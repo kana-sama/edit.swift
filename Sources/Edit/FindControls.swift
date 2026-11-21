@@ -27,7 +27,7 @@ final class FindInput: NSView, NSTextViewDelegate {
         bezel.isBezeled = true
         bezel.bezelStyle = .roundedBezel
         bezel.drawsBackground = true
-        focusRingType = .exterior
+        focusRingType = .none
 
         let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
         input.isRichText = false
@@ -38,6 +38,7 @@ final class FindInput: NSView, NSTextViewDelegate {
         input.isAutomaticTextReplacementEnabled = false
         input.font = font
         input.drawsBackground = false
+        input.focusRingType = .none
         input.textContainerInset = NSSize(width: 0, height: 2)
         input.textContainer?.lineFragmentPadding = 0
         input.isVerticallyResizable = true
@@ -101,14 +102,30 @@ final class FindInput: NSView, NSTextViewDelegate {
 
     required init?(coder: NSCoder) { fatalError("Find inputs are programmatically constructed") }
 
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        let center = NotificationCenter.default
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            if let window { center.removeObserver(self, name: name, object: window) }
+            if let newWindow {
+                center.addObserver(self, selector: #selector(windowFocusChanged(_:)), name: name, object: newWindow)
+            }
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         bezel.draw(withFrame: bounds, in: self)
-        if window?.isKeyWindow == true && window?.firstResponder === input {
-            NSGraphicsContext.saveGraphicsState()
-            NSFocusRingPlacement.only.set()
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 8, yRadius: 8).fill()
-            NSGraphicsContext.restoreGraphicsState()
-        }
+        guard window?.isKeyWindow == true, window?.firstResponder === input else { return }
+
+        // Keep the outline inside the shared bezel so clipped redraws of the field and buttons agree.
+        let outline = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 7, yRadius: 7)
+        outline.lineWidth = 2
+        NSColor.keyboardFocusIndicatorColor.setStroke()
+        outline.stroke()
+    }
+
+    @objc private func windowFocusChanged(_ notification: Notification) {
+        needsDisplay = true
     }
 
     @objc private func scrollFrameChanged(_ notification: Notification) {
