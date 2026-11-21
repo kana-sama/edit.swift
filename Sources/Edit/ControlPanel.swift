@@ -195,6 +195,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         table.allowsEmptySelection = true
         table.target = self
         table.action = #selector(activateClickedRow)
+        table.appearanceChanged = { [weak self] in self?.table.reloadData() }
         table.hoverChanged = { [weak self] previous, next in
             self?.updateButtons(at: [previous, next])
             if next < 0, let self, self.deferredRefresh {
@@ -434,7 +435,14 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let match = entries[row]
         let title = makeLabel(match.entry.title, highlights: match.titleCharacters, secondary: false)
-        var views = [NSView](arrayLiteral: title)
+        var views: [NSView] = []
+        if let file = match.entry.recent,
+           let image = FileIcons.image(for: file.url, appearance: tableView.effectiveAppearance) {
+            let icon = NSImageView(image: image)
+            icon.setAccessibilityElement(false)
+            views.append(icon)
+        }
+        views.append(title)
         if let detail = match.entry.detail {
             let path = makeLabel(detail, highlights: match.detailCharacters, secondary: true)
             path.lineBreakMode = .byTruncatingHead
@@ -506,6 +514,12 @@ private final class ControlTable: NSTableView {
     private var tracking: NSTrackingArea?
     private(set) var hovered = -1
     var hoverChanged: ((Int, Int) -> Void)?
+    var appearanceChanged: (() -> Void)?
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        appearanceChanged?()
+    }
 
     override func updateTrackingAreas() {
         if let tracking { removeTrackingArea(tracking) }

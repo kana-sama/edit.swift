@@ -168,6 +168,11 @@ enum FilesCheck {
         app.menuWillOpen(menu)
         try expect(menu.items.first?.representedObject as? URL == alias, "native Open Recent shows the history")
         try expect(menu.items.count <= 10, "Open Recent is capped at ten entries")
+        let rust = FileIcons.iconKey(for: URL(fileURLWithPath: "/tmp/MAIN.RS"), dark: true)
+        let typescript = FileIcons.iconKey(for: URL(fileURLWithPath: "/tmp/widget.test.ts"), dark: true)
+        try expect(rust != nil && typescript != nil && rust != typescript, "bundled file icons match file types")
+        try expect(FileIcons.iconKey(for: URL(fileURLWithPath: "/tmp/main.rs"), dark: false) != rust,
+                   "light appearance uses the theme variant")
 
         let entries = [
             ControlEntry(id: "folder", title: "helper.rs", detail: "~/src/main"),

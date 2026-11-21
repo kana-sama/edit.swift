@@ -4,5 +4,5 @@ import PackageDescription
 let package = Package(
     name: "Edit",
     platforms: [.macOS("27.0")],
-    targets: [.executableTarget(name: "Edit")]
+    targets: [.executableTarget(name: "Edit", resources: [.copy("Resources/Seti")])]
 )

@@ -121,6 +121,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                                     keyEquivalent: "")
             item.target = self
             item.representedObject = recent.url
+            item.image = FileIcons.image(for: recent.url, appearance: NSApplication.shared.effectiveAppearance)
         }
     }
 

@@ -32,7 +32,7 @@ build_fingerprint() {
         printf '%s\n' "$configuration" "$bundle_name" "$target" "$compiler" "$sdk" &&
         /usr/bin/stat -L -f '%i:%m:%c:%z' "$compiler" "$sdk/SDKSettings.plist" &&
         /usr/bin/shasum -a 256 "${sources[@]}" Package.swift resources/Info.plist \
-            script/build script/app-bundle.sh script/publish-app.c
+            script/build script/app-bundle.sh script/publish-app.c Sources/Edit/Resources/Seti/*
     } | /usr/bin/shasum -a 256
 }
 
@@ -58,6 +58,7 @@ app="$stage/$bundle_name.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 mv "$stage/Edit" "$app/Contents/MacOS/Edit"
 cp resources/Info.plist "$app/Contents/Info.plist"
+cp -R Sources/Edit/Resources/Seti "$app/Contents/Resources/"
 if [[ "$bundle_name" == 'Edit Agent' ]]; then
     /usr/libexec/PlistBuddy \
         -c 'Set :CFBundleIdentifier dev.edit-swift.Edit.agent' \
