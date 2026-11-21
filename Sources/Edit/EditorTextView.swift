@@ -10,6 +10,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     private weak var multiCaretWindow: NSWindow?
     var onTextChange: (() -> Void)?
     var onBlur: (() -> Void)?
+    var onFindEditorInteraction: (() -> Void)?
+    var onFindViewportChange: (() -> Void)?
     var preferredLineEnding = "\n"
 
     static func scrollingEditor(in frame: NSRect) -> (NSScrollView, EditorTextView) {
@@ -247,6 +249,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        onFindEditorInteraction?()
         if addCaret(at: event) { return }
         multiCaret.pendingSkip = false
         super.mouseDown(with: event)
@@ -353,16 +356,23 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         replace(edit.range, with: edit.replacement, selection: edit.selection)
     }
 
-    private func replace(_ range: NSRange, with replacement: String, selection: NSRange? = nil, coalesce: Bool = false) {
-        guard isEditable, range.length > 0 || !replacement.isEmpty, let textStorage else { return }
+    func replaceFoundText(in range: NSRange, with replacement: String) -> Bool {
+        guard !hasMarkedText() else { return false }
+        return replace(range, with: replacement)
+    }
+
+    @discardableResult
+    private func replace(_ range: NSRange, with replacement: String, selection: NSRange? = nil, coalesce: Bool = false) -> Bool {
+        guard isEditable, range.length > 0 || !replacement.isEmpty, let textStorage else { return false }
         if !coalesce { breakUndoCoalescing() }
-        guard shouldChangeText(in: range, replacementString: replacement) else { return }
+        guard shouldChangeText(in: range, replacementString: replacement) else { return false }
         textStorage.replaceCharacters(in: range, with: replacement)
         let next = selection ?? NSRange(location: range.location + replacement.utf16.count, length: 0)
         setSelectedRange(next)
         didChangeText()
         if !coalesce { breakUndoCoalescing() }
         scrollRangeToVisible(next)
+        return true
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
@@ -393,6 +403,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             guard let self else { return }
             self.refreshCurrentLine()
             self.lineRefreshPending = false
+            self.onFindViewportChange?()
         }
     }
 

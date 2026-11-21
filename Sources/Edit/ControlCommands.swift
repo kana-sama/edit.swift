@@ -50,6 +50,22 @@ struct ControlCommand {
         }
     }
 
+    static func searchCommands(for app: Edit) -> [ControlCommand] {
+        let labels: [(FindCommand, String)] = [
+            (.refresh, "Refresh Search"), (.toggleReplace, "Toggle Replace Section"),
+            (.toggleCase, "Toggle Match Case"), (.toggleWholeWord, "Toggle Match Whole Word"),
+            (.toggleRegex, "Toggle Regular Expression"), (.replaceAll, "Replace All"),
+            (.replaceSelected, "Replace Selected Match"), (.dismissSelected, "Dismiss Selected Match"),
+            (.clearSelection, "Clear Search Result Selection")
+        ]
+        return labels.map { action, title in
+            let item = NSMenuItem(title: title, action: #selector(Edit.performFindControlAction(_:)), keyEquivalent: "")
+            item.target = app
+            item.representedObject = action
+            return ControlCommand(id: "find.\(action)", title: title, item: item)
+        }
+    }
+
     private static func commands(in menu: NSMenu, prefix: String) -> [ControlCommand] {
         menu.items.flatMap { item -> [ControlCommand] in
             if item.title == "Open Recent" { return [] }

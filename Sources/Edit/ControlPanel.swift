@@ -271,7 +271,9 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             return entries
         }
         guard let menu = NSApplication.shared.mainMenu else { return [] }
-        let available = ControlCommand.fromMenu(menu).filter { $0.isAvailable(in: document, focus: originalFocus) }
+        let available = (ControlCommand.fromMenu(menu) + ControlCommand.searchCommands(for: app)).filter {
+            $0.isAvailable(in: document, focus: originalFocus)
+        }
         let arranged = history.arrange(available)
         commands = Dictionary(arranged.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var ids: Set<String> = []
@@ -443,6 +445,10 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         history.record(command.id)
         if command.item.action == #selector(Edit.showGoToFile(_:)) {
             switchMode(to: .files, query: "")
+            return
+        }
+        if command.item.action == #selector(Edit.toggleFindSidebar(_:)) {
+            command.run()
             return
         }
         if command.item.action == #selector(Edit.showLanguageModes(_:)) {

@@ -33,6 +33,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var autosaveRequested = false
     private var autosaveFailure: (generation: UInt, detail: String, reported: Bool)?
     private var syntaxHighlighting: SyntaxHighlighting?
+    private var findPanel: FindSidebar?
     private(set) var manualSyntaxLanguage: SyntaxLanguage?
 
     var resolvedSyntaxLanguage: SyntaxLanguage {
@@ -43,6 +44,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         guard manualSyntaxLanguage != language else { return }
         manualSyntaxLanguage = language
         app.syntaxOverrides.set(language, for: fileURL)
+        findPanel?.updateName()
         refreshSyntax(immediate: true)
     }
 
@@ -75,6 +77,35 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         } else {
             window.center()
         }
+        if !app.isAgentCheck {
+            let settings = FindSettings.current(in: .standard)
+            if settings.visible { searchPanel(settings: settings).restoreVisibility() }
+        }
+    }
+
+    func canPerformFind(_ command: FindCommand) -> Bool {
+        if let findPanel { return findPanel.canPerform(command) }
+        switch command {
+        case .find, .replace, .toggleSidebar: return true
+        default: return false
+        }
+    }
+
+    func performFind(_ command: FindCommand) {
+        guard !app.isQuitting, window.attachedSheet == nil, canPerformFind(command) else { return }
+        searchPanel().perform(command)
+    }
+
+    func persistFindSettings() { findPanel?.persistSettings() }
+
+    private func searchPanel(settings: FindSettings? = nil) -> FindSidebar {
+        if let findPanel { return findPanel }
+        let resolved = settings ?? (app.isAgentCheck ? FindSettings() : FindSettings.current(in: .standard))
+        let panel = FindSidebar(document: self, settings: resolved, writesPreferences: !app.isAgentCheck)
+        findPanel = panel
+        editor.onFindEditorInteraction = { [weak panel] in panel?.editorInteracted() }
+        editor.onFindViewportChange = { [weak panel] in panel?.viewportChanged() }
+        return panel
     }
 
     func present() {
@@ -435,6 +466,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        persistFindSettings()
         syntaxHighlighting?.cancel()
         idleSave?.cancel()
         idleSave = nil
@@ -487,6 +519,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         updateTitle()
         updateEditedState()
         refreshSyntax(immediate: true)
+        findPanel?.bufferReplaced()
     }
 
     private func updateIdentity(from file: FileBuffer) {
@@ -501,6 +534,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private func updateTitle() {
         window.representedURL = fileURL
         window.title = fileURL?.lastPathComponent ?? "Untitled"
+        findPanel?.updateName()
     }
 
     private func updateEditedState() {

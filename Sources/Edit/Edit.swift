@@ -57,6 +57,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     let sample = try await FilesCheck.run(in: self)
                     try ControlPanel(app: self).checkHidden(in: sample)
                     try await SyntaxCheck.run(in: self)
+                    try await FindCheck.run(in: self)
                     try checkWindow(sample.window, screenshot: CommandLine.arguments.dropFirst(2).first)
                     print("Edit passed its native editing and file-session checks without activation.")
                     exit(EXIT_SUCCESS)
@@ -187,6 +188,24 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         Task { await document.save(asNew: true) }
     }
 
+    @objc func openFind(_ sender: Any?) {
+        controlPanel?.dismiss(restoreFocus: true)
+        activeDocument?.performFind(.find)
+    }
+
+    @objc func openReplace(_ sender: Any?) {
+        controlPanel?.dismiss(restoreFocus: true)
+        activeDocument?.performFind(.replace)
+    }
+
+    @objc func findNext(_ sender: Any?) { activeDocument?.performFind(.next) }
+    @objc func findPrevious(_ sender: Any?) { activeDocument?.performFind(.previous) }
+    @objc func toggleFindSidebar(_ sender: Any?) { activeDocument?.performFind(.toggleSidebar) }
+
+    @objc func performFindControlAction(_ sender: NSMenuItem) {
+        if let command = sender.representedObject as? FindCommand { activeDocument?.performFind(command) }
+    }
+
     func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
         guard !isQuitting else { return false }
         switch item.action {
@@ -196,6 +215,13 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case #selector(openDocument(_:)): return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)):
             return activeDocument.map { !$0.isBusy && $0.window.attachedSheet == nil } ?? false
+        case #selector(openFind(_:)), #selector(openReplace(_:)), #selector(toggleFindSidebar(_:)):
+            return activeDocument.map { $0.window.attachedSheet == nil } ?? false
+        case #selector(findNext(_:)): return activeDocument?.canPerformFind(.next) ?? false
+        case #selector(findPrevious(_:)): return activeDocument?.canPerformFind(.previous) ?? false
+        case #selector(performFindControlAction(_:)):
+            guard let command = (item as? NSMenuItem)?.representedObject as? FindCommand else { return false }
+            return activeDocument?.canPerformFind(command) ?? false
         default: return false
         }
     }
@@ -213,6 +239,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         // The temporary startup window can be closed before restoration reads the saved session.
         if startup != nil && documents.isEmpty { return .terminateNow }
         isQuitting = true
+        activeDocument?.persistFindSettings()
         for document in documents {
             if document.editor.hasMarkedText() { document.editor.unmarkText() }
             document.editor.isEditable = false
@@ -463,6 +490,12 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         edit.addCommand("Select All", #selector(NSText.selectAll(_:)), "a")
         edit.addItem(.separator())
 
+        edit.addCommand("Find…", #selector(openFind(_:)), "f").target = self
+        edit.addCommand("Replace…", #selector(openReplace(_:)), "f", [.command, .option]).target = self
+        edit.addCommand("Find Next", #selector(findNext(_:)), "g").target = self
+        edit.addCommand("Find Previous", #selector(findPrevious(_:)), "g", [.command, .shift]).target = self
+        edit.addItem(.separator())
+
         let lines = NSMenu(title: "Lines")
         lines.addCommand("Move Line Up", #selector(EditorTextView.moveLinesUp(_:)), "\u{F700}", [.option])
         lines.addCommand("Move Line Down", #selector(EditorTextView.moveLinesDown(_:)), "\u{F701}", [.option])
@@ -487,6 +520,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         edit.addItem(withTitle: "Selection", action: nil, keyEquivalent: "").submenu = selection
 
         let view = addMenu("View")
+        view.addCommand("Toggle Search Sidebar", #selector(toggleFindSidebar(_:)), "b").target = self
         view.addCommand("Command Mode…", #selector(showCommandMode(_:)), "p", [.command, .shift]).target = self
         view.addCommand("Change Language Mode…", #selector(showLanguageModes(_:))).target = self
         view.addItem(.separator())
