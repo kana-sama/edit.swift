@@ -261,7 +261,6 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         if startup != nil && documents.isEmpty { return .terminateNow }
         isQuitting = true
         controlPanel?.dismiss(restoreFocus: true)
-        activeDocument?.persistFindSettings()
         for document in documents {
             if document.editor.hasMarkedText() { document.editor.unmarkText() }
             document.editor.isEditable = false
@@ -396,6 +395,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             } else if let opened {
                 document.load(opened.file, storedSyntaxLanguage: record.syntaxLanguage, preparedSyntax: opened.syntax)
             }
+            if let settings = record.findSettings { document.restoreFindSettings(settings) }
             if let path = record.path { await recentFiles.record(URL(fileURLWithPath: path)) }
             if isQuitting { document.editor.isEditable = false }
             restored.append((index, document))

@@ -6,28 +6,13 @@ struct FindOptions: Codable, Equatable, Sendable {
     var regularExpression = false
 }
 
-struct FindSettings: Codable, Sendable {
+struct FindSettings: Codable, Equatable, Sendable {
     var visible = false
     var showsReplacement = false
     var query = ""
     var replacement = ""
     var options = FindOptions()
     var width: Double = 280
-
-    private static let key = "FindSidebar"
-
-    static func current(in defaults: UserDefaults) -> Self {
-        guard let value = defaults.data(forKey: key),
-              var settings = try? JSONDecoder().decode(Self.self, from: value) else { return Self() }
-        settings.width = min(650, max(185, settings.width))
-        return settings
-    }
-
-    func store(in defaults: UserDefaults) {
-        if let data = try? JSONEncoder().encode(self) {
-            defaults.set(data, forKey: Self.key)
-        }
-    }
 }
 
 // Foundation produces immutable regular-expression results. Keeping the result preserves named captures.

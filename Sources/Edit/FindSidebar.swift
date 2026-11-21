@@ -36,8 +36,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private static let minimumEditorWidth: CGFloat = 128
     private static let contentInset: CGFloat = 10
     private unowned let document: DocumentWindow
-    private let writesPreferences: Bool
-    private var settings: FindSettings
+    private var settings: FindSettings {
+        get { document.findSettings }
+        set { document.findSettings = newValue }
+    }
     private let matchCase = NSButton(title: "Aa", target: nil, action: nil)
     private let wholeWord = NSButton(title: "ab", target: nil, action: nil)
     private let regex = NSButton(title: ".*", target: nil, action: nil)
@@ -79,15 +81,12 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private var generation: UInt64 = 0
     private var work: Task<FindSearch.Outcome, Never>?
     private var activity: Task<Void, Never>?
-    private var preferenceWrite: Task<Void, Never>?
     private var queuedDirection: Int?
     private weak var pendingResultFocus: FindFieldTextView?
     private var advanceFrom: Int?
 
-    init(document: DocumentWindow, settings: FindSettings, writesPreferences: Bool) {
+    init(document: DocumentWindow) {
         self.document = document
-        self.settings = settings
-        self.writesPreferences = writesPreferences
         bufferSnapshot = document.editor.string
         super.init()
         configure()
@@ -100,7 +99,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     deinit {
         work?.cancel()
         activity?.cancel()
-        preferenceWrite?.cancel()
     }
 
     func restoreVisibility() {
@@ -225,22 +223,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         refreshDecorations()
     }
 
-    func persistSettings() {
-        preferenceWrite?.cancel()
-        guard writesPreferences else { return }
-        settings.store(in: .standard)
-    }
-
-    private func schedulePreferencesWrite() {
-        guard writesPreferences else { return }
-        preferenceWrite?.cancel()
-        preferenceWrite = Task { [weak self] in
-            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
-            guard let self else { return }
-            self.settings.store(in: .standard)
-        }
-    }
-
     private func configure() {
         for (option, label) in [(matchCase, "Match Case"), (wholeWord, "Whole Word"), (regex, "Regular Expression")] {
             option.setButtonType(.pushOnPushOff)
@@ -266,7 +248,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         replaceInput.onChange = { [weak self] in
             guard let self else { return }
             settings.replacement = replaceInput.value
-            schedulePreferencesWrite()
             refreshDecorations()
         }
         findInput.onReturn = { [weak self] in self?.advanceFindFocus() }
@@ -507,7 +488,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             if focusIsInSidebar { document.window.makeFirstResponder(document.editor) }
         }
         refreshDecorations()
-        schedulePreferencesWrite()
     }
 
     private var focusIsInSidebar: Bool {
@@ -535,7 +515,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             window.makeFirstResponder(responder)
         }
         refreshDecorations()
-        schedulePreferencesWrite()
     }
 
     private func hide() {
@@ -548,7 +527,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         previewRequested = false
         setSidebarCollapsed(true, animate: true, transition: animation)
         refreshDecorations()
-        schedulePreferencesWrite()
     }
 
     private func updateSidebarToolbarVisibility() {
@@ -691,7 +669,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         refreshVisibleRows()
         refreshDecorations()
         updateReplaceAvailability()
-        schedulePreferencesWrite()
     }
 
     private func updateReplacementVisibility() {
@@ -714,7 +691,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
                                        regularExpression: regex.state == .on)
         updateSearchOptionsAppearance()
         resetMatches()
-        schedulePreferencesWrite()
     }
 
     private func updateSearchOptionsAppearance() {
@@ -726,7 +702,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private func queryChanged() {
         settings.query = findInput.value
         resetMatches()
-        schedulePreferencesWrite()
     }
 
     private func resetMatches() {

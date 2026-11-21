@@ -65,8 +65,86 @@ enum FindCheck {
         try await checkRenderedHighlights(in: app.makeDocument())
         try await checkSidebarLayout(in: app.makeDocument())
         try await checkSidebarReversal(in: app.makeDocument())
+        try await checkWindowSession(in: app)
         try expect(NSApplication.shared.activationPolicy() == .prohibited &&
                    !NSApplication.shared.isActive && !window.isVisible, "Find stays in the isolated hidden window")
+    }
+
+    private static func checkWindowSession(in app: Edit) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "find-session-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appending(path: "Sample.txt")
+        try Data("alpha ALPHA\nBeta Bota\n".utf8).write(to: file)
+        let first = app.makeDocument()
+        let second = app.makeDocument()
+        let untouched = app.makeDocument()
+
+        func type(_ value: String, command: FindCommand, in document: DocumentWindow) throws {
+            document.performFind(command)
+            let field = try require(document.window.firstResponder as? FindFieldTextView, "search session input")
+            field.insertText(value, replacementRange: NSRange(location: 0, length: field.string.utf16.count))
+        }
+
+        func setWidth(_ width: CGFloat, in document: DocumentWindow) throws {
+            let split = try require(document.window.contentViewController as? NSSplitViewController, "search session split view")
+            split.splitView.setPosition(width, ofDividerAt: 0)
+            document.window.layoutIfNeeded()
+        }
+
+        _ = try await app.openFile(file, in: first)
+        _ = try await app.openFile(file, in: second)
+        try type("alpha", command: .find, in: first)
+        first.performFind(.toggleCase)
+        try type("first replacement", command: .replace, in: first)
+        try setWidth(240, in: first)
+        try type("B.ta", command: .find, in: second)
+        second.performFind(.toggleRegex)
+        try type("second replacement", command: .replace, in: second)
+        second.performFind(.toggleReplace)
+        try setWidth(325, in: second)
+        second.performFind(.toggleSidebar)
+
+        let all = app.sessionSnapshot()
+        let snapshot = EditorSession(documents: Array(all.documents.suffix(3)), activeIndex: 0, lastWindow: nil)
+        let store = SessionStore(url: directory.appending(path: "session.json"))
+        try store.write(snapshot)
+        let saved = try require(try store.read(), "read back window search sessions")
+        let firstSettings = try require(saved.documents[0].findSettings, "snapshot of first window's search")
+        let secondSettings = try require(saved.documents[1].findSettings, "snapshot of second window's search")
+        try expect(firstSettings.query == "alpha" && secondSettings.query == "B.ta" && saved.documents[2].findSettings == nil,
+                   "search state is saved per window even for two views of the same file")
+        try expect(firstSettings.width != secondSettings.width, "the windows keep independent sidebar widths")
+
+        [first, second, untouched].forEach { $0.window.close() }
+        let placeholder = app.makeDocument()
+        await app.restore(saved, reusing: placeholder)
+        let restored = Array(app.documents.suffix(3))
+        defer { restored.forEach { $0.window.close() } }
+        try expect(restored.first === placeholder, "restoring search keeps the associated editor windows")
+        try expect(restored[0].sessionDocument().findSettings == firstSettings &&
+                   restored[1].sessionDocument().findSettings == secondSettings,
+                   "each window restores its own replacement, options, width, and visibility")
+
+        let firstTable = try require(descendant(of: restored[0].window.contentView, type: FindResultsTable.self),
+                                     "the first sidebar reopens visibly")
+        try await waitUntil("the first window reruns its case-insensitive query") { firstTable.numberOfRows == 2 }
+        try expect(restored[1].window.contentViewController as? NSSplitViewController == nil && restored[1].canPerformFind(.next),
+                   "the second sidebar stays hidden and still has its own query")
+        restored[1].performFind(.find)
+        let secondField = try require(restored[1].window.firstResponder as? FindFieldTextView, "the restored second query field")
+        let secondTable = try require(descendant(of: restored[1].window.contentView, type: FindResultsTable.self),
+                                      "the second sidebar opens on demand")
+        try expect(secondField.string == "B.ta", "opening hidden Find preserves its saved query")
+        try await waitUntil("the second window reruns its regex") { secondTable.numberOfRows == 2 }
+
+        let fresh = app.makeDocument()
+        defer { fresh.window.close() }
+        for document in [restored[2], fresh] {
+            document.performFind(.find)
+            let field = try require(document.window.firstResponder as? FindFieldTextView, "empty search field")
+            try expect(field.string.isEmpty, "windows without saved search state start with an empty query")
+        }
     }
 
     private static func checkReturnNavigation(in document: DocumentWindow) async throws {

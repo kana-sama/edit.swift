@@ -53,6 +53,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var autosaveFailure: (generation: UInt, detail: String, reported: Bool)?
     private var syntaxHighlighting: SyntaxHighlighting?
     private var findPanel: FindSidebar?
+    var findSettings = FindSettings()
     private var appearanceObservation: NSKeyValueObservation?
     private(set) var manualSyntaxLanguage: SyntaxLanguage?
 
@@ -70,7 +71,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     var isBusy: Bool { saving || promptingToClose }
     var canReplaceBuffer: Bool { !isBusy && window.attachedSheet == nil }
-    var isReusable: Bool { folderURL == nil && fileURL == nil && !window.isDocumentEdited && canReplaceBuffer }
+    var isReusable: Bool {
+        folderURL == nil && fileURL == nil && findPanel == nil && !window.isDocumentEdited && canReplaceBuffer
+    }
 
     init(app: Edit, placement: WindowPlacement? = nil) {
         self.app = app
@@ -108,16 +111,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         } else {
             window.center()
         }
-        if !app.isAgentCheck {
-            let settings = FindSettings.current(in: .standard)
-            if settings.visible { searchPanel(settings: settings).restoreVisibility() }
-        }
     }
 
     func canPerformFind(_ command: FindCommand) -> Bool {
         if let findPanel { return findPanel.canPerform(command) }
         switch command {
         case .find, .replace, .toggleSidebar: return true
+        case .next, .previous: return !findSettings.query.isEmpty
         default: return false
         }
     }
@@ -129,12 +129,17 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if window.toolbar !== previousToolbar { updateTitleIcon() }
     }
 
-    func persistFindSettings() { findPanel?.persistSettings() }
+    func restoreFindSettings(_ settings: FindSettings) {
+        findSettings = settings
+        if settings.visible {
+            searchPanel().restoreVisibility()
+            updateTitleIcon()
+        }
+    }
 
-    private func searchPanel(settings: FindSettings? = nil) -> FindSidebar {
+    private func searchPanel() -> FindSidebar {
         if let findPanel { return findPanel }
-        let resolved = settings ?? (app.isAgentCheck ? FindSettings() : FindSettings.current(in: .standard))
-        let panel = FindSidebar(document: self, settings: resolved, writesPreferences: !app.isAgentCheck)
+        let panel = FindSidebar(document: self)
         findPanel = panel
         editor.onFindEditorInteraction = { [weak panel] in panel?.editorInteracted() }
         editor.onFindViewportChange = { [weak panel] in panel?.viewportChanged() }
@@ -224,7 +229,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             revision: revision,
             placement: placement,
             syntaxLanguage: manualSyntaxLanguage?.rawValue,
-            folderPath: folderURL?.path
+            folderPath: folderURL?.path,
+            findSettings: findSettings == FindSettings() ? nil : findSettings
         )
     }
 
@@ -539,7 +545,6 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
-        persistFindSettings()
         syntaxHighlighting?.cancel(clearingColors: false)
         idleSave?.cancel()
         idleSave = nil
