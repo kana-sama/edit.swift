@@ -1,15 +1,21 @@
 import AppKit
 
 @MainActor
-final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private unowned let app: Edit
     private let panel = ControlWindow()
     enum Mode { case files, commands, languages }
 
-    private let input = NSSearchField()
-    private let panelInset: CGFloat = 8
+    private let input = NSTextField()
+    private let leadingIcon = NSImageView()
+    private let clearButton = NSButton()
+    private let headerHeight: CGFloat = 44
+    private let headerInset: CGFloat = 14
+    private let iconSize: CGFloat = 18
     private let separatorHeight: CGFloat = 1
-    private var searchImage: NSImage?
+    private let rowSpacing: CGFloat = 2
+    private static let searchImage = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)?
+        .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
     private lazy var history = ControlCommandHistory(persist: !app.isAgentCheck)
     private var commands: [String: ControlCommand] = [:]
     private var mode: Mode = .files
@@ -61,6 +67,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         configure(mode)
         let query = failure?.query ?? ""
         input.stringValue = query
+        clearButton.isHidden = query.isEmpty
         apply(ControlMatching.rank(sourceEntries(), query: query), selected: failure?.id ?? initialID)
         if let failure {
             feedback.stringValue = failure.message
@@ -83,14 +90,15 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
 
     private func configure(_ mode: Mode) {
         self.mode = mode
-        (input.cell as? NSSearchFieldCell)?.searchButtonCell?.image = mode == .commands ? Self.commandImage : searchImage
-        input.needsDisplay = true
+        leadingIcon.image = mode == .commands ? Self.commandImage : Self.searchImage
+        let hint: String
         switch mode {
-        case .files: input.placeholderString = "Search recent files"
-        case .commands: input.placeholderString = "Search commands"
-        case .languages: input.placeholderString = "Search languages"
+        case .files: hint = "Search recent files"
+        case .commands: hint = "Search commands"
+        case .languages: hint = "Search languages"
         }
-        input.setAccessibilityLabel(input.placeholderString)
+        input.placeholderString = hint
+        input.setAccessibilityLabel(hint)
     }
 
     private func switchMode(to mode: Mode, query: String) {
@@ -147,16 +155,15 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
 
     private func position() {
         guard let parent = document?.window else { return }
-        let width = min(620, max(240, parent.frame.width - 32))
-        let headerHeight = input.intrinsicContentSize.height + 2 * panelInset + separatorHeight
-        let messageHeight = feedback.isHidden ? 0 : feedback.intrinsicContentSize.height + 2 * panelInset
-        let room = parent.frame.height - headerHeight - messageHeight - 104
-        let rowCount = min(entries.count, 10, max(1, Int(room / table.rowHeight)))
+        let width = min(600, max(240, parent.frame.width - 32))
+        let messageHeight = feedback.isHidden ? 0 : feedback.intrinsicContentSize.height + 16
+        let room = parent.frame.height - headerHeight - separatorHeight - messageHeight - 104
+        let rowCount = min(entries.count, 10, max(1, Int(room / (table.rowHeight + rowSpacing))))
         let resultsHeight = rowCount == 0 ? 0 : table.rect(ofRow: rowCount - 1).maxY
         listHeight.constant = resultsHeight
         feedbackHeight.constant = messageHeight
         scroll.isHidden = rowCount == 0
-        let panelHeight = headerHeight + resultsHeight + messageHeight
+        let panelHeight = headerHeight + separatorHeight + resultsHeight + messageHeight
         let top = parent.frame.maxY - min(85, max(24, (parent.frame.height - panelHeight) / 2))
         panel.setFrame(NSRect(x: parent.frame.midX - width / 2, y: top - panelHeight,
                               width: width, height: panelHeight), display: panel.isVisible)
@@ -169,7 +176,9 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
 
     private static let commandImage: NSImage = {
         // Use the prompt marker's shape from the Rust editor in the native search icon slot.
-        let image = NSImage(size: NSSize(width: 14, height: 14), flipped: true) { rect in
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: true) { rect in
+            NSColor.labelColor.withAlphaComponent(0.13).setFill()
+            NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4).fill()
             let origin = NSPoint(x: rect.midX - 6, y: rect.midY - 4)
             let chevron = NSBezierPath()
             chevron.move(to: origin)
@@ -177,19 +186,17 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
                 chevron.line(to: NSPoint(x: origin.x + x, y: origin.y + y))
             }
             chevron.close()
-            NSColor.black.setFill()
+            NSColor.labelColor.setFill()
             chevron.fill()
             NSBezierPath(roundedRect: NSRect(x: origin.x + 7.5, y: origin.y + 6.5, width: 4.5, height: 1.5),
                          xRadius: 0.5, yRadius: 0.5).fill()
             return true
         }
-        image.isTemplate = true
         return image
     }()
 
     private func setSearching(_ searching: Bool) {
-        (input.cell as? NSSearchFieldCell)?.searchButtonCell?.isTransparent = searching
-        input.needsDisplay = true
+        leadingIcon.isHidden = searching
         if searching {
             progress.startAnimation(nil)
         } else {
@@ -206,19 +213,36 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         panel.collectionBehavior = [.fullScreenAuxiliary, .transient]
         panel.title = "Control"
 
-        let appearance = NSVisualEffectView()
-        appearance.material = .popover
+        let appearance = ControlSurface()
+        appearance.material = .menu
         appearance.blendingMode = .behindWindow
         appearance.state = .active
         appearance.wantsLayer = true
         appearance.layer?.cornerRadius = 14
         appearance.layer?.masksToBounds = true
+        appearance.layer?.borderWidth = 0.5
+        appearance.updateBorder()
         panel.contentView = appearance
 
-        input.placeholderString = "Search recent files"
-        input.sendsWholeSearchString = false
+        input.isBordered = false
+        input.isBezeled = false
+        input.drawsBackground = false
+        input.focusRingType = .none
+        input.font = .systemFont(ofSize: 14)
+        input.cell?.usesSingleLineMode = true
+        input.cell?.isScrollable = true
+        input.setAccessibilitySubrole(.searchField)
         input.delegate = self
-        searchImage = (input.cell as? NSSearchFieldCell)?.searchButtonCell?.image
+        leadingIcon.contentTintColor = .secondaryLabelColor
+        leadingIcon.imageScaling = .scaleNone
+        leadingIcon.setAccessibilityElement(false)
+        clearButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: nil)
+        clearButton.contentTintColor = .secondaryLabelColor
+        clearButton.isBordered = false
+        clearButton.isHidden = true
+        clearButton.target = self
+        clearButton.action = #selector(clearQuery)
+        clearButton.setAccessibilityLabel("Clear search")
         progress.style = .spinning
         progress.controlSize = .small
         progress.isDisplayedWhenStopped = false
@@ -231,9 +255,10 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         table.headerView = nil
         table.dataSource = self
         table.delegate = self
-        table.style = .plain
-        table.rowHeight = 30
-        table.intercellSpacing = .zero
+        table.style = .inset
+        table.rowHeight = 23
+        table.intercellSpacing = NSSize(width: 0, height: rowSpacing)
+        table.focusRingType = .none
         table.backgroundColor = .clear
         table.selectionHighlightStyle = .regular
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
@@ -261,21 +286,29 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         feedback.lineBreakMode = .byTruncatingTail
         let feedbackArea = NSView()
         feedbackHeight = feedbackArea.heightAnchor.constraint(equalToConstant: 0)
-        for view in [input, progress, separator, scroll, feedbackArea] {
+        for view in [leadingIcon, input, clearButton, progress, separator, scroll, feedbackArea] {
             view.translatesAutoresizingMaskIntoConstraints = false
             appearance.addSubview(view)
         }
         feedback.translatesAutoresizingMaskIntoConstraints = false
         feedbackArea.addSubview(feedback)
         NSLayoutConstraint.activate([
-            input.topAnchor.constraint(equalTo: appearance.topAnchor, constant: panelInset),
-            input.leadingAnchor.constraint(equalTo: appearance.leadingAnchor, constant: panelInset),
-            input.trailingAnchor.constraint(equalTo: appearance.trailingAnchor, constant: -panelInset),
-            progress.centerYAnchor.constraint(equalTo: input.centerYAnchor),
-            progress.leadingAnchor.constraint(equalTo: input.leadingAnchor, constant: 5),
-            progress.widthAnchor.constraint(equalToConstant: 12),
-            progress.heightAnchor.constraint(equalToConstant: 12),
-            separator.topAnchor.constraint(equalTo: input.bottomAnchor, constant: panelInset),
+            leadingIcon.topAnchor.constraint(equalTo: appearance.topAnchor, constant: (headerHeight - iconSize) / 2),
+            leadingIcon.leadingAnchor.constraint(equalTo: appearance.leadingAnchor, constant: headerInset),
+            leadingIcon.widthAnchor.constraint(equalToConstant: iconSize),
+            leadingIcon.heightAnchor.constraint(equalToConstant: iconSize),
+            input.centerYAnchor.constraint(equalTo: leadingIcon.centerYAnchor),
+            input.leadingAnchor.constraint(equalTo: leadingIcon.trailingAnchor, constant: 6),
+            input.trailingAnchor.constraint(equalTo: clearButton.leadingAnchor, constant: -6),
+            clearButton.centerYAnchor.constraint(equalTo: leadingIcon.centerYAnchor),
+            clearButton.trailingAnchor.constraint(equalTo: appearance.trailingAnchor, constant: -headerInset),
+            clearButton.widthAnchor.constraint(equalTo: leadingIcon.widthAnchor),
+            clearButton.heightAnchor.constraint(equalTo: leadingIcon.heightAnchor),
+            progress.centerYAnchor.constraint(equalTo: leadingIcon.centerYAnchor),
+            progress.centerXAnchor.constraint(equalTo: leadingIcon.centerXAnchor),
+            progress.widthAnchor.constraint(equalToConstant: 14),
+            progress.heightAnchor.constraint(equalToConstant: 14),
+            separator.topAnchor.constraint(equalTo: appearance.topAnchor, constant: headerHeight),
             separator.leadingAnchor.constraint(equalTo: appearance.leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: appearance.trailingAnchor),
             separator.heightAnchor.constraint(equalToConstant: separatorHeight),
@@ -288,8 +321,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             feedbackArea.trailingAnchor.constraint(equalTo: appearance.trailingAnchor),
             feedbackHeight,
             feedback.centerYAnchor.constraint(equalTo: feedbackArea.centerYAnchor),
-            feedback.leadingAnchor.constraint(equalTo: feedbackArea.leadingAnchor, constant: panelInset),
-            feedback.trailingAnchor.constraint(equalTo: feedbackArea.trailingAnchor, constant: -panelInset),
+            feedback.leadingAnchor.constraint(equalTo: feedbackArea.leadingAnchor, constant: headerInset),
+            feedback.trailingAnchor.constraint(equalTo: feedbackArea.trailingAnchor, constant: -headerInset),
         ])
     }
 
@@ -350,6 +383,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         let current = generation
         let rows = sourceEntries()
         let query = input.stringValue
+        clearButton.isHidden = query.isEmpty
         feedback.stringValue = ""
         pending = true
         request = Task { [self] in
@@ -371,6 +405,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             setSearching(false)
             apply(results, selected: id)
         }
+    }
+
+    @objc private func clearQuery() {
+        input.stringValue = ""
+        panel.makeFirstResponder(input)
+        search(preserving: initialID)
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -458,7 +498,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         guard table.numberOfRows == 0, !feedback.isHidden else { throw CheckFailure.invalidPanel }
         configure(.commands)
         let commands = sourceEntries()
-        guard (input.cell as? NSSearchFieldCell)?.searchButtonCell?.image === Self.commandImage,
+        guard leadingIcon.image === Self.commandImage, !input.isBezeled, !input.drawsBackground,
               ControlMatching.rank(commands, query: "save").first?.entry.title == "File: Save",
               ControlMatching.rank(commands, query: "sva").first?.entry.title == "File: Save As…",
               commands.contains(where: { $0.title == "Move Caret Left" && $0.shortcut == "←" }) else {
@@ -471,15 +511,35 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         guard scroll.contentView.bounds.origin == .zero else { throw CheckFailure.invalidPanel }
         configure(.languages)
         let choices = sourceEntries()
-        guard (input.cell as? NSSearchFieldCell)?.searchButtonCell?.image === searchImage,
+        guard leadingIcon.image === Self.searchImage,
               choices.count == 25, choices.first?.id == "auto", choices[1].id == SyntaxLanguage.plainText.rawValue else {
             throw CheckFailure.invalidPanel
+        }
+        configure(.files)
+        guard panel.makeFirstResponder(input), let field = input.currentEditor() as? NSTextView else {
+            throw CheckFailure.invalidSearchField
+        }
+        field.insertText(">save", replacementRange: field.selectedRange())
+        guard mode == .commands, field.string == "save", !clearButton.isHidden,
+              leadingIcon.image === Self.commandImage, abs(leadingIcon.frame.midY - input.frame.midY) < 1 else {
+            throw CheckFailure.invalidSearchField
+        }
+        clearQuery()
+        guard field.string.isEmpty, clearButton.isHidden, input.currentEditor() === field else {
+            throw CheckFailure.invalidSearchField
         }
     }
 
     private enum CheckFailure: LocalizedError {
         case invalidPanel
-        var errorDescription: String? { "Control did not render its recent list and empty state quietly." }
+        case invalidSearchField
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidPanel: "Control did not render its recent list and empty state quietly."
+            case .invalidSearchField: "Control did not preserve editing, switching modes, or clearing the search."
+            }
+        }
     }
 
     private func activate(row: Int) {
@@ -543,6 +603,10 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
 
     func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
 
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        ControlRow()
+    }
+
     func tableViewSelectionDidChange(_ notification: Notification) {
         if !updatingRows {
             updateButtons(at: Array(entries.indices))
@@ -583,7 +647,6 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         let stack = NSStackView(views: views)
         stack.alignment = .centerY
         stack.spacing = 7
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: panelInset + 4, bottom: 0, right: panelInset + 4)
         return stack
     }
 
@@ -591,8 +654,9 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         _ text: String, highlights: Set<Int>, secondary: Bool, lineBreak: NSLineBreakMode = .byTruncatingTail
     ) -> NSTextField {
         let field = NSTextField(labelWithString: text)
-        field.font = secondary ? .systemFont(ofSize: NSFont.smallSystemFontSize) : .systemFont(ofSize: NSFont.systemFontSize)
-        field.textColor = secondary ? .secondaryLabelColor : .labelColor
+        let size = secondary ? NSFont.smallSystemFontSize : NSFont.systemFontSize
+        field.font = .systemFont(ofSize: size)
+        field.textColor = secondary ? .labelColor.withAlphaComponent(0.65) : .labelColor
         field.lineBreakMode = lineBreak
         field.maximumNumberOfLines = 1
         field.cell?.usesSingleLineMode = true
@@ -605,7 +669,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         for (index, character) in text.enumerated() {
             let length = String(character).utf16.count
             if highlights.contains(index) {
-                styled.addAttribute(.foregroundColor, value: NSColor.controlAccentColor,
+                styled.addAttribute(.font, value: NSFont.systemFont(ofSize: size, weight: .semibold),
                                     range: NSRange(location: offset, length: length))
             }
             offset += length
@@ -627,6 +691,20 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
 }
 
 @MainActor
+private final class ControlSurface: NSVisualEffectView {
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateBorder()
+    }
+
+    func updateBorder() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.borderColor = NSColor.separatorColor.cgColor
+        }
+    }
+}
+
+@MainActor
 private final class ControlWindow: NSPanel {
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -634,6 +712,18 @@ private final class ControlWindow: NSPanel {
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+}
+
+@MainActor
+private final class ControlRow: NSTableRowView {
+    override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
+
+    override func drawSelection(in dirtyRect: NSRect) {
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        NSColor.controlAccentColor.withAlphaComponent(dark ? 0.38 : 0.22).setFill()
+        let selection = bounds.insetBy(dx: 8, dy: 0.5)
+        NSBezierPath(roundedRect: selection, xRadius: 6, yRadius: 6).fill()
+    }
 }
 
 @MainActor
