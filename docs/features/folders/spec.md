@@ -8,7 +8,7 @@ File → Open Recent shows the ten most recently opened folders before a separat
 
 With a folder open, a nonempty ⌘P query searches recent files and regular files within the folder according to the [Control folder search rules](../control/spec.md). Clearing the query shows only eligible recent files.
 
-The title bar displays the folder name followed by the current file or “Untitled”. The folder name opens a native menu of recent folders. The file name opens a native menu of files in the same directory. Choosing an entry replaces the buffer or folder in that window through the regular Open command. Session restoration reopens the folder alongside the window's current file or draft. If that file is missing or unreadable and there is no draft, keep the folder window open with an untitled buffer.
+The title bar displays the folder name followed by the current file or “Untitled”. Right-click the folder name for recent folders or the file name for files in the same directory. The native menus align with their title labels and show an icon next to each entry. Drag either label to move the window. Choosing an entry replaces the buffer or folder in that window through the regular Open command. Session restoration reopens the folder alongside the window's current file or draft. If that file is missing or unreadable and there is no draft, keep the folder window open with an untitled buffer.
 
 ## Acceptance
 

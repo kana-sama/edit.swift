@@ -667,6 +667,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
     }
 
+    func windowDidResize(_ notification: Notification) {
+        if let findPanel { findPanel.resizeTitleBar() }
+        else { titleBar.resize() }
+    }
+
     func windowWillClose(_ notification: Notification) {
         rememberFilePosition()
         syntaxHighlighting?.cancel(clearingColors: false)

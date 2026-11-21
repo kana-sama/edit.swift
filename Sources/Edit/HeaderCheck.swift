@@ -2,8 +2,20 @@ import AppKit
 
 @MainActor
 enum HeaderCheck {
-    static func fileIcon(in document: DocumentWindow) -> NSButton? {
-        document.window.toolbar?.items.first { $0.itemIdentifier == DocumentTitleBar.languageItemIdentifier }?.view as? NSButton
+    static func fileIcon(in document: DocumentWindow) -> NSImageView? {
+        fileTitle(in: document)?.arrangedSubviews.compactMap { $0 as? NSImageView }.first
+    }
+
+    private static func fileTitle(in document: DocumentWindow) -> NSStackView? {
+        document.window.toolbar?.items.first { $0.itemIdentifier == DocumentTitleBar.fileItemIdentifier }?.view as? NSStackView
+    }
+
+    private static func folderLabel(in document: DocumentWindow) -> NSTextField? {
+        document.window.toolbar?.items.first { $0.itemIdentifier == DocumentTitleBar.folderItemIdentifier }?.view as? NSTextField
+    }
+
+    private static func fileLabel(in document: DocumentWindow) -> NSTextField? {
+        fileTitle(in: document)?.arrangedSubviews.compactMap { $0 as? NSTextField }.first
     }
 
     static func run(in app: Edit) async throws {
@@ -31,18 +43,39 @@ enum HeaderCheck {
         _ = try await app.openFile(source, in: document)
 
         document.window.layoutIfNeeded()
-        let titles = buttons(in: document).map(\.title)
-        try expect(titles == ["Project", "", "Main.swift"],
-                   "the folder appears before the file icon and name (\(titles))")
+        guard let folderTitle = folderLabel(in: document), let fileTitle = fileLabel(in: document),
+              let icon = fileIcon(in: document) else { throw Failure("title has two text labels and a file icon") }
+        try expect(folderTitle.stringValue == "Project" && fileTitle.stringValue == "Main.swift",
+                   "the folder appears before the file name")
+        let folderFrame = folderTitle.convert(folderTitle.bounds, to: nil)
+        let iconFrame = icon.convert(icon.bounds, to: nil)
+        let nameFrame = fileTitle.convert(fileTitle.bounds, to: nil)
+        let iconGap = nameFrame.minX - iconFrame.maxX
+        try expect(iconFrame.minX - folderFrame.maxX >= 3 && (-1...4).contains(iconGap),
+                   "separate folder and file hit regions with a compact icon gap (\(folderFrame), \(iconFrame), \(nameFrame))")
+        try expect(folderTitle.action == nil && fileTitle.action == nil && icon.action == nil
+                   && folderTitle.mouseDownCanMoveWindow && fileTitle.mouseDownCanMoveWindow && icon.mouseDownCanMoveWindow,
+                   "the title parts leave primary mouse events available for moving the window")
+        guard let frameView = document.window.contentView?.superview else { throw Failure("the title is in a window frame") }
+        for view in [folderTitle, icon, fileTitle] as [NSView] {
+            let center = NSPoint(x: view.bounds.midX, y: view.bounds.midY)
+            let hit = frameView.hitTest(view.convert(center, to: frameView.superview))
+            try expect(hit === view || hit?.isDescendant(of: view) == true,
+                       "AppKit routes pointer events to the visible part of the title")
+        }
         let recentFolders = document.titleBar.recentFoldersMenu()
         let folderPaths = recentFolders.items.compactMap { ($0.representedObject as? URL)?.lastPathComponent }
         try expect(Array(folderPaths.prefix(2)) == ["Project", "Another folder"], "folder menu shows recent folders")
         try expect(recentFolders.items.first?.state == .on, "the folder menu marks the current project")
+        try expect(recentFolders.items.allSatisfy { $0.image != nil && $0.preferredImageVisibility == .visible },
+                   "all recent folders show icons on macOS 27")
         guard let current = document.fileURL else { throw Failure("a named document is open") }
         let files = await DocumentTitleBar.loadSiblingFiles(of: current)
         let siblings = document.titleBar.siblingFilesMenu(files, current: current)
         try expect(siblings.items.map(\.title) == ["Main.swift", "Notes.txt"], "file menu shows files next to the current file")
         try expect(siblings.items[0].state == .on, "the file menu marks the current file")
+        try expect(siblings.items.allSatisfy { $0.image != nil && $0.preferredImageVisibility == .visible },
+                   "all sibling files show icons on macOS 27")
 
         let count = app.documents.count
         siblings.performActionForItem(at: 1)
@@ -58,16 +91,16 @@ enum HeaderCheck {
               let click = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [],
                                             timestamp: 0, windowNumber: document.window.windowNumber,
                                             context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else {
-            throw Failure("the language button can receive a right click")
+            throw Failure("the language icon can receive a right click")
         }
         icon.rightMouseDown(with: click)
         try app.checkHeaderLanguagePicker(in: document)
 
         document.performFind(.toggleSidebar)
         document.window.layoutIfNeeded()
-        try expect(buttons(in: document).map(\.title) == ["Another folder", "", "Untitled"]
-                   && fileIcon(in: document)?.image != nil,
-                   "the folder, file and language button remain in the toolbar alongside the sidebar")
+        try expect(folderLabel(in: document)?.stringValue == "Another folder"
+                   && fileLabel(in: document)?.stringValue == "Untitled" && fileIcon(in: document)?.image != nil,
+                   "the folder, file and language icon remain in the toolbar alongside the sidebar")
 
         let longFolder = root.appending(path: String(repeating: "Long folder name ", count: 7) + "project")
         let longFile = longFolder.appending(path: String(repeating: "File name ", count: 8) + "example.txt")
@@ -84,13 +117,6 @@ enum HeaderCheck {
         try expect(compactIcon.window === document.window && rect.width > 0 && rect.minX >= 0 &&
                    rect.maxX <= document.window.frame.width,
                    "the file icon stays visible with long names in a narrow window (\(rect), window width \(document.window.frame.width), attached \(compactIcon.window === document.window))")
-    }
-
-    private static func buttons(in document: DocumentWindow) -> [NSButton] {
-        document.window.toolbar?.items.compactMap { item in
-            guard DocumentTitleBar.itemIdentifiers.contains(item.itemIdentifier) else { return nil }
-            return item.view as? NSButton
-        } ?? []
     }
 
     private static func waitFor(_ detail: String, condition: () -> Bool) async throws {

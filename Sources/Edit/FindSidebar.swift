@@ -587,8 +587,13 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         installed = true
     }
 
+    func resizeTitleBar() {
+        document.titleBar.resize(sidebarWidth: installed && !sidebarItem.isCollapsed ? sidebar.view.frame.width : 0)
+    }
+
     @objc private func splitResized(_ notification: Notification) {
         guard installed else { return }
+        resizeTitleBar()
         restoreEditorAnchor()
         guard !sidebarAnimating else { return }
         settings.visible = !sidebarItem.isCollapsed
@@ -728,6 +733,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
         sidebarAnimating = false
         document.window.layoutIfNeeded()
+        resizeTitleBar()
         updateSidebarToolbarVisibility()
         restoreEditorAnchor()
         // AppKit also reconciles its text viewport after focus and split changes.

@@ -3,16 +3,19 @@ import AppKit
 @MainActor
 final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     static let folderItemIdentifier = NSToolbarItem.Identifier("Edit.FolderTitle")
-    static let languageItemIdentifier = NSToolbarItem.Identifier("Edit.FileLanguage")
     static let fileItemIdentifier = NSToolbarItem.Identifier("Edit.FileTitle")
-    static let itemIdentifiers = [folderItemIdentifier, languageItemIdentifier, fileItemIdentifier]
+    static let itemIdentifiers = [folderItemIdentifier, fileItemIdentifier]
 
     private unowned let document: DocumentWindow
     private unowned let app: Edit
-    private weak var folderButton: TitleBarButton?
-    private weak var fileButton: TitleBarButton?
-    private weak var languageButton: TitleBarButton?
+    private weak var folderLabel: TitleBarLabel?
+    private weak var fileLabel: TitleBarLabel?
+    private weak var fileTitle: NSStackView?
+    private weak var languageIcon: TitleBarIcon?
     private weak var folderItem: NSToolbarItem?
+    private weak var folderWidthLimit: NSLayoutConstraint?
+    private weak var fileWidthLimit: NSLayoutConstraint?
+    private var availableWidth: CGFloat = 0
     private var siblingRequest: Task<Void, Never>?
 
     init(document: DocumentWindow, app: Edit) {
@@ -40,76 +43,105 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         let item = NSToolbarItem(itemIdentifier: identifier)
         item.isBordered = false
         item.autovalidates = false
-        let button = TitleBarButton()
-        button.isBordered = false
 
-        switch identifier {
-        case Self.folderItemIdentifier:
+        if identifier == Self.folderItemIdentifier {
             item.label = "Folder"
+            let label = makeLabel()
+            folderWidthLimit = constrainWidth(of: label, to: 160)
+            label.onRightClick = { [weak self] label in self?.showFolderMenu(from: label) }
+            folderLabel = label
             folderItem = item
-            folderButton = button
-            configureName(button, maximumWidth: 160)
-            button.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)?
-                .withSymbolConfiguration(.init(pointSize: 8, weight: .semibold))
-            button.imagePosition = .imageTrailing
-            button.onPress = { [weak self] button in self?.showFolderMenu(from: button) }
-        case Self.fileItemIdentifier:
+            item.view = label
+        } else {
             item.label = "File"
-            fileButton = button
-            configureName(button, maximumWidth: 280)
-            button.onPress = { [weak self] button in self?.showSiblingMenu(from: button) }
-        default:
-            item.label = "Change Language Mode"
-            item.visibilityPriority = .user
-            languageButton = button
-            button.title = ""
-            button.imagePosition = .imageOnly
-            button.imageScaling = .scaleProportionallyDown
-            button.widthAnchor.constraint(equalToConstant: 20).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 20).isActive = true
-            button.setAccessibilityLabel(item.label)
-            button.toolTip = item.label
-            button.onPress = { [weak self] _ in self?.showLanguagePicker() }
+            item.visibilityPriority = .high
+            let label = makeLabel()
+            fileWidthLimit = constrainWidth(of: label, to: 240)
+            label.onRightClick = { [weak self] label in self?.showSiblingMenu(from: label) }
+            let icon = TitleBarIcon()
+            icon.imageScaling = .scaleProportionallyDown
+            icon.setAccessibilityLabel("Change Language Mode")
+            icon.toolTip = "Change Language Mode"
+            icon.onRightClick = { [weak self] in self?.showLanguagePicker() }
+            icon.widthAnchor.constraint(equalToConstant: 17).isActive = true
+            icon.heightAnchor.constraint(equalTo: icon.widthAnchor).isActive = true
+            fileLabel = label
+            languageIcon = icon
+
+            let title = NSStackView(views: [icon, label])
+            title.alignment = .centerY
+            title.spacing = 2
+            title.setVisibilityPriority(.detachOnlyIfNecessary, for: label)
+            fileTitle = title
+            item.view = title
         }
 
-        item.view = button
         update()
         return item
     }
 
-    private func configureName(_ button: NSButton, maximumWidth: CGFloat) {
-        button.font = .titleBarFont(ofSize: 0)
-        button.lineBreakMode = .byTruncatingMiddle
-        button.widthAnchor.constraint(greaterThanOrEqualToConstant: 24).isActive = true
-        button.widthAnchor.constraint(lessThanOrEqualToConstant: maximumWidth).isActive = true
-        button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    private func makeLabel() -> TitleBarLabel {
+        let label = TitleBarLabel(labelWithString: "")
+        label.font = .titleBarFont(ofSize: 0)
+        label.lineBreakMode = .byTruncatingMiddle
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return label
+    }
+
+    private func constrainWidth(of label: NSTextField, to maximum: CGFloat) -> NSLayoutConstraint {
+        let limit = label.widthAnchor.constraint(lessThanOrEqualToConstant: maximum)
+        limit.isActive = true
+        return limit
+    }
+
+    func resize(sidebarWidth: CGFloat = 0) {
+        let window = document.window
+        let zoom = window.standardWindowButton(.zoomButton)
+        let controls = zoom.map { $0.convert($0.bounds, to: nil).maxX + 8 } ?? 84
+        let leading = sidebarWidth > 0 ? sidebarWidth : controls
+        availableWidth = max(0, floor(window.frame.width - leading))
+        fitLabels()
+    }
+
+    private func fitLabels() {
+        // Keep the icon and a compact file name inside the editor pane as the divider moves.
+        let width = max(0, availableWidth - 40)
+        let folder = document.folderURL == nil ? 0 : min(160, width * 0.4)
+        let folderUsed = min(folderLabel?.intrinsicContentSize.width ?? 0, folder)
+        let file = min(240, max(0, width - folderUsed))
+        if folderWidthLimit?.constant != folder { folderWidthLimit?.constant = folder }
+        if fileWidthLimit?.constant != file { fileWidthLimit?.constant = file }
     }
 
     func update() {
         if let folder = document.folderURL {
             let name = folder.lastPathComponent
-            folderButton?.title = name.isEmpty ? folder.path : name
-            folderButton?.toolTip = folder.path
+            folderLabel?.stringValue = name.isEmpty ? folder.path : name
+            folderLabel?.toolTip = folder.path
             folderItem?.isHidden = false
         } else {
             folderItem?.isHidden = true
         }
-        fileButton?.title = document.displayName
-        fileButton?.toolTip = document.fileURL?.path ?? document.displayName
+        fileTitle?.edgeInsets.left = document.folderURL == nil ? 0 : 7
+        fileLabel?.stringValue = document.displayName
+        fileLabel?.toolTip = document.fileURL?.path ?? document.displayName
+        if availableWidth == 0 { resize() } else { fitLabels() }
         if document.fileURL == nil && document.manualSyntaxLanguage == nil {
-            languageButton?.image = NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
+            languageIcon?.image = NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
         } else {
-            languageButton?.image = FileIcons.image(for: document.fileURL, appearance: document.window.effectiveAppearance,
-                                                   language: document.manualSyntaxLanguage?.iconIdentifier)
+            languageIcon?.image = FileIcons.image(for: document.fileURL, appearance: document.window.effectiveAppearance,
+                                                  language: document.manualSyntaxLanguage?.iconIdentifier)
         }
     }
 
     func recentFoldersMenu() -> NSMenu {
         let menu = NSMenu(title: "Recent Folders")
         let current = document.folderURL?.path
+        let icon = NSImage(named: NSImage.folderName)?.copy() as? NSImage
+        icon?.size = NSSize(width: 16, height: 16)
         for folder in app.recentFiles.folders.prefix(10) {
             let item = openItem(folder.displayPath, at: folder.url, selected: folder.canonicalURL.path == current)
-            item.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
+            item.image = icon
             menu.addItem(item)
         }
         return menu
@@ -157,6 +189,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         item.target = self
         item.representedObject = url
         item.state = selected ? .on : .off
+        item.preferredImageVisibility = .visible
         return item
     }
 
@@ -165,20 +198,21 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         Task { [app, document] in await app.openFiles([url], in: document) }
     }
 
-    private func showFolderMenu(from button: TitleBarButton) {
+    private func showFolderMenu(from label: TitleBarLabel) {
         siblingRequest?.cancel()
         guard document.canReplaceBuffer else { return }
-        popUp(recentFoldersMenu(), from: button)
+        popUp(recentFoldersMenu(), from: label)
     }
 
-    private func showSiblingMenu(from button: TitleBarButton) {
+    private func showSiblingMenu(from label: TitleBarLabel) {
         siblingRequest?.cancel()
         guard document.canReplaceBuffer, let file = document.fileURL else { return }
-        siblingRequest = Task { [weak self, weak button] in
+        let wasKeyWindow = document.window.isKeyWindow
+        siblingRequest = Task { [weak self, weak label] in
             let files = await Self.loadSiblingFiles(of: file)
-            guard !Task.isCancelled, let self, let button, document.fileURL == file,
-                  document.canReplaceBuffer, document.window.isKeyWindow else { return }
-            popUp(siblingFilesMenu(files, current: file), from: button)
+            guard !Task.isCancelled, let self, let label, document.fileURL == file,
+                  document.canReplaceBuffer, !wasKeyWindow || document.window.isKeyWindow else { return }
+            popUp(siblingFilesMenu(files, current: file), from: label)
         }
     }
 
@@ -187,30 +221,31 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         app.showLanguageModes(in: document)
     }
 
-    private func popUp(_ menu: NSMenu, from button: TitleBarButton) {
-        guard !menu.items.isEmpty, button.window === document.window else { return }
-        let y = button.isFlipped ? button.bounds.maxY : button.bounds.minY
-        menu.popUp(positioning: nil, at: NSPoint(x: button.bounds.minX, y: y), in: button)
+    private func popUp(_ menu: NSMenu, from label: TitleBarLabel) {
+        guard let first = menu.items.first, label.window === document.window else { return }
+        let top = label.isFlipped ? label.bounds.minY : label.bounds.maxY
+        menu.popUp(positioning: first, at: NSPoint(x: label.bounds.minX, y: top), in: label)
     }
 }
 
 @MainActor
-private final class TitleBarButton: NSButton {
-    var onPress: ((TitleBarButton) -> Void)?
+private final class TitleBarLabel: NSTextField {
+    var onRightClick: ((TitleBarLabel) -> Void)?
 
-    init() {
-        super.init(frame: .zero)
-        target = self
-        action = #selector(press(_:))
-    }
-
-    required init?(coder: NSCoder) { fatalError("Title buttons are programmatically constructed") }
-
-    @objc private func press(_ sender: Any?) {
-        onPress?(self)
-    }
+    override var mouseDownCanMoveWindow: Bool { true }
 
     override func rightMouseDown(with event: NSEvent) {
-        onPress?(self)
+        onRightClick?(self)
+    }
+}
+
+@MainActor
+private final class TitleBarIcon: NSImageView {
+    var onRightClick: (() -> Void)?
+
+    override var mouseDownCanMoveWindow: Bool { true }
+
+    override func rightMouseDown(with event: NSEvent) {
+        onRightClick?()
     }
 }
