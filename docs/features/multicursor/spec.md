@@ -11,8 +11,10 @@ Use multiple carets or selections to edit a document in one operation. TextKit s
 
 These operations apply to every caret or selected range: text insertion, character and word deletion, moving the caret, indentation, line-boundary deletion, and moving or inserting lines. Line commands act once per affected line or contiguous block. Copy and Cut use the selected text, or each distinct line when every selection is empty. Whole-line Paste inserts above the target lines and keeps the clipboard content useful in other apps. Text changes from one multi-selection command are one undo step.
 
+Arrow navigation applies to every selection, including Command-Left and Command-Right for the visual line edges and Shift to extend each selection from its own anchor. Word, paragraph, document, and page movement also retain separate carets or selections where their resulting ranges are distinct. Carets that reach the same boundary merge. Scroll-only commands leave the selections in place.
+
 AppKit shows marked input at the primary selection. Confirming the composition inserts the finished text at all original selections as one Undo step. Cancelling restores the original text and selections.
 
 ## Verification
 
-Run `./script/check` to verify selection commands and history, Unicode edits and input-method composition, line edits, clipboard, and document Undo in an isolated, non-activating instance.
+Run `./script/check` to verify selection commands and history, native key dispatch for caret movement and selection extension, Unicode edits and input-method composition, line edits, clipboard, and document Undo in an isolated, non-activating instance.

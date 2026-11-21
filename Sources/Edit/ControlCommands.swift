@@ -48,7 +48,11 @@ struct ControlCommand {
 
     func run(in document: DocumentWindow) {
         guard let action = item.action else { return }
-        if documentOnly { document.window.makeFirstResponder(document.editor) }
+        if documentOnly {
+            document.window.makeFirstResponder(document.editor)
+            document.editor.doCommand(by: action)
+            return
+        }
         NSApplication.shared.sendAction(action, to: item.target, from: item)
     }
 

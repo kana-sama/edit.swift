@@ -236,16 +236,21 @@ extension EditorTextView {
         _ range: NSRange,
         direction: NSTextSelectionNavigation.Direction,
         destination: NSTextSelectionNavigation.Destination,
-        extending: Bool
+        extending: Bool,
+        steps: Int = 1
     ) -> (range: NSRange, selection: NSTextSelection)? {
         guard let layout = textLayoutManager, let textRange = textRange(range, in: layout) else { return nil }
-        let selection = multiCaret.navigation[range] ?? NSTextSelection(
+        var selection = multiCaret.navigation[range] ?? NSTextSelection(
             range: textRange, affinity: .downstream, granularity: .character
         )
-        guard let result = layout.textSelectionNavigation.destinationSelection(
-            for: selection, direction: direction, destination: destination, extending: extending, confined: false
-        ), let first = result.textRanges.first, let last = result.textRanges.last else { return nil }
-        return (NSUnionRange(charRange(first, in: layout), charRange(last, in: layout)), result)
+        for _ in 0..<steps {
+            guard let next = layout.textSelectionNavigation.destinationSelection(
+                for: selection, direction: direction, destination: destination, extending: extending, confined: false
+            ) else { break }
+            selection = next
+        }
+        guard let first = selection.textRanges.first, let last = selection.textRanges.last else { return nil }
+        return (NSUnionRange(charRange(first, in: layout), charRange(last, in: layout)), selection)
     }
 
     func moveSecondarySelections(command: Selector) -> Bool {
@@ -253,6 +258,7 @@ extension EditorTextView {
         typealias Direction = NSTextSelectionNavigation.Direction
         typealias Destination = NSTextSelectionNavigation.Destination
         let movement: (Direction, Destination, Bool)
+        let steps: Int
         switch command {
         case #selector(moveBackward(_:)): movement = (.backward, .character, false)
         case #selector(moveForward(_:)): movement = (.forward, .character, false)
@@ -264,8 +270,12 @@ extension EditorTextView {
         case #selector(moveWordForward(_:)): movement = (.forward, .word, false)
         case #selector(moveWordLeft(_:)): movement = (.left, .word, false)
         case #selector(moveWordRight(_:)): movement = (.right, .word, false)
+        case #selector(moveToLeftEndOfLine(_:)): movement = (.left, .line, false)
+        case #selector(moveToRightEndOfLine(_:)): movement = (.right, .line, false)
         case #selector(moveToBeginningOfLine(_:)): movement = (.backward, .line, false)
         case #selector(moveToEndOfLine(_:)): movement = (.forward, .line, false)
+        case #selector(moveToBeginningOfParagraph(_:)): movement = (.backward, .paragraph, false)
+        case #selector(moveToEndOfParagraph(_:)): movement = (.forward, .paragraph, false)
         case #selector(moveToBeginningOfDocument(_:)): movement = (.backward, .document, false)
         case #selector(moveToEndOfDocument(_:)): movement = (.forward, .document, false)
         case #selector(moveBackwardAndModifySelection(_:)): movement = (.backward, .character, true)
@@ -278,16 +288,34 @@ extension EditorTextView {
         case #selector(moveWordForwardAndModifySelection(_:)): movement = (.forward, .word, true)
         case #selector(moveWordLeftAndModifySelection(_:)): movement = (.left, .word, true)
         case #selector(moveWordRightAndModifySelection(_:)): movement = (.right, .word, true)
+        case #selector(moveToLeftEndOfLineAndModifySelection(_:)): movement = (.left, .line, true)
+        case #selector(moveToRightEndOfLineAndModifySelection(_:)): movement = (.right, .line, true)
         case #selector(moveToBeginningOfLineAndModifySelection(_:)): movement = (.backward, .line, true)
         case #selector(moveToEndOfLineAndModifySelection(_:)): movement = (.forward, .line, true)
+        case #selector(moveToBeginningOfParagraphAndModifySelection(_:)),
+             #selector(moveParagraphBackwardAndModifySelection(_:)): movement = (.backward, .paragraph, true)
+        case #selector(moveToEndOfParagraphAndModifySelection(_:)),
+             #selector(moveParagraphForwardAndModifySelection(_:)): movement = (.forward, .paragraph, true)
         case #selector(moveToBeginningOfDocumentAndModifySelection(_:)): movement = (.backward, .document, true)
         case #selector(moveToEndOfDocumentAndModifySelection(_:)): movement = (.forward, .document, true)
+        case #selector(pageUp(_:)): movement = (.up, .character, false)
+        case #selector(pageDown(_:)): movement = (.down, .character, false)
+        case #selector(pageUpAndModifySelection(_:)): movement = (.up, .character, true)
+        case #selector(pageDownAndModifySelection(_:)): movement = (.down, .character, true)
         default: return false
+        }
+        switch command {
+        case #selector(pageUp(_:)), #selector(pageDown(_:)),
+             #selector(pageUpAndModifySelection(_:)), #selector(pageDownAndModifySelection(_:)):
+            let lineHeight = font.map { ceil($0.ascender - $0.descender + $0.leading) } ?? 1
+            steps = max(1, Int(visibleRect.height / max(1, lineHeight)) - 1)
+        default:
+            steps = 1
         }
         var navigation: [NSRange: NSTextSelection] = [:]
         let ranges = caretSelections.map { range in
             guard let result = navigationResult(range, direction: movement.0, destination: movement.1,
-                                                extending: movement.2) else { return range }
+                                                extending: movement.2, steps: steps) else { return range }
             navigation[result.range] = result.selection
             return result.range
         }

@@ -106,6 +106,47 @@ enum MultiCaretCheck {
         editor.doCommand(by: #selector(EditorTextView.moveRightAndModifySelection(_:)))
         try expect(editor.caretSelections == [range(1, 1), range(5, 1)], "reverse direction without losing the anchors")
 
+        func arrow(_ keyCode: UInt16, _ arrow: String, _ modifiers: NSEvent.ModifierFlags) throws {
+            let flags = modifiers.union([.numericPad, .function])
+            guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
+                                                timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                                characters: arrow, charactersIgnoringModifiers: arrow,
+                                                isARepeat: false, keyCode: keyCode) else {
+                throw Failure("create isolated movement key event")
+            }
+            if !editor.performKeyEquivalent(with: event) { editor.keyDown(with: event) }
+        }
+        let movementText = "zero one\ntwo three\nfour five\nsix seven\n"
+        let originalCarets = [range(2), range(12)]
+        set(movementText, originalCarets)
+        try arrow(123, "\u{F702}", .command)
+        try expect(editor.caretSelections == [range(0), range(9)], "Command-Left moves each caret to its own line start")
+        try arrow(124, "\u{F703}", .command)
+        try expect(editor.caretSelections == [range(8), range(18)], "Command-Right moves each caret to its own line end")
+        try arrow(123, "\u{F702}", [.command, .shift])
+        try expect(editor.caretSelections == [range(0, 8), range(9, 9)], "Shift-Command-Left extends both selections")
+        try arrow(124, "\u{F703}", [.command, .shift])
+        try expect(editor.caretSelections == [range(8), range(18)], "Shift-Command-Right returns to the original anchors")
+
+        set(movementText, originalCarets)
+        try arrow(124, "\u{F703}", .option)
+        try expect(editor.caretSelections == [range(4), range(18)], "Option-Right advances each caret to a word end")
+        try arrow(125, "\u{F701}", [])
+        try expect(editor.caretSelections == [range(13), range(28)], "Down moves both carets to the next visual line")
+        editor.doCommand(by: #selector(EditorTextView.moveToBeginningOfParagraph(_:)))
+        try expect(editor.caretSelections == [range(9), range(19)], "move to each paragraph start")
+        try arrow(126, "\u{F700}", .command)
+        try expect(editor.caretSelections == [range(0)], "coincident document-start carets merge")
+
+        set(String(repeating: "abcdefghij\n", count: 250), [range(4), range(554)])
+        let beforePage = editor.caretSelections
+        editor.doCommand(by: #selector(EditorTextView.pageDownAndModifySelection(_:)))
+        let afterPage = editor.caretSelections
+        try expect(afterPage.count == beforePage.count
+                   && zip(afterPage, beforePage).allSatisfy { $0.location == $1.location && $0.length > 11 }
+                   && afterPage[0].length == afterPage[1].length,
+                   "extending a page keeps independent selections and column positions")
+
         set("abc\ndef\nghi", [range(0, 2), range(5), range(8, 2)])
         window.layoutIfNeeded()
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
