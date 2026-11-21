@@ -81,6 +81,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private var activity: Task<Void, Never>?
     private var preferenceWrite: Task<Void, Never>?
     private var queuedDirection: Int?
+    private weak var pendingResultFocus: FindFieldTextView?
     private var advanceFrom: Int?
 
     init(document: DocumentWindow, settings: FindSettings, writesPreferences: Bool) {
@@ -180,6 +181,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         dismissed.removeAll()
         advanceFrom = nil
         queuedDirection = nil
+        pendingResultFocus = nil
         bufferSnapshot = document.editor.string
         publish([])
         requestSearchIfNeeded()
@@ -267,7 +269,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             schedulePreferencesWrite()
             refreshDecorations()
         }
-        findInput.onReturn = { [weak self] in self?.moveResult(by: 1) }
+        findInput.onReturn = { [weak self] in self?.advanceFindFocus() }
         replaceInput.onReturn = { [weak self] in self?.focusFirstResult() }
         findInput.onEscape = { [weak self] in self?.hide() }
         replaceInput.onEscape = { [weak self] in self?.hide() }
@@ -527,6 +529,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             setSidebarCollapsed(false, animate: animate, transition: transition, desiredWidth: desiredWidth)
         }
         if let input {
+            pendingResultFocus = nil
             window.makeFirstResponder(input)
         } else if let responder, !focusIsInSidebar {
             window.makeFirstResponder(responder)
@@ -537,6 +540,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     private func hide() {
         guard installed && settings.visible else { return }
+        pendingResultFocus = nil
         let animation = beginSidebarTransition()
         if focusIsInSidebar { document.window.makeFirstResponder(document.editor) }
         settings.visible = false
@@ -677,6 +681,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     private func setReplacementVisible(_ visible: Bool) {
+        if settings.showsReplacement != visible { pendingResultFocus = nil }
         if !visible && document.window.firstResponder === replaceInput.input {
             document.window.makeFirstResponder(findInput.input)
         }
@@ -727,6 +732,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private func resetMatches() {
         dismissed.removeAll()
         queuedDirection = nil
+        pendingResultFocus = nil
         advanceFrom = nil
         selected = nil
         previewRequested = false
@@ -818,11 +824,16 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         } else {
             previewRequested = false
         }
+        if let input = pendingResultFocus {
+            pendingResultFocus = nil
+            if document.window.firstResponder === input { focusFirstResult() }
+        }
         refreshDecorations()
         refreshVisibleRows()
     }
 
     private func moveResult(by direction: Int) {
+        pendingResultFocus = nil
         guard !settings.query.isEmpty else { return }
         guard validResults else {
             if pending {
@@ -838,9 +849,23 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         selectRow((base + direction + matches.count) % matches.count, reveal: true, preview: focusIsInSidebar)
     }
 
+    private func advanceFindFocus() {
+        if settings.showsReplacement {
+            document.window.makeFirstResponder(replaceInput.input)
+        } else {
+            focusFirstResult()
+        }
+    }
+
     private func focusFirstResult() {
-        guard validResults, !matches.isEmpty else { return }
-        document.window.makeFirstResponder(results)
+        guard settings.visible else { return }
+        let window = document.window
+        if pending || bufferSearchScheduled {
+            queuedDirection = nil
+            pendingResultFocus = window.firstResponder as? FindFieldTextView
+            return
+        }
+        guard validResults, !matches.isEmpty, window.makeFirstResponder(results) else { return }
         selectRow(0, reveal: true, preview: true)
     }
 
@@ -886,7 +911,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     @objc private func openClickedResult(_ sender: NSTableView) {
-        let row = sender.clickedRow
+        openResult(at: sender.clickedRow)
+    }
+
+    private func openResult(at row: Int) {
         guard validResults, matches.indices.contains(row) else { return }
         layoutAnchor = nil
         selectRow(row, reveal: false, preview: false)
@@ -898,11 +926,11 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     private func activateResult() {
-        guard let selected, validResults else { return }
+        guard validResults, let selected, matches.indices.contains(selected) else { return }
         if settings.showsReplacement {
             apply([matches[selected]], advance: true)
         } else {
-            selectRow(selected, reveal: true, preview: false)
+            openResult(at: selected)
         }
     }
 

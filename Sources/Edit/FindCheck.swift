@@ -61,11 +61,69 @@ enum FindCheck {
         try expect(window.firstResponder === editor, "hiding Find restores editor focus")
         document.performFind(.next)
         try expect(editor.string == "cat cat\ncat", "finding with the sidebar hidden preserves text")
+        try await checkReturnNavigation(in: app.makeDocument())
         try await checkRenderedHighlights(in: app.makeDocument())
         try await checkSidebarLayout(in: app.makeDocument())
         try await checkSidebarReversal(in: app.makeDocument())
         try expect(NSApplication.shared.activationPolicy() == .prohibited &&
                    !NSApplication.shared.isActive && !window.isVisible, "Find stays in the isolated hidden window")
+    }
+
+    private static func checkReturnNavigation(in document: DocumentWindow) async throws {
+        let window = document.window
+        let editor = document.editor
+        editor.string = "cat cat\ncat"
+        document.performFind(.find)
+        let find = try require(window.firstResponder as? FindFieldTextView, "Return check Find field")
+        let table = try require(descendant(of: window.contentView, type: FindResultsTable.self), "Return check results")
+        let pressReturn = try require(
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                             windowNumber: window.windowNumber, context: nil, characters: "\r",
+                             charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36),
+            "plain Return key event"
+        )
+
+        find.keyDown(with: pressReturn)
+        try expect(window.firstResponder === find, "Find keeps focus when there are no matches")
+        find.insertText("cat", replacementRange: NSRange(location: 0, length: 0))
+        find.keyDown(with: pressReturn)
+        try await waitUntil("Return focuses the first result when the pending search completes") {
+            window.firstResponder === table && table.selectedRow == 0
+        }
+        table.keyDown(with: pressReturn)
+        try expect(window.firstResponder === editor && editor.selectedRange() == NSRange(location: 3, length: 0) &&
+                   editor.string == "cat cat\ncat", "Return in a search result focuses the editor after the match")
+
+        document.performFind(.replace)
+        let replace = try require(window.firstResponder as? FindFieldTextView, "Return check Replace field")
+        replace.insertText("dog", replacementRange: NSRange(location: 0, length: 0))
+        document.performFind(.find)
+        find.keyDown(with: pressReturn)
+        try expect(window.firstResponder === replace, "Return in Find moves to Replace when it is open")
+        replace.keyDown(with: pressReturn)
+        try expect(window.firstResponder === table && table.selectedRow == 0, "Return in Replace focuses the first result")
+        table.keyDown(with: pressReturn)
+        try await waitUntil("Return on a result applies one replacement and advances") {
+            editor.string == "dog cat\ncat" && table.numberOfRows == 2 && window.firstResponder === table &&
+                table.selectedRow == 0
+        }
+
+        document.performFind(.find)
+        find.insertText("missing", replacementRange: NSRange(location: 0, length: find.string.utf16.count))
+        find.keyDown(with: pressReturn)
+        try expect(window.firstResponder === replace, "Return in Find moves to Replace with no results")
+        replace.keyDown(with: pressReturn)
+        try await waitUntil("the unmatched query finishes without moving focus out of Replace") {
+            table.numberOfRows == 0 && window.firstResponder === replace
+        }
+
+        document.performFind(.toggleReplace)
+        find.insertText("cat", replacementRange: NSRange(location: 0, length: find.string.utf16.count))
+        find.keyDown(with: pressReturn)
+        document.performFind(.find)
+        try await waitUntil("reopening Find cancels deferred focus of results") {
+            table.numberOfRows == 2 && window.firstResponder === find
+        }
     }
 
     private static func checkRenderedHighlights(in document: DocumentWindow) async throws {
