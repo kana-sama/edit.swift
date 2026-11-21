@@ -159,6 +159,32 @@ enum FindCheck {
         let plainDistance = abs(lineRect(fourthLine).minY - lineRect(followingLine).minY)
         try expect(plainDistance < previewDistance, "clearing preview restores the original line spacing")
 
+        window.makeFirstResponder(editor)
+        let firstCharacter = NSRange(location: 0, length: 0)
+        editor.setSelectedRange(firstCharacter)
+        let drags: [(NSPoint, CGFloat)] = [
+            (NSPoint(x: 0, y: -scroll.contentInsets.top), 9),
+            (NSPoint(x: 140, y: 40), -6),
+        ]
+        for (position, distance) in drags {
+            clip.scroll(to: position)
+            scroll.reflectScrolledClipView(clip)
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            let beforeDrag = clip.bounds.origin
+            try expect(abs(beforeDrag.x - position.x) < 1 && abs(beforeDrag.y - position.y) < 1,
+                       "the editor is scrolled to the starting position for the divider drag")
+            let width = sidebar.frame.width
+            try dragDivider(split.splitView, sidebar: sidebar, in: window, by: distance)
+            window.layoutIfNeeded()
+            await Task.yield()
+            try expect(abs(sidebar.frame.width - width - distance) < 1,
+                       "dragging the native divider changes the sidebar width")
+            let afterDrag = clip.bounds.origin
+            try expect(abs(afterDrag.x - beforeDrag.x) < 1 && abs(afterDrag.y - beforeDrag.y) < 1,
+                       "dragging the sidebar divider preserves the editor scroll position (\(beforeDrag) to \(afterDrag))")
+            try expect(editor.selectedRange() == firstCharacter, "dragging the sidebar divider preserves selection")
+        }
+
         document.performFind(.toggleSidebar)
         await Task.yield()
         clip.scroll(to: NSPoint(x: 140, y: 40))
@@ -168,6 +194,24 @@ enum FindCheck {
         await Task.yield()
         try expect(abs(clip.bounds.origin.x - scrolled.x) < 1,
                    "reopening the sidebar preserves a nonzero horizontal scroll offset")
+    }
+
+    private static func dragDivider(_ splitView: NSSplitView, sidebar: NSView, in window: NSWindow, by distance: CGFloat) throws {
+        let divider = splitView.convert(
+            NSPoint(x: sidebar.frame.maxX + splitView.dividerThickness / 2, y: splitView.bounds.midY), to: nil
+        )
+        func mouse(_ type: NSEvent.EventType, offset: CGFloat) throws -> NSEvent {
+            try require(NSEvent.mouseEvent(with: type, location: NSPoint(x: divider.x + offset, y: divider.y),
+                                         modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                                         context: nil, eventNumber: 1, clickCount: 1, pressure: 1),
+                        "native divider event")
+        }
+        let down = try mouse(.leftMouseDown, offset: 0)
+        for offset in [distance / 3, 2 * distance / 3, distance] {
+            NSApplication.shared.postEvent(try mouse(.leftMouseDragged, offset: offset), atStart: false)
+        }
+        NSApplication.shared.postEvent(try mouse(.leftMouseUp, offset: distance), atStart: false)
+        splitView.mouseDown(with: down)
     }
 
     private static func checkMatcher() throws {
