@@ -15,3 +15,5 @@ Requires macOS 27 and Apple Command Line Tools with the macOS 27 SDK and Swift 6
 | `./script/run` | Build and open the development app. |
 | `./script/check` | Render the window in a separate, non-activating test app. |
 | `./script/install` | Build Release and install Edit to `~/Applications`. Pass a directory to choose a different destination. |
+
+The app build reuses SDK modules under `.local/swift-sdk` even when `.build` is recreated.

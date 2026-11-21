@@ -5,27 +5,58 @@ source script/app-bundle.sh
 
 configuration="${1:-debug}"
 case "$configuration" in
-    debug|release) ;;
+    debug) swift_flags=(-Onone -g -D DEBUG) ;;
+    release) swift_flags=(-O -whole-module-optimization) ;;
     *) printf 'Usage: %s [debug|release]\n' "$0" >&2; exit 2 ;;
 esac
 
 build_dir="${EDIT_BUILD_DIR:-$PWD/.build}"
+sdk_cache="${EDIT_SDK_CACHE_DIR:-$PWD/.local/swift-sdk}"
 bundle_name=Edit
 if [[ "${EDIT_AGENT_BUILD:-0}" == 1 ]]; then
     bundle_name='Edit Agent'
 fi
 
-swift_options=(--scratch-path "$build_dir" --manifest-cache local --configuration "$configuration")
-swift build "${swift_options[@]}" --product Edit --disable-index-store
-bin_path="$(swift build "${swift_options[@]}" --show-bin-path)"
+compiler="$(xcrun --find swiftc)"
+sdk="$(xcrun --sdk macosx --show-sdk-path)"
+minimum_version="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' resources/Info.plist)"
+target="$(uname -m)-apple-macosx$minimum_version"
+sources=()
+while IFS= read -r -d '' path; do
+    sources+=("$path")
+done < <(/usr/bin/find -s Sources/Edit -type f -name '*.swift' -print0)
 
+# Include toolchain and SDK identities so updates invalidate the finished bundle.
+build_fingerprint() {
+    {
+        printf '%s\n' "$configuration" "$bundle_name" "$target" "$compiler" "$sdk" &&
+        /usr/bin/stat -L -f '%i:%m:%c:%z' "$compiler" "$sdk/SDKSettings.plist" &&
+        /usr/bin/shasum -a 256 "${sources[@]}" Package.swift resources/Info.plist \
+            script/build script/app-bundle.sh script/publish-app.c
+    } | /usr/bin/shasum -a 256
+}
+
+fingerprint="$(build_fingerprint)"
 output="$build_dir/app/$configuration"
-mkdir -p "$output"
+destination="$output/$bundle_name.app"
+stamp="$destination/Contents/Resources/build-fingerprint"
+if [[ -f "$stamp" && "$(<"$stamp")" == "$fingerprint" ]] && verify_app "$destination" 2>/dev/null; then
+    printf '%s is up to date.\n' "$bundle_name.app"
+    exit 0
+fi
+
+# Keep SDK modules across a clean build of the project.
+mkdir -p "$sdk_cache/clang" "$sdk_cache/modules" "$output"
 stage="$(mktemp -d "$output/.edit-bundle.XXXXXX")"
 trap 'rm -rf -- "$stage"' EXIT
+"$compiler" -sdk "$sdk" -target "$target" -swift-version 6 -module-name Edit \
+    -parse-as-library -explicit-module-build -j "$(getconf _NPROCESSORS_ONLN)" \
+    -module-cache-path "$sdk_cache/clang" -sdk-module-cache-path "$sdk_cache/modules" \
+    "${swift_flags[@]}" "${sources[@]}" -o "$stage/Edit"
+
 app="$stage/$bundle_name.app"
-mkdir -p "$app/Contents/MacOS"
-cp -c "$bin_path/Edit" "$app/Contents/MacOS/Edit"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+mv "$stage/Edit" "$app/Contents/MacOS/Edit"
 cp resources/Info.plist "$app/Contents/Info.plist"
 if [[ "$bundle_name" == 'Edit Agent' ]]; then
     /usr/libexec/PlistBuddy \
@@ -36,5 +67,13 @@ if [[ "$bundle_name" == 'Edit Agent' ]]; then
         "$app/Contents/Info.plist"
 fi
 
+if [[ "$(build_fingerprint)" != "$fingerprint" ]]; then
+    printf 'Build inputs changed. Run the build again.\n' >&2
+    exit 1
+fi
+printf '%s\n' "$fingerprint" > "$app/Contents/Resources/build-fingerprint"
 sign_app "$app"
-publish_app "$app" "$output/$bundle_name.app"
+if [[ -d "$stage/Edit.dSYM" ]]; then
+    publish_app "$stage/Edit.dSYM" "$output/$bundle_name.dSYM"
+fi
+publish_app "$app" "$destination"

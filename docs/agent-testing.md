@@ -9,9 +9,9 @@ Read this before building or launching for agent checks or changing the build an
 - `./script/check [screenshot-path]` checks that the native window renders without activating the app. Pass a path to capture the window.
 - `./script/install [directory]` installs the release app bundle and leaves bundles with unrelated identifiers untouched.
 
-Use the SwiftPM cache across edits. Use the default debug build during development and an optimized build when measuring runtime or launch performance.
+The app build invokes `swiftc` directly for the dependency-free `Edit` target. Keep `Package.swift` in sync for Swift tooling. The build reuses compiled SDK modules in `.local/swift-sdk` and reuses a signed bundle when its inputs match. Use the default debug build during development and an optimized build when measuring runtime or launch performance.
 
-For a cold-build measurement, use fresh build and compiler-cache directories and report whether packages were already available locally. Report incremental build times separately. For cold launch, measure first launch to the first usable window and record the machine, OS, and cache conditions.
+Use separate fresh directories via `EDIT_BUILD_DIR` and `EDIT_SDK_CACHE_DIR` to measure a fully cold build. Setting just `EDIT_BUILD_DIR` to a fresh directory measures rebuilding the project with the existing SDK cache. Report incremental build times separately. For cold launch, measure first launch to the first usable window and record the machine, OS, and cache conditions.
 
 ## Quiet agent checks
 

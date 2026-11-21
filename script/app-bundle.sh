@@ -12,6 +12,8 @@ verify_app() {
 publish_app() {
     local app="$1" destination="$2"
     local publisher="${app%/*}/publish-app"
-    /usr/bin/clang -Wall -Wextra -Werror script/publish-app.c -o "$publisher"
+    if [[ ! -x "$publisher" ]]; then
+        /usr/bin/clang -Wall -Wextra -Werror script/publish-app.c -o "$publisher"
+    fi
     "$publisher" "$app" "$destination"
 }
