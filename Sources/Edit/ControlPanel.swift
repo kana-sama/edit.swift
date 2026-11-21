@@ -7,7 +7,9 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
     enum Mode { case files, commands, languages }
 
     private let input = NSSearchField()
-    private let commandMark = NSTextField(labelWithString: ">")
+    private let panelInset: CGFloat = 8
+    private let separatorHeight: CGFloat = 1
+    private var searchImage: NSImage?
     private lazy var history = ControlCommandHistory(persist: !app.isAgentCheck)
     private var commands: [String: ControlCommand] = [:]
     private var mode: Mode = .files
@@ -15,7 +17,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
     private let table = ControlTable()
     private let scroll = NSScrollView()
     private let feedback = NSTextField(labelWithString: "")
-    private var height: NSLayoutConstraint!
+    private var listHeight: NSLayoutConstraint!
+    private var feedbackHeight: NSLayoutConstraint!
     private weak var document: DocumentWindow?
     private weak var originalFocus: NSResponder?
     private var monitor: Any?
@@ -24,7 +27,6 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
     private var generation = 0
     private var opening = 0
     private var pending = false
-    private var activating = false
     private var updatingRows = false
 
     init(app: Edit) {
@@ -43,7 +45,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         }
     }
 
-    private func show(in document: DocumentWindow, mode: Mode = .files) {
+    private func show(in document: DocumentWindow, mode: Mode = .files,
+                      failure: (query: String, id: String, message: String)? = nil) {
         dismiss(restoreFocus: false)
         guard document.window.attachedSheet == nil else { return }
         document.requestAutosave()
@@ -56,9 +59,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         }
 
         configure(mode)
-        input.stringValue = ""
-        feedback.stringValue = ""
-        apply(ControlMatching.rank(sourceEntries(), query: ""), selected: initialID)
+        let query = failure?.query ?? ""
+        input.stringValue = query
+        apply(ControlMatching.rank(sourceEntries(), query: query), selected: failure?.id ?? initialID)
+        if let failure {
+            feedback.stringValue = failure.message
+            feedback.isHidden = false
+        }
         position()
         if !app.isAgentCheck {
             document.window.addChildWindow(panel, ordered: .above)
@@ -71,12 +78,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             NotificationCenter.default.addObserver(self, selector: #selector(parentResized),
                                                    name: NSWindow.didResizeNotification, object: document.window)
         }
-        refreshFiles(for: document)
+        if failure == nil { refreshFiles(for: document) }
     }
 
     private func configure(_ mode: Mode) {
         self.mode = mode
-        commandMark.isHidden = mode != .commands
+        (input.cell as? NSSearchFieldCell)?.searchButtonCell?.image = mode == .commands ? Self.commandImage : searchImage
+        input.needsDisplay = true
         switch mode {
         case .files: input.placeholderString = "Search recent files"
         case .commands: input.placeholderString = "Search commands"
@@ -116,9 +124,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         request?.cancel()
         request = nil
         pending = false
-        activating = false
         deferredRefresh = false
-        progress.stopAnimation(nil)
+        setSearching(false)
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResizeNotification, object: document.window)
@@ -133,7 +140,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        if !activating { dismiss(restoreFocus: false) }
+        dismiss(restoreFocus: false)
     }
 
     @objc private func parentResized() { position() }
@@ -141,16 +148,53 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
     private func position() {
         guard let parent = document?.window else { return }
         let width = min(620, max(240, parent.frame.width - 32))
-        let availableRows = max(1, Int((parent.frame.height - 116) / table.rowHeight))
-        let rows = min(10, availableRows, max(1, entries.count))
-        let listHeight = CGFloat(rows) * table.rowHeight
-        height.constant = entries.isEmpty ? 0 : listHeight
-        scroll.isHidden = entries.isEmpty
-        let messageHeight: CGFloat = feedback.isHidden ? 0 : 23
-        let panelHeight = listHeight * (entries.isEmpty ? 0 : 1) + 60 + messageHeight
+        let headerHeight = input.intrinsicContentSize.height + 2 * panelInset + separatorHeight
+        let messageHeight = feedback.isHidden ? 0 : feedback.intrinsicContentSize.height + 2 * panelInset
+        let room = parent.frame.height - headerHeight - messageHeight - 104
+        let rowCount = min(entries.count, 10, max(1, Int(room / table.rowHeight)))
+        let resultsHeight = rowCount == 0 ? 0 : table.rect(ofRow: rowCount - 1).maxY
+        listHeight.constant = resultsHeight
+        feedbackHeight.constant = messageHeight
+        scroll.isHidden = rowCount == 0
+        let panelHeight = headerHeight + resultsHeight + messageHeight
         let top = parent.frame.maxY - min(85, max(24, (parent.frame.height - panelHeight) / 2))
         panel.setFrame(NSRect(x: parent.frame.midX - width / 2, y: top - panelHeight,
                               width: width, height: panelHeight), display: panel.isVisible)
+        panel.contentView?.layoutSubtreeIfNeeded()
+        if rowCount == entries.count && scroll.contentView.bounds.origin != .zero {
+            scroll.contentView.scroll(to: .zero)
+            scroll.reflectScrolledClipView(scroll.contentView)
+        }
+    }
+
+    private static let commandImage: NSImage = {
+        // Use the prompt marker's shape from the Rust editor in the native search icon slot.
+        let image = NSImage(size: NSSize(width: 14, height: 14), flipped: true) { rect in
+            let origin = NSPoint(x: rect.midX - 6, y: rect.midY - 4)
+            let chevron = NSBezierPath()
+            chevron.move(to: origin)
+            for (x, y) in [(6.0, 3.5), (6, 4.5), (0, 8), (0, 6.5), (4.25, 4), (0, 1.5)] {
+                chevron.line(to: NSPoint(x: origin.x + x, y: origin.y + y))
+            }
+            chevron.close()
+            NSColor.black.setFill()
+            chevron.fill()
+            NSBezierPath(roundedRect: NSRect(x: origin.x + 7.5, y: origin.y + 6.5, width: 4.5, height: 1.5),
+                         xRadius: 0.5, yRadius: 0.5).fill()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
+
+    private func setSearching(_ searching: Bool) {
+        (input.cell as? NSSearchFieldCell)?.searchButtonCell?.isTransparent = searching
+        input.needsDisplay = true
+        if searching {
+            progress.startAnimation(nil)
+        } else {
+            progress.stopAnimation(nil)
+        }
     }
 
     private func buildPanel() {
@@ -174,26 +218,21 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         input.placeholderString = "Search recent files"
         input.sendsWholeSearchString = false
         input.delegate = self
-        input.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        searchImage = (input.cell as? NSSearchFieldCell)?.searchButtonCell?.image
         progress.style = .spinning
         progress.controlSize = .small
         progress.isDisplayedWhenStopped = false
-        progress.translatesAutoresizingMaskIntoConstraints = false
-        progress.widthAnchor.constraint(equalToConstant: 16).isActive = true
-        progress.heightAnchor.constraint(equalToConstant: 16).isActive = true
-        commandMark.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .medium)
-        commandMark.textColor = .secondaryLabelColor
-        commandMark.isHidden = true
-        let header = NSStackView(views: [commandMark, input, progress])
-        header.spacing = 8
-        header.alignment = .centerY
+        progress.setAccessibilityElement(false)
+        let separator = NSBox()
+        separator.boxType = .separator
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("result"))
         table.addTableColumn(column)
         table.headerView = nil
         table.dataSource = self
         table.delegate = self
-        table.rowHeight = 38
+        table.style = .plain
+        table.rowHeight = 30
         table.intercellSpacing = .zero
         table.backgroundColor = .clear
         table.selectionHighlightStyle = .regular
@@ -210,29 +249,47 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             }
         }
         scroll.documentView = table
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
+        scroll.hasVerticalScroller = false
+        scroll.hasHorizontalScroller = false
+        scroll.verticalScrollElasticity = .none
+        scroll.horizontalScrollElasticity = .none
+        scroll.automaticallyAdjustsContentInsets = false
         scroll.drawsBackground = false
-        height = scroll.heightAnchor.constraint(equalToConstant: 0)
-        height.isActive = true
+        listHeight = scroll.heightAnchor.constraint(equalToConstant: 0)
 
         feedback.textColor = .secondaryLabelColor
         feedback.lineBreakMode = .byTruncatingTail
-        let stack = NSStackView(views: [header, scroll, feedback])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        appearance.addSubview(stack)
+        let feedbackArea = NSView()
+        feedbackHeight = feedbackArea.heightAnchor.constraint(equalToConstant: 0)
+        for view in [input, progress, separator, scroll, feedbackArea] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            appearance.addSubview(view)
+        }
+        feedback.translatesAutoresizingMaskIntoConstraints = false
+        feedbackArea.addSubview(feedback)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: appearance.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: appearance.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: appearance.topAnchor),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: appearance.bottomAnchor),
-            header.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
-            scroll.widthAnchor.constraint(equalTo: header.widthAnchor),
-            feedback.widthAnchor.constraint(equalTo: header.widthAnchor),
+            input.topAnchor.constraint(equalTo: appearance.topAnchor, constant: panelInset),
+            input.leadingAnchor.constraint(equalTo: appearance.leadingAnchor, constant: panelInset),
+            input.trailingAnchor.constraint(equalTo: appearance.trailingAnchor, constant: -panelInset),
+            progress.centerYAnchor.constraint(equalTo: input.centerYAnchor),
+            progress.leadingAnchor.constraint(equalTo: input.leadingAnchor, constant: 5),
+            progress.widthAnchor.constraint(equalToConstant: 12),
+            progress.heightAnchor.constraint(equalToConstant: 12),
+            separator.topAnchor.constraint(equalTo: input.bottomAnchor, constant: panelInset),
+            separator.leadingAnchor.constraint(equalTo: appearance.leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: appearance.trailingAnchor),
+            separator.heightAnchor.constraint(equalToConstant: separatorHeight),
+            scroll.topAnchor.constraint(equalTo: separator.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: appearance.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: appearance.trailingAnchor),
+            listHeight,
+            feedbackArea.topAnchor.constraint(equalTo: scroll.bottomAnchor),
+            feedbackArea.leadingAnchor.constraint(equalTo: appearance.leadingAnchor),
+            feedbackArea.trailingAnchor.constraint(equalTo: appearance.trailingAnchor),
+            feedbackHeight,
+            feedback.centerYAnchor.constraint(equalTo: feedbackArea.centerYAnchor),
+            feedback.leadingAnchor.constraint(equalTo: feedbackArea.leadingAnchor, constant: panelInset),
+            feedback.trailingAnchor.constraint(equalTo: feedbackArea.trailingAnchor, constant: -panelInset),
         ])
     }
 
@@ -302,7 +359,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(150))
                 guard let self, current == generation, pending else { return }
-                progress.startAnimation(nil)
+                setSearching(true)
             }
             let results = await withTaskCancellationHandler {
                 await worker.value
@@ -311,7 +368,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             }
             guard current == generation, document != nil else { return }
             pending = false
-            progress.stopAnimation(nil)
+            setSearching(false)
             apply(results, selected: id)
         }
     }
@@ -329,15 +386,15 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         entries = results
         updatingRows = true
         table.reloadData()
-        if !results.isEmpty {
-            let row = id.flatMap { key in results.firstIndex { $0.entry.id == key } } ?? 0
-            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            table.scrollRowToVisible(row)
-        }
-        updatingRows = false
         feedback.stringValue = entries.isEmpty ? "No matching results" : ""
         feedback.isHidden = !entries.isEmpty
         position()
+        if !results.isEmpty {
+            let row = id.flatMap { key in results.firstIndex { $0.entry.id == key } } ?? 0
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            reveal(row)
+        }
+        updatingRows = false
         updateButtons(at: [table.selectedRow, table.hovered])
     }
 
@@ -366,7 +423,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         guard !pending, !entries.isEmpty else { return }
         let row = (max(0, table.selectedRow) + step + entries.count) % entries.count
         table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        table.scrollRowToVisible(row)
+        reveal(row)
+    }
+
+    private func reveal(_ row: Int) {
+        if !table.visibleRect.contains(table.rect(ofRow: row)) {
+            table.scrollRowToVisible(row)
+        }
     }
 
     @objc private func activateClickedRow() { activate(row: table.clickedRow) }
@@ -381,18 +444,35 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
               table.numberOfRows > 0, table.selectedRow == 0 else {
             throw CheckFailure.invalidPanel
         }
+        let files = Array(ControlMatching.rank(fileEntries(), query: "").prefix(2))
+        guard files.count == 2 else { throw CheckFailure.invalidPanel }
+        apply(files, selected: files.last?.entry.id)
+        guard !scroll.hasVerticalScroller, !scroll.hasHorizontalScroller,
+              let content = panel.contentView, abs(scroll.frame.width - content.bounds.width) < 0.5,
+              abs(scroll.frame.minY - content.bounds.minY) < 0.5,
+              scroll.contentView.bounds.origin == .zero,
+              scroll.contentView.bounds.contains(table.rect(ofRow: 1)) else {
+            throw CheckFailure.invalidPanel
+        }
         apply(ControlMatching.rank(fileEntries(), query: "not-a-real-result"), selected: nil)
         guard table.numberOfRows == 0, !feedback.isHidden else { throw CheckFailure.invalidPanel }
         configure(.commands)
         let commands = sourceEntries()
-        guard ControlMatching.rank(commands, query: "save").first?.entry.title == "File: Save",
+        guard (input.cell as? NSSearchFieldCell)?.searchButtonCell?.image === Self.commandImage,
+              ControlMatching.rank(commands, query: "save").first?.entry.title == "File: Save",
               ControlMatching.rank(commands, query: "sva").first?.entry.title == "File: Save As…",
               commands.contains(where: { $0.title == "Move Caret Left" && $0.shortcut == "←" }) else {
             throw CheckFailure.invalidPanel
         }
+        apply(ControlMatching.rank(commands, query: ""), selected: commands.last?.id)
+        guard commands.count > 10, scroll.contentView.bounds.minY > 0,
+              table.visibleRect.contains(table.rect(ofRow: table.selectedRow)) else { throw CheckFailure.invalidPanel }
+        apply(files, selected: files.last?.entry.id)
+        guard scroll.contentView.bounds.origin == .zero else { throw CheckFailure.invalidPanel }
         configure(.languages)
         let choices = sourceEntries()
-        guard choices.count == 25, choices.first?.id == "auto", choices[1].id == SyntaxLanguage.plainText.rawValue else {
+        guard (input.cell as? NSSearchFieldCell)?.searchButtonCell?.image === searchImage,
+              choices.count == 25, choices.first?.id == "auto", choices[1].id == SyntaxLanguage.plainText.rawValue else {
             throw CheckFailure.invalidPanel
         }
     }
@@ -403,7 +483,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
     }
 
     private func activate(row: Int) {
-        guard !pending, !activating, entries.indices.contains(row), let document else { return }
+        guard !pending, entries.indices.contains(row), let document else { return }
         let entry = entries[row].entry
         if mode == .commands {
             runCommand(entry, in: document)
@@ -416,29 +496,17 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             return
         }
         guard let recent = entry.recent else { return }
-        activating = true
-        document.requestAutosave()
-        let current = generation
+        let query = input.stringValue
+        dismiss(restoreFocus: true)
+        let dismissedOpening = opening
         Task {
             do {
-                if try await app.openFile(recent.url, promoteExisting: false) != nil, self.document === document {
-                    dismiss(restoreFocus: false)
-                }
+                try await app.openFile(recent.url, in: document)
             } catch {
                 await app.recentFiles.removeIfMissing(recent.url)
-                guard self.document === document, current == generation else {
-                    activating = false
-                    return
-                }
-                let results = ControlMatching.rank(fileEntries(), query: input.stringValue)
-                let replacement = results.indices.contains(row) ? results[row].entry.id : results.last?.entry.id
-                apply(results, selected: results.contains(where: { $0.entry.id == recent.url.absoluteString })
-                      ? recent.url.absoluteString : replacement)
-                feedback.stringValue = error.localizedDescription
-                feedback.isHidden = false
-                position()
+                guard opening == dismissedOpening, self.document == nil, document.window.isKeyWindow else { return }
+                show(in: document, failure: (query, entry.id, error.localizedDescription))
             }
-            activating = false
         }
     }
 
@@ -465,7 +533,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
     }
 
     @objc private func dismissRecent(_ button: NSButton) {
-        guard !pending, !activating, let id = button.identifier?.rawValue,
+        guard !pending, let id = button.identifier?.rawValue,
               let row = entries.firstIndex(where: { $0.entry.id == id }), let recent = entries[row].entry.recent else { return }
         let neighbor = row + 1 < entries.count ? entries[row + 1].entry.id : row > 0 ? entries[row - 1].entry.id : nil
         let selected = selectedID == id ? neighbor : selectedID
@@ -514,8 +582,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         }
         let stack = NSStackView(views: views)
         stack.alignment = .centerY
-        stack.spacing = 9
-        stack.edgeInsets = NSEdgeInsets(top: 1, left: 8, bottom: 1, right: 8)
+        stack.spacing = 7
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: panelInset + 4, bottom: 0, right: panelInset + 4)
         return stack
     }
 

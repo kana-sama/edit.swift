@@ -18,8 +18,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
     private var startup: Task<Void, Never>?
     private var receivedInitialSession = false
-    private var pendingFiles: [(urls: [URL], allowMissing: Bool)] = []
-    private var saveTargets: [URL: (document: DocumentWindow, identity: FileIdentity?)] = [:]
+    private var pendingFiles: [(urls: [URL], allowMissing: Bool, document: DocumentWindow?)] = []
+    private var saveTargets: [URL: FileIdentity?] = [:]
     private var lastPlacement: WindowPlacement?
     private var sessionReadFailed = false
     private var pendingFullScreen: [DocumentWindow] = []
@@ -76,7 +76,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         let arguments = CommandLine.arguments.dropFirst().filter { $0 != "--" && !$0.hasPrefix("-psn_") }
         if !arguments.isEmpty {
             let urls = arguments.map { URL(fileURLWithPath: $0).standardizedFileURL }
-            pendingFiles.append((urls, true))
+            pendingFiles.append((urls, true, nil))
         }
 
         startup = Task { @MainActor in
@@ -98,7 +98,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             let requests = pendingFiles
             pendingFiles.removeAll()
             for request in requests where !isQuitting {
-                await openFiles(request.urls, allowMissing: request.allowMissing)
+                await openFiles(request.urls, allowMissing: request.allowMissing, in: request.document)
             }
         }
     }
@@ -141,7 +141,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     @objc func openRecentDocument(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
-        requestOpen([url])
+        requestOpen([url], in: activeDocument)
     }
 
     @objc func showGoToFile(_ sender: Any?) { showControl(.files) }
@@ -168,14 +168,15 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     @objc func openDocument(_ sender: Any?) {
-        guard let document = activeDocument, document.window.attachedSheet == nil, !isQuitting else { return }
+        guard let document = activeDocument, document.canReplaceBuffer, !isQuitting else { return }
         document.requestAutosave()
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = true
+        panel.allowsMultipleSelection = false
         panel.directoryURL = document.fileURL?.deletingLastPathComponent()
         panel.beginSheetModal(for: document.window) { response in
-            if response == .OK { self.requestOpen(panel.urls) }
+            panel.orderOut(nil)
+            if response == .OK, let url = panel.url { self.requestOpen([url], in: document) }
         }
     }
 
@@ -212,8 +213,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         switch item.action {
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
         case #selector(showGoToFile(_:)), #selector(showCommandMode(_:)), #selector(showLanguageModes(_:)): return activeDocument.map { $0.window.attachedSheet == nil } ?? false
-        case #selector(newWindow(_:)), #selector(openRecentDocument(_:)): return true
-        case #selector(openDocument(_:)): return activeDocument.map { $0.window.attachedSheet == nil } ?? false
+        case #selector(newWindow(_:)): return true
+        case #selector(openDocument(_:)), #selector(openRecentDocument(_:)):
+            return activeDocument?.canReplaceBuffer ?? false
         case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)):
             return activeDocument.map { !$0.isBusy && $0.window.attachedSheet == nil } ?? false
         case #selector(openFind(_:)), #selector(openReplace(_:)), #selector(toggleFindSidebar(_:)):
@@ -322,11 +324,15 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     func reserveSave(to url: URL, identity: FileIdentity?, for document: DocumentWindow) -> Bool {
-        guard !documents.contains(where: {
+        // Buffers already associated with a path compare their revisions before writing.
+        // Save As must not claim a path owned by another window.
+        guard url == document.fileURL || !documents.contains(where: {
             $0 !== document && ($0.fileURL == url || (identity != nil && $0.fileIdentity == identity))
-        }), saveTargets[url] == nil, identity == nil || !saveTargets.values.contains(where: { $0.identity == identity })
+        }) else { return false }
+        guard !saveTargets.keys.contains(url),
+              identity == nil || !saveTargets.values.contains(identity)
         else { return false }
-        saveTargets[url] = (document, identity)
+        saveTargets.updateValue(identity, forKey: url)
         return true
     }
 
@@ -389,71 +395,61 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         }
     }
 
-    func openFiles(_ urls: [URL], allowMissing: Bool = false) async {
+    func openFiles(_ urls: [URL], allowMissing: Bool = false, in sourceDocument: DocumentWindow? = nil) async {
+        guard let document = sourceDocument ?? activeDocument else { return }
         for url in urls where !isQuitting {
             do {
-                _ = try await openFile(url, allowMissing: allowMissing)
+                guard try await openFile(url, allowMissing: allowMissing, in: document) != nil else { break }
             } catch {
                 await recentFiles.removeIfMissing(url)
-                if !isAgentCheck && !isQuitting {
-                    await activeDocument?.showError("Could Not Open “\(url.lastPathComponent)”", detail: error.localizedDescription)
+                if !isAgentCheck && !isQuitting && document.canReplaceBuffer && documents.contains(where: { $0 === document }) {
+                    await document.showError("Could Not Open “\(url.lastPathComponent)”", detail: error.localizedDescription)
                 }
             }
         }
     }
 
     @discardableResult
-    func openFile(_ url: URL, allowMissing: Bool = false, promoteExisting: Bool = true) async throws -> DocumentWindow? {
-        guard !isQuitting else { return nil }
-        if let existing = openDocument(at: url.standardizedFileURL, identity: nil) {
-            if !isAgentCheck { existing.present() }
-            if promoteExisting { await recentFiles.record(url) }
-            return existing
-        }
+    func openFile(_ url: URL, allowMissing: Bool = false, in sourceDocument: DocumentWindow? = nil) async throws -> DocumentWindow? {
+        guard !isQuitting, let document = sourceDocument ?? activeDocument, document.canReplaceBuffer,
+              documents.contains(where: { $0 === document }) else { return nil }
 
+        if document.fileURL == url.standardizedFileURL {
+            await recentFiles.record(url)
+            return document
+        }
         let (canonical, identity) = await Task.detached {
             let path = FileBuffer.canonicalURL(url)
             return (path, FileIdentity.at(path))
         }.value
-        guard !isQuitting else { return nil }
-        if let existing = openDocument(at: canonical, identity: identity) {
-            if !isAgentCheck { existing.present() }
-            if promoteExisting { await recentFiles.record(url) }
-            return existing
+        guard !isQuitting, documents.contains(where: { $0 === document }) else { return nil }
+        if document.fileURL == canonical || (identity != nil && identity == document.fileIdentity) {
+            await recentFiles.record(url)
+            return document
         }
 
         let file = try await Task.detached { try FileBuffer.read(canonical, allowMissing: allowMissing) }.value
-        guard !isQuitting else { return nil }
-        if let existing = openDocument(at: file.url, identity: file.identity) {
-            if !isAgentCheck { existing.present() }
-            if promoteExisting { await recentFiles.record(url) }
-            return existing
-        }
-        let document = activeDocument.flatMap { $0.isReusable ? $0 : nil } ?? makeDocument()
-        document.load(file)
-        if !isAgentCheck { document.present() }
+        guard documents.contains(where: { $0 === document }),
+              await document.replaceBuffer(with: file) else { return nil }
         if file.identity != nil { await recentFiles.record(url) }
         return document
     }
 
     func manualIconLanguage(for recent: RecentFile) -> String? {
-        let document = openDocument(at: recent.canonicalURL, identity: recent.identity)
-        return document?.manualSyntaxLanguage?.iconIdentifier
-            ?? syntaxOverrides.language(for: recent.canonicalURL)?.iconIdentifier
+        if let document = activeDocument,
+           document.fileURL == recent.canonicalURL || document.fileIdentity == recent.identity {
+            return document.manualSyntaxLanguage?.iconIdentifier
+        }
+        return syntaxOverrides.language(for: recent.canonicalURL)?.iconIdentifier
     }
 
-    private func openDocument(at url: URL, identity: FileIdentity?) -> DocumentWindow? {
-        documents.first { $0.fileURL == url || (identity != nil && $0.fileIdentity == identity) }
-            ?? saveTargets[url]?.document
-            ?? saveTargets.values.first { identity != nil && $0.identity == identity }?.document
-    }
-
-    private func requestOpen(_ urls: [URL], allowMissing: Bool = false) {
+    private func requestOpen(_ urls: [URL], allowMissing: Bool = false, in document: DocumentWindow? = nil) {
         guard !urls.isEmpty, !isQuitting else { return }
         if !receivedInitialSession {
-            pendingFiles.append((urls, allowMissing))
+            pendingFiles.append((urls, allowMissing, document))
         } else {
-            Task { await openFiles(urls, allowMissing: allowMissing) }
+            let document = document ?? activeDocument
+            Task { await openFiles(urls, allowMissing: allowMissing, in: document) }
         }
     }
 

@@ -6,7 +6,7 @@ Autosave writes changed text to the current file in the background. A buffer is 
 
 - Save after one second without a text edit. A new edit restarts the timer. Wait for marked input from a macOS input method to commit before a background write.
 - Request an immediate save when focus leaves the editor, when a window loses focus or minimizes, and when a native menu or file picker opens.
-- Actions that leave the editing context can request the same background save. New, Close, and Quit finish pending writes and attempt an autosave before changing buffers or recording the session. See [Files](../files/spec.md) for the prompts and draft recovery.
+- Actions that leave the editing context can request the same background save. Open, New, Close, and Quit finish pending writes and attempt an autosave before changing buffers or recording the session. See [Files](../files/spec.md) for the prompts and draft recovery.
 
 ## Writes and errors
 

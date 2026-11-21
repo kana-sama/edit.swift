@@ -8,6 +8,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         case cancel
     }
 
+    enum CloseDestination {
+        case window
+        case buffer(FileBuffer?)
+    }
+
     private struct AutosaveRequest {
         let generation: UInt
         let text: String
@@ -40,6 +45,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var autosaveFailure: (generation: UInt, detail: String, reported: Bool)?
     private var syntaxHighlighting: SyntaxHighlighting?
     private var findPanel: FindSidebar?
+    private var appearanceObservation: NSKeyValueObservation?
     private(set) var manualSyntaxLanguage: SyntaxLanguage?
 
     var resolvedSyntaxLanguage: SyntaxLanguage {
@@ -50,7 +56,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         guard manualSyntaxLanguage != language else { return }
         manualSyntaxLanguage = language
         app.syntaxOverrides.set(language, for: fileURL)
-        findPanel?.updateName()
+        updateTitle()
         refreshSyntax(immediate: true)
     }
 
@@ -73,6 +79,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         window.isRestorable = false
         window.tabbingMode = .disallowed
         window.delegate = self
+        appearanceObservation = window.observe(\.effectiveAppearance) { [weak self] _, _ in
+            Task { @MainActor in self?.updateTitleIcon() }
+        }
         window.contentView = scrollView
         window.initialFirstResponder = editor
         window.makeFirstResponder(editor)
@@ -236,7 +245,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }.value
         let promote = asNew || target != fileURL
         guard app.reserveSave(to: target, identity: identity, for: self) else {
-            await showError("The file is already open in another window.")
+            await showError("The file is in use by another window.")
             return false
         }
         defer { app.finishSave(to: target) }
@@ -336,7 +345,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         writingGeneration = generation
         defer { writingGeneration = nil }
         guard app.reserveSave(to: target, identity: fileIdentity, for: self) else {
-            autosaveFailure = (generation, "The file is already open in another window.", false)
+            autosaveFailure = (generation, "The file is in use by another window.", false)
             return
         }
         defer { app.finishSave(to: target) }
@@ -412,17 +421,23 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         guard canReplaceBuffer, !app.isQuitting else { return false }
         guard window.isDocumentEdited || autosaveTask != nil else { return true }
         promptingToClose = true
-        Task { await closeBuffer(replacing: false) }
+        Task { await closeBuffer(destination: .window) }
         return false
     }
 
     func newBuffer() async {
-        guard canReplaceBuffer, !app.isQuitting else { return }
-        promptingToClose = true
-        await closeBuffer(replacing: true)
+        await replaceBuffer(with: nil)
     }
 
-    private func closeBuffer(replacing: Bool) async {
+    @discardableResult
+    func replaceBuffer(with file: FileBuffer?) async -> Bool {
+        guard canReplaceBuffer, !app.isQuitting else { return false }
+        promptingToClose = true
+        return await closeBuffer(destination: .buffer(file))
+    }
+
+    @discardableResult
+    private func closeBuffer(destination: CloseDestination) async -> Bool {
         if editor.hasMarkedText() { editor.unmarkText() }
         let wasEditable = editor.isEditable
         editor.isEditable = false
@@ -446,33 +461,41 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         } else {
             choice = await confirmNamedClose()
         }
-        await finishClose(choice, replacing: replacing)
+        return await finishClose(choice, destination: destination)
     }
 
-    func finishClose(_ choice: CloseChoice, replacing: Bool = false) async {
+    @discardableResult
+    func finishClose(_ choice: CloseChoice, destination: CloseDestination = .window) async -> Bool {
         switch choice {
         case .save(let url):
-            guard await save(to: url), !window.isDocumentEdited else { return }
+            guard await save(to: url), !window.isDocumentEdited else { return false }
         case .discard:
             break
         case .cancel:
-            return
+            return false
         }
 
-        if replacing {
-            fileURL = nil
-            manualSyntaxLanguage = nil
-            fileIdentity = nil
-            savedText = "" as NSString
-            format = FileFormat()
-            revision = nil
+        switch destination {
+        case .buffer(let file):
             autosaveFailure = nil
             editor.breakUndoCoalescing()
-            installText("")
+            if let file {
+                // Saving the outgoing draft to the target already installed the latest revision.
+                if file.url != fileURL { load(file) }
+            } else {
+                fileURL = nil
+                manualSyntaxLanguage = nil
+                fileIdentity = nil
+                savedText = "" as NSString
+                format = FileFormat()
+                revision = nil
+                installText("")
+            }
             window.makeFirstResponder(editor)
-        } else {
+        case .window:
             window.close()
         }
+        return true
     }
 
     private func confirmNamedClose() async -> CloseChoice {
@@ -562,9 +585,17 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func updateTitle() {
-        window.representedURL = fileURL
+        if window.representedURL != fileURL { window.representedURL = fileURL }
         window.title = fileURL?.lastPathComponent ?? "Untitled"
+        updateTitleIcon()
         findPanel?.updateName()
+    }
+
+    private func updateTitleIcon() {
+        guard let fileURL else { return }
+        window.standardWindowButton(.documentIconButton)?.image = FileIcons.image(
+            for: fileURL, appearance: window.effectiveAppearance, language: manualSyntaxLanguage?.iconIdentifier
+        )
     }
 
     private func updateEditedState() {

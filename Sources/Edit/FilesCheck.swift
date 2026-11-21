@@ -16,7 +16,7 @@ enum FilesCheck {
         initial.editor.string = ""
         initial.editor.didChangeText()
 
-        await app.openFiles([file, file])
+        await app.openFiles([file, file], in: initial)
         try expect(app.documents.count == 1, "reuse empty window and focus matching file")
         let document = try resolve(app.documents.first)
         try expect(document.fileURL == FileBuffer.canonicalURL(file), "opened file URL")
@@ -30,9 +30,11 @@ enum FilesCheck {
         let savedBytes = try Data(contentsOf: file)
         try expect(savedBytes == Data(("\u{feff}" + inserted + initialText).utf8), "save preserves UTF-8 BOM and line endings")
 
-        await app.openFiles([other])
-        try expect(app.documents.count == 2, "a second file gets a native window")
+        app.newWindow(nil)
         let draft = try resolve(app.documents.last)
+        await app.openFiles([other], in: draft)
+        try expect(app.documents.count == 2 && draft.fileURL == FileBuffer.canonicalURL(other),
+                   "Open fills the separate window created by New Window")
         let draftText = "An unsaved note\n"
         draft.editor.insertText(draftText, replacementRange: NSRange(location: 0, length: 0))
         let userFrame = NSRect(x: 48, y: 72, width: 640, height: 440)
@@ -79,8 +81,9 @@ enum FilesCheck {
         try expect(Edit.launcherFileURL(relative) == nil, "launcher only accepts absolute file paths")
 
         let newPath = directory.appendingPathComponent("New empty file.txt")
-        await app.openFiles([newPath], allowMissing: true)
+        app.newWindow(nil)
         let newDocument = try resolve(app.documents.last)
+        await app.openFiles([newPath], allowMissing: true, in: newDocument)
         try expect(!FileManager.default.fileExists(atPath: newPath.path), "new path stays absent until Save")
         let created = await newDocument.save()
         try expect(created && FileManager.default.fileExists(atPath: newPath.path), "Save creates an empty named file")
@@ -118,6 +121,7 @@ enum FilesCheck {
         try expect(try Data(contentsOf: draftPath) == Data("Save the draft".utf8),
                    "Save writes an untitled draft to the chosen path")
 
+        try await checkOpeningInPlace(in: app, directory: directory)
         try await checkRecentFiles(in: app, directory: directory)
         try await checkEncodings(in: app, directory: directory)
         try await checkAutosaveAndNewBuffer(in: app, directory: directory)
@@ -141,6 +145,63 @@ enum FilesCheck {
         return sample
     }
 
+    private static func checkOpeningInPlace(in app: Edit, directory: URL) async throws {
+        let source = directory.appendingPathComponent("Open from here.txt")
+        let target = directory.appendingPathComponent("Cargo.lock")
+        try Data("original".utf8).write(to: source)
+        try Data("version = 4".utf8).write(to: target)
+
+        app.newWindow(nil)
+        let first = try resolve(app.documents.last)
+        _ = try await app.openFile(source, in: first)
+        first.editor.insertText("Saved ", replacementRange: NSRange(location: 0, length: 0))
+
+        app.newWindow(nil)
+        let second = try resolve(app.documents.last)
+        _ = try await app.openFile(target, in: second)
+        let count = app.documents.count
+        let frame = first.window.frame
+        let opened = try await app.openFile(target, in: first)
+        try expect(opened === first && app.documents.count == count && first.window.frame == frame,
+                   "Open replaces the named buffer in the originating native window")
+        try expect(try String(contentsOf: source, encoding: .utf8) == "Saved original",
+                   "opening a new file autosaves the outgoing buffer")
+        try expect(second.window !== first.window && second.editor.string == "version = 4",
+                   "an explicitly created second window keeps its independent buffer")
+        let icon = FileIcons.image(for: target, appearance: first.window.effectiveAppearance)
+        try expect(icon != nil && first.window.standardWindowButton(.documentIconButton)?.image === icon,
+                   "the title proxy uses the same Seti image as the file list")
+        first.setSyntaxLanguage(.rust)
+        let rustIcon = FileIcons.image(for: target, appearance: first.window.effectiveAppearance,
+                                      language: SyntaxLanguage.rust.iconIdentifier)
+        try expect(rustIcon !== icon && first.window.standardWindowButton(.documentIconButton)?.image === rustIcon,
+                   "the title proxy follows a manual language override")
+
+        first.editor.insertText("# newest\n", replacementRange: NSRange(location: 0, length: 0))
+        let saved = await first.save()
+        try expect(saved, "an already-associated buffer can save with another view of the same file open")
+        second.editor.insertText("# stale\n", replacementRange: NSRange(location: 0, length: 0))
+        let otherSaved = await second.save()
+        try expect(!otherSaved && second.window.isDocumentEdited, "a stale parallel buffer cannot overwrite a newer save")
+        try expect(try String(contentsOf: target, encoding: .utf8) == "# newest\nversion = 4",
+                   "the first write survives a stale local save")
+
+        await first.newBuffer()
+        first.editor.insertText("Keep the untitled draft", replacementRange: NSRange(location: 0, length: 0))
+        let cancelled = try await app.openFile(target, in: first)
+        try expect(cancelled == nil && first.fileURL == nil && first.editor.string == "Keep the untitled draft",
+                   "cancelling Open preserves an untitled draft")
+        let incoming = try FileBuffer.read(target)
+        let savedDraft = directory.appendingPathComponent("Saved before opening.txt")
+        let continued = await first.finishClose(.save(to: savedDraft), destination: .buffer(incoming))
+        try expect(continued && first.fileURL == incoming.url && first.editor.string == incoming.text,
+                   "saving the outgoing draft continues Open in the same window")
+        try expect(try String(contentsOf: savedDraft, encoding: .utf8) == "Keep the untitled draft",
+                   "saving during Open writes only the outgoing draft")
+        first.window.close()
+        second.window.close()
+    }
+
     private static func checkRecentFiles(in app: Edit, directory: URL) async throws {
         let one = directory.appendingPathComponent("Recent one.txt")
         let two = directory.appendingPathComponent("Recent two.txt")
@@ -148,10 +209,13 @@ enum FilesCheck {
         try Data("one".utf8).write(to: one)
         try Data("two".utf8).write(to: two)
         try FileManager.default.linkItem(at: one, to: alias)
-        let older = try await app.openFile(one)
         _ = try await app.openFile(two)
-        let same = try await app.openFile(alias)
-        try expect(older === same, "hard link focuses the open buffer")
+        let current = try resolve(try await app.openFile(one))
+        let selection = NSRange(location: 1, length: 0)
+        current.editor.setSelectedRange(selection)
+        let same = try await app.openFile(alias, in: current)
+        try expect(current === same && current.editor.selectedRange() == selection,
+                   "a hard link already in the current window preserves selection and text")
         try expect(Array(app.recentFiles.entries.prefix(2).map(\.url)) == [alias, two],
                    "history keeps the latest alias once")
 
@@ -323,7 +387,7 @@ enum FilesCheck {
         try expect(editor.string == "Keep this draft" && window.isDocumentEdited,
                    "cancelling the untitled sheet preserves the draft")
         let destination = directory.appendingPathComponent("Draft saved by New.txt")
-        await document.finishClose(.save(to: destination), replacing: true)
+        await document.finishClose(.save(to: destination), destination: .buffer(nil))
         try expect(try Data(contentsOf: destination) == Data("Keep this draft".utf8),
                    "saving the untitled draft uses the chosen path")
         try expect(document.fileURL == nil && editor.string.isEmpty && app.documents.count == count,
