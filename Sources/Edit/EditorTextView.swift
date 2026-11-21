@@ -428,9 +428,45 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func doCommand(by selector: Selector) {
+        let before = selectedRange()
         if !moveSecondarySelections(command: selector) {
             super.doCommand(by: selector)
+            let selection = selectedRange()
+            if selection != before {
+                let caret = selection.location == before.location ? NSMaxRange(selection) : selection.location
+                revealHorizontally(NSRange(location: caret, length: 0))
+            }
         }
+    }
+
+    override func scrollRangeToVisible(_ range: NSRange) {
+        super.scrollRangeToVisible(range)
+        revealHorizontally(range)
+    }
+
+    private func revealHorizontally(_ range: NSRange) {
+        guard range.location != NSNotFound, let window, let scroll = enclosingScrollView else { return }
+        let insets = scroll.contentInsets
+        var origin = scroll.visibleContentOrigin
+        guard (insets.left > 0 && origin.x > 0) || insets.right > 0 else { return }
+
+        // TextKit can consider a range visible while it is underneath the sidebar.
+        let screenRect = firstRect(forCharacterRange: range, actualRange: nil)
+        guard screenRect.height > 0 else { return }
+        let rect = convert(window.convertFromScreen(screenRect), from: nil)
+        let visible = scroll.documentVisibleRect
+        let left = visible.minX + insets.left
+        let right = visible.maxX - insets.right
+        guard right > left else { return }
+
+        if insets.left > 0 && rect.minX < left {
+            origin.x += rect.minX - left - textContainerInset.width
+        } else if insets.right > 0 && rect.maxX > right, rect.width <= right - left {
+            origin.x += rect.maxX - right + textContainerInset.width
+        } else {
+            return
+        }
+        scroll.scrollToVisibleContentOrigin(origin)
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -474,7 +510,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             return EditorPosition(selections: caretSelections, horizontalOffset: 0, verticalOffset: 0, topLine: nil)
         }
         let top = textViewport(in: scroll).lowerBound
-        return EditorPosition(selections: caretSelections, horizontalOffset: scroll.contentView.bounds.minX,
+        return EditorPosition(selections: caretSelections, horizontalOffset: scroll.visibleContentOrigin.x,
                               verticalOffset: top, topLine: capturePositionTopLine(at: top))
     }
 
@@ -500,7 +536,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         // TextKit may adjust estimated coordinates when newly visible fragments are laid out.
         let settledTop = position.topLine.flatMap { positionTopLineOrigin($0) } ?? top
         if abs(textViewport(in: scroll).lowerBound - settledTop) > 0.5 ||
-            abs(scroll.contentView.bounds.minX - position.horizontalOffset) > 0.5 {
+            abs(scroll.visibleContentOrigin.x - position.horizontalOffset) > 0.5 {
             scrollToTextTop(settledTop, horizontalOrigin: position.horizontalOffset, in: scroll)
         }
     }
@@ -598,7 +634,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             visibleActiveLine = nil
         }
         return ZoomAnchor(topLine: topLine.textOffset, offsetIntoTopLine: topLine.offsetIntoLine,
-                          visibleActiveLine: visibleActiveLine, horizontalOrigin: scroll.contentView.bounds.minX)
+                          visibleActiveLine: visibleActiveLine, horizontalOrigin: scroll.visibleContentOrigin.x)
     }
 
     private func restoreZoomAnchor(_ anchor: ZoomAnchor, in scroll: NSScrollView) {
@@ -626,15 +662,12 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     private func scrollToTextTop(_ top: CGFloat, horizontalOrigin: CGFloat, in scroll: NSScrollView) {
-        let clip = scroll.contentView
-        var bounds = clip.bounds
-        bounds.origin.x = horizontalOrigin
-        bounds.origin.y += top - textViewport(in: scroll).lowerBound
-        let origin = clip.constrainBoundsRect(bounds).origin
-        guard clip.bounds.origin != origin else { return }
-        clip.scroll(to: origin)
-        scroll.reflectScrolledClipView(clip)
-        textLayoutManager?.textViewportLayoutController.layoutViewport()
+        var origin = scroll.visibleContentOrigin
+        origin.x = horizontalOrigin
+        origin.y += top - textViewport(in: scroll).lowerBound
+        if scroll.scrollToVisibleContentOrigin(origin) {
+            textLayoutManager?.textViewportLayoutController.layoutViewport()
+        }
     }
 
     private func textViewport(in scroll: NSScrollView) -> ClosedRange<CGFloat> {
@@ -753,5 +786,24 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         }
         onDrawFindHighlights?(dirtyRect)
         drawSecondarySelections(in: dirtyRect)
+    }
+}
+
+extension NSScrollView {
+    // Measure from the unobscured edge so adding or resizing an overlay doesn't change the text position.
+    var visibleContentOrigin: NSPoint {
+        let origin = contentView.bounds.origin
+        return NSPoint(x: origin.x + contentInsets.left, y: origin.y + contentInsets.top)
+    }
+
+    @discardableResult
+    func scrollToVisibleContentOrigin(_ origin: NSPoint) -> Bool {
+        let clip = contentView
+        let proposed = NSPoint(x: origin.x - contentInsets.left, y: origin.y - contentInsets.top)
+        let constrained = clip.constrainBoundsRect(NSRect(origin: proposed, size: clip.bounds.size)).origin
+        guard clip.bounds.origin != constrained else { return false }
+        clip.scroll(to: constrained)
+        reflectScrolledClipView(clip)
+        return true
     }
 }

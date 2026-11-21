@@ -218,23 +218,21 @@ enum FilesCheck {
         func offset(_ line: Int) -> Int { contents.range(of: "position_\(line) ").location }
         func viewport(in document: DocumentWindow) -> NSPoint {
             let scroll = document.scrollView
-            return NSPoint(x: scroll.contentView.bounds.minX, y: scroll.documentVisibleRect.minY + scroll.contentInsets.top)
+            return scroll.visibleContentOrigin
         }
 
         func setPosition(in document: DocumentWindow, row: Int, x: CGFloat, ranges: [NSRange]) -> EditorPosition {
             let window = document.window
             let editor = document.editor
             let scroll = document.scrollView
-            let clip = scroll.contentView
             editor.setCaretSelections(ranges, record: false)
             let anchor = NSRange(location: offset(row), length: 0)
             editor.scrollRangeToVisible(anchor)
             window.layoutIfNeeded()
             editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
             let line = window.convertFromScreen(editor.firstRect(forCharacterRange: anchor, actualRange: nil))
-            let y = editor.convert(line, from: nil).minY - scroll.contentInsets.top + 4
-            clip.scroll(to: NSPoint(x: x, y: y))
-            scroll.reflectScrolledClipView(clip)
+            let y = editor.convert(line, from: nil).minY + 4
+            scroll.scrollToVisibleContentOrigin(NSPoint(x: x, y: y))
             editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
             return editor.capturePosition()
         }

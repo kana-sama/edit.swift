@@ -331,11 +331,12 @@ enum FindCheck {
         clip.scroll(to: NSPoint(x: 0, y: 40))
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         document.scrollView.reflectScrolledClipView(clip)
-        let origin = clip.bounds.origin
+        let origin = scroll.visibleContentOrigin
         document.performFind(.find)
         try await Task.sleep(for: .milliseconds(30))
-        try expect(abs(clip.bounds.origin.x - origin.x) < 1 && abs(clip.bounds.origin.y - origin.y) < 1,
-                   "opening the sidebar preserves editor scroll position (\(origin) to \(clip.bounds.origin))")
+        let openedOrigin = scroll.visibleContentOrigin
+        try expect(abs(openedOrigin.x - origin.x) < 1 && abs(openedOrigin.y - origin.y) < 1,
+                   "opening the sidebar preserves editor scroll position (\(origin) to \(openedOrigin))")
         try expect(editor.selectedRange() == caret, "sidebar layout preserves the editor selection")
 
         let split = try require(window.contentViewController as? NSSplitViewController, "Find uses a native split view")
@@ -347,6 +348,48 @@ enum FindCheck {
         try expect(editorFrame.maxY > window.contentLayoutRect.maxY && abs(editorFrame.maxY - sidebarFrame.maxY) < 1 &&
                    abs(scroll.contentInsets.top - titlebarInset) < 1,
                    "the editor still scrolls under the same titlebar when the sidebar opens")
+        try expect(abs(editorFrame.minX - initialFrame.minX) < 1 && scroll.contentInsets.left > 0 &&
+                   abs(editorFrame.minX + scroll.contentInsets.left - sidebarFrame.maxX) < 2,
+                   "the full-width editor is inset only at the native sidebar's exposed edge")
+        let sampleLocation = (text as NSString).range(of: lines[6]).location
+        func sampleFrame() -> NSRect {
+            let screen = editor.firstRect(forCharacterRange: NSRange(location: sampleLocation, length: 1), actualRange: nil)
+            return window.convertFromScreen(screen)
+        }
+        let glyphAtRest = sampleFrame()
+        try expect(glyphAtRest.height > 0 && glyphAtRest.minX >= sidebarFrame.maxX,
+                   "the first column stays clear of the sidebar at the leftmost scroll position")
+        scroll.scrollToVisibleContentOrigin(NSPoint(x: 140, y: origin.y))
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        let glyphBehindSidebar = sampleFrame()
+        try expect(glyphBehindSidebar.height > 0 && glyphBehindSidebar.minX > sidebarFrame.minX &&
+                   glyphBehindSidebar.maxX < sidebarFrame.maxX && abs(glyphAtRest.minX - glyphBehindSidebar.minX - 140) < 2,
+                   "horizontal scrolling carries the same text underneath the sidebar")
+        let scroller = try require(scroll.horizontalScroller, "the native editor horizontal scroller")
+        try expect(scroller.convert(scroller.bounds, to: nil).minX >= sidebarFrame.maxX - 1,
+                   "the horizontal scroller starts at the exposed edge of the editor")
+        let bitmap = try require(clip.bitmapImageRepForCachingDisplay(in: clip.bounds), "editor underlay bitmap")
+        clip.cacheDisplay(in: clip.bounds, to: bitmap)
+        let glyphInClip = clip.convert(glyphBehindSidebar, from: nil)
+        let scale = CGFloat(bitmap.pixelsWide) / clip.bounds.width
+        let from = max(0, Int((glyphInClip.minX - clip.bounds.minX) * scale))
+        let to = min(bitmap.pixelsWide, Int((glyphInClip.maxX - clip.bounds.minX) * scale) + 1)
+        let paintsBehindSidebar = stride(from: bitmap.pixelsHigh / 4, to: bitmap.pixelsHigh * 3 / 4, by: 3).contains { y in
+            guard let background = bitmap.colorAt(x: 8, y: y)?.usingColorSpace(.sRGB) else { return false }
+            return (from..<max(from, to)).contains { x in
+                guard let ink = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { return false }
+                return max(abs(ink.redComponent - background.redComponent),
+                           abs(ink.greenComponent - background.greenComponent),
+                           abs(ink.blueComponent - background.blueComponent)) > 0.08
+            }
+        }
+        try expect(paintsBehindSidebar, "TextKit paints glyphs in the editor region underneath the sidebar")
+        editor.scrollRangeToVisible(NSRange(location: sampleLocation, length: 1))
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        try expect(sampleFrame().minX >= sidebarFrame.maxX,
+                   "revealing a text range brings it back into the exposed editor")
+        scroll.scrollToVisibleContentOrigin(origin)
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         let icon = FileIcons.image(for: url, appearance: window.effectiveAppearance)
         try expect(icon != nil && window.standardWindowButton(.documentIconButton)?.image === icon,
                    "the title proxy retains its Seti icon with the sidebar toolbar installed")
@@ -425,17 +468,38 @@ enum FindCheck {
         try expect(plainDistance < previewDistance, "clearing preview restores the original line spacing")
 
         window.makeFirstResponder(editor)
+        editor.setSelectedRange(NSRange(location: sampleLocation, length: 0))
+        scroll.scrollToVisibleContentOrigin(NSPoint(x: 140, y: origin.y))
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        editor.doCommand(by: #selector(NSResponder.moveRight(_:)))
+        try expect(editor.selectedRange().location == sampleLocation + 1, "keyboard navigation moves the caret")
+        let exposedEdge = sidebar.convert(sidebar.bounds, to: nil).maxX
+        try await waitUntil("keyboard navigation reveals a caret behind the resized sidebar") {
+            let range = NSRange(location: editor.selectedRange().location, length: 1)
+            let rect = editor.firstRect(forCharacterRange: range, actualRange: nil)
+            return rect.height > 0 && window.convertFromScreen(rect).minX >= exposedEdge
+        }
+
+        scroll.scrollToVisibleContentOrigin(NSPoint(x: 140, y: origin.y))
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        let insertion = editor.selectedRange()
+        editor.insertText("x", replacementRange: insertion)
+        try expect(editor.selectedRange().location == insertion.location + 1, "typing keeps the insertion caret")
+        try await waitUntil("typing reveals the insertion point behind the sidebar") {
+            let rect = editor.firstRect(forCharacterRange: editor.selectedRange(), actualRange: nil)
+            return rect.height > 0 && window.convertFromScreen(rect).minX >= exposedEdge
+        }
+
         let firstCharacter = NSRange(location: 0, length: 0)
         editor.setSelectedRange(firstCharacter)
         let drags: [(NSPoint, CGFloat)] = [
-            (NSPoint(x: 0, y: -scroll.contentInsets.top), 9),
-            (NSPoint(x: 140, y: 40), -6),
+            (NSPoint(x: 0, y: 0), 9),
+            (NSPoint(x: 140, y: 80), -6),
         ]
         for (position, distance) in drags {
-            clip.scroll(to: position)
-            scroll.reflectScrolledClipView(clip)
+            scroll.scrollToVisibleContentOrigin(position)
             editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
-            let beforeDrag = clip.bounds.origin
+            let beforeDrag = scroll.visibleContentOrigin
             try expect(abs(beforeDrag.x - position.x) < 1 && abs(beforeDrag.y - position.y) < 1,
                        "the editor is scrolled to the starting position for the divider drag")
             let width = sidebar.frame.width
@@ -444,7 +508,7 @@ enum FindCheck {
             await Task.yield()
             try expect(abs(sidebar.frame.width - width - distance) < 1,
                        "dragging the native divider changes the sidebar width")
-            let afterDrag = clip.bounds.origin
+            let afterDrag = scroll.visibleContentOrigin
             try expect(abs(afterDrag.x - beforeDrag.x) < 1 && abs(afterDrag.y - beforeDrag.y) < 1,
                        "dragging the sidebar divider preserves the editor scroll position (\(beforeDrag) to \(afterDrag))")
             try expect(editor.selectedRange() == firstCharacter, "dragging the sidebar divider preserves selection")
@@ -455,10 +519,10 @@ enum FindCheck {
         try expect(picker.isHidden, "the menu is hidden with the sidebar")
         clip.scroll(to: NSPoint(x: 140, y: 40))
         document.scrollView.reflectScrolledClipView(clip)
-        let scrolled = clip.bounds.origin
+        let scrolled = scroll.visibleContentOrigin
         document.performFind(.toggleSidebar)
         await Task.yield()
-        try expect(abs(clip.bounds.origin.x - scrolled.x) < 1,
+        try expect(abs(scroll.visibleContentOrigin.x - scrolled.x) < 1,
                    "reopening the sidebar preserves a nonzero horizontal scroll offset")
         try expect(!picker.isHidden, "reopening the sidebar restores its menu")
     }
@@ -478,19 +542,18 @@ enum FindCheck {
         document.performFind(.toggleSidebar)
         let split = try require(window.contentViewController as? NSSplitViewController, "native animated split view")
         let sidebar = split.splitViewItems[0]
-        let editorPane = split.splitViewItems[1].viewController.view
         let picker = try sidebarMenu(in: window)
-        func divider() -> CGFloat { editorPane.convert(editorPane.bounds, to: split.splitView).minX }
-        func sidebarEdge() -> CGFloat {
+        func divider() -> CGFloat {
+            if sidebar.isCollapsed { return 0 }
             let view = sidebar.viewController.view
             return view.convert(view.bounds, to: split.splitView).maxX
         }
         func reverse(with command: FindCommand) throws {
             let position = divider()
-            let edge = sidebarEdge()
+            let origin = document.scrollView.visibleContentOrigin
             document.performFind(command)
-            try expect(abs(divider() - position) < 1 && abs(sidebarEdge() - edge) < 1,
-                       "reversing keeps both panes at their current positions")
+            try expect(abs(divider() - position) < 1 && abs(document.scrollView.visibleContentOrigin.x - origin.x) < 1,
+                       "reversing preserves the divider position and the horizontal scroll offset")
             try expect(picker.isHidden, "the menu button stays hidden until the sidebar settles")
         }
 

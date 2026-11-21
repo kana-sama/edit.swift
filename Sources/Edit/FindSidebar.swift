@@ -435,6 +435,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         ])
         editorController.view = editorPane
         let editorItem = NSSplitViewItem(viewController: editorController)
+        editorItem.automaticallyAdjustsSafeAreaInsets = true
         editorItem.minimumThickness = Self.minimumEditorWidth
         sidebarItem.minimumThickness = Self.minimumSidebarWidth
         sidebarItem.allowsFullHeightLayout = true
@@ -540,20 +541,12 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
     }
 
-    private var currentEditorAnchor: NSPoint {
-        let scroll = document.scrollView
-        // Anchor to the visible edge below the titlebar if its inset changes during layout.
-        var anchor = scroll.contentView.bounds.origin
-        anchor.y += scroll.contentInsets.top
-        return anchor
-    }
-
     func preserveRestoredEditorPosition() {
-        if layoutAnchor != nil { layoutAnchor = currentEditorAnchor }
+        if layoutAnchor != nil { layoutAnchor = document.scrollView.visibleContentOrigin }
     }
 
     private func beginSidebarTransition() -> UInt64 {
-        layoutAnchor = currentEditorAnchor
+        layoutAnchor = document.scrollView.visibleContentOrigin
         sidebarTransition &+= 1
         return sidebarTransition
     }
@@ -631,14 +624,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     private func restoreEditorAnchor() {
-        guard var layoutAnchor else { return }
-        let scroll = document.scrollView
-        let clip = scroll.contentView
-        layoutAnchor.y -= scroll.contentInsets.top
-        let bounds = clip.constrainBoundsRect(NSRect(origin: layoutAnchor, size: clip.bounds.size))
-        guard clip.bounds.origin != bounds.origin else { return }
-        clip.scroll(to: bounds.origin)
-        scroll.reflectScrolledClipView(clip)
+        guard let layoutAnchor else { return }
+        document.scrollView.scrollToVisibleContentOrigin(layoutAnchor)
     }
 
     private func openField(replace: Bool) {
