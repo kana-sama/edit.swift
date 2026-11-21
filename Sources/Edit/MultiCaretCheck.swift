@@ -128,6 +128,74 @@ enum MultiCaretCheck {
         editor.resetMultiCarets()
     }
 
+    static func runComposition(in editor: EditorTextView) throws {
+        guard let undo = editor.undoManager else { throw Failure("find IME Undo manager") }
+        undo.groupsByEvent = false
+        let original = "aa BB cc DD ee"
+        let selections = [NSRange(location: 3, length: 2), NSRange(location: 9, length: 2)]
+        let implicit = NSRange(location: NSNotFound, length: 0)
+        let notify = editor.onTextChange
+        var changes = 0
+        editor.onTextChange = { changes += 1 }
+        defer { editor.onTextChange = notify }
+
+        func edit(_ action: () -> Void) {
+            undo.beginUndoGrouping()
+            action()
+            undo.endUndoGrouping()
+        }
+
+        func reset() {
+            editor.resetMultiCarets()
+            editor.string = original
+            editor.setCaretSelections(selections, record: false)
+            undo.removeAllActions()
+            changes = 0
+        }
+
+        func mark(_ text: String) {
+            editor.setMarkedText(text, selectedRange: NSRange(location: text.utf16.count, length: 0),
+                                 replacementRange: implicit)
+        }
+
+        reset()
+        mark("ka")
+        mark("かな")
+        try expect(editor.hasMarkedText() && editor.string == "aa BB cc かな ee" && changes == 0 && !undo.canUndo,
+                   "native primary preedit stays out of edit notifications and Undo")
+        let markedRange = editor.markedRange()
+        edit { editor.insertText("仮名", replacementRange: markedRange) }
+        try expect(!editor.hasMarkedText() && editor.string == "aa 仮名 cc 仮名 ee" && changes == 1,
+                   "commit broadcasts input with one edit notification")
+        undo.undo()
+        try expect(editor.string == original && editor.caretSelections == selections && !undo.canUndo,
+                   "one Undo restores text and selections before the composition")
+        undo.redo()
+        try expect(editor.string == "aa 仮名 cc 仮名 ee", "redo repeats the complete composition")
+
+        reset()
+        mark("한")
+        mark("")
+        try expect(!editor.hasMarkedText() && editor.string == original
+                   && editor.caretSelections == selections && changes == 0 && !undo.canUndo,
+                   "empty preedit cancels composition without history or an edit notification")
+
+        reset()
+        mark("ㅎ")
+        editor.cancelOperation(nil)
+        try expect(!editor.hasMarkedText() && editor.string == original
+                   && editor.caretSelections == selections && !undo.canUndo,
+                   "cancelling the native command restores the original selections")
+
+        reset()
+        mark("한")
+        edit { editor.unmarkText() }
+        try expect(!editor.hasMarkedText() && editor.string == "aa 한 cc 한 ee" && changes == 1,
+                   "unmark commits through the standard AppKit input-client path")
+        undo.undo()
+        try expect(editor.string == original && !undo.canUndo, "unmark uses the same grouped Undo")
+    }
+
     private static func expect(_ condition: @autoclosure () -> Bool, _ description: String) throws {
         guard condition() else { throw Failure(description) }
     }

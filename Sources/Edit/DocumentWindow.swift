@@ -207,6 +207,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     func save(asNew: Bool = false, to selectedURL: URL? = nil, encoding: FileTextEncoding? = nil) async -> Bool {
         guard !saving else { return false }
         saving = true
+        if editor.hasMarkedText() { editor.unmarkText() }
         defer {
             saving = false
             startRequestedAutosave()

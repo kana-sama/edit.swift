@@ -59,6 +59,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try await SyntaxCheck.run(in: self)
                     try await FindCheck.run(in: self)
                     try checkWindow(sample.window, screenshot: CommandLine.arguments.dropFirst(2).first)
+                    try MultiCaretCheck.runComposition(in: sample.editor)
                     print("Edit passed its native editing and file-session checks without activation.")
                     exit(EXIT_SUCCESS)
                 } catch {

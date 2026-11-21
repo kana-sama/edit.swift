@@ -63,6 +63,7 @@ extension EditorTextView {
     }
 
     func resetMultiCarets() {
+        discardMultiCaretComposition()
         resetSelectionHistory()
         multiCaret.selections = []
         multiCaret.navigation = [:]

@@ -1,5 +1,28 @@
 import AppKit
 
+private struct MultiCaretComposition {
+    let selections: [NSRange]
+    let original: NSAttributedString
+    var preview: NSRange
+
+    func contains(_ range: NSRange) -> Bool {
+        range.location >= preview.location && range.location <= NSMaxRange(preview)
+            && range.length <= NSMaxRange(preview) - range.location
+    }
+
+    func restoreRange(_ range: NSRange) -> NSRange {
+        guard range.location != NSNotFound else { return range }
+        func restore(_ offset: Int, trailing: Bool) -> Int {
+            if offset < preview.location { return offset }
+            if offset >= NSMaxRange(preview) { return offset + original.length - preview.length }
+            return preview.location + (trailing ? original.length : 0)
+        }
+        let start = restore(range.location, trailing: false)
+        let end = restore(NSMaxRange(range), trailing: range.length > 0)
+        return NSRange(location: start, length: max(0, end - start))
+    }
+}
+
 final class EditorTextView: NSTextView, NSTextViewDelegate {
     static let linePasteType = NSPasteboard.PasteboardType("dev.edit-swift.whole-line")
     private static let defaultFontSize: CGFloat = 13
@@ -8,6 +31,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     private var lineRefreshPending = false
     let multiCaret = MultiCaretState()
     private weak var multiCaretWindow: NSWindow?
+    private var multiCaretComposition: MultiCaretComposition?
+    private var updatingComposition = false
     var onTextChange: (() -> Void)?
     var onBlur: (() -> Void)?
     var onFindEditorInteraction: (() -> Void)?
@@ -84,6 +109,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     override func resignFirstResponder() -> Bool {
         guard super.resignFirstResponder() else { return false }
         multiCaret.pendingSkip = false
+        if multiCaretComposition != nil { unmarkText() }
         hideSecondaryCarets()
         onBlur?()
         return true
@@ -257,6 +283,27 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func insertText(_ string: Any, replacementRange: NSRange) {
+        if updatingComposition {
+            super.insertText(string, replacementRange: replacementRange)
+            return
+        }
+        if let composition = multiCaretComposition {
+            let target = replacementRange.location == NSNotFound ? markedRange() : replacementRange
+            if composition.contains(target),
+               let preview = textStorage?.attributedSubstring(from: composition.preview).string,
+               let final = (string as? String) ?? (string as? NSAttributedString)?.string {
+                let relative = NSRange(location: target.location - composition.preview.location,
+                                       length: target.length)
+                commitMultiCaretComposition((preview as NSString).replacingCharacters(in: relative, with: final))
+                return
+            }
+            // A replacement outside the marked preview is a primary-only action.
+            let restoredRange = composition.restoreRange(replacementRange)
+            discardMultiCaretComposition()
+            keepPrimarySelection(nil)
+            super.insertText(string, replacementRange: restoredRange)
+            return
+        }
         if !insertAtCarets(string, replacementRange: replacementRange) {
             if hasSecondarySelections { keepPrimarySelection(nil) }
             super.insertText(string, replacementRange: replacementRange)
@@ -264,8 +311,89 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-        if hasSecondarySelections { keepPrimarySelection(nil) }
-        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        guard !updatingComposition else {
+            super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+            return
+        }
+        let preview = (string as? String) ?? (string as? NSAttributedString)?.string
+        if preview?.isEmpty == true, multiCaretComposition != nil {
+            discardMultiCaretComposition()
+            return
+        }
+
+        if let composition = multiCaretComposition, replacementRange.location != NSNotFound,
+           !composition.contains(replacementRange) {
+            let restoredRange = composition.restoreRange(replacementRange)
+            discardMultiCaretComposition()
+            keepPrimarySelection(nil)
+            super.setMarkedText(string, selectedRange: selectedRange, replacementRange: restoredRange)
+            return
+        }
+
+        if multiCaretComposition == nil, hasSecondarySelections, let primary = caretSelections.last {
+            let selections = caretSelections
+            setCaretSelections([primary], record: false)
+            if isEditable, preview?.isEmpty == false, let storage = textStorage,
+               replacementRange.location == NSNotFound || replacementRange == primary {
+                breakUndoCoalescing()
+                multiCaretComposition = MultiCaretComposition(
+                    selections: selections, original: storage.attributedSubstring(from: primary), preview: primary
+                )
+            }
+        }
+
+        guard multiCaretComposition != nil, let storage = textStorage else {
+            super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+            return
+        }
+        let oldLength = storage.length
+        withTransientComposition {
+            super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        }
+        multiCaretComposition?.preview.length += storage.length - oldLength
+        if !hasMarkedText() || (multiCaretComposition?.preview.length ?? 0) < 0 {
+            discardMultiCaretComposition()
+        }
+    }
+
+    override func unmarkText() {
+        if updatingComposition {
+            super.unmarkText()
+        } else if let composition = multiCaretComposition,
+                  let preview = textStorage?.attributedSubstring(from: composition.preview).string {
+            commitMultiCaretComposition(preview)
+        } else {
+            super.unmarkText()
+        }
+    }
+
+    private func withTransientComposition(_ change: () -> Void) {
+        updatingComposition = true
+        let manager = undoManager
+        manager?.disableUndoRegistration()
+        defer {
+            manager?.enableUndoRegistration()
+            updatingComposition = false
+        }
+        change()
+    }
+
+    func discardMultiCaretComposition() {
+        guard let composition = multiCaretComposition else { return }
+        multiCaretComposition = nil
+        withTransientComposition {
+            super.unmarkText()
+            if let storage = textStorage, composition.preview.length >= 0,
+               NSMaxRange(composition.preview) <= storage.length {
+                storage.replaceCharacters(in: composition.preview, with: composition.original)
+            }
+            setCaretSelections(composition.selections, record: false)
+        }
+    }
+
+    private func commitMultiCaretComposition(_ text: String) {
+        discardMultiCaretComposition()
+        _ = insertAtCarets(text, replacementRange: NSRange(location: NSNotFound, length: 0))
     }
 
     override func deleteBackward(_ sender: Any?) {
@@ -285,7 +413,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func cancelOperation(_ sender: Any?) {
-        if hasSecondarySelections && !hasMarkedText() {
+        if multiCaretComposition != nil {
+            discardMultiCaretComposition()
+            inputContext?.discardMarkedText()
+        } else if hasSecondarySelections && !hasMarkedText() {
             keepPrimarySelection(sender)
         } else {
             super.cancelOperation(sender)
@@ -376,11 +507,15 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
-        nativeSelectionChanged()
+        if !updatingComposition { nativeSelectionChanged() }
         requestLineRefresh()
     }
 
     func textDidChange(_ notification: Notification) {
+        guard !updatingComposition else {
+            requestLineRefresh()
+            return
+        }
         if !multiCaret.isApplying {
             multiCaret.selections = [selectedRange()]
             multiCaret.navigation = [:]
