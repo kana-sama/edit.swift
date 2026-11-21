@@ -77,7 +77,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         if !app.isAgentCheck {
             document.window.addChildWindow(panel, ordered: .above)
             panel.makeKeyAndOrderFront(nil)
-            panel.makeFirstResponder(input)
+            focusQuery()
+            (input.currentEditor() as? NSTextView)?.undoManager?.removeAllActions()
             monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
                 guard let self else { return event }
                 return intercept(event)
@@ -104,7 +105,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     private func switchMode(to mode: Mode, query: String) {
         configure(mode)
         input.stringValue = query
-        panel.makeFirstResponder(input)
+        focusQuery()
         if let field = input.currentEditor() as? NSTextView {
             field.undoManager?.removeAllActions()
             field.setSelectedRange(NSRange(location: query.utf16.count, length: 0))
@@ -415,8 +416,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
 
     @objc private func clearQuery() {
         input.stringValue = ""
-        panel.makeFirstResponder(input)
+        focusQuery()
         search(preserving: initialID)
+    }
+
+    private func focusQuery() {
+        panel.makeFirstResponder(input)
+        (input.currentEditor() as? NSTextView)?.allowsUndo = true
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -449,20 +455,83 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             if event.window !== panel { dismiss(restoreFocus: false) }
             return event
         }
-        guard event.window === panel, event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
-              (input.currentEditor() as? NSTextView)?.hasMarkedText() != true else { return event }
-        switch event.keyCode {
-        case 53: dismiss(restoreFocus: true)
-        case 125: moveSelection(by: 1)
-        case 126: moveSelection(by: -1)
-        case 36, 76: activate(row: table.selectedRow)
-        case 51 where mode == .commands && (input.currentEditor() as? NSTextView)?.selectedRange() == NSRange(location: 0, length: 0):
-            let query = input.stringValue
-            switchMode(to: .files, query: query)
-            (input.currentEditor() as? NSTextView)?.setSelectedRange(NSRange(location: 0, length: 0))
-        default: return event
+        guard event.type == .keyDown, let document, event.window === panel || panel.isKeyWindow else { return event }
+
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        switch (key, modifiers) {
+        case ("q", .command):
+            return event
+        case ("p", .command):
+            toggle(in: document, mode: .files)
+            return nil
+        case ("p", [.command, .shift]):
+            toggle(in: document, mode: .commands)
+            return nil
+        case ("w", .command):
+            dismiss(restoreFocus: true)
+            return nil
+        case ("f", .command), ("f", [.command, .option]):
+            dismiss(restoreFocus: true)
+            document.performFind(modifiers.contains(.option) ? .replace : .find)
+            return nil
+        default:
+            break
         }
+
+        let field = input.currentEditor() as? NSTextView
+        if field?.hasMarkedText() != true {
+            switch (event.keyCode, modifiers) {
+            case (53, []):
+                dismiss(restoreFocus: true)
+                return nil
+            case (125, []):
+                moveSelection(by: 1)
+                return nil
+            case (126, []):
+                moveSelection(by: -1)
+                return nil
+            case (36, []), (76, []):
+                activate(row: table.selectedRow)
+                return nil
+            case (36, _), (76, _):
+                return nil
+            case (51, []) where mode == .commands && field?.selectedRange() == NSRange(location: 0, length: 0):
+                switchMode(to: .files, query: input.stringValue)
+                (input.currentEditor() as? NSTextView)?.setSelectedRange(NSRange(location: 0, length: 0))
+                return nil
+            default:
+                break
+            }
+        }
+
+        // A targetless menu action can fall through from the key panel to the main document.
+        sendToQuery(event, key: key, modifiers: modifiers, field: field)
         return nil
+    }
+
+    private func sendToQuery(_ event: NSEvent, key: String, modifiers: NSEvent.ModifierFlags, field: NSTextView?) {
+        guard modifiers.contains(.command) else {
+            panel.firstResponder?.keyDown(with: event)
+            return
+        }
+        guard let field else { return }
+        switch (key, modifiers) {
+        case ("x", .command): field.cut(nil)
+        case ("c", .command): field.copy(nil)
+        case ("v", .command): field.paste(nil)
+        case ("a", .command): field.selectAll(nil)
+        case ("z", .command):
+            if let undo = field.undoManager, undo.canUndo { undo.undo() }
+        case ("z", [.command, .shift]):
+            if let undo = field.undoManager, undo.canRedo { undo.redo() }
+        default:
+            // Command-arrow and Command-delete are native single-field navigation and deletion.
+            if modifiers.isSubset(of: [.command, .shift]),
+               [51, 117, 123, 124, 125, 126].contains(event.keyCode) {
+                field.keyDown(with: event)
+            }
+        }
     }
 
     private func moveSelection(by step: Int) {
@@ -543,16 +612,89 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         guard field.string.isEmpty, clearButton.isHidden, input.currentEditor() === field else {
             throw CheckFailure.invalidSearchField
         }
+        try checkKeyboardRouting()
+    }
+
+    private func checkKeyboardRouting() throws {
+        let probe = app.makeDocument()
+        let text = "one one\ntwo\nthree"
+        let selection = NSRange(location: 0, length: 3)
+        probe.editor.string = text
+        probe.editor.setSelectedRange(selection)
+        let count = app.documents.count
+        show(in: probe, mode: .commands)
+        defer { dismiss(restoreFocus: false) }
+        focusQuery()
+
+        func key(_ characters: String, _ code: UInt16, _ modifiers: NSEvent.ModifierFlags = []) -> NSEvent {
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,
+                             timestamp: 0, windowNumber: panel.windowNumber, context: nil,
+                             characters: characters, charactersIgnoringModifiers: characters,
+                             isARepeat: false, keyCode: code)!
+        }
+
+        let protectedKeys: [(String, UInt16, NSEvent.ModifierFlags)] = [
+            ("\r", 36, .command), ("\r", 36, [.command, .shift]),
+            ("\u{F700}", 126, .option), ("\u{F701}", 125, [.command, .option]),
+            ("]", 30, .command), ("d", 2, .command), ("u", 32, .command),
+            ("n", 45, .command), ("o", 31, .command), ("s", 1, .command), ("=", 24, .command),
+        ]
+        for (characters, code, modifiers) in protectedKeys {
+            guard intercept(key(characters, code, modifiers)) == nil else {
+                throw CheckFailure.shortcutEscaped
+            }
+        }
+        guard probe.editor.string == text, probe.editor.selectedRange() == selection, !probe.editor.hasSecondarySelections,
+              app.documents.count == count, document === probe, mode == .commands,
+              let query = input.currentEditor() as? NSTextView, let undo = query.undoManager,
+              undo !== probe.editor.undoManager else {
+            throw CheckFailure.shortcutEscaped
+        }
+
+        undo.groupsByEvent = false
+        undo.beginUndoGrouping()
+        let typed = intercept(key("x", 7))
+        undo.endUndoGrouping()
+        guard typed == nil, query.string == "x",
+              intercept(key("a", 0, .command)) == nil,
+              query.selectedRange() == NSRange(location: 0, length: 1),
+              intercept(key("z", 6, .command)) == nil, query.string.isEmpty,
+              intercept(key("Z", 6, [.command, .shift])) == nil, query.string == "x",
+              probe.editor.string == text else { throw CheckFailure.invalidSearchField }
+        undo.groupsByEvent = true
+
+        query.setSelectedRange(NSRange(location: 1, length: 0))
+        guard intercept(key("\u{F702}", 123, .command)) == nil,
+              query.selectedRange() == NSRange(location: 0, length: 0) else {
+            throw CheckFailure.invalidSearchField
+        }
+
+        guard intercept(key("p", 35, .command)) == nil, mode == .files, input.stringValue == "x",
+              intercept(key("P", 35, [.command, .shift])) == nil, mode == .commands, input.stringValue == "x",
+              intercept(key("w", 13, .command)) == nil, document == nil else {
+            throw CheckFailure.shortcutEscaped
+        }
+
+        show(in: probe, mode: .commands)
+        focusQuery()
+        let results = ControlMatching.rank(sourceEntries(), query: "Insert Line Break")
+        guard results.first?.entry.id == "insertNewline:" else { throw CheckFailure.shortcutEscaped }
+        apply(results, selected: nil)
+        probe.editor.setSelectedRange(NSRange(location: 3, length: 0))
+        guard intercept(key("\r", 36)) == nil, document == nil, probe.editor.string == "one\n one\ntwo\nthree"
+        else { throw CheckFailure.shortcutEscaped }
     }
 
     private enum CheckFailure: LocalizedError {
         case invalidPanel
         case invalidSearchField
+        case shortcutEscaped
 
         var errorDescription: String? {
             switch self {
             case .invalidPanel: "Control did not render its recent list and empty state quietly."
             case .invalidSearchField: "Control did not preserve editing, switching modes, or clearing the search."
+            case .shortcutEscaped: "Control did not keep document shortcuts separate from palette commands."
             }
         }
     }
