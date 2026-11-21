@@ -101,7 +101,8 @@ enum EditorCheck {
     static func checkScrolledZoom(in document: DocumentWindow) async throws {
         let window = document.window
         let editor = document.editor
-        let clip = document.scrollView.contentView
+        let scroll = document.scrollView
+        let clip = scroll.contentView
         window.appearance = NSAppearance(named: .darkAqua)
         window.alphaValue = 0
         window.ignoresMouseEvents = true
@@ -121,19 +122,81 @@ enum EditorCheck {
         window.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(80))
 
-        let range = (text as NSString).range(of: "row_920 =")
-        editor.resetTextSize(nil)
-        editor.scrollRangeToVisible(range)
+        func rowBounds(at offset: Int) -> NSRect {
+            let rect = editor.firstRect(forCharacterRange: NSRange(location: offset, length: 0), actualRange: nil)
+            return editor.convert(window.convertFromScreen(rect), from: nil)
+        }
+
+        func textTop() -> CGFloat { scroll.documentVisibleRect.minY + scroll.contentInsets.top }
+        func textBottom() -> CGFloat { scroll.documentVisibleRect.maxY - scroll.contentInsets.bottom }
+
+        func checkTopRow(_ offset: Int) throws {
+            let row = rowBounds(at: offset)
+            let top = textTop()
+            try expect(row.minY <= top && top < row.maxY, "zoom preserves the top visible row")
+        }
+
+        let source = text as NSString
+        let topRow = source.range(of: "row_920 =")
+        func scrollToTopRow() {
+            editor.scrollRangeToVisible(topRow)
+            let row = rowBounds(at: topRow.location)
+            var origin = clip.bounds.origin
+            origin.y += row.minY + row.height / 2 - textTop()
+            clip.scroll(to: origin)
+            scroll.reflectScrolledClipView(clip)
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        }
+
+        scrollToTopRow()
         try await checkTextPaint(in: clip, after: "scrolling deep into the buffer")
         try expect(clip.bounds.minY > 10_000, "the zoom test starts deep in the buffer")
+        try checkTopRow(topRow.location)
         editor.decreaseTextSize(nil)
         try await checkTextPaint(in: clip, after: "decreasing text size without scrolling")
+        try checkTopRow(topRow.location)
         editor.increaseTextSize(nil)
         try await checkTextPaint(in: clip, after: "increasing text size without scrolling")
+        try checkTopRow(topRow.location)
         editor.increaseTextSize(nil)
         editor.resetTextSize(nil)
         try await checkTextPaint(in: clip, after: "resetting text size without scrolling")
-        try expect(editor.string == text && editor.selectedRange() == caret, "zoom preserves text and selection")
+        try checkTopRow(topRow.location)
+        try expect(editor.string == text && editor.selectedRange() == caret, "zoom preserves text and the offscreen caret")
+
+        let middleRow = source.range(of: "row_930 =")
+        editor.setSelectedRange(middleRow)
+        editor.increaseTextSize(nil)
+        try await checkTextPaint(in: clip, after: "zooming with the active row still visible")
+        try checkTopRow(topRow.location)
+
+        for length in [0, 4] {
+            editor.resetTextSize(nil)
+            if length == 0 {
+                for _ in 0..<5 { editor.decreaseTextSize(nil) }
+            }
+            scrollToTopRow()
+            let rowHeight = rowBounds(at: topRow.location).height
+            let offsetNearBottom = editor.characterIndexForInsertion(
+                at: NSPoint(x: editor.textContainerOrigin.x, y: textBottom() - rowHeight)
+            )
+            let selection = NSRange(location: offsetNearBottom, length: length)
+            editor.setSelectedRange(selection)
+            scrollToTopRow()
+            let before = rowBounds(at: selection.location)
+            try expect(before.minY > textTop() && before.maxY <= textBottom(), "active row starts near the bottom")
+
+            if length == 0 {
+                editor.resetTextSize(nil)
+            } else {
+                editor.increaseTextSize(nil)
+            }
+            try await checkTextPaint(in: clip, after: "revealing the active row")
+            let after = rowBounds(at: selection.location)
+            try expect(after.minY >= textTop() && abs(after.maxY - textBottom()) <= 1,
+                       "zoom scrolls just enough to reveal the previously visible active row")
+            try expect(editor.selectedRange() == selection, "revealing the active row preserves the selection")
+        }
     }
 
     private static func checkTextPaint(in clip: NSClipView, after action: String) async throws {

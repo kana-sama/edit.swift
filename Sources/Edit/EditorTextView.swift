@@ -469,8 +469,17 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         }
     }
 
+    private struct ZoomAnchor {
+        let topLine: Int
+        let offsetIntoTopLine: CGFloat
+        let visibleActiveLine: Int?
+        let horizontalOrigin: CGFloat
+    }
+
     private func setFontSize(_ size: CGFloat) {
-        fontSize = min(max(size, 6), 72)
+        let newSize = min(max(size, 6), 72)
+        let anchor = newSize == fontSize ? nil : zoomAnchor()
+        fontSize = newSize
         let font = fontSize == Self.defaultFontSize ? Self.defaultFont
             : NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         self.font = font
@@ -487,8 +496,78 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         if range.length > 0 {
             // Rebuild the visible fragments after changing both the font and paragraph metrics.
             textLayoutManager?.textViewportLayoutController.layoutViewport()
+            if let anchor, let scroll = enclosingScrollView {
+                restoreZoomAnchor(anchor, in: scroll)
+            }
         }
         requestLineRefresh()
+    }
+
+    private func zoomAnchor() -> ZoomAnchor? {
+        guard let scroll = enclosingScrollView, let textStorage, textStorage.length > 0 else { return nil }
+        let visible = textViewport(in: scroll)
+        let top = characterIndexForInsertion(at: NSPoint(x: textContainerOrigin.x,
+                                                        y: max(textContainerOrigin.y, visible.lowerBound)))
+        guard top <= textStorage.length, let topLine = lineBounds(at: top) else { return nil }
+        let active = selectedRange().location
+        let visibleActiveLine: Int?
+        if active <= textStorage.length, caretIsNearViewport(active), let line = lineBounds(at: active),
+           line.maxY > visible.lowerBound, line.minY < visible.upperBound {
+            visibleActiveLine = active
+        } else {
+            visibleActiveLine = nil
+        }
+        return ZoomAnchor(topLine: top, offsetIntoTopLine: visible.lowerBound - topLine.minY,
+                          visibleActiveLine: visibleActiveLine, horizontalOrigin: scroll.contentView.bounds.minX)
+    }
+
+    private func restoreZoomAnchor(_ anchor: ZoomAnchor, in scroll: NSScrollView) {
+        let clip = scroll.contentView
+
+        func layoutLine(at offset: Int) -> NSRect? {
+            if let line = lineBounds(at: offset) { return line }
+            // TextKit can omit geometry for lines outside its current layout viewport.
+            scrollRangeToVisible(NSRange(location: offset, length: 0))
+            textLayoutManager?.textViewportLayoutController.layoutViewport()
+            return lineBounds(at: offset)
+        }
+
+        func scrollToTextTop(_ top: CGFloat) {
+            var bounds = clip.bounds
+            bounds.origin.x = anchor.horizontalOrigin
+            bounds.origin.y += top - textViewport(in: scroll).lowerBound
+            let origin = clip.constrainBoundsRect(bounds).origin
+            guard clip.bounds.origin != origin else { return }
+            clip.scroll(to: origin)
+            scroll.reflectScrolledClipView(clip)
+            textLayoutManager?.textViewportLayoutController.layoutViewport()
+        }
+
+        guard let topLine = layoutLine(at: anchor.topLine) else { return }
+        let offset = min(anchor.offsetIntoTopLine, max(0, topLine.height - 1))
+        scrollToTextTop(topLine.minY + offset)
+
+        let visible = textViewport(in: scroll)
+        guard let active = anchor.visibleActiveLine, let line = layoutLine(at: active) else { return }
+        var top = visible.lowerBound
+        if line.maxY <= visible.lowerBound {
+            top = line.minY
+        } else if line.minY >= visible.upperBound {
+            top = line.maxY - (visible.upperBound - visible.lowerBound)
+        }
+        scrollToTextTop(top)
+    }
+
+    private func textViewport(in scroll: NSScrollView) -> ClosedRange<CGFloat> {
+        let rect = scroll.documentVisibleRect
+        let top = rect.minY + scroll.contentInsets.top
+        return top...max(top, rect.maxY - scroll.contentInsets.bottom)
+    }
+
+    private func lineBounds(at offset: Int) -> NSRect? {
+        guard let window else { return nil }
+        let caret = firstRect(forCharacterRange: NSRange(location: offset, length: 0), actualRange: nil)
+        return caret.height > 0 ? convert(window.convertFromScreen(caret), from: nil) : nil
     }
 
     private func apply(_ edit: LineEditing.Edit?) {
@@ -562,13 +641,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     func refreshCurrentLine() {
         refreshSecondarySelections()
-        let location = NSRange(location: selectedRange().location, length: 0)
+        let location = selectedRange().location
         var newLine = NSRect.zero
-        if let window, caretIsNearViewport(location.location) {
-            let caret = firstRect(forCharacterRange: location, actualRange: nil)
-            if caret.height > 0 {
-                let local = convert(window.convertFromScreen(caret), from: nil)
-                newLine = NSRect(x: bounds.minX, y: local.minY, width: bounds.width, height: local.height)
+        if window != nil, caretIsNearViewport(location) {
+            if let line = lineBounds(at: location) {
+                newLine = NSRect(x: bounds.minX, y: line.minY, width: bounds.width, height: line.height)
             } else if textStorage?.length == 0, let font {
                 newLine = NSRect(x: bounds.minX, y: textContainerOrigin.y, width: bounds.width,
                                  height: ceil(font.ascender - font.descender + font.leading))
