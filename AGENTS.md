@@ -9,4 +9,4 @@ Edit is an independent macOS text editor written in Swift with AppKit. Build ins
 - Check the scope and relevant specs before changing behavior. Use [project principles](docs/principles.md) and the [shared design](docs/design.md) when deciding behavior or visuals. Use the [coding guidelines](docs/coding.md) for implementation and tests.
 - Follow the [test isolation rules](docs/agent-testing.md) before launching any test instance. Keep launches, profiles, and sample files separate from the owner's running editor and data.
 - Use [verification and completion](docs/workflow.md#verification-and-completion) before reporting completion. Inspect the running UI when it changes.
-- Give the owner an exact copy-paste launch command for any implementation awaiting review, following the [handoff instructions](docs/workflow.md#owner-verification-handoff).
+- Include a copy-paste launch command in the final response for every completed feature or change to the runnable app. Also include it when handing off an implementation for review. Follow the [launch instructions](docs/workflow.md#launch-command).

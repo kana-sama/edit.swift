@@ -38,9 +38,11 @@ Review the diff against the request and the specification. Choose checks for the
 
 Check the final history and current working state after any amend or squash. Verify affected descendants when rewriting a mutable ancestor. Report the changed behavior, relevant commit or change ID, checks completed, and any specific limitation that remains.
 
-## Owner verification handoff
+## Launch command
 
-When handing off an implementation for review or asking the owner to test, give a copy-paste launch command for the exact checkout or prepared app under review. Build the app before handoff. Keep the review target available and include a separate command for each target. Use an absolute, quoted path and a `bash` code block with no prompt or placeholders. A command that changes directory should use a subshell with `cd` followed by `&&`. Use the actual relevant entry point and state what to check.
+When reporting a completed feature or change to the runnable app, include a copy-paste command to launch the build containing the change. Include a launch command when handing off an implementation for review or asking the owner to test. Build the app first and verify that the command points to the intended checkout or prepared app.
+
+Use a `bash` code block with absolute, quoted paths and no prompt or placeholders. If the command changes directory, use a subshell with `cd` followed by `&&`. Keep review targets available and give a separate command for each one. When asking the owner to test, state what to check.
 
 ## README maintenance
 
