@@ -95,9 +95,27 @@ enum LineEditing {
         )
     }
 
-    static func moveLines(_ text: NSString, selection: NSRange, up: Bool) -> Edit? {
-        guard let block = affectedLines(in: text, selection: selection) else { return nil }
+    struct Movement {
+        let range: NSRange
+        let replacement: String
+        let block: Line
+        let start: Int
+        let followingSeparatorLength: Int
 
+        func selection(_ range: NSRange) -> NSRange {
+            let startOffset = block.offset(of: range.location, withSeparatorLength: followingSeparatorLength)
+            let endOffset = block.offset(of: NSMaxRange(range), withSeparatorLength: followingSeparatorLength)
+            return NSRange(location: start + startOffset, length: endOffset - startOffset)
+        }
+    }
+
+    static func moveLines(_ text: NSString, selection: NSRange, up: Bool) -> Edit? {
+        guard let block = affectedLines(in: text, selection: selection),
+              let movement = move(text, block: block, up: up) else { return nil }
+        return Edit(range: movement.range, replacement: movement.replacement, selection: movement.selection(selection))
+    }
+
+    static func move(_ text: NSString, block: Line, up: Bool) -> Movement? {
         let first: Line
         let second: Line
         if up {
@@ -116,16 +134,16 @@ enum LineEditing {
         let replacement = text.substring(with: second.contentRange) + separator + text.substring(with: first.contentRange)
         let movedStart = up ? first.start : first.start + second.contentRange.length + first.separatorRange.length
         let followingSeparatorLength = up ? first.separatorRange.length : second.separatorRange.length
-        let selectionStart = block.offset(of: selection.location, withSeparatorLength: followingSeparatorLength)
-        let selectionEnd = block.offset(of: NSMaxRange(selection), withSeparatorLength: followingSeparatorLength)
-        return Edit(
+        return Movement(
             range: NSRange(location: first.start, length: second.contentEnd - first.start),
             replacement: replacement,
-            selection: NSRange(location: movedStart + selectionStart, length: selectionEnd - selectionStart)
+            block: block,
+            start: movedStart,
+            followingSeparatorLength: followingSeparatorLength
         )
     }
 
-    private static func affectedLines(in text: NSString, selection: NSRange) -> Line? {
+    static func affectedLines(in text: NSString, selection: NSRange) -> Line? {
         guard selection.location >= 0, selection.location <= text.length,
               selection.length >= 0, selection.length <= text.length - selection.location else { return nil }
 
@@ -144,7 +162,7 @@ enum LineEditing {
         return Line(start: start, contentEnd: contentEnd, end: end)
     }
 
-    private static func indentationEnd(in line: Line, text: NSString) -> Int {
+    static func indentationEnd(in line: Line, text: NSString) -> Int {
         var index = line.start
         while index < line.contentEnd {
             let character = text.character(at: index)
@@ -154,7 +172,7 @@ enum LineEditing {
         return index
     }
 
-    private static func outdentLength(in line: Line, text: NSString) -> Int {
+    static func outdentLength(in line: Line, text: NSString) -> Int {
         guard line.start < line.contentEnd else { return 0 }
         if text.character(at: line.start) == 0x09 { return 1 }
 

@@ -1,11 +1,13 @@
 import AppKit
 
 final class EditorTextView: NSTextView, NSTextViewDelegate {
-    private static let linePasteType = NSPasteboard.PasteboardType("dev.edit-swift.whole-line")
+    static let linePasteType = NSPasteboard.PasteboardType("dev.edit-swift.whole-line")
     private static let defaultFontSize: CGFloat = 13
     private var fontSize = EditorTextView.defaultFontSize
     private var currentLine = NSRect.zero
     private var lineRefreshPending = false
+    let multiCaret = MultiCaretState()
+    private weak var multiCaretWindow: NSWindow?
     var onTextChange: (() -> Void)?
     var onBlur: (() -> Void)?
     var preferredLineEnding = "\n"
@@ -49,13 +51,44 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         return (scrollView, editor)
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        let center = NotificationCenter.default
+        let events = [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification]
+        if let previous = multiCaretWindow {
+            for event in events { center.removeObserver(self, name: event, object: previous) }
+        }
+        multiCaretWindow = window
+        if let window {
+            for event in events {
+                center.addObserver(self, selector: #selector(windowFocusChanged(_:)), name: event, object: window)
+            }
+        }
+    }
+
+    @objc private func windowFocusChanged(_ notification: Notification) {
+        if hasSecondarySelections {
+            hideSecondaryCarets()
+            requestLineRefresh()
+        }
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        guard super.becomeFirstResponder() else { return false }
+        requestLineRefresh()
+        return true
+    }
+
     override func resignFirstResponder() -> Bool {
         guard super.resignFirstResponder() else { return false }
+        multiCaret.pendingSkip = false
+        hideSecondaryCarets()
         onBlur?()
         return true
     }
 
     override func insertTab(_ sender: Any?) {
+        if editMultipleLines(.tab) { return }
         guard !hasMarkedText(), let text = textStorage?.mutableString else {
             super.insertTab(sender)
             return
@@ -77,6 +110,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func insertNewline(_ sender: Any?) {
+        if editMultipleLines(.newline) { return }
         guard !hasMarkedText(), let text = textStorage?.mutableString else {
             super.insertNewline(sender)
             return
@@ -94,36 +128,43 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     @objc func indentLines(_ sender: Any?) {
+        if editMultipleLines(.indent(outdent: false)) { return }
         guard let text = textStorage?.mutableString else { return }
         apply(LineEditing.indent(text, selection: selectedRange(), outdent: false))
     }
 
     @objc func outdentLines(_ sender: Any?) {
+        if editMultipleLines(.indent(outdent: true)) { return }
         guard let text = textStorage?.mutableString else { return }
         apply(LineEditing.indent(text, selection: selectedRange(), outdent: true))
     }
 
     @objc func moveLinesUp(_ sender: Any?) {
+        if editMultipleLines(.move(up: true)) { return }
         guard let text = textStorage?.mutableString else { return }
         apply(LineEditing.moveLines(text, selection: selectedRange(), up: true))
     }
 
     @objc func moveLinesDown(_ sender: Any?) {
+        if editMultipleLines(.move(up: false)) { return }
         guard let text = textStorage?.mutableString else { return }
         apply(LineEditing.moveLines(text, selection: selectedRange(), up: false))
     }
 
     @objc func insertLineAbove(_ sender: Any?) {
+        if editMultipleLines(.insert(above: true)) { return }
         guard let text = textStorage?.mutableString else { return }
         apply(LineEditing.insertLine(text, selection: selectedRange(), above: true))
     }
 
     @objc func insertLineBelow(_ sender: Any?) {
+        if editMultipleLines(.insert(above: false)) { return }
         guard let text = textStorage?.mutableString else { return }
         apply(LineEditing.insertLine(text, selection: selectedRange(), above: false))
     }
 
     override func copy(_ sender: Any?) {
+        if copySelections(to: .general, cutting: false) { return }
         if selectedRange().length > 0 {
             super.copy(sender)
         } else {
@@ -132,6 +173,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func cut(_ sender: Any?) {
+        if copySelections(to: .general, cutting: true) { return }
         if selectedRange().length > 0 {
             super.cut(sender)
         } else {
@@ -140,7 +182,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func paste(_ sender: Any?) {
-        if !pasteLine(from: .general) {
+        if !pasteAtCarets(from: .general) && !pasteLine(from: .general) {
             super.paste(sender)
         }
     }
@@ -177,6 +219,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func deleteToBeginningOfLine(_ sender: Any?) {
+        if editMultipleLines(.deleteLineBoundary(backward: true)) { return }
         guard !hasMarkedText(), let text = textStorage?.mutableString else {
             super.deleteToBeginningOfLine(sender)
             return
@@ -190,6 +233,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func deleteToEndOfLine(_ sender: Any?) {
+        if editMultipleLines(.deleteLineBoundary(backward: false)) { return }
         guard !hasMarkedText(), let text = textStorage?.mutableString else {
             super.deleteToEndOfLine(sender)
             return
@@ -202,7 +246,62 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         replace(NSRange(location: selection.location, length: end - selection.location), with: "")
     }
 
+    override func mouseDown(with event: NSEvent) {
+        if addCaret(at: event) { return }
+        multiCaret.pendingSkip = false
+        super.mouseDown(with: event)
+        if hasSecondarySelections { keepPrimarySelection(nil) }
+    }
+
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        if !insertAtCarets(string, replacementRange: replacementRange) {
+            if hasSecondarySelections { keepPrimarySelection(nil) }
+            super.insertText(string, replacementRange: replacementRange)
+        }
+    }
+
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        if hasSecondarySelections { keepPrimarySelection(nil) }
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+    }
+
+    override func deleteBackward(_ sender: Any?) {
+        if !deleteAtCarets(backward: true, word: false) { super.deleteBackward(sender) }
+    }
+
+    override func deleteForward(_ sender: Any?) {
+        if !deleteAtCarets(backward: false, word: false) { super.deleteForward(sender) }
+    }
+
+    override func deleteWordBackward(_ sender: Any?) {
+        if !deleteAtCarets(backward: true, word: true) { super.deleteWordBackward(sender) }
+    }
+
+    override func deleteWordForward(_ sender: Any?) {
+        if !deleteAtCarets(backward: false, word: true) { super.deleteWordForward(sender) }
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if hasSecondarySelections && !hasMarkedText() {
+            keepPrimarySelection(sender)
+        } else {
+            super.cancelOperation(sender)
+        }
+    }
+
+    override func doCommand(by selector: Selector) {
+        if !moveSecondarySelections(command: selector) {
+            super.doCommand(by: selector)
+        }
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if window?.firstResponder === self, handleMultiCaretKey(event) { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func keyDown(with event: NSEvent) {
+        if handleMultiCaretKey(event) { return }
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
         if modifiers == .command && event.charactersIgnoringModifiers == "\u{F728}" && !hasMarkedText() {
             deleteToEndOfLine(nil)
@@ -228,7 +327,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         case #selector(resetTextSize(_:)):
             return fontSize != Self.defaultFontSize
         default:
-            return super.validateUserInterfaceItem(item)
+            return validateSelectionCommand(item.action) ?? super.validateUserInterfaceItem(item)
         }
     }
 
@@ -266,8 +365,17 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         scrollRangeToVisible(next)
     }
 
-    func textViewDidChangeSelection(_ notification: Notification) { requestLineRefresh() }
+    func textViewDidChangeSelection(_ notification: Notification) {
+        nativeSelectionChanged()
+        requestLineRefresh()
+    }
+
     func textDidChange(_ notification: Notification) {
+        if !multiCaret.isApplying {
+            multiCaret.selections = [selectedRange()]
+            multiCaret.navigation = [:]
+        }
+        resetSelectionHistory()
         requestLineRefresh()
         onTextChange?()
     }
@@ -277,7 +385,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         requestLineRefresh()
     }
 
-    private func requestLineRefresh() {
+    func requestLineRefresh() {
         guard !lineRefreshPending else { return }
         lineRefreshPending = true
         // Resolving the caret can request viewport layout. Do it outside the layout callback.
@@ -289,6 +397,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func refreshCurrentLine() {
+        refreshSecondarySelections()
         let location = NSRange(location: selectedRange().location, length: 0)
         var newLine = NSRect.zero
         if let window, caretIsNearViewport(location.location) {
@@ -322,5 +431,6 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             NSColor.labelColor.withAlphaComponent(0.06).setFill()
             stripe.fill()
         }
+        drawSecondarySelections(in: dirtyRect)
     }
 }

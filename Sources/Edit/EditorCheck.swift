@@ -80,6 +80,8 @@ enum EditorCheck {
         try expect(scrollView.hasVerticalScroller && scrollView.contentView.bounds.minY > 0, "vertical overflow")
         try expect(editor.textLayoutManager != nil, "editing stays on TextKit 2")
 
+        try MultiCaretCheck.run(in: window, editor: editor, undo: undo)
+
         let sample = "let greeting = \"Hello, Edit!\"\n\nprint(greeting)"
         let selection = (sample as NSString).range(of: "Hello, Edit!")
         setBuffer(sample, at: selection.location, length: selection.length)

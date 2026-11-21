@@ -433,6 +433,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func installText(_ text: String) {
         editor.preferredLineEnding = format.lineEnding
+        editor.resetMultiCarets()
         editor.string = text
         editor.setSelectedRange(NSRange(location: 0, length: 0))
         editor.scrollRangeToVisible(editor.selectedRange())

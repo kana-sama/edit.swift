@@ -462,6 +462,20 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         lines.addCommand("Outdent Lines", #selector(EditorTextView.outdentLines(_:)), "[")
         edit.addItem(withTitle: "Lines", action: nil, keyEquivalent: "").submenu = lines
 
+        let selection = NSMenu(title: "Selection")
+        selection.addCommand("Add Caret Above", #selector(EditorTextView.addCaretAbove(_:)), "\u{F700}", [.command, .option])
+        selection.addCommand("Add Caret Below", #selector(EditorTextView.addCaretBelow(_:)), "\u{F701}", [.command, .option])
+        selection.addCommand("Add Carets at Ends of Lines", #selector(EditorTextView.addCaretsAtLineEnds(_:)), "i", [.option, .shift])
+        selection.addItem(.separator())
+        selection.addCommand("Select Next Occurrence", #selector(EditorTextView.selectNextOccurrence(_:)), "d")
+        selection.addCommand("Skip to Next Occurrence", #selector(EditorTextView.skipNextOccurrence(_:)))
+        selection.addCommand("Select All Occurrences", #selector(EditorTextView.selectAllOccurrences(_:)), "l", [.command, .shift])
+        selection.addItem(.separator())
+        selection.addCommand("Undo Selection", #selector(EditorTextView.undoSelection(_:)), "u")
+        selection.addCommand("Redo Selection", #selector(EditorTextView.redoSelection(_:)), "u", [.command, .shift])
+        selection.addCommand("Keep Only Primary Selection", #selector(EditorTextView.keepPrimarySelection(_:)))
+        edit.addItem(withTitle: "Selection", action: nil, keyEquivalent: "").submenu = selection
+
         let view = addMenu("View")
         view.addCommand("Command Mode…", #selector(showCommandMode(_:)), "p", [.command, .shift]).target = self
         view.addItem(.separator())
