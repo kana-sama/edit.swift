@@ -2,6 +2,12 @@ import AppKit
 
 @MainActor
 final class DocumentWindow: NSObject, NSWindowDelegate {
+    enum CloseChoice {
+        case save(to: URL?)
+        case discard
+        case cancel
+    }
+
     let window: NSWindow
     let editor: EditorTextView
     let scrollView: NSScrollView
@@ -110,23 +116,19 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     @discardableResult
-    func save(asNew: Bool = false) async -> Bool {
+    func save(asNew: Bool = false, to selectedURL: URL? = nil) async -> Bool {
         guard !saving else { return false }
-        if !asNew, fileURL != nil, revision != .missing, !window.isDocumentEdited { return true }
+        if selectedURL == nil, !asNew, fileURL != nil, revision != .missing, !window.isDocumentEdited {
+            return true
+        }
         saving = true
         defer { saving = false }
 
-        var destination = fileURL
-        if destination == nil || asNew {
+        var destination = selectedURL ?? fileURL
+        if selectedURL == nil, destination == nil || asNew {
             guard !app.isAgentCheck else { return false }
-            let panel = NSSavePanel()
-            panel.canCreateDirectories = true
-            panel.nameFieldStringValue = fileURL?.lastPathComponent ?? "Untitled.txt"
-            panel.directoryURL = fileURL?.deletingLastPathComponent()
-            let choice = await withCheckedContinuation { continuation in
-                panel.beginSheetModal(for: window) { continuation.resume(returning: $0) }
-            }
-            guard choice == NSApplication.ModalResponse.OK else { return false }
+            let panel = makeSavePanel()
+            guard await response(to: panel) == .OK else { return false }
             destination = panel.url
         }
         guard let destination else { return false }
@@ -177,26 +179,66 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
         promptingToClose = true
         Task { @MainActor in
-            let alert = NSAlert()
-            alert.messageText = "Save changes to “\(window.title)”?"
-            alert.informativeText = "Your edits will be lost if you close the window without saving."
-            alert.addButton(withTitle: "Save")
-            alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
-            alert.addButton(withTitle: "Don’t Save").hasDestructiveAction = true
-            await finishClose(await response(to: alert))
+            let choice = fileURL == nil ? await confirmUntitledClose() : await confirmNamedClose()
+            await finishClose(choice)
         }
         return false
     }
 
-    func finishClose(_ choice: NSApplication.ModalResponse) async {
+    func finishClose(_ choice: CloseChoice) async {
         defer { promptingToClose = false }
         switch choice {
-        case .alertFirstButtonReturn:
-            if await save(), !window.isDocumentEdited { window.close() }
-        case .alertThirdButtonReturn:
+        case .save(let url):
+            if await save(to: url), !window.isDocumentEdited { window.close() }
+        case .discard:
             window.close()
+        case .cancel:
+            break
+        }
+    }
+
+    private func confirmUntitledClose() async -> CloseChoice {
+        let panel = makeSavePanel()
+        panel.message = "Save this new document before closing? You can save it now or delete the draft."
+        panel.showsTagField = false
+        panel.canSelectHiddenExtension = false
+        panel.isExtensionHidden = false
+
+        let delete = DeleteDraftAction(panel: panel)
+        let button = NSButton(title: "Delete", target: delete, action: #selector(DeleteDraftAction.deleteDraft(_:)))
+        button.bezelStyle = .push
+        button.hasDestructiveAction = true
+
+        let encoding = NSTextField(labelWithString: "Plain Text Encoding: Unicode (UTF-8)")
+        let accessory = NSStackView(views: [button, encoding])
+        accessory.orientation = .horizontal
+        accessory.alignment = .centerY
+        accessory.spacing = 16
+        accessory.setFrameSize(accessory.fittingSize)
+        panel.accessoryView = accessory
+
+        switch await response(to: panel) {
+        case .OK:
+            if let url = panel.url { return .save(to: url) }
+        case .cancel:
+            if delete.wasChosen { return .discard }
         default:
             break
+        }
+        return .cancel
+    }
+
+    private func confirmNamedClose() async -> CloseChoice {
+        let alert = NSAlert()
+        alert.messageText = "Save changes to “\(window.title)”?"
+        alert.informativeText = "Your edits will be lost if you close the window without saving."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+        alert.addButton(withTitle: "Don’t Save").hasDestructiveAction = true
+        switch await response(to: alert) {
+        case .alertFirstButtonReturn: return .save(to: nil)
+        case .alertThirdButtonReturn: return .discard
+        default: return .cancel
         }
     }
 
@@ -214,6 +256,23 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         alert.messageText = title
         alert.informativeText = detail
         _ = await response(to: alert)
+    }
+
+    private func makeSavePanel() -> NSSavePanel {
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = fileURL?.lastPathComponent ?? "Untitled.txt"
+        panel.directoryURL = fileURL?.deletingLastPathComponent()
+        return panel
+    }
+
+    private func response(to panel: NSSavePanel) async -> NSApplication.ModalResponse {
+        await withCheckedContinuation { continuation in
+            panel.beginSheetModal(for: window) { result in
+                panel.orderOut(nil)
+                continuation.resume(returning: result)
+            }
+        }
     }
 
     private func response(to alert: NSAlert) async -> NSApplication.ModalResponse {
@@ -250,5 +309,20 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if isEdited != window.isDocumentEdited {
             window.isDocumentEdited = isEdited
         }
+    }
+}
+
+@MainActor
+private final class DeleteDraftAction: NSObject {
+    private weak var panel: NSSavePanel?
+    private(set) var wasChosen = false
+
+    init(panel: NSSavePanel) {
+        self.panel = panel
+    }
+
+    @objc func deleteDraft(_ sender: NSButton) {
+        wasChosen = true
+        panel?.cancel(sender)
     }
 }

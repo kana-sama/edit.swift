@@ -59,7 +59,8 @@ enum FilesCheck {
         let recovered = app.documents[1]
         try expect(recovered.editor.string == draftText + "On disk before quitting\n", "named draft is preserved")
         try expect(recovered.window.isDocumentEdited, "restored draft stays marked edited")
-        try expect(app.documents[2].editor.string == "An untitled draft", "untitled draft is recovered")
+        let untitled = app.documents[2]
+        try expect(untitled.editor.string == "An untitled draft", "untitled draft is recovered")
         try expect(!reopened.window.isVisible && !NSApplication.shared.isActive, "quiet restoration")
 
         // A restored draft still expects its original disk revision.
@@ -80,19 +81,33 @@ enum FilesCheck {
         try expect(created && FileManager.default.fileExists(atPath: newPath.path), "Save creates an empty named file")
         try expect(newDocument.windowShouldClose(newDocument.window), "clean file closes without a prompt")
         try expect(!recovered.windowShouldClose(recovered.window), "dirty file cannot close without a decision")
-        await recovered.finishClose(.alertSecondButtonReturn)
+        await recovered.finishClose(.cancel)
         try expect(app.documents.contains { $0 === recovered }, "Cancel keeps a dirty document open")
-        await recovered.finishClose(.alertFirstButtonReturn)
+        await recovered.finishClose(.save(to: nil))
         try expect(app.documents.contains { $0 === recovered }, "a failed save keeps a dirty document open")
-        await recovered.finishClose(.alertThirdButtonReturn)
+        await recovered.finishClose(.discard)
         try expect(!app.documents.contains { $0 === recovered }, "Don’t Save closes a dirty window")
         try expect(try Data(contentsOf: other) == Data("Externally changed draft file\n".utf8),
                    "Don’t Save preserves bytes on disk")
 
         newDocument.editor.insertText("Saved when closing", replacementRange: newDocument.editor.selectedRange())
-        await newDocument.finishClose(.alertFirstButtonReturn)
+        await newDocument.finishClose(.save(to: nil))
         try expect(!app.documents.contains { $0 === newDocument }, "Save closes the successfully saved window")
         try expect(try Data(contentsOf: newPath) == Data("Saved when closing".utf8), "Save on close writes the edits")
+
+        await untitled.finishClose(.cancel)
+        try expect(app.documents.contains { $0 === untitled } && untitled.editor.string == "An untitled draft",
+                   "Cancel keeps the untitled draft open with its text")
+        await untitled.finishClose(.discard)
+        try expect(!app.documents.contains { $0 === untitled }, "Delete closes the untitled draft")
+
+        let draftToSave = app.makeDocument()
+        draftToSave.editor.insertText("Save the draft", replacementRange: draftToSave.editor.selectedRange())
+        let draftPath = directory.appendingPathComponent("Saved draft.txt")
+        await draftToSave.finishClose(.save(to: draftPath))
+        try expect(!app.documents.contains { $0 === draftToSave }, "saving an untitled draft closes its window")
+        try expect(try Data(contentsOf: draftPath) == Data("Save the draft".utf8),
+                   "Save writes an untitled draft to the chosen path")
 
         let preview = directory.appendingPathComponent("Meeting Notes.txt")
         let sampleText = "Meeting notes\n\nTuesday\n    Review the new editor\n    Bring a sample project\n"

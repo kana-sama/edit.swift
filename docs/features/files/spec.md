@@ -11,7 +11,8 @@ Edit opens and saves UTF-8 regular files. Each document has a native window with
 
 ## Close and restore
 
-- Command-W closes the current window. For unsaved changes, offer Save, Don’t Save, and Cancel. Closing after Save requires a successful write. Cancel keeps the current window and changes. Closing the last window exits Edit and remembers its frame for the next new window.
+- Command-W closes the current window. For an edited untitled document, use one native save sheet with a filename, destination, and Save, Delete, and Cancel actions. Show UTF-8 as the fixed encoding. Hide the Tags field and the extension option. Delete discards the draft without writing a file.
+- For a document with a path and unsaved changes, offer Save, Don’t Save, and Cancel. Closing after Save requires a successful write. Cancel keeps the current window and changes. Closing the last window exits Edit and remembers its frame for the next new window.
 - Command-Q atomically saves the session, including open windows, the active window, and any unsaved drafts. On relaunch, load clean files from disk and restore unsaved text from the drafts. Report files that are missing or unreadable.
 - Restore each window’s position, size, and full-screen state. Remember the normal window frame when a window goes full screen. If a saved frame is off the available displays, restore the window on an available screen.
 - File contents are written through Save and Save As. Switching focus or quitting preserves any edits in memory or the session draft, respectively.
@@ -22,4 +23,5 @@ Edit opens and saves UTF-8 regular files. Each document has a native window with
 - Open existing files from the native panel, Finder, and the terminal. Run the launcher from a different directory with a relative path that includes spaces. Open the same file twice and confirm that its existing window is focused.
 - Create an untitled document, cancel the save panel, then save it. Use Save As to continue editing a second file. Pass a new path to the app executable and verify that the file appears only after Save.
 - Modify or remove an open file externally and attempt to save. Cancel the confirmation and verify the document stays open with its edits. Check all three choices when closing a modified window.
+- Close an edited untitled document. Check that the initial filename is Untitled.txt and that the native sheet lets you choose a destination, save and close, discard the draft, or cancel and keep editing.
 - Quit with clean and dirty documents, including an untitled draft and a full-screen window. Verify that the original files with unsaved edits retain their disk contents. Relaunch and check the drafts, the clean documents, the active window, and window geometry.
