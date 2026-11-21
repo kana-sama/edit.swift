@@ -28,6 +28,14 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             if oldValue != fileURL { detectedSyntaxLanguage = SyntaxLanguage.detected(at: fileURL) }
         }
     }
+    private(set) var folderURL: URL?
+    var displayName: String { fileURL?.lastPathComponent ?? "Untitled" }
+
+    func setFolder(_ url: URL) {
+        folderURL = url
+        updateTitle()
+    }
+
     private var detectedSyntaxLanguage: SyntaxLanguage = .plainText
     private(set) var fileIdentity: FileIdentity?
     private var savedText: NSString? = "" as NSString
@@ -62,7 +70,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     var isBusy: Bool { saving || promptingToClose }
     var canReplaceBuffer: Bool { !isBusy && window.attachedSheet == nil }
-    var isReusable: Bool { fileURL == nil && !window.isDocumentEdited && canReplaceBuffer }
+    var isReusable: Bool { folderURL == nil && fileURL == nil && !window.isDocumentEdited && canReplaceBuffer }
 
     init(app: Edit, placement: WindowPlacement? = nil) {
         self.app = app
@@ -215,7 +223,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             format: fileURL == nil ? nil : format,
             revision: revision,
             placement: placement,
-            syntaxLanguage: manualSyntaxLanguage?.rawValue
+            syntaxLanguage: manualSyntaxLanguage?.rawValue,
+            folderPath: folderURL?.path
         )
     }
 
@@ -250,7 +259,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             let url = FileBuffer.canonicalURL(destination)
             return (url, FileIdentity.at(url))
         }.value
-        let promote = asNew || target != fileURL
+        let promote = asNew || target != fileURL || revision == .missing
         guard app.reserveSave(to: target, identity: identity, for: self) else {
             await showError("The file is in use by another window.")
             return false
@@ -279,7 +288,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             }
             if let queuedAutosave, queuedAutosave.generation <= writtenGeneration { self.queuedAutosave = nil }
             if window.isDocumentEdited { scheduleIdleAutosave() }
-            if promote { await app.recentFiles.record(destination) }
+            if promote { await app.recentFiles.record(destination, in: folderURL) }
             return true
         } catch {
             await showError("Could Not Save “\(target.lastPathComponent)”", detail: error.localizedDescription)
@@ -368,7 +377,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     func takeAutosaveFailure() -> String? {
         guard let failure = autosaveFailure, !failure.reported, window.isDocumentEdited else { return nil }
         autosaveFailure?.reported = true
-        return "“\(window.title)” — \(failure.detail)"
+        return "“\(displayName)” — \(failure.detail)"
     }
 
     private func reportAutosaveFailure() {
@@ -378,7 +387,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         autosaveFailure?.reported = true
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Could Not Autosave “\(window.title)”"
+        alert.messageText = "Could Not Autosave “\(displayName)”"
         alert.informativeText = failure.detail
         alert.beginSheetModal(for: window)
     }
@@ -465,7 +474,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         } else if app.isAgentCheck {
             choice = .cancel
         } else if fileURL == nil {
-            let sheet = UntitledCloseSheet(window: window) { [self] destination, encoding in
+            let sheet = UntitledCloseSheet(window: window, folder: folderURL) { [self] destination, encoding in
                 await save(to: destination, encoding: encoding)
             }
             choice = await sheet.confirmClose() ? .discard : .cancel
@@ -511,7 +520,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func confirmNamedClose() async -> CloseChoice {
         let alert = NSAlert()
-        alert.messageText = "Save changes to “\(window.title)”?"
+        alert.messageText = "Save changes to “\(displayName)”?"
         let consequence = "Closing this document without saving discards your edits."
         if let failure = autosaveFailure {
             alert.informativeText = failure.detail + "\n\n" + consequence
@@ -554,7 +563,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = fileURL?.lastPathComponent ?? "Untitled.txt"
-        panel.directoryURL = fileURL?.deletingLastPathComponent()
+        panel.directoryURL = fileURL?.deletingLastPathComponent() ?? folderURL
         return panel
     }
 
@@ -597,7 +606,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func updateTitle() {
         if window.representedURL != fileURL { window.representedURL = fileURL }
-        window.title = fileURL?.lastPathComponent ?? "Untitled"
+        if let folderURL {
+            let folderName = folderURL.lastPathComponent
+            window.title = "\(displayName) — \(folderName.isEmpty ? folderURL.path : folderName)"
+        } else {
+            window.title = displayName
+        }
         updateTitleIcon()
         findPanel?.updateName()
     }

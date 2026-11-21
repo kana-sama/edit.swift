@@ -30,6 +30,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     private var monitor: Any?
     private var entries: [ControlMatch] = []
     private var request: Task<Void, Never>?
+    private var folderScan: (folder: URL, task: Task<[ControlEntry], Never>)?
     private var generation = 0
     private var opening = 0
     private var pending = false
@@ -51,6 +52,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
     }
 
+    func folderDidChange(in document: DocumentWindow) {
+        guard self.document === document, mode == .files else { return }
+        configure(.files)
+        search()
+    }
+
     private func show(in document: DocumentWindow, mode: Mode = .files,
                       failure: (query: String, id: String, message: String)? = nil) {
         dismiss(restoreFocus: false)
@@ -68,12 +75,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let query = failure?.query ?? ""
         input.stringValue = query
         clearButton.isHidden = query.isEmpty
-        apply(ControlMatching.rank(sourceEntries(), query: query), selected: failure?.id ?? initialID)
-        if let failure {
-            feedback.stringValue = failure.message
-            feedback.isHidden = false
-        }
-        position()
+        apply(ControlMatching.rank(sourceEntries(), query: query), selected: failure?.id ?? initialID,
+              error: failure?.message)
         if !app.isAgentCheck {
             document.window.addChildWindow(panel, ordered: .above)
             panel.makeKeyAndOrderFront(nil)
@@ -86,7 +89,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             NotificationCenter.default.addObserver(self, selector: #selector(parentResized),
                                                    name: NSWindow.didResizeNotification, object: document.window)
         }
-        if failure == nil { refreshFiles(for: document) }
+        if let failure {
+            if document.folderURL != nil && !query.allSatisfy(\.isWhitespace) {
+                search(preserving: failure.id, error: failure.message)
+            }
+        } else {
+            refreshFiles(for: document)
+        }
     }
 
     private func configure(_ mode: Mode) {
@@ -94,7 +103,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         leadingIcon.image = mode == .commands ? Self.commandImage : Self.searchImage
         let hint: String
         switch mode {
-        case .files: hint = "Search recent files"
+        case .files: hint = document?.folderURL == nil ? "Search recent files" : "Search files"
         case .commands: hint = "Search commands"
         case .languages: hint = "Search languages"
         }
@@ -132,6 +141,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         generation &+= 1
         request?.cancel()
         request = nil
+        folderScan?.task.cancel()
+        folderScan = nil
         pending = false
         deferredRefresh = false
         setSearching(false)
@@ -384,18 +395,34 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         entries.indices.contains(table.selectedRow) ? entries[table.selectedRow].entry.id : nil
     }
 
-    private func search(preserving id: String? = nil) {
+    private func scanFolder(_ folder: URL?) -> Task<[ControlEntry], Never>? {
+        if let folderScan, folderScan.folder == folder { return folderScan.task }
+        folderScan?.task.cancel()
+        folderScan = folder.map { folder in
+            (folder, Task.detached(priority: .userInitiated) { FolderFileSearch.entries(in: folder) })
+        }
+        return folderScan?.task
+    }
+
+    private func search(preserving id: String? = nil, error: String? = nil) {
         request?.cancel()
         generation &+= 1
         let current = generation
         let rows = sourceEntries()
         let query = input.stringValue
+        let folder = mode == .files ? document?.folderURL : nil
+        let scan = scanFolder(query.allSatisfy(\.isWhitespace) ? nil : folder)
         clearButton.isHidden = query.isEmpty
-        feedback.stringValue = ""
+        if error == nil { feedback.stringValue = "" }
         pending = true
-        request = Task { [self] in
+        request = Task { [weak self] in
             let worker = Task.detached(priority: .userInitiated) {
-                ControlMatching.rank(rows, query: query)
+                if let scan {
+                    let folderFiles = await scan.value
+                    guard !Task.isCancelled else { return [ControlMatch]() }
+                    return FolderFileSearch.rank(rows, folderFiles: folderFiles, query: query)
+                }
+                return ControlMatching.rank(rows, query: query)
             }
             Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(150))
@@ -407,10 +434,15 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             } onCancel: {
                 worker.cancel()
             }
-            guard current == generation, document != nil else { return }
+            guard let self, let document, current == generation else { return }
+            if mode == .files && document.folderURL != folder {
+                configure(mode)
+                search(preserving: id, error: error)
+                return
+            }
             pending = false
             setSearching(false)
-            apply(results, selected: id)
+            apply(results, selected: id, error: error)
         }
     }
 
@@ -434,12 +466,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
     }
 
-    private func apply(_ results: [ControlMatch], selected id: String?) {
+    private func apply(_ results: [ControlMatch], selected id: String?, error: String? = nil) {
         entries = results
         updatingRows = true
         table.reloadData()
-        feedback.stringValue = entries.isEmpty ? "No matching results" : ""
-        feedback.isHidden = !entries.isEmpty
+        feedback.stringValue = error ?? (entries.isEmpty ? "No matching results" : "")
+        feedback.isHidden = error == nil && !entries.isEmpty
         position()
         if !results.isEmpty {
             let row = id.flatMap { key in results.firstIndex { $0.entry.id == key } } ?? 0
@@ -552,7 +584,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
     }
 
-    @objc private func activateClickedRow() { activate(row: table.clickedRow) }
+    @objc private func activateClickedRow() { _ = activate(row: table.clickedRow) }
 
     func checkHidden(in document: DocumentWindow) throws {
         guard app.isAgentCheck else { return }
@@ -613,6 +645,43 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             throw CheckFailure.invalidSearchField
         }
         try checkKeyboardRouting()
+    }
+
+    func checkFolder(in document: DocumentWindow, file: URL) async throws {
+        guard app.isAgentCheck else { return }
+        let file = FileBuffer.canonicalURL(file)
+        show(in: document)
+        defer { dismiss(restoreFocus: false) }
+        guard folderScan == nil, !entries.isEmpty, entries.allSatisfy({ $0.entry.recent != nil }) else {
+            throw CheckFailure.invalidFolderResults("blank query")
+        }
+
+        input.stringValue = "  "
+        search()
+        while pending { await request?.value }
+        guard folderScan == nil, !entries.isEmpty, entries.allSatisfy({ $0.entry.recent != nil }) else {
+            throw CheckFailure.invalidFolderResults("whitespace-only query")
+        }
+
+        let folder = document.folderURL
+        input.stringValue = "\(file.deletingLastPathComponent().lastPathComponent) \(file.lastPathComponent)"
+        search()
+        while pending { await request?.value }
+        guard let row = entries.firstIndex(where: { $0.entry.folderFileURL?.path == file.path }),
+              let activation = activate(row: row) else { throw CheckFailure.invalidFolderResults("nested file") }
+        await activation.value
+        guard document.fileURL == file, document.folderURL == folder else {
+            throw CheckFailure.invalidFolderResults("same-window activation")
+        }
+
+        show(in: document)
+        input.stringValue = file.lastPathComponent
+        search()
+        while pending { await request?.value }
+        let matchingFiles = entries.filter { ($0.entry.recent?.canonicalURL ?? $0.entry.folderFileURL)?.path == file.path }
+        guard matchingFiles.count == 1, matchingFiles.first?.entry.recent != nil else {
+            throw CheckFailure.invalidFolderResults("recent file deduplication")
+        }
     }
 
     private func checkKeyboardRouting() throws {
@@ -688,6 +757,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     private enum CheckFailure: LocalizedError {
         case invalidPanel
         case invalidSearchField
+        case invalidFolderResults(String)
         case shortcutEscaped
 
         var errorDescription: String? {
@@ -695,32 +765,39 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             case .invalidPanel: "Control did not render its recent list and empty state quietly."
             case .invalidSearchField: "Control did not preserve editing, switching modes, or clearing the search."
             case .shortcutEscaped: "Control did not keep document shortcuts separate from palette commands."
+            case .invalidFolderResults(let stage): "Control failed the folder search check for \(stage)."
             }
         }
     }
 
-    private func activate(row: Int) {
-        guard !pending, entries.indices.contains(row), let document else { return }
+    @discardableResult
+    private func activate(row: Int) -> Task<Void, Never>? {
+        guard !pending, entries.indices.contains(row), let document else { return nil }
         let entry = entries[row].entry
         if mode == .commands {
             runCommand(entry, in: document)
-            return
+            return nil
         }
         if mode == .languages {
             let language = SyntaxLanguage(rawValue: entry.id)
             document.setSyntaxLanguage(language)
             dismiss(restoreFocus: true)
-            return
+            return nil
         }
-        guard let recent = entry.recent else { return }
+        guard let url = entry.fileURL else { return nil }
+        if entry.folderFileURL != nil && document.folderURL != folderScan?.folder {
+            configure(mode)
+            search()
+            return nil
+        }
         let query = input.stringValue
         dismiss(restoreFocus: true)
         let dismissedOpening = opening
-        Task {
+        return Task {
             do {
-                try await app.openFile(recent.url, in: document)
+                try await app.openFile(url, in: document)
             } catch {
-                await app.recentFiles.removeIfMissing(recent.url)
+                if entry.recent != nil { await app.recentFiles.removeIfMissing(url) }
                 guard opening == dismissedOpening, self.document == nil, document.window.isKeyWindow else { return }
                 show(in: document, failure: (query, entry.id, error.localizedDescription))
             }
@@ -766,7 +843,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         if !updatingRows {
-            updateButtons(at: Array(entries.indices))
+            let visible = table.rows(in: table.visibleRect)
+            updateButtons(at: Array(visible.location..<NSMaxRange(visible)))
         }
     }
 
@@ -774,10 +852,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let match = entries[row]
         let title = makeLabel(match.entry.title, highlights: match.titleCharacters, secondary: false)
         var views: [NSView] = []
-        let file = match.entry.recent
-        let language = match.entry.iconLanguage ?? file.flatMap { app.manualIconLanguage(for: $0) }
-        if file != nil || language != nil,
-           let image = FileIcons.image(for: file?.url, appearance: tableView.effectiveAppearance, language: language) {
+        let fileURL = match.entry.fileURL
+        let language = match.entry.iconLanguage
+            ?? match.entry.recent.flatMap { app.manualIconLanguage(for: $0) }
+            ?? match.entry.folderFileURL.flatMap { app.syntaxOverrides.language(for: $0)?.iconIdentifier }
+        if fileURL != nil || language != nil,
+           let image = FileIcons.image(for: fileURL, appearance: tableView.effectiveAppearance, language: language) {
             let icon = NSImageView(image: image)
             icon.setAccessibilityElement(false)
             views.append(icon)

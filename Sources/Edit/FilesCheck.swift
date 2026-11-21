@@ -235,8 +235,9 @@ enum FilesCheck {
         let item = NSApplication.shared.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "Open Recent")
         let menu = try resolve(item?.submenu)
         app.menuWillOpen(menu)
-        try expect(menu.items.first?.representedObject as? URL == alias, "native Open Recent shows the history")
-        try expect(menu.items.count <= 10, "Open Recent is capped at ten entries")
+        let recentURLs = menu.items.compactMap { $0.representedObject as? URL }
+        try expect(recentURLs.first == alias, "native Open Recent shows the history")
+        try expect(recentURLs.count <= 10, "Open Recent is capped at ten files when no folder has been opened")
         let rust = FileIcons.iconKey(for: URL(fileURLWithPath: "/tmp/MAIN.RS"), dark: true)
         let typescript = FileIcons.iconKey(for: URL(fileURLWithPath: "/tmp/widget.test.ts"), dark: true)
         try expect(rust != nil && typescript != nil && rust != typescript, "bundled file icons match file types")

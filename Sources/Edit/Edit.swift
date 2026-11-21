@@ -61,6 +61,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try checkWindow(sample.window, screenshot: CommandLine.arguments.dropFirst(2).first)
                     try MultiCaretCheck.runComposition(in: sample.editor)
                     try await EditorCheck.checkScrolledZoom(in: makeDocument())
+                    receivedInitialSession = true
+                    let folderWindow = try await FolderCheck.run(in: self)
+                    try checkWindow(folderWindow, screenshot: nil)
                     print("Edit passed its native editing and file-session checks without activation.")
                     exit(EXIT_SUCCESS)
                 } catch {
@@ -130,6 +133,20 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     private func populateRecentMenu(_ menu: NSMenu) {
         menu.removeAllItems()
+        if !recentFiles.folders.isEmpty {
+            menu.addItem(.sectionHeader(title: "Folders"))
+            for recent in recentFiles.folders.prefix(10) {
+                let item = menu.addItem(withTitle: recent.displayPath, action: #selector(openRecentDocument(_:)),
+                                        keyEquivalent: "")
+                item.target = self
+                item.representedObject = recent.url
+                item.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
+            }
+            if !recentFiles.entries.isEmpty { menu.addItem(.separator()) }
+        }
+        if !recentFiles.entries.isEmpty {
+            menu.addItem(.sectionHeader(title: "Files"))
+        }
         for recent in recentFiles.entries.prefix(10) {
             let item = menu.addItem(withTitle: recent.displayPath, action: #selector(openRecentDocument(_:)),
                                     keyEquivalent: "")
@@ -172,9 +189,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         guard let document = activeDocument, document.canReplaceBuffer, !isQuitting else { return }
         document.requestAutosave()
         let panel = NSOpenPanel()
-        panel.canChooseDirectories = false
+        panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.directoryURL = document.fileURL?.deletingLastPathComponent()
+        panel.directoryURL = document.folderURL ?? document.fileURL?.deletingLastPathComponent()
         panel.beginSheetModal(for: document.window) { response in
             panel.orderOut(nil)
             if response == .OK, let url = panel.url { self.requestOpen([url], in: document) }
@@ -361,7 +378,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     opened = try await readForOpening(URL(fileURLWithPath: path), storedLanguage: record.syntaxLanguage)
                 } catch {
                     warnings.append("“\(URL(fileURLWithPath: path).lastPathComponent)” — \(error.localizedDescription)")
-                    continue
+                    guard record.folderPath != nil else { continue }
+                    opened = nil
                 }
             } else {
                 opened = nil
@@ -369,6 +387,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             let document = restored.isEmpty && documents.contains(where: { $0 === placeholder }) && placeholder.isReusable
                 ? placeholder : makeDocument()
             document.restorePlacement(record.placement)
+            if let path = record.folderPath { document.setFolder(URL(filePath: path, directoryHint: .isDirectory)) }
             if let draft = record.draft {
                 let identity = await Task.detached {
                     record.path.flatMap { FileIdentity.at(URL(fileURLWithPath: $0)) }
@@ -415,33 +434,87 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         guard !isQuitting, let document = sourceDocument ?? activeDocument, document.canReplaceBuffer,
               documents.contains(where: { $0 === document }) else { return nil }
 
-        if document.fileURL == url.standardizedFileURL {
-            await recentFiles.record(url)
-            return document
-        }
-        let (canonical, identity) = await Task.detached {
+        let (canonical, identity, isFolder) = await Task.detached {
             let path = FileBuffer.canonicalURL(url)
-            return (path, FileIdentity.at(path))
+            let identity = FileIdentity.at(path)
+            var isDirectory: ObjCBool = false
+            if identity == nil { _ = FileManager.default.fileExists(atPath: path.path, isDirectory: &isDirectory) }
+            return (path, identity, isDirectory.boolValue)
         }.value
-        guard !isQuitting, documents.contains(where: { $0 === document }) else { return nil }
+        guard !isQuitting, document.canReplaceBuffer, documents.contains(where: { $0 === document }) else { return nil }
+        if isFolder {
+            let folder = URL(filePath: canonical.path, directoryHint: .isDirectory)
+            return try await openFolder(url, canonical: folder, in: document)
+        }
         if document.fileURL == canonical || (identity != nil && identity == document.fileIdentity) {
-            await recentFiles.record(url)
+            await recentFiles.record(url, in: document.folderURL)
             return document
         }
 
         let opened = try await readForOpening(canonical, allowMissing: allowMissing)
         guard documents.contains(where: { $0 === document }),
               await document.replaceBuffer(with: opened.file, preparedSyntax: opened.syntax) else { return nil }
-        if opened.file.identity != nil { await recentFiles.record(url) }
+        if opened.file.identity != nil { await recentFiles.record(url, in: document.folderURL) }
         return document
     }
 
+    private func openFolder(_ url: URL, canonical folder: URL, in document: DocumentWindow) async throws -> DocumentWindow? {
+        var opened: (file: FileBuffer, syntax: SyntaxSnapshot?)?
+        if let last = await recentFiles.lastFile(in: folder) {
+            opened = try? await readForOpening(last, within: folder)
+        }
+        if opened == nil {
+            let readmes = try await Task.detached { try Self.folderReadmes(folder) }.value
+            for readme in readmes {
+                if let candidate = try? await readForOpening(readme, within: folder) {
+                    opened = candidate
+                    break
+                }
+            }
+        }
+        guard !isQuitting, document.canReplaceBuffer, documents.contains(where: { $0 === document }) else { return nil }
+        if opened == nil || opened?.file.url != document.fileURL {
+            guard await document.replaceBuffer(with: opened?.file, preparedSyntax: opened?.syntax) else { return nil }
+        }
+        if document.folderURL != folder {
+            document.setFolder(folder)
+            controlPanel?.folderDidChange(in: document)
+        }
+        await recentFiles.recordFolder(url, opening: opened?.file.url)
+        return document
+    }
+
+    private nonisolated static func folderReadmes(_ folder: URL) throws -> [URL] {
+        let children = try FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]
+        )
+        let preferredNames = ["readme.md", "readme", "readme.txt"]
+        let readmes = children.compactMap { url -> (priority: Int, url: URL)? in
+            let name = url.lastPathComponent.lowercased()
+            guard name == "readme" || name.hasPrefix("readme."),
+                  (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { return nil }
+            return (preferredNames.firstIndex(of: name) ?? preferredNames.count, url)
+        }
+        return readmes.sorted {
+            if $0.priority != $1.priority { return $0.priority < $1.priority }
+            return $0.url.lastPathComponent < $1.url.lastPathComponent
+        }.map(\.url)
+    }
+
     private func readForOpening(
-        _ url: URL, allowMissing: Bool = false, storedLanguage: String? = nil
+        _ url: URL, allowMissing: Bool = false, storedLanguage: String? = nil, within folder: URL? = nil
     ) async throws -> (file: FileBuffer, syntax: SyntaxSnapshot?) {
         let override = storedLanguage.flatMap(SyntaxLanguage.init(rawValue:)) ?? syntaxOverrides.language(for: url)
         return try await Task.detached(priority: .userInitiated) {
-            let file = try FileBuffer.read(url, allowMissing: allowMissing)
+            let target: URL
+            if let folder {
+                target = FileBuffer.canonicalURL(url)
+                let prefix = folder.path.hasSuffix("/") ? folder.path : folder.path + "/"
+                guard target.path.hasPrefix(prefix) else { throw FileBufferError.invalidPath(url) }
+            } else {
+                target = url
+            }
+            let file = try FileBuffer.read(target, allowMissing: allowMissing)
             let language = override ?? SyntaxLanguage.detected(at: file.url)
             return (file, SyntaxEngine.prepareSmallDocument(file.text, language: language))
         }.value

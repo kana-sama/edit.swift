@@ -5,16 +5,18 @@ import UniformTypeIdentifiers
 @MainActor
 final class UntitledCloseSheet: NSDocument {
     private let parent: NSWindow
+    private let folder: URL?
     private let saveDraft: (URL, FileTextEncoding) async -> Bool
     private lazy var encodingAccessory = SaveEncodingAccessory(selected: .utf8)
     private var closeReply: CheckedContinuation<Bool, Never>?
 
-    init(window: NSWindow, saveDraft: @escaping (URL, FileTextEncoding) async -> Bool) {
+    init(window: NSWindow, folder: URL?, saveDraft: @escaping (URL, FileTextEncoding) async -> Bool) {
         parent = window
+        self.folder = folder
         self.saveDraft = saveDraft
         super.init()
         fileType = UTType.plainText.identifier
-        displayName = window.title
+        displayName = "Untitled"
         updateChangeCount(.changeDone)
     }
 
@@ -44,6 +46,7 @@ final class UntitledCloseSheet: NSDocument {
 
     override func prepareSavePanel(_ panel: NSSavePanel) -> Bool {
         panel.nameFieldStringValue = "Untitled.txt"
+        if let folder { panel.directoryURL = folder }
         panel.allowsOtherFileTypes = true
         panel.showsTagField = false
         panel.canSelectHiddenExtension = false

@@ -172,7 +172,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     func updateName() {
-        resultFile.stringValue = document.window.title
+        resultFile.stringValue = document.displayName
         resultIcon.image = FileIcons.image(for: document.fileURL, appearance: sidebar.view.effectiveAppearance,
                                            language: document.manualSyntaxLanguage?.iconIdentifier)
     }

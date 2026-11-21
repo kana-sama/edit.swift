@@ -15,12 +15,28 @@ struct FileIdentity: Codable, Equatable, Hashable, Sendable {
     }
 
     static func at(_ url: URL) -> Self? {
+        at(url, type: S_IFREG)
+    }
+
+    fileprivate static func directory(at url: URL) -> Self? {
+        at(url, type: S_IFDIR)
+    }
+
+    fileprivate func isMissing(at url: URL, on volume: URL?) -> Bool {
         var status = stat()
-        guard statusAt(url, &status) == 0, status.st_mode & S_IFMT == S_IFREG else { return nil }
+        let error = Self.statusAt(url, &status)
+        guard error == ENOENT || error == ENOTDIR else { return false }
+        guard let volume, Self.statusAt(volume, &status) == 0 else { return false }
+        return status.st_dev == device
+    }
+
+    private static func at(_ url: URL, type: mode_t) -> Self? {
+        var status = stat()
+        guard statusAt(url, &status) == 0, status.st_mode & S_IFMT == type else { return nil }
         return Self(status)
     }
 
-    fileprivate static func statusAt(_ url: URL, _ status: inout stat) -> Int32 {
+    private static func statusAt(_ url: URL, _ status: inout stat) -> Int32 {
         url.withUnsafeFileSystemRepresentation { path in
             guard let path else { return EINVAL }
             return stat(path, &status) == 0 ? 0 : errno
@@ -44,11 +60,7 @@ struct RecentFile: Codable, Hashable, Sendable {
     }
 
     var isMissing: Bool {
-        var status = stat()
-        let error = FileIdentity.statusAt(url, &status)
-        guard error == ENOENT || error == ENOTDIR else { return false }
-        guard let volume, FileIdentity.statusAt(volume, &status) == 0 else { return false }
-        return status.st_dev == identity.device
+        identity.isMissing(at: url, on: volume)
     }
 
     var displayPath: String {
@@ -56,21 +68,61 @@ struct RecentFile: Codable, Hashable, Sendable {
     }
 }
 
+struct RecentFolder: Codable, Hashable, Sendable {
+    let url: URL
+    let canonicalURL: URL
+    let identity: FileIdentity
+    let volume: URL?
+    let opened: Date
+    fileprivate var lastFileURL: URL?
+
+    fileprivate static func read(_ url: URL) -> Self? {
+        let url = url.standardizedFileURL
+        let canonical = FileBuffer.canonicalURL(url)
+        guard let identity = FileIdentity.directory(at: canonical) else { return nil }
+        let volume = try? canonical.resourceValues(forKeys: [.volumeURLKey]).volume
+        return Self(url: url, canonicalURL: canonical, identity: identity, volume: volume, opened: Date())
+    }
+
+    var displayPath: String {
+        (url.path as NSString).abbreviatingWithTildeInPath
+    }
+
+    fileprivate var isMissing: Bool {
+        identity.isMissing(at: url, on: volume)
+    }
+
+    fileprivate func contains(_ file: URL) -> Bool {
+        let folderPath = canonicalURL.path
+        let prefix = folderPath.hasSuffix("/") ? folderPath : folderPath + "/"
+        return file.path.hasPrefix(prefix)
+    }
+}
+
 @MainActor
 final class RecentFiles {
+    private struct History: Codable, Sendable {
+        var files: [RecentFile]
+        var folders: [RecentFolder]
+    }
+
     private let url: URL
-    private let initialRead: Task<[RecentFile], Never>
+    private let initialRead: Task<History, Never>
     private var loaded = false
     private var recording: Task<Void, Never>?
     private var writing: Task<Void, Never>?
     private(set) var entries: [RecentFile] = []
+    private(set) var folders: [RecentFolder] = []
 
     init(url: URL) {
         self.url = url
         initialRead = Task.detached(priority: .utility) {
-            guard let bytes = try? Data(contentsOf: url),
-                  let entries = try? JSONDecoder().decode([RecentFile].self, from: bytes) else { return [] }
-            return Array(entries.prefix(500))
+            guard let bytes = try? Data(contentsOf: url) else { return History(files: [], folders: []) }
+            let decoder = JSONDecoder()
+            let history = try? decoder.decode(History.self, from: bytes)
+            let legacyFiles = history == nil ? try? decoder.decode([RecentFile].self, from: bytes) : nil
+            let files = history?.files ?? legacyFiles ?? []
+            return History(files: Array(files.prefix(500)), folders: history?.folders ?? [])
         }
     }
 
@@ -78,24 +130,68 @@ final class RecentFiles {
         guard !loaded else { return }
         let existing = await initialRead.value
         if !loaded {
-            entries = existing
+            entries = existing.files
+            folders = existing.folders
             loaded = true
         }
     }
 
-    func record(_ url: URL) async {
-        let metadata = Task.detached { RecentFile.read(url) }
+    func record(_ url: URL, in folder: URL? = nil) async {
+        let metadata = Task.detached {
+            let entry = RecentFile.read(url)
+            let canonicalFolder = folder.map(FileBuffer.canonicalURL)
+            return (entry, canonicalFolder)
+        }
+        await enqueueRecording {
+            let (entry, canonicalFolder) = await metadata.value
+            guard let entry else { return }
+            self.promote(entry, in: canonicalFolder)
+            self.persist()
+        }
+    }
+
+    func recordFolder(_ url: URL, opening file: URL? = nil) async {
+        let metadata = Task.detached { (RecentFolder.read(url), file.flatMap(RecentFile.read)) }
+        await enqueueRecording {
+            let (recordedFolder, openedFile) = await metadata.value
+            guard var folder = recordedFolder else { return }
+            let matches: (RecentFolder) -> Bool = { [folder] in
+                $0.url.path == folder.url.path || $0.canonicalURL == folder.canonicalURL || $0.identity == folder.identity
+            }
+            folder.lastFileURL = self.folders.lazy.filter(matches).compactMap(\.lastFileURL).first(where: folder.contains)
+            self.folders.removeAll(where: matches)
+            self.folders.insert(folder, at: 0)
+            if let openedFile { self.promote(openedFile, in: folder.canonicalURL) }
+            self.persist()
+        }
+    }
+
+    private func promote(_ entry: RecentFile, in canonicalFolder: URL?) {
+        entries.removeAll {
+            $0.url == entry.url || $0.canonicalURL == entry.canonicalURL || $0.identity == entry.identity
+        }
+        entries.insert(entry, at: 0)
+        if entries.count > 500 { entries.removeLast(entries.count - 500) }
+        if let canonicalFolder, let index = folders.firstIndex(where: { $0.canonicalURL == canonicalFolder }),
+           folders[index].contains(entry.canonicalURL) {
+            folders[index].lastFileURL = entry.canonicalURL
+        }
+    }
+
+    func lastFile(in folder: URL) async -> URL? {
+        let canonical = Task.detached { FileBuffer.canonicalURL(folder) }
+        await recording?.value
+        await load()
+        let canonicalFolder = await canonical.value
+        return folders.first(where: { $0.canonicalURL == canonicalFolder })?.lastFileURL
+    }
+
+    private func enqueueRecording(_ update: @escaping @MainActor () async -> Void) async {
         let previous = recording
         let operation = Task {
             await previous?.value
-            guard let entry = await metadata.value else { return }
             await load()
-            entries.removeAll {
-                $0.url == entry.url || $0.canonicalURL == entry.canonicalURL || $0.identity == entry.identity
-            }
-            entries.insert(entry, at: 0)
-            if entries.count > 500 { entries.removeLast(entries.count - 500) }
-            persist()
+            await update()
         }
         recording = operation
         await operation.value
@@ -108,17 +204,26 @@ final class RecentFiles {
 
     func prune() async {
         await load()
-        let snapshot = entries
-        let missing = await Task.detached(priority: .utility) { Set(snapshot.filter(\.isMissing)) }.value
-        let previousCount = entries.count
-        entries.removeAll { missing.contains($0) }
-        if entries.count != previousCount { persist() }
+        let snapshot = History(files: entries, folders: folders)
+        let (missingFiles, missingFolders) = await Task.detached(priority: .utility) {
+            (Set(snapshot.files.filter(\.isMissing)), Set(snapshot.folders.filter(\.isMissing)))
+        }.value
+        let previousCount = entries.count + folders.count
+        entries.removeAll { missingFiles.contains($0) }
+        folders.removeAll { missingFolders.contains($0) }
+        if entries.count + folders.count != previousCount { persist() }
     }
 
     func removeIfMissing(_ url: URL) async {
-        guard let entry = entries.first(where: { $0.url == url }) else { return }
-        guard await Task.detached(operation: { entry.isMissing }).value, entries.contains(entry) else { return }
-        dismiss(entry)
+        if let entry = entries.first(where: { $0.url == url }),
+           await Task.detached(operation: { entry.isMissing }).value, entries.contains(entry) {
+            dismiss(entry)
+        }
+        if let folder = folders.first(where: { $0.url.path == url.path }),
+           await Task.detached(operation: { folder.isMissing }).value, folders.contains(folder) {
+            folders.removeAll { $0 == folder }
+            persist()
+        }
     }
 
     func finishWrites() async {
@@ -127,7 +232,7 @@ final class RecentFiles {
     }
 
     private func persist() {
-        let snapshot = entries
+        let snapshot = History(files: entries, folders: folders)
         let previous = writing
         let url = url
         writing = Task.detached(priority: .utility) {
@@ -136,7 +241,7 @@ final class RecentFiles {
                 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try JSONEncoder().encode(snapshot).write(to: url, options: .atomic)
             } catch {
-                NSLog("Could not save recent files: %@", error.localizedDescription)
+                NSLog("Could not save recent files and folders: %@", error.localizedDescription)
             }
         }
     }
