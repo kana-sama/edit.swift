@@ -58,6 +58,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     makeDocument()
                     let sample = try await FilesCheck.run(in: self)
                     try ControlPanel(app: self).checkHidden(in: sample)
+                    try await ControlPanel(app: self).checkPins(in: sample)
                     try await SyntaxCheck.run(in: self)
                     try await FindCheck.run(in: self)
                     try checkWindow(sample.window, screenshot: CommandLine.arguments.dropFirst(2).first)

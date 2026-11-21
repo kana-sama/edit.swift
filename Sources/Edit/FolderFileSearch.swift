@@ -41,7 +41,7 @@ enum FolderFileSearch {
         fileprivate let files: [ControlEntry]
         fileprivate let recentScope: RecentScope
 
-        func rank(_ recent: [ControlEntry], query: String) -> [ControlMatch] {
+        func rank(_ recent: [ControlEntry], query: String, pinnedFiles: [ControlEntry] = []) -> [ControlMatch] {
             let eligible: [ControlEntry]
             switch recentScope {
             case .project(var exclusions):
@@ -49,7 +49,7 @@ enum FolderFileSearch {
             case .listedFiles(let paths):
                 eligible = recent.filter { $0.recent.map { paths.contains($0.canonicalURL.path) } == true }
             }
-            return FolderFileSearch.rank(eligible, folderFiles: files, query: query)
+            return FolderFileSearch.rank(eligible, folderFiles: files, pinnedFiles: pinnedFiles, query: query)
         }
     }
 
@@ -133,16 +133,21 @@ enum FolderFileSearch {
                             detail: parent.isEmpty ? nil : parent, folderFileURL: url, folderFileIdentity: identity)
     }
 
-    private static func rank(_ recent: [ControlEntry], folderFiles: [ControlEntry], query: String) -> [ControlMatch] {
-        let matches = ControlMatching.rank(recent + folderFiles, query: query)
+    private static func rank(_ recent: [ControlEntry], folderFiles: [ControlEntry], pinnedFiles: [ControlEntry],
+                             query: String) -> [ControlMatch] {
+        let matches = ControlMatching.rank(recent + folderFiles + pinnedFiles, query: query)
 
         // Rank both paths before merging. A recent may use an alias while the query matches the real name.
         let matchingRecents = matches.compactMap { $0.entry.recent }
         let paths = Set(matchingRecents.map { $0.canonicalURL.path })
         let identities = Set(matchingRecents.map(\.identity))
+        var seen: Set<String> = []
         return matches.filter { match in
-            guard let url = match.entry.folderFileURL else { return true }
-            return !paths.contains(url.path) && match.entry.folderFileIdentity.map(identities.contains) != true
+            if let url = match.entry.folderFileURL,
+               paths.contains(url.path) || match.entry.folderFileIdentity.map(identities.contains) == true {
+                return false
+            }
+            return pinnedFiles.isEmpty || seen.insert(match.entry.id).inserted
         }
     }
 }

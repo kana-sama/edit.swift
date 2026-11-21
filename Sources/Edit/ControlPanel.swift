@@ -16,7 +16,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     private let rowSpacing: CGFloat = 2
     private static let searchImage = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)?
         .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
+    private static let pinDragType = NSPasteboard.PasteboardType("dev.edit-swift.control-pin")
+    private static let pinImage = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: nil)?
+        .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
     private lazy var history = ControlCommandHistory(persist: !app.isAgentCheck)
+    private lazy var pins = ControlPins(defaults: app.isAgentCheck ? nil : .standard)
+    private var pinsChangedInPlace = false
+    private var cachedPinnedRows: [Int]?
     private var commands: [String: ControlCommand] = [:]
     private var mode: Mode = .files
     private let progress = NSProgressIndicator()
@@ -77,8 +83,11 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         input.stringValue = query
         clearButton.isHidden = query.isEmpty
         let searchesFolder = mode == .files && document.folderURL != nil
-        let rows = searchesFolder ? [] : ControlMatching.rank(sourceEntries(), query: query)
-        apply(rows, selected: failure?.id ?? initialID, error: failure?.message)
+        let source = searchesFolder ? [] : sourceEntries()
+        let pinnedFiles = mode == .files && !searchesFolder ? pinnedFileEntries(reusing: source) : []
+        let rows = searchesFolder ? [] : ControlMatching.rank(includingPins(pinnedFiles, in: source), query: query)
+        apply(searchesFolder ? [] : orderedRows(rows, pinnedFiles: pinnedFiles, query: query),
+              selected: failure?.id ?? initialID, error: failure?.message)
         if searchesFolder {
             if failure == nil { feedback.isHidden = true }
             search(preserving: failure?.id ?? initialID, error: failure?.message)
@@ -130,7 +139,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         Task { [weak self] in
             guard let self else { return }
             await app.recentFiles.prune()
-            guard mode == .files, self.document === document, current == opening, !isHovering,
+            guard mode == .files, self.document === document, current == opening, !pinsChangedInPlace, !isHovering,
                   app.recentFiles.entries != recent else { return }
             search(preserving: selectedID)
         }
@@ -148,6 +157,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         resultsFolder = nil
         pending = false
         deferredRefresh = false
+        pinsChangedInPlace = false
         setSearching(false)
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
@@ -286,12 +296,15 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         table.allowsEmptySelection = true
         table.target = self
         table.action = #selector(activateClickedRow)
+        table.registerForDraggedTypes([Self.pinDragType])
+        table.setDraggingSourceOperationMask(.move, forLocal: true)
+        table.setDraggingSourceOperationMask([], forLocal: false)
         table.appearanceChanged = { [weak self] in self?.table.reloadData() }
         table.hoverChanged = { [weak self] previous, next in
             self?.updateButtons(at: [previous, next])
             if next < 0, let self, self.deferredRefresh {
                 self.deferredRefresh = false
-                self.search(preserving: self.selectedID)
+                if !self.pinsChangedInPlace { self.search(preserving: self.selectedID) }
             }
         }
         scroll.documentView = table
@@ -354,19 +367,49 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     }
 
     private func fileEntries() -> [ControlEntry] {
-        let folder = document?.folderURL
-        return app.recentFiles.entries.compactMap { file in
-            guard !FolderFileSearch.isExcludedFile(file.url), !FolderFileSearch.isExcludedFile(file.canonicalURL) else {
-                return nil
-            }
-            let relative = folder.flatMap {
-                FolderFileSearch.relativeDirectory(of: file.url, in: $0)
-                    ?? FolderFileSearch.relativeDirectory(of: file.canonicalURL, in: $0)
-            }
-            let parent = relative ?? (file.url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath
-            return ControlEntry(id: file.url.absoluteString, title: file.url.lastPathComponent,
-                                detail: parent.isEmpty ? nil : parent, recent: file)
+        app.recentFiles.entries.compactMap { fileEntry($0.url, canonical: $0.canonicalURL, recent: $0) }
+    }
+
+    private func fileEntry(_ url: URL, canonical: URL, recent: RecentFile? = nil,
+                           identity: FileIdentity? = nil) -> ControlEntry? {
+        guard !FolderFileSearch.isExcludedFile(url), !FolderFileSearch.isExcludedFile(canonical) else { return nil }
+        let relative = document?.folderURL.flatMap { folder in
+            FolderFileSearch.relativeDirectory(of: url, in: folder)
+                ?? FolderFileSearch.relativeDirectory(of: canonical, in: folder)
         }
+        let parent = relative ?? (url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath
+        return ControlEntry(id: url.absoluteString, title: url.lastPathComponent,
+                            detail: parent.isEmpty ? nil : parent, recent: recent,
+                            folderFileURL: recent == nil ? url : nil, folderFileIdentity: identity)
+    }
+
+    private func pinnedFileEntries(reusing recent: [ControlEntry]) -> [ControlEntry] {
+        pins.entries.compactMap { pin in
+            guard case .file(let url, let canonical, let identity) = pin else { return nil }
+            return recent.first(where: pin.matches) ?? fileEntry(url, canonical: canonical, identity: identity)
+        }
+    }
+
+    private func includingPins(_ pinned: [ControlEntry], in source: [ControlEntry]) -> [ControlEntry] {
+        guard !pinned.isEmpty else { return source }
+        let ids = Set(source.map(\.id))
+        return source + pinned.filter { !ids.contains($0.id) }
+    }
+
+    private func orderedRows(_ results: [ControlMatch], pinnedFiles: [ControlEntry], query: String) -> [ControlMatch] {
+        guard mode != .languages, query.allSatisfy(\.isWhitespace), !pins.entries.isEmpty else { return results }
+        let prefix: [ControlMatch]
+        if mode == .files {
+            prefix = ControlMatching.rank(pinnedFiles, query: "")
+        } else {
+            let byCommand = Dictionary(results.map { ($0.entry.id, $0) }, uniquingKeysWith: { first, _ in first })
+            prefix = pins.entries.compactMap { pin in
+                guard case .command(let id) = pin else { return nil }
+                return byCommand[id]
+            }
+        }
+        let pinnedIDs = Set(prefix.map { $0.entry.id })
+        return prefix + results.filter { !pinnedIDs.contains($0.entry.id) }
     }
 
     private var initialID: String? {
@@ -419,13 +462,17 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         request?.cancel()
         generation &+= 1
         let current = generation
+        pinsChangedInPlace = false
         let rows = sourceEntries()
+        let pinnedFiles = mode == .files ? pinnedFileEntries(reusing: rows) : []
         let query = input.stringValue
         let folder = mode == .files ? document?.folderURL : nil
         let path = folder == nil ? nil : FolderFileSearch.DirectoryQuery(query)
         let scope = folder.map { FolderFileSearch.Scope(folder: $0, components: path?.components) }
         let scan = scanFolder(query.allSatisfy(\.isWhitespace) ? nil : scope)
         let filter = path?.filter ?? query
+        let searchablePins = path == nil ? pinnedFiles : []
+        let rowsWithPins = folder == nil ? includingPins(pinnedFiles, in: rows) : rows
         clearButton.isHidden = query.isEmpty
         if error == nil { feedback.stringValue = "" }
         pending = true
@@ -434,12 +481,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
                 if let scan {
                     let index = await scan.value
                     guard !Task.isCancelled else { return [ControlMatch]() }
-                    return index.rank(rows, query: filter)
+                    return index.rank(rows, query: filter, pinnedFiles: searchablePins)
                 }
                 if let folder {
                     return FolderFileSearch.recentMatches(rows, in: folder)
                 }
-                return ControlMatching.rank(rows, query: query)
+                return ControlMatching.rank(rowsWithPins, query: query)
             }
             Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(150))
@@ -460,7 +507,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             pending = false
             resultsFolder = folder
             setSearching(false)
-            apply(results, selected: id, error: error)
+            apply(orderedRows(results, pinnedFiles: pinnedFiles, query: query), selected: id, error: error)
         }
     }
 
@@ -486,6 +533,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
 
     private func apply(_ results: [ControlMatch], selected id: String?, error: String? = nil) {
         entries = results
+        cachedPinnedRows = nil
         updatingRows = true
         table.reloadData()
         feedback.stringValue = error ?? (entries.isEmpty ? "No matching results" : "")
@@ -541,6 +589,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             case (126, []):
                 moveSelection(by: -1)
                 return nil
+            case (36, .shift), (76, .shift):
+                if !event.isARepeat { togglePin(at: table.selectedRow) }
+                return nil
+            case (125, [.option, .shift]), (126, [.option, .shift]):
+                guard pin(at: table.selectedRow) != nil else { break }
+                moveSelectedPin(by: event.keyCode == 125 ? 1 : -1)
+                return nil
             case (36, []), (76, []):
                 activate(row: table.selectedRow)
                 return nil
@@ -589,6 +644,109 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let row = (max(0, table.selectedRow) + step + entries.count) % entries.count
         table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         reveal(row)
+    }
+
+    private func pin(at row: Int) -> ControlPin? {
+        guard mode != .languages, entries.indices.contains(row) else { return nil }
+        return pins.pin(matching: entries[row].entry)
+    }
+
+    private func togglePin(at row: Int) {
+        guard !pending, mode != .languages, entries.indices.contains(row) else { return }
+        let entry = entries[row].entry
+        let pin: ControlPin
+        if let url = entry.fileURL {
+            pin = .file(url, canonicalURL: entry.recent?.canonicalURL ?? url,
+                        identity: entry.recent?.identity ?? entry.folderFileIdentity)
+        } else {
+            guard mode == .commands else { return }
+            pin = .command(entry.id)
+        }
+        pins.toggle(pin, for: entry)
+        cachedPinnedRows = nil
+        pinsChangedInPlace = true
+        table.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
+    }
+
+    private var pinnedRows: [Int] {
+        if let cachedPinnedRows { return cachedPinnedRows }
+        var unique: Set<ControlPin> = []
+        let rows = entries.indices.filter { row in
+            guard let pin = pin(at: row) else { return false }
+            return unique.insert(pin).inserted
+        }
+        cachedPinnedRows = rows
+        return rows
+    }
+
+    private func moveSelectedPin(by offset: Int) {
+        guard !pending else { return }
+        let rows = pinnedRows
+        guard let index = rows.firstIndex(of: table.selectedRow), rows.indices.contains(index + offset) else { return }
+        _ = movePin(from: table.selectedRow, to: rows[index + offset], among: rows)
+    }
+
+    private func movePin(from source: Int, to destination: Int, among rows: [Int]) -> Bool {
+        guard source != destination, let from = rows.firstIndex(of: source),
+              let to = rows.firstIndex(of: destination) else { return false }
+        var reordered = rows.map { entries[$0] }
+        let moving = reordered.remove(at: from)
+        reordered.insert(moving, at: to)
+        let order = reordered.compactMap { pins.pin(matching: $0.entry) }
+        guard order.count == reordered.count else { return false }
+        pins.reorder(order)
+        cachedPinnedRows = nil
+        pinsChangedInPlace = true
+
+        // Only the slots occupied by pinned items participate, including in a filtered list.
+        let range = min(from, to)...max(from, to)
+        for index in range { entries[rows[index]] = reordered[index] }
+        let changed = IndexSet(range.map { rows[$0] })
+        table.reloadData(forRowIndexes: changed, columnIndexes: IndexSet(integer: 0))
+        table.selectRowIndexes(IndexSet(integer: destination), byExtendingSelection: false)
+        reveal(destination)
+        return true
+    }
+
+    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
+        guard !pending, pin(at: row) != nil else { return nil }
+        let item = NSPasteboardItem()
+        item.setString(entries[row].entry.id, forType: Self.pinDragType)
+        return item
+    }
+
+    func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession,
+                   willBeginAt point: NSPoint, forRowIndexes rowIndexes: IndexSet) {
+        pinsChangedInPlace = true
+    }
+
+    func tableView(_ tableView: NSTableView, validateDrop info: any NSDraggingInfo, proposedRow row: Int,
+                   proposedDropOperation operation: NSTableView.DropOperation) -> NSDragOperation {
+        guard let drop = pinDrop(info, row: row, operation: operation) else { return [] }
+        tableView.setDropRow(drop.from < drop.to ? drop.to + 1 : drop.to, dropOperation: .above)
+        return .move
+    }
+
+    func tableView(_ tableView: NSTableView, acceptDrop info: any NSDraggingInfo, row: Int,
+                   dropOperation operation: NSTableView.DropOperation) -> Bool {
+        guard let drop = pinDrop(info, row: row, operation: operation) else { return false }
+        return movePin(from: drop.from, to: drop.to, among: drop.rows)
+    }
+
+    private func pinDrop(_ info: any NSDraggingInfo, row: Int,
+                         operation: NSTableView.DropOperation) -> (from: Int, to: Int, rows: [Int])? {
+        guard !pending, (info.draggingSource as? NSTableView) === table,
+              let id = info.draggingPasteboard.string(forType: Self.pinDragType) else { return nil }
+        let rows = pinnedRows
+        guard let source = rows.first(where: { entries[$0].entry.id == id }) else { return nil }
+        var boundary = row
+        if operation == .on, entries.indices.contains(row) {
+            let point = table.convert(info.draggingLocation, from: nil)
+            if point.y >= table.rect(ofRow: row).midY { boundary += 1 }
+        }
+        let destination = source < boundary ? rows.last { $0 < boundary } : rows.first { $0 >= boundary }
+        guard let destination, destination != source else { return nil }
+        return (source, destination, rows)
     }
 
     private func reveal(_ row: Int) {
@@ -767,6 +925,123 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
     }
 
+    func checkPins(in document: DocumentWindow) async throws {
+        guard app.isAgentCheck else { return }
+        try ControlPinsCheck.run()
+        let originalText = document.editor.string
+        let originalFile = document.fileURL
+        defer { dismiss(restoreFocus: false) }
+
+        func key(_ characters: String, _ code: UInt16, _ modifiers: NSEvent.ModifierFlags) -> NSEvent {
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,
+                             timestamp: 0, windowNumber: panel.windowNumber, context: nil,
+                             characters: characters, charactersIgnoringModifiers: characters,
+                             isARepeat: false, keyCode: code)!
+        }
+
+        let toggle = key("\r", 36, .shift)
+        let moveUp = key("\u{F700}", 126, [.option, .shift])
+        let moveDown = key("\u{F701}", 125, [.option, .shift])
+        show(in: document, mode: .commands)
+        await request?.value
+        guard entries.count > 4 else { throw CheckFailure.invalidPins("load command rows") }
+        let starting = entries.map { $0.entry.id }
+        let second = starting[2]
+        let fourth = starting[4]
+        table.selectRowIndexes(IndexSet(integer: 2), byExtendingSelection: false)
+        guard intercept(toggle) == nil, pin(at: 2) == .command(second),
+              table.selectedRow == 2, entries.map({ $0.entry.id }) == starting,
+              document.editor.string == originalText else {
+            throw CheckFailure.invalidPins("toggle a command without moving, selecting, or running it")
+        }
+        table.selectRowIndexes(IndexSet(integer: 4), byExtendingSelection: false)
+        _ = intercept(toggle)
+        _ = intercept(moveUp)
+        guard entries[2].entry.id == fourth, entries[3].entry.id == starting[3],
+              entries[4].entry.id == second, table.selectedRow == 2 else {
+            throw CheckFailure.invalidPins("move only the pinned slots, including immediately after pinning")
+        }
+        let drag = self.tableView(table, pasteboardWriterForRow: 2) as? NSPasteboardItem
+        guard drag?.string(forType: Self.pinDragType) == fourth,
+              self.tableView(table, pasteboardWriterForRow: 3) == nil else {
+            throw CheckFailure.invalidPins("export only pinned rows for local dragging")
+        }
+
+        show(in: document, mode: .commands)
+        guard entries.prefix(2).map({ $0.entry.id }) == [fourth, second] else {
+            throw CheckFailure.invalidPins("show the saved command order on reopening")
+        }
+        let reordered = entries.map { $0.entry.id }
+        _ = intercept(toggle)
+        guard entries.map({ $0.entry.id }) == reordered, pin(at: 0) == nil, table.selectedRow == 0 else {
+            throw CheckFailure.invalidPins("unpin in place with selection intact")
+        }
+        input.stringValue = "save"
+        search()
+        await request?.value
+        guard entries.first?.entry.title == "File: Save" else { throw CheckFailure.invalidPins("rank filtered commands normally") }
+        clearQuery()
+        await request?.value
+        guard entries.first?.entry.id == second else { throw CheckFailure.invalidPins("apply pin order on clearing the query") }
+
+        show(in: document, mode: .files)
+        await request?.value
+        guard entries.count >= 2 else { throw CheckFailure.invalidPins("load recent file rows") }
+        let recentOrder = entries.map { $0.entry.id }
+        table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        _ = intercept(toggle)
+        guard entries.map({ $0.entry.id }) == recentOrder, pin(at: 1) != nil,
+              document.fileURL == originalFile else { throw CheckFailure.invalidPins("pin a file in place without opening it") }
+        _ = intercept(key("\u{F700}", 126, []))
+        _ = intercept(toggle)
+        _ = intercept(moveDown)
+        show(in: document, mode: .files)
+        await request?.value
+        guard entries.prefix(2).map({ $0.entry.id }) == [recentOrder[1], recentOrder[0]] else {
+            throw CheckFailure.invalidPins("put files first in their manual order")
+        }
+        let firstEntry = entries[0].entry
+        if let recent = firstEntry.recent {
+            app.recentFiles.dismiss(recent)
+            show(in: document, mode: .files)
+            await request?.value
+            guard entries.first?.entry.fileURL == firstEntry.fileURL, entries.first?.entry.recent == nil else {
+                throw CheckFailure.invalidPins("keep files pinned independently of recent history")
+            }
+            if let url = firstEntry.fileURL { await app.recentFiles.record(url) }
+        }
+
+        let root = FileManager.default.temporaryDirectory.appending(path: "Pinned folder check \(UUID())")
+        let excluded = root.appending(path: "node_modules")
+        try FileManager.default.createDirectory(at: excluded, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let module = excluded.appending(path: "PinnedModule.js")
+        try Data("const test = true".utf8).write(to: module)
+        let folderDocument = app.makeDocument()
+        defer { folderDocument.window.close() }
+        _ = try await app.openFile(root, in: folderDocument)
+        show(in: folderDocument, mode: .files)
+        input.stringValue = "node_modules/"
+        search()
+        await request?.value
+        guard entries.count == 1, entries.first?.entry.title == module.lastPathComponent,
+              entries.first?.entry.recent == nil else { throw CheckFailure.invalidPins("load an explicit folder result") }
+        _ = intercept(toggle)
+        _ = intercept(moveUp)
+        clearQuery()
+        await request?.value
+        guard entries.first?.entry.id == recentOrder[1],
+              entries.contains(where: { $0.entry.title == module.lastPathComponent }) else {
+            throw CheckFailure.invalidPins("retain an explicitly pinned excluded file in an empty query")
+        }
+        input.stringValue = "PinnedModule"
+        search()
+        await request?.value
+        guard entries.count == 1, entries.first?.entry.title == module.lastPathComponent else {
+            throw CheckFailure.invalidPins("find the pinned file with an ordinary query")
+        }
+    }
+
     private func checkKeyboardRouting() throws {
         let probe = app.makeDocument()
         let text = "one one\ntwo\nthree"
@@ -841,6 +1116,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         case invalidPanel
         case invalidSearchField
         case invalidFolderResults(String)
+        case invalidPins(String)
         case shortcutEscaped
 
         var errorDescription: String? {
@@ -849,6 +1125,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             case .invalidSearchField: "Control did not preserve editing, switching modes, or clearing the search."
             case .shortcutEscaped: "Control did not keep document shortcuts separate from palette commands."
             case .invalidFolderResults(let stage): "Control failed the folder search check for \(stage)."
+            case .invalidPins(let stage): "Control pins could not \(stage)."
             }
         }
     }
@@ -949,25 +1226,58 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         if let detail = match.entry.detail {
             views.append(makeLabel(detail, highlights: match.detailCharacters, secondary: true, lineBreak: .byTruncatingHead))
         }
+        if mode != .languages || match.entry.shortcut != nil { views.append(NSView()) }
+        if mode == .commands { views.append(pinMarker(for: row)) }
         if let shortcut = match.entry.shortcut {
-            views.append(NSView())
             views.append(makeLabel(shortcut, highlights: [], secondary: true))
         }
-        if match.entry.recent != nil {
-            views.append(NSView())
-            let button = NSButton(image: NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: "Remove from recent files")!,
-                                  target: self, action: #selector(dismissRecent(_:)))
-            button.isBordered = false
-            button.identifier = NSUserInterfaceItemIdentifier(match.entry.id)
-            button.widthAnchor.constraint(equalToConstant: 20).isActive = true
-            button.alphaValue = row == table.selectedRow || row == table.hovered ? 1 : 0
-            button.isEnabled = button.alphaValue > 0
-            views.append(button)
-        }
+        if mode == .files { views.append(fileAccessory(for: match.entry, row: row)) }
         let stack = NSStackView(views: views)
         stack.alignment = .centerY
         stack.spacing = 7
         return stack
+    }
+
+    private func pinMarker(for row: Int) -> NSImageView {
+        let marker = NSImageView()
+        marker.image = Self.pinImage
+        marker.imageScaling = .scaleNone
+        marker.contentTintColor = .secondaryLabelColor
+        let pinned = pin(at: row) != nil
+        marker.alphaValue = pinned ? 1 : 0
+        marker.setAccessibilityElement(pinned)
+        marker.setAccessibilityLabel("Pinned")
+        marker.widthAnchor.constraint(equalToConstant: 17).isActive = true
+        marker.heightAnchor.constraint(equalToConstant: 17).isActive = true
+        return marker
+    }
+
+    private func fileAccessory(for entry: ControlEntry, row: Int) -> NSView {
+        let accessory = ControlFileAccessory()
+        accessory.widthAnchor.constraint(equalToConstant: 20).isActive = true
+        accessory.heightAnchor.constraint(equalToConstant: 19).isActive = true
+        let marker = pinMarker(for: row)
+        marker.translatesAutoresizingMaskIntoConstraints = false
+        accessory.addSubview(marker)
+        NSLayoutConstraint.activate([
+            marker.centerXAnchor.constraint(equalTo: accessory.centerXAnchor),
+            marker.centerYAnchor.constraint(equalTo: accessory.centerYAnchor),
+        ])
+        if entry.recent != nil && pin(at: row) == nil {
+            let image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: "Remove from recent files")!
+            let button = NSButton(image: image, target: self, action: #selector(dismissRecent(_:)))
+            button.isBordered = false
+            button.identifier = NSUserInterfaceItemIdentifier(entry.id)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            accessory.addSubview(button)
+            NSLayoutConstraint.activate([
+                button.centerXAnchor.constraint(equalTo: accessory.centerXAnchor),
+                button.centerYAnchor.constraint(equalTo: accessory.centerYAnchor),
+            ])
+            accessory.dismissButton = button
+            updateDismissButton(button, at: row)
+        }
+        return accessory
     }
 
     private func makeLabel(
@@ -1002,12 +1312,22 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     private func updateButtons(at indices: [Int]) {
         for row in indices where entries.indices.contains(row) {
             guard let stack = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? NSStackView,
-                  let button = stack.arrangedSubviews.last as? NSButton else { continue }
-            let visible = row == table.selectedRow || row == table.hovered
-            button.alphaValue = visible ? 1 : 0
-            button.isEnabled = visible
+                  let accessory = stack.arrangedSubviews.last as? ControlFileAccessory,
+                  let button = accessory.dismissButton else { continue }
+            updateDismissButton(button, at: row)
         }
     }
+
+    private func updateDismissButton(_ button: NSButton, at row: Int) {
+        let visible = row == table.selectedRow || row == table.hovered
+        button.alphaValue = visible ? 1 : 0
+        button.isEnabled = visible
+    }
+}
+
+@MainActor
+private final class ControlFileAccessory: NSView {
+    weak var dismissButton: NSButton?
 }
 
 @MainActor
