@@ -5,10 +5,19 @@ import AppKit
 final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, NSMenuDelegate {
     let isAgentCheck = CommandLine.arguments.dropFirst().first == "--agent-check"
     private lazy var sessionStore = SessionStore.application()
+    private weak var recentMenu: NSMenu?
+    private(set) lazy var recentFiles = RecentFiles(url: recentHistoryURL)
+
+    private var recentHistoryURL: URL {
+        let folder = isAgentCheck
+            ? URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory())
+            : sessionStore.url.deletingLastPathComponent()
+        return folder.appendingPathComponent("recent-files.json")
+    }
     private var startup: Task<Void, Never>?
     private var receivedInitialSession = false
     private var pendingFiles: [(urls: [URL], allowMissing: Bool)] = []
-    private var saveTargets: [URL: DocumentWindow] = [:]
+    private var saveTargets: [URL: (document: DocumentWindow, identity: FileIdentity?)] = [:]
     private var lastPlacement: WindowPlacement?
     private var sessionReadFailed = false
     private var pendingFullScreen: [DocumentWindow] = []
@@ -65,6 +74,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         }
 
         startup = Task { @MainActor in
+            await recentFiles.load()
+            Task { await recentFiles.prune() }
             let store = sessionStore
             do {
                 if let previous = try await Task.detached(operation: { try store.read() }).value {
@@ -96,6 +107,24 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     func menuWillOpen(_ menu: NSMenu) {
         activeDocument?.requestAutosave()
+        guard let recentMenu, menu === recentMenu || menu === recentMenu.supermenu else { return }
+        populateRecentMenu(recentMenu)
+        if menu === recentMenu { Task { await recentFiles.prune() } }
+    }
+
+    private func populateRecentMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+        for recent in recentFiles.entries.prefix(10) {
+            let item = menu.addItem(withTitle: recent.displayPath, action: #selector(openRecentDocument(_:)),
+                                    keyEquivalent: "")
+            item.target = self
+            item.representedObject = recent.url
+        }
+    }
+
+    @objc func openRecentDocument(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        requestOpen([url])
     }
 
     @objc func newDocument(_ sender: Any?) {
@@ -136,7 +165,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         guard !isQuitting else { return false }
         switch item.action {
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
-        case #selector(newWindow(_:)): return true
+        case #selector(newWindow(_:)), #selector(openRecentDocument(_:)): return true
         case #selector(openDocument(_:)): return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)):
             return activeDocument.map { !$0.isBusy && $0.window.attachedSheet == nil } ?? false
@@ -164,6 +193,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         Task { @MainActor in
             await startup?.value
             for document in documents { await document.flushAutosave() }
+            await recentFiles.finishWrites()
             let session = sessionSnapshot()
             let store = sessionStore
             let copyUnrestoredSession = sessionReadFailed
@@ -227,10 +257,12 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         documents.removeAll { $0 === document }
     }
 
-    func reserveSave(to url: URL, for document: DocumentWindow) -> Bool {
-        guard !documents.contains(where: { $0 !== document && $0.fileURL == url }),
-              saveTargets[url] == nil else { return false }
-        saveTargets[url] = document
+    func reserveSave(to url: URL, identity: FileIdentity?, for document: DocumentWindow) -> Bool {
+        guard !documents.contains(where: {
+            $0 !== document && ($0.fileURL == url || (identity != nil && $0.fileIdentity == identity))
+        }), saveTargets[url] == nil, identity == nil || !saveTargets.values.contains(where: { $0.identity == identity })
+        else { return false }
+        saveTargets[url] = (document, identity)
         return true
     }
 
@@ -267,10 +299,14 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 ? placeholder : makeDocument()
             document.restorePlacement(record.placement)
             if let draft = record.draft {
-                document.restoreDraft(record, text: draft)
+                let identity = await Task.detached {
+                    record.path.flatMap { FileIdentity.at(URL(fileURLWithPath: $0)) }
+                }.value
+                document.restoreDraft(record, text: draft, identity: identity)
             } else if let file {
                 document.load(file)
             }
+            if let path = record.path { await recentFiles.record(URL(fileURLWithPath: path)) }
             if isQuitting { document.editor.isEditable = false }
             restored.append((index, document))
         }
@@ -291,27 +327,55 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     func openFiles(_ urls: [URL], allowMissing: Bool = false) async {
         for url in urls where !isQuitting {
-            if let existing = documents.first(where: { $0.fileURL == url.standardizedFileURL }) {
-                if !isAgentCheck { existing.present() }
-                continue
-            }
-
             do {
-                let file = try await Task.detached { try FileBuffer.read(url, allowMissing: allowMissing) }.value
-                guard !isQuitting else { return }
-                if let existing = documents.first(where: { $0.fileURL == file.url }) ?? saveTargets[file.url] {
-                    if !isAgentCheck { existing.present() }
-                    continue
-                }
-                let document = activeDocument.flatMap { $0.isReusable ? $0 : nil } ?? makeDocument()
-                document.load(file)
-                if !isAgentCheck { document.present() }
+                _ = try await openFile(url, allowMissing: allowMissing)
             } catch {
+                await recentFiles.removeIfMissing(url)
                 if !isAgentCheck && !isQuitting {
                     await activeDocument?.showError("Could Not Open “\(url.lastPathComponent)”", detail: error.localizedDescription)
                 }
             }
         }
+    }
+
+    @discardableResult
+    func openFile(_ url: URL, allowMissing: Bool = false, promoteExisting: Bool = true) async throws -> DocumentWindow? {
+        guard !isQuitting else { return nil }
+        if let existing = openDocument(at: url.standardizedFileURL, identity: nil) {
+            if !isAgentCheck { existing.present() }
+            if promoteExisting { await recentFiles.record(url) }
+            return existing
+        }
+
+        let (canonical, identity) = await Task.detached {
+            let path = FileBuffer.canonicalURL(url)
+            return (path, FileIdentity.at(path))
+        }.value
+        guard !isQuitting else { return nil }
+        if let existing = openDocument(at: canonical, identity: identity) {
+            if !isAgentCheck { existing.present() }
+            if promoteExisting { await recentFiles.record(url) }
+            return existing
+        }
+
+        let file = try await Task.detached { try FileBuffer.read(canonical, allowMissing: allowMissing) }.value
+        guard !isQuitting else { return nil }
+        if let existing = openDocument(at: file.url, identity: file.identity) {
+            if !isAgentCheck { existing.present() }
+            if promoteExisting { await recentFiles.record(url) }
+            return existing
+        }
+        let document = activeDocument.flatMap { $0.isReusable ? $0 : nil } ?? makeDocument()
+        document.load(file)
+        if !isAgentCheck { document.present() }
+        if file.identity != nil { await recentFiles.record(url) }
+        return document
+    }
+
+    private func openDocument(at url: URL, identity: FileIdentity?) -> DocumentWindow? {
+        documents.first { $0.fileURL == url || (identity != nil && $0.fileIdentity == identity) }
+            ?? saveTargets[url]?.document
+            ?? saveTargets.values.first { identity != nil && $0.identity == identity }?.document
     }
 
     private func requestOpen(_ urls: [URL]) {
@@ -346,6 +410,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         file.addCommand("New", #selector(newDocument(_:)), "n").target = self
         file.addCommand("New Window", #selector(newWindow(_:)), "n", [.command, .shift]).target = self
         file.addCommand("Open…", #selector(openDocument(_:)), "o").target = self
+        let recent = NSMenu(title: "Open Recent")
+        recent.delegate = self
+        file.addItem(withTitle: "Open Recent", action: nil, keyEquivalent: "").submenu = recent
+        recentMenu = recent
         file.addItem(.separator())
         file.addCommand("Save", #selector(saveDocument(_:)), "s").target = self
         file.addCommand("Save As…", #selector(saveDocumentAs(_:)), "s", [.command, .shift]).target = self

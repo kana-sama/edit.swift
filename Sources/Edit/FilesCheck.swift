@@ -113,6 +113,7 @@ enum FilesCheck {
         try expect(try Data(contentsOf: draftPath) == Data("Save the draft".utf8),
                    "Save writes an untitled draft to the chosen path")
 
+        try await checkRecentFiles(in: app, directory: directory)
         try await checkEncodings(in: app, directory: directory)
         try await checkAutosaveAndNewBuffer(in: app, directory: directory)
 
@@ -133,6 +134,40 @@ enum FilesCheck {
         sample.editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         sample.editor.refreshCurrentLine()
         return sample
+    }
+
+    private static func checkRecentFiles(in app: Edit, directory: URL) async throws {
+        let one = directory.appendingPathComponent("Recent one.txt")
+        let two = directory.appendingPathComponent("Recent two.txt")
+        let alias = directory.appendingPathComponent("Recent hard link.txt")
+        try Data("one".utf8).write(to: one)
+        try Data("two".utf8).write(to: two)
+        try FileManager.default.linkItem(at: one, to: alias)
+        let older = try await app.openFile(one)
+        _ = try await app.openFile(two)
+        let same = try await app.openFile(alias)
+        try expect(older === same, "hard link focuses the open buffer")
+        try expect(Array(app.recentFiles.entries.prefix(2).map(\.url)) == [alias, two],
+                   "history keeps the latest alias once")
+
+        let archive = directory.appendingPathComponent("recent-test.json")
+        let list = RecentFiles(url: archive)
+        await list.record(two)
+        await list.record(alias)
+        await list.finishWrites()
+        let restored = RecentFiles(url: archive)
+        await restored.load()
+        try expect(restored.entries.map(\.url) == [alias, two], "recent history survives restart")
+        try FileManager.default.removeItem(at: two)
+        await restored.prune()
+        try expect(restored.entries.map(\.url) == [alias], "confirmed deletions leave recent history")
+        await restored.finishWrites()
+
+        let item = NSApplication.shared.mainMenu?.item(withTitle: "File")?.submenu?.item(withTitle: "Open Recent")
+        let menu = try resolve(item?.submenu)
+        app.menuWillOpen(menu)
+        try expect(menu.items.first?.representedObject as? URL == alias, "native Open Recent shows the history")
+        try expect(menu.items.count <= 10, "Open Recent is capped at ten entries")
     }
 
     private static func checkEncodings(in app: Edit, directory: URL) async throws {

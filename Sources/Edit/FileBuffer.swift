@@ -116,6 +116,7 @@ struct FileBuffer: Sendable {
     let text: String
     let format: FileFormat
     let revision: FileRevision
+    let identity: FileIdentity?
 
     private static let encodingAttribute = "com.apple.TextEncoding"
 
@@ -139,7 +140,7 @@ struct FileBuffer: Sendable {
         guard let disk = try diskContents(at: url, readEncoding: true) else {
             guard allowMissing else { throw fileError(ENOENT, url) }
             try requireDirectory(url.deletingLastPathComponent())
-            return FileBuffer(url: url, text: "", format: FileFormat(), revision: .missing)
+            return FileBuffer(url: url, text: "", format: FileFormat(), revision: .missing, identity: nil)
         }
 
         let taggedBOM = disk.encoding.flatMap { encoding in
@@ -155,7 +156,7 @@ struct FileBuffer: Sendable {
 
         let format = FileFormat(hasBOM: bomEncoding != nil, lineEnding: dominantLineEnding(in: text) ?? "\n",
                                 storedEncoding: encoding == .utf8 ? nil : encoding)
-        return FileBuffer(url: url, text: text, format: format, revision: FileRevision(bytes: disk.bytes))
+        return FileBuffer(url: url, text: text, format: format, revision: FileRevision(bytes: disk.bytes), identity: disk.identity)
     }
 
     static func save(
@@ -206,6 +207,8 @@ struct FileBuffer: Sendable {
         if let status, fchmod(descriptor, status.st_mode & 0o777) != 0 {
             throw fileError(errno, temporary)
         }
+        var outputStatus = stat()
+        guard fstat(descriptor, &outputStatus) == 0 else { throw fileError(errno, temporary) }
         try handle.synchronize()
         try handle.close()
 
@@ -236,7 +239,7 @@ struct FileBuffer: Sendable {
 
         var savedFormat = format
         savedFormat.lineEnding = dominantLineEnding(in: text) ?? format.lineEnding
-        return FileBuffer(url: url, text: text, format: savedFormat, revision: revision)
+        return FileBuffer(url: url, text: text, format: savedFormat, revision: revision, identity: FileIdentity(outputStatus))
     }
 
     private static func resolvedURL(_ url: URL) -> URL? {
@@ -249,7 +252,7 @@ struct FileBuffer: Sendable {
 
     private static func diskContents(
         at url: URL, readEncoding: Bool = false
-    ) throws -> (bytes: Data, encoding: FileTextEncoding?)? {
+    ) throws -> (bytes: Data, encoding: FileTextEncoding?, identity: FileIdentity)? {
         guard try fileStatus(at: url) != nil else { return nil }
 
         // Nonblocking open keeps a concurrent replacement with a FIFO from blocking.
@@ -277,7 +280,7 @@ struct FileBuffer: Sendable {
               before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec else {
             throw FileBufferError.changedOnDisk
         }
-        return (data, encoding)
+        return (data, encoding, FileIdentity(after))
     }
 
     private static func encodingHint(from descriptor: Int32) -> FileTextEncoding? {

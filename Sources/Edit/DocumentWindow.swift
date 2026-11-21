@@ -14,6 +14,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private unowned let app: Edit
     private(set) var fileURL: URL?
+    private(set) var fileIdentity: FileIdentity?
     private var savedText: NSString? = "" as NSString
     private var format = FileFormat()
     private var revision: FileRevision?
@@ -120,8 +121,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         installText(file.text)
     }
 
-    func restoreDraft(_ record: SessionDocument, text: String) {
+    func restoreDraft(_ record: SessionDocument, text: String, identity: FileIdentity? = nil) {
         fileURL = record.path.map { URL(fileURLWithPath: $0) }
+        fileIdentity = identity
         savedText = fileURL == nil ? "" as NSString : nil
         format = record.format ?? FileFormat()
         revision = record.revision
@@ -164,8 +166,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             saveFormat = saveFormat.using(accessory.selection)
         }
         guard let destination else { return false }
-        let target = await Task.detached { FileBuffer.canonicalURL(destination) }.value
-        guard app.reserveSave(to: target, for: self) else {
+        let (target, identity) = await Task.detached {
+            let url = FileBuffer.canonicalURL(destination)
+            return (url, FileIdentity.at(url))
+        }.value
+        let promote = asNew || target != fileURL
+        guard app.reserveSave(to: target, identity: identity, for: self) else {
             await showError("The file is already open in another window.")
             return false
         }
@@ -190,6 +196,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 guard await response(to: alert) == .alertSecondButtonReturn else { return false }
                 try await write(text, to: target, format: saveFormat, expected: nil)
             }
+            if promote { await app.recentFiles.record(destination) }
             return true
         } catch {
             await showError("Could Not Save “\(target.lastPathComponent)”", detail: error.localizedDescription)
@@ -247,7 +254,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         guard window.isDocumentEdited, let target = fileURL, let revision,
               retryFailed || autosaveFailure?.generation != editGeneration else { return }
         let generation = editGeneration
-        guard app.reserveSave(to: target, for: self) else {
+        guard app.reserveSave(to: target, identity: fileIdentity, for: self) else {
             autosaveFailure = (generation, "The file is already open in another window.", false)
             return
         }
@@ -349,6 +356,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
         if replacing {
             fileURL = nil
+            fileIdentity = nil
             savedText = "" as NSString
             format = FileFormat()
             revision = nil
@@ -435,6 +443,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func updateIdentity(from file: FileBuffer) {
         fileURL = file.url
+        fileIdentity = file.identity
         revision = file.revision
         format = file.format
         savedText = file.text as NSString
