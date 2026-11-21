@@ -230,8 +230,23 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             placement: placement,
             syntaxLanguage: manualSyntaxLanguage?.rawValue,
             folderPath: folderURL?.path,
-            findSettings: findSettings == FindSettings() ? nil : findSettings
+            findSettings: findSettings == FindSettings() ? nil : findSettings,
+            editorPosition: editor.capturePosition()
         )
+    }
+
+    func restoreEditorPosition(_ position: EditorPosition?) {
+        if let position {
+            // AppKit calculates the titlebar inset during layout, including in a window not presented yet.
+            window.layoutIfNeeded()
+            editor.restorePosition(position)
+        }
+        findPanel?.preserveRestoredEditorPosition()
+    }
+
+    func rememberFilePosition(_ position: EditorPosition? = nil) {
+        guard let fileURL, let fileIdentity else { return }
+        app.recentFiles.rememberPosition(position ?? editor.capturePosition(), for: fileURL, identity: fileIdentity)
     }
 
     @discardableResult
@@ -307,6 +322,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             try FileBuffer.save(text, to: target, format: format, expected: expected)
         }.value
         let changedPath = fileURL != file.url
+        if changedPath { rememberFilePosition() }
         let previousLanguage = resolvedSyntaxLanguage
         updateIdentity(from: file)
         if changedPath {
@@ -505,10 +521,16 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         case .buffer(let file, let preparedSyntax):
             autosaveFailure = nil
             editor.breakUndoCoalescing()
+            var position: EditorPosition?
             if let file {
                 // Saving the outgoing draft to the target already installed the latest revision.
-                if file.url != fileURL { load(file, preparedSyntax: preparedSyntax) }
+                if file.url != fileURL {
+                    rememberFilePosition()
+                    position = await app.recentFiles.position(for: file.url, identity: file.identity)
+                    load(file, preparedSyntax: preparedSyntax)
+                }
             } else {
+                rememberFilePosition()
                 fileURL = nil
                 manualSyntaxLanguage = nil
                 fileIdentity = nil
@@ -518,6 +540,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 installText("")
             }
             window.makeFirstResponder(editor)
+            restoreEditorPosition(position)
         case .window:
             window.close()
         }
@@ -545,6 +568,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        rememberFilePosition()
         syntaxHighlighting?.cancel(clearingColors: false)
         idleSave?.cancel()
         idleSave = nil

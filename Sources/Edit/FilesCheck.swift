@@ -125,6 +125,7 @@ enum FilesCheck {
         try await checkRecentFiles(in: app, directory: directory)
         try await checkEncodings(in: app, directory: directory)
         try await checkAutosaveAndNewBuffer(in: app, directory: directory)
+        try await checkRememberedPosition(in: app, directory: directory)
 
         let preview = directory.appendingPathComponent("Meeting Notes.txt")
         let sampleText = "Meeting notes\n\nTuesday\n    Review the new editor\n    Bring a sample project\n"
@@ -200,6 +201,105 @@ enum FilesCheck {
                    "saving during Open writes only the outgoing draft")
         first.window.close()
         second.window.close()
+    }
+
+    private static func checkRememberedPosition(in app: Edit, directory: URL) async throws {
+        let source = directory.appending(path: "Remembered Position.txt")
+        let alias = directory.appending(path: "Remembered Position Alias.txt")
+        let other = directory.appending(path: "Other Buffer.txt")
+        let text = (0..<750).map { index in
+            "position_\(index) " + String(repeating: "wide text ", count: 22) + "\n"
+        }.joined()
+        let contents = text as NSString
+        try Data(text.utf8).write(to: source)
+        try FileManager.default.linkItem(at: source, to: alias)
+        try Data("Another buffer\n".utf8).write(to: other)
+
+        func offset(_ line: Int) -> Int { contents.range(of: "position_\(line) ").location }
+        func viewport(in document: DocumentWindow) -> NSPoint {
+            let scroll = document.scrollView
+            return NSPoint(x: scroll.contentView.bounds.minX, y: scroll.documentVisibleRect.minY + scroll.contentInsets.top)
+        }
+
+        func setPosition(in document: DocumentWindow, row: Int, x: CGFloat, ranges: [NSRange]) -> EditorPosition {
+            let window = document.window
+            let editor = document.editor
+            let scroll = document.scrollView
+            let clip = scroll.contentView
+            editor.setCaretSelections(ranges, record: false)
+            let anchor = NSRange(location: offset(row), length: 0)
+            editor.scrollRangeToVisible(anchor)
+            window.layoutIfNeeded()
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            let line = window.convertFromScreen(editor.firstRect(forCharacterRange: anchor, actualRange: nil))
+            let y = editor.convert(line, from: nil).minY - scroll.contentInsets.top + 4
+            clip.scroll(to: NSPoint(x: x, y: y))
+            scroll.reflectScrolledClipView(clip)
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            return editor.capturePosition()
+        }
+
+        func expectPosition(in document: DocumentWindow, at expected: EditorPosition, ranges: [NSRange]) throws {
+            let viewportPoint = viewport(in: document)
+            let actual = document.editor.capturePosition()
+            let expectedTop = try resolve(expected.topLine)
+            let actualTop = try resolve(actual.topLine)
+            try expect(abs(viewportPoint.x - expected.horizontalOffset) <= 1 &&
+                       actualTop.textOffset == expectedTop.textOffset &&
+                       abs(actualTop.offsetIntoLine - expectedTop.offsetIntoLine) <= 1,
+                       "restore the visible text and horizontal offset (expected \(expected), got \(actual))")
+            try expect(document.editor.caretSelections == ranges && document.editor.selectedRange() == ranges.last,
+                       "restore all selections and the primary caret")
+        }
+
+        let first = app.makeDocument()
+        _ = try await app.openFile(source, in: first)
+        let ranges = [
+            NSRange(location: offset(495) + 5, length: 3),
+            NSRange(location: offset(502) + 19, length: 0),
+            NSRange(location: offset(12) + 2, length: 4),
+        ]
+        let point = setPosition(in: first, row: 500, x: 220, ranges: ranges)
+        try expect(point.horizontalOffset > 200 && point.verticalOffset > 7_900,
+                   "the position check starts scrolled on both axes")
+        _ = try await app.openFile(other, in: first)
+        try expect(first.editor.caretSelections == [NSRange(location: 0, length: 0)],
+                   "opening a different file uses its own selection")
+        _ = try await app.openFile(alias, in: first)
+        await Task.yield()
+        try expectPosition(in: first, at: point, ranges: ranges)
+        first.window.close()
+
+        let reopened = app.makeDocument()
+        _ = try await app.openFile(source, in: reopened)
+        try expectPosition(in: reopened, at: point, ranges: ranges)
+
+        let second = app.makeDocument()
+        _ = try await app.openFile(source, in: second)
+        second.performFind(.toggleSidebar)
+        await Task.yield()
+        let secondRanges = [NSRange(location: offset(250) + 2, length: 7)]
+        let secondPoint = setPosition(in: second, row: 245, x: 125, ranges: secondRanges)
+        let store = SessionStore(url: directory.appending(path: "position-session.json"))
+        try store.write(EditorSession(documents: [reopened, second].map { $0.sessionDocument() },
+                                      activeIndex: 0, lastWindow: nil))
+        let session = try resolve(store.read())
+        [reopened, second].forEach { $0.window.close() }
+        let placeholder = app.makeDocument()
+        await app.restore(session, reusing: placeholder)
+        await Task.yield()
+        let restored = Array(app.documents.suffix(2))
+        try expect(restored.first === placeholder, "restore session windows for the same file")
+        try expectPosition(in: restored[0], at: point, ranges: ranges)
+        try expectPosition(in: restored[1], at: secondPoint, ranges: secondRanges)
+
+        await restored[0].newBuffer()
+        try Data("👋".utf8).write(to: source)
+        _ = try await app.openFile(source, in: restored[0])
+        let end = NSRange(location: "👋".utf16.count, length: 0)
+        try expect(restored[0].editor.caretSelections == [end], "saved selections clamp to the end of a shortened file")
+        try expect(restored[0].scrollView.contentView.bounds.minX <= 1
+                   && restored[0].scrollView.contentView.bounds.minY <= 1, "saved scroll clamps to the shortened file")
     }
 
     private static func checkRecentFiles(in app: Edit, directory: URL) async throws {

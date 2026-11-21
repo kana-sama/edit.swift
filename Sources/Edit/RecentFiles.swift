@@ -104,8 +104,20 @@ final class RecentFiles {
     private struct History: Codable, Sendable {
         var files: [RecentFile]
         var folders: [RecentFolder]
+        var positions: [SavedPosition]? = nil
     }
 
+    private struct SavedPosition: Codable, Sendable {
+        var url: URL
+        var identity: FileIdentity?
+        var position: EditorPosition
+
+        func matches(_ url: URL, identity: FileIdentity?) -> Bool {
+            self.url == url || (identity != nil && self.identity == identity)
+        }
+    }
+
+    private static let positionLimit = 100
     private let url: URL
     private let initialRead: Task<History, Never>
     private var loaded = false
@@ -113,6 +125,7 @@ final class RecentFiles {
     private var writing: Task<Void, Never>?
     private(set) var entries: [RecentFile] = []
     private(set) var folders: [RecentFolder] = []
+    private var positions: [SavedPosition] = []
 
     init(url: URL) {
         self.url = url
@@ -122,7 +135,8 @@ final class RecentFiles {
             let history = try? decoder.decode(History.self, from: bytes)
             let legacyFiles = history == nil ? try? decoder.decode([RecentFile].self, from: bytes) : nil
             let files = history?.files ?? legacyFiles ?? []
-            return History(files: Array(files.prefix(500)), folders: history?.folders ?? [])
+            return History(files: Array(files.prefix(500)), folders: history?.folders ?? [],
+                           positions: history?.positions)
         }
     }
 
@@ -132,6 +146,7 @@ final class RecentFiles {
         if !loaded {
             entries = existing.files
             folders = existing.folders
+            positions = Array((existing.positions ?? []).prefix(Self.positionLimit))
             loaded = true
         }
     }
@@ -147,7 +162,7 @@ final class RecentFiles {
             guard let entry else { return }
             self.promote(entry, in: canonicalFolder)
             self.persist()
-        }
+        }.value
     }
 
     func recordFolder(_ url: URL, opening file: URL? = nil) async {
@@ -163,7 +178,26 @@ final class RecentFiles {
             self.folders.insert(folder, at: 0)
             if let openedFile { self.promote(openedFile, in: folder.canonicalURL) }
             self.persist()
+        }.value
+    }
+
+    func rememberPosition(_ position: EditorPosition, for url: URL, identity: FileIdentity?) {
+        let canonical = Task.detached { FileBuffer.canonicalURL(url) }
+        enqueueRecording {
+            let target = await canonical.value
+            self.positions.removeAll { $0.matches(target, identity: identity) }
+            self.positions.insert(SavedPosition(url: target, identity: identity, position: position), at: 0)
+            if self.positions.count > Self.positionLimit { self.positions.removeLast() }
+            self.persist()
         }
+    }
+
+    func position(for url: URL, identity: FileIdentity?) async -> EditorPosition? {
+        let canonical = Task.detached { FileBuffer.canonicalURL(url) }
+        await recording?.value
+        await load()
+        let target = await canonical.value
+        return positions.first { $0.matches(target, identity: identity) }?.position
     }
 
     private func promote(_ entry: RecentFile, in canonicalFolder: URL?) {
@@ -186,7 +220,8 @@ final class RecentFiles {
         return folders.first(where: { $0.canonicalURL == canonicalFolder })?.lastFileURL
     }
 
-    private func enqueueRecording(_ update: @escaping @MainActor () async -> Void) async {
+    @discardableResult
+    private func enqueueRecording(_ update: @escaping @MainActor () async -> Void) -> Task<Void, Never> {
         let previous = recording
         let operation = Task {
             await previous?.value
@@ -194,7 +229,7 @@ final class RecentFiles {
             await update()
         }
         recording = operation
-        await operation.value
+        return operation
     }
 
     func dismiss(_ entry: RecentFile) {
@@ -232,7 +267,7 @@ final class RecentFiles {
     }
 
     private func persist() {
-        let snapshot = History(files: entries, folders: folders)
+        let snapshot = History(files: entries, folders: folders, positions: positions.isEmpty ? nil : positions)
         let previous = writing
         let url = url
         writing = Task.detached(priority: .utility) {

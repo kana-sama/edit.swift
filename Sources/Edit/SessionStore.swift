@@ -56,6 +56,7 @@ struct SessionDocument: Codable, Sendable {
     var syntaxLanguage: String? = nil
     var folderPath: String? = nil
     var findSettings: FindSettings? = nil
+    var editorPosition: EditorPosition? = nil
 }
 
 struct EditorSession: Codable, Sendable {

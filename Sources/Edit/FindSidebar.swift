@@ -540,12 +540,20 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
     }
 
-    private func beginSidebarTransition() -> UInt64 {
+    private var currentEditorAnchor: NSPoint {
         let scroll = document.scrollView
         // Anchor to the visible edge below the titlebar if its inset changes during layout.
         var anchor = scroll.contentView.bounds.origin
         anchor.y += scroll.contentInsets.top
-        layoutAnchor = anchor
+        return anchor
+    }
+
+    func preserveRestoredEditorPosition() {
+        if layoutAnchor != nil { layoutAnchor = currentEditorAnchor }
+    }
+
+    private func beginSidebarTransition() -> UInt64 {
+        layoutAnchor = currentEditorAnchor
         sidebarTransition &+= 1
         return sidebarTransition
     }

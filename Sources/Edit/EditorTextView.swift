@@ -469,6 +469,88 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         }
     }
 
+    func capturePosition() -> EditorPosition {
+        guard let scroll = enclosingScrollView else {
+            return EditorPosition(selections: caretSelections, horizontalOffset: 0, verticalOffset: 0, topLine: nil)
+        }
+        let top = textViewport(in: scroll).lowerBound
+        return EditorPosition(selections: caretSelections, horizontalOffset: scroll.contentView.bounds.minX,
+                              verticalOffset: top, topLine: capturePositionTopLine(at: top))
+    }
+
+    func restorePosition(_ position: EditorPosition) {
+        if let text = textStorage?.mutableString {
+            let selections = position.selections.compactMap { restoredSelection($0, in: text) }
+            setCaretSelections(selections.isEmpty ? [NSRange(location: 0, length: 0)] : selections, record: false)
+        }
+
+        guard let scroll = enclosingScrollView,
+              position.horizontalOffset.isFinite, position.verticalOffset.isFinite else { return }
+        let viewport = textLayoutManager?.textViewportLayoutController
+        viewport?.layoutViewport()
+        if let anchor = position.topLine, anchor.textOffset >= 0,
+           anchor.textOffset <= (textStorage?.length ?? 0), !caretIsNearViewport(anchor.textOffset) {
+            scrollRangeToVisible(NSRange(location: anchor.textOffset, length: 0))
+            viewport?.layoutViewport()
+        }
+        let top = position.topLine.flatMap { positionTopLineOrigin($0) } ?? position.verticalOffset
+        // Restore the saved viewport last, even if the primary selection is outside it.
+        scrollToTextTop(top, horizontalOrigin: position.horizontalOffset, in: scroll)
+
+        // TextKit may adjust estimated coordinates when newly visible fragments are laid out.
+        let settledTop = position.topLine.flatMap { positionTopLineOrigin($0) } ?? top
+        if abs(textViewport(in: scroll).lowerBound - settledTop) > 0.5 ||
+            abs(scroll.contentView.bounds.minX - position.horizontalOffset) > 0.5 {
+            scrollToTextTop(settledTop, horizontalOrigin: position.horizontalOffset, in: scroll)
+        }
+    }
+
+    private func restoredSelection(_ range: NSRange, in text: NSString) -> NSRange? {
+        guard range.location >= 0, range.location != NSNotFound, range.length >= 0 else { return nil }
+        let start = min(range.location, text.length)
+        let end = start + min(range.length, text.length - start)
+
+        func splitsSurrogate(at offset: Int) -> Bool {
+            offset > 0 && offset < text.length && UTF16.isLeadSurrogate(text.character(at: offset - 1))
+                && UTF16.isTrailSurrogate(text.character(at: offset))
+        }
+
+        let lowerBound = splitsSurrogate(at: start) ? start - 1 : start
+        if start == end { return NSRange(location: lowerBound, length: 0) }
+        let upperBound = splitsSurrogate(at: end) ? end + 1 : end
+        return NSRange(location: lowerBound, length: upperBound - lowerBound)
+    }
+
+    private func capturePositionTopLine(at top: CGFloat) -> EditorPosition.TopLine? {
+        guard let manager = textLayoutManager else { return nil }
+        let point = NSPoint(x: textContainer?.lineFragmentPadding ?? 0, y: max(0, top - textContainerOrigin.y))
+        // Layout coordinates stay available when a line's first character is horizontally offscreen.
+        guard let fragment = manager.textLayoutFragment(for: point), fragment.state == .layoutAvailable else {
+            return nil
+        }
+        let offset = manager.offset(from: manager.documentRange.location, to: fragment.rangeInElement.location)
+        let lineTop = fragment.layoutFragmentFrame.minY + textContainerOrigin.y
+        return EditorPosition.TopLine(textOffset: offset, offsetIntoLine: top - lineTop)
+    }
+
+    private func positionTopLineOrigin(_ anchor: EditorPosition.TopLine) -> CGFloat? {
+        guard anchor.textOffset >= 0, anchor.textOffset <= (textStorage?.length ?? 0),
+              anchor.offsetIntoLine.isFinite, let manager = textLayoutManager,
+              let location = manager.location(manager.documentRange.location, offsetBy: anchor.textOffset),
+              let fragment = manager.textLayoutFragment(for: location), fragment.state == .layoutAvailable else {
+            return nil
+        }
+        return fragment.layoutFragmentFrame.minY + textContainerOrigin.y + anchor.offsetIntoLine
+    }
+
+    private func topLine(at top: CGFloat) -> EditorPosition.TopLine? {
+        guard let textStorage, textStorage.length > 0 else { return nil }
+        let offset = characterIndexForInsertion(at: NSPoint(x: textContainerOrigin.x,
+                                                           y: max(textContainerOrigin.y, top)))
+        guard offset <= textStorage.length, let line = lineBounds(at: offset) else { return nil }
+        return EditorPosition.TopLine(textOffset: offset, offsetIntoLine: top - line.minY)
+    }
+
     private struct ZoomAnchor {
         let topLine: Int
         let offsetIntoTopLine: CGFloat
@@ -506,9 +588,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     private func zoomAnchor() -> ZoomAnchor? {
         guard let scroll = enclosingScrollView, let textStorage, textStorage.length > 0 else { return nil }
         let visible = textViewport(in: scroll)
-        let top = characterIndexForInsertion(at: NSPoint(x: textContainerOrigin.x,
-                                                        y: max(textContainerOrigin.y, visible.lowerBound)))
-        guard top <= textStorage.length, let topLine = lineBounds(at: top) else { return nil }
+        guard let topLine = topLine(at: visible.lowerBound) else { return nil }
         let active = selectedRange().location
         let visibleActiveLine: Int?
         if active <= textStorage.length, caretIsNearViewport(active), let line = lineBounds(at: active),
@@ -517,35 +597,14 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         } else {
             visibleActiveLine = nil
         }
-        return ZoomAnchor(topLine: top, offsetIntoTopLine: visible.lowerBound - topLine.minY,
+        return ZoomAnchor(topLine: topLine.textOffset, offsetIntoTopLine: topLine.offsetIntoLine,
                           visibleActiveLine: visibleActiveLine, horizontalOrigin: scroll.contentView.bounds.minX)
     }
 
     private func restoreZoomAnchor(_ anchor: ZoomAnchor, in scroll: NSScrollView) {
-        let clip = scroll.contentView
-
-        func layoutLine(at offset: Int) -> NSRect? {
-            if let line = lineBounds(at: offset) { return line }
-            // TextKit can omit geometry for lines outside its current layout viewport.
-            scrollRangeToVisible(NSRange(location: offset, length: 0))
-            textLayoutManager?.textViewportLayoutController.layoutViewport()
-            return lineBounds(at: offset)
-        }
-
-        func scrollToTextTop(_ top: CGFloat) {
-            var bounds = clip.bounds
-            bounds.origin.x = anchor.horizontalOrigin
-            bounds.origin.y += top - textViewport(in: scroll).lowerBound
-            let origin = clip.constrainBoundsRect(bounds).origin
-            guard clip.bounds.origin != origin else { return }
-            clip.scroll(to: origin)
-            scroll.reflectScrolledClipView(clip)
-            textLayoutManager?.textViewportLayoutController.layoutViewport()
-        }
-
         guard let topLine = layoutLine(at: anchor.topLine) else { return }
         let offset = min(anchor.offsetIntoTopLine, max(0, topLine.height - 1))
-        scrollToTextTop(topLine.minY + offset)
+        scrollToTextTop(topLine.minY + offset, horizontalOrigin: anchor.horizontalOrigin, in: scroll)
 
         let visible = textViewport(in: scroll)
         guard let active = anchor.visibleActiveLine, let line = layoutLine(at: active) else { return }
@@ -555,7 +614,27 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         } else if line.minY >= visible.upperBound {
             top = line.maxY - (visible.upperBound - visible.lowerBound)
         }
-        scrollToTextTop(top)
+        scrollToTextTop(top, horizontalOrigin: anchor.horizontalOrigin, in: scroll)
+    }
+
+    private func layoutLine(at offset: Int) -> NSRect? {
+        if let line = lineBounds(at: offset) { return line }
+        // TextKit can omit geometry for lines outside its current layout viewport.
+        scrollRangeToVisible(NSRange(location: offset, length: 0))
+        textLayoutManager?.textViewportLayoutController.layoutViewport()
+        return lineBounds(at: offset)
+    }
+
+    private func scrollToTextTop(_ top: CGFloat, horizontalOrigin: CGFloat, in scroll: NSScrollView) {
+        let clip = scroll.contentView
+        var bounds = clip.bounds
+        bounds.origin.x = horizontalOrigin
+        bounds.origin.y += top - textViewport(in: scroll).lowerBound
+        let origin = clip.constrainBoundsRect(bounds).origin
+        guard clip.bounds.origin != origin else { return }
+        clip.scroll(to: origin)
+        scroll.reflectScrolledClipView(clip)
+        textLayoutManager?.textViewportLayoutController.layoutViewport()
     }
 
     private func textViewport(in scroll: NSScrollView) -> ClosedRange<CGFloat> {

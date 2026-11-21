@@ -268,8 +268,15 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         Task { @MainActor in
             await startup?.value
             for document in documents { await document.flushAutosave() }
-            await recentFiles.finishWrites()
             let session = sessionSnapshot()
+            for index in documents.indices where index != session.activeIndex {
+                documents[index].rememberFilePosition(session.documents[index].editorPosition)
+            }
+            if let index = session.activeIndex {
+                // The active view is the most recent when several windows have the same file open.
+                documents[index].rememberFilePosition(session.documents[index].editorPosition)
+            }
+            await recentFiles.finishWrites()
             let store = sessionStore
             let copyUnrestoredSession = sessionReadFailed
             do {
@@ -396,6 +403,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 document.load(opened.file, storedSyntaxLanguage: record.syntaxLanguage, preparedSyntax: opened.syntax)
             }
             if let settings = record.findSettings { document.restoreFindSettings(settings) }
+            document.restoreEditorPosition(record.editorPosition)
             if let path = record.path { await recentFiles.record(URL(fileURLWithPath: path)) }
             if isQuitting { document.editor.isEditable = false }
             restored.append((index, document))
