@@ -239,7 +239,8 @@ final class FindResultCell: NSTableCellView {
     private var acceptsActions = false
     private var replacementAvailable = false
     private var tracking: NSTrackingArea?
-    private var excerptEnd: NSLayoutConstraint?
+    private lazy var excerptBeforeDismiss = excerpt.trailingAnchor.constraint(equalTo: dismissButton.leadingAnchor, constant: -4)
+    private lazy var excerptBeforeApply = excerpt.trailingAnchor.constraint(equalTo: applyButton.leadingAnchor, constant: -4)
     private var onApply: (() -> Void)?
     private var onDismiss: (() -> Void)?
 
@@ -275,15 +276,13 @@ final class FindResultCell: NSTableCellView {
         }
         excerpt.translatesAutoresizingMaskIntoConstraints = false
         addSubview(excerpt)
-        let end = excerpt.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4)
-        excerptEnd = end
         NSLayoutConstraint.activate([
             excerpt.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 5),
             excerpt.heightAnchor.constraint(lessThanOrEqualTo: heightAnchor),
             excerpt.centerYAnchor.constraint(equalTo: centerYAnchor),
             dismissButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
             applyButton.trailingAnchor.constraint(equalTo: dismissButton.leadingAnchor, constant: -Self.actionSpacing),
-            end,
+            excerptBeforeDismiss,
         ])
     }
 
@@ -296,7 +295,12 @@ final class FindResultCell: NSTableCellView {
         excerpt.attributedStringValue = text
         setAccessibilityLabel(excerpt.stringValue)
         self.acceptsActions = acceptsActions
-        self.replacementAvailable = replacementAvailable
+        // Keep the same text column whether the row actions are currently visible or hidden.
+        if self.replacementAvailable != replacementAvailable {
+            (self.replacementAvailable ? excerptBeforeApply : excerptBeforeDismiss).isActive = false
+            (replacementAvailable ? excerptBeforeApply : excerptBeforeDismiss).isActive = true
+            self.replacementAvailable = replacementAvailable
+        }
         onApply = apply
         onDismiss = dismiss
         updateSelection(selected)
@@ -324,9 +328,6 @@ final class FindResultCell: NSTableCellView {
         let showApply = showDismiss && replacementAvailable
         dismissButton.isHidden = !showDismiss
         applyButton.isHidden = !showApply
-        let dismissWidth = showDismiss ? Self.actionSize + 4 : 0
-        let applyWidth = showApply ? Self.actionSize + Self.actionSpacing : 0
-        excerptEnd?.constant = -(4 + dismissWidth + applyWidth)
     }
 
     @objc private func applyMatch(_ sender: Any?) { onApply?() }

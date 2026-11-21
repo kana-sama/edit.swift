@@ -232,7 +232,8 @@ enum FindCheck {
         for width in [280.0, 185.0] {
             split.splitView.setPosition(width, ofDividerAt: 0)
             window.layoutIfNeeded()
-            let cell = try require(table.view(atColumn: 0, row: 4, makeIfNecessary: true), "a visible match has a row")
+            let cell = try require(table.view(atColumn: 0, row: 4, makeIfNecessary: true) as? FindResultCell,
+                                   "a visible match has a result row")
             cell.layoutSubtreeIfNeeded()
             let field = try require(descendant(of: cell, type: NSTextField.self), "result has an excerpt")
             try expect(field.stringValue.hasPrefix("checksum ="), "long excerpts keep their matching prefix")
@@ -245,6 +246,25 @@ enum FindCheck {
             )
             try expect(!dismiss.isHidden && abs(dismiss.frame.maxX - (cell.bounds.maxX - 4)) < 1,
                        "Dismiss stays at the right edge of the result row")
+            let style = field.attributedStringValue.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+            try expect(style?.tighteningFactorForTruncation == 0, "truncating excerpts preserves character spacing")
+            func hoverEvent(_ type: NSEvent.EventType) throws -> NSEvent {
+                try require(NSEvent.enterExitEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
+                                                   windowNumber: window.windowNumber, context: nil,
+                                                   eventNumber: 0, trackingNumber: 0, userData: nil),
+                            "search row hover event")
+            }
+            let selectedFrame = field.frame
+            cell.updateSelection(false)
+            cell.layoutSubtreeIfNeeded()
+            try expect(dismiss.isHidden && field.frame == selectedFrame,
+                       "the result excerpt keeps its width when selection changes (\(selectedFrame) to \(field.frame))")
+            cell.mouseEntered(with: try hoverEvent(.mouseEntered))
+            cell.layoutSubtreeIfNeeded()
+            try expect(!dismiss.isHidden && field.frame == selectedFrame,
+                       "the result excerpt keeps its width when row buttons appear on hover")
+            cell.mouseExited(with: try hoverEvent(.mouseExited))
+            cell.updateSelection(true)
         }
         let fourthLine = lines.prefix(4).reduce(0) { $0 + $1.utf16.count + 1 }
         let followingLine = fourthLine + lines[4].utf16.count + 1

@@ -1036,6 +1036,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let text = source.substring(with: excerptRange).replacingOccurrences(of: "\t", with: " ")
         let style = NSMutableParagraphStyle()
         style.lineBreakMode = .byTruncatingTail
+        style.tighteningFactorForTruncation = 0
         let label = NSMutableAttributedString(string: text.isEmpty ? "↵" : prefix + text + suffix, attributes: [
             .font: EditorTextView.defaultFont,
             .foregroundColor: NSColor.labelColor,
