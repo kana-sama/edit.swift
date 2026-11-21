@@ -283,6 +283,27 @@ enum FilesCheck {
         try expect(try Data(contentsOf: file) == Data(("\u{feff}" + editor.string).utf8),
                    "an earlier autosave cannot overwrite a manual save")
 
+        editor.breakUndoCoalescing()
+        let beforeUndo = editor.string
+        editor.insertText("Undo this\r\n", replacementRange: editor.selectedRange())
+        editor.breakUndoCoalescing()
+        _ = await document.save()
+        editor.undoManager?.undo()
+        try expect(editor.string == beforeUndo && window.isDocumentEdited, "native Undo marks the buffer edited")
+        document.requestAutosave()
+        try await waitFor("an Undo is autosaved") { !window.isDocumentEdited }
+        try expect(try Data(contentsOf: file) == Data(("\u{feff}" + beforeUndo).utf8),
+                   "autosave writes the exact text after Undo")
+
+        editor.insertText("Queued snapshot\r\n", replacementRange: editor.selectedRange())
+        let requested = Data(("\u{feff}" + editor.string).utf8)
+        document.requestAutosave()
+        editor.insertText("Later edit\r\n", replacementRange: editor.selectedRange())
+        try await waitFor("autosave writes the requested snapshot") {
+            (try? Data(contentsOf: file)) == requested
+        }
+        try expect(window.isDocumentEdited, "newer edits stay marked after a queued autosave")
+
         editor.insertText("Before replacing\r\n", replacementRange: editor.selectedRange())
         let lastText = editor.string
         let frame = window.frame

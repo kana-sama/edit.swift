@@ -8,6 +8,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         case cancel
     }
 
+    private struct AutosaveRequest {
+        let generation: UInt
+        let text: String
+    }
+
     let window: NSWindow
     let editor: EditorTextView
     let scrollView: NSScrollView
@@ -30,7 +35,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var editGeneration: UInt = 0
     private var idleSave: Task<Void, Never>?
     private var autosaveTask: Task<Void, Never>?
-    private var autosaveRequested = false
+    private var queuedAutosave: AutosaveRequest?
+    private var writingGeneration: UInt?
     private var autosaveFailure: (generation: UInt, detail: String, reported: Bool)?
     private var syntaxHighlighting: SyntaxHighlighting?
     private var findPanel: FindSidebar?
@@ -72,6 +78,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         window.makeFirstResponder(editor)
         editor.onTextChange = { [weak self] in self?.textDidChange() }
         editor.onBlur = { [weak self] in self?.requestAutosave() }
+        for name in [Notification.Name.NSUndoManagerDidUndoChange, .NSUndoManagerDidRedoChange] {
+            NotificationCenter.default.addObserver(self, selector: #selector(undoOrRedo(_:)), name: name, object: nil)
+        }
         if let placement {
             restorePlacement(placement)
         } else {
@@ -232,6 +241,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         defer { app.finishSave(to: target) }
 
         let text = editor.string
+        let writtenGeneration = editGeneration
         let expected = target == fileURL ? revision : nil
 
         do {
@@ -250,6 +260,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 guard await response(to: alert) == .alertSecondButtonReturn else { return false }
                 try await write(text, to: target, format: saveFormat, expected: nil)
             }
+            if let queuedAutosave, queuedAutosave.generation <= writtenGeneration { self.queuedAutosave = nil }
+            if window.isDocumentEdited { scheduleIdleAutosave() }
             if promote { await app.recentFiles.record(destination) }
             return true
         } catch {
@@ -283,20 +295,22 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             scheduleIdleAutosave()
             return
         }
-        autosaveRequested = true
+        guard queuedAutosave?.generation != editGeneration, writingGeneration != editGeneration,
+              autosaveFailure?.generation != editGeneration else { return }
+        queuedAutosave = AutosaveRequest(generation: editGeneration, text: editor.string)
         startRequestedAutosave()
     }
 
     private func startRequestedAutosave() {
-        guard autosaveRequested, autosaveTask == nil, !isBusy, !app.isQuitting else { return }
+        guard queuedAutosave != nil, autosaveTask == nil, !isBusy, !app.isQuitting else { return }
         autosaveTask = Task {
-            while autosaveRequested && !isBusy && !app.isQuitting {
-                autosaveRequested = false
+            while let request = queuedAutosave, !isBusy, !app.isQuitting {
+                queuedAutosave = nil
                 if editor.hasMarkedText() {
                     scheduleIdleAutosave()
                     break
                 }
-                await writeAutosave()
+                await writeAutosave(request)
             }
             autosaveTask = nil
             reportAutosaveFailure()
@@ -308,26 +322,36 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         idleSave?.cancel()
         idleSave = nil
         await autosaveTask?.value
-        autosaveRequested = false
-        await writeAutosave(retryFailed: true)
+        queuedAutosave = nil
+        if window.isDocumentEdited {
+            await writeAutosave(AutosaveRequest(generation: editGeneration, text: editor.string), retryFailed: true)
+        }
     }
 
-    private func writeAutosave(retryFailed: Bool = false) async {
-        guard window.isDocumentEdited, let target = fileURL, let revision,
-              retryFailed || autosaveFailure?.generation != editGeneration else { return }
-        let generation = editGeneration
+    private func writeAutosave(_ request: AutosaveRequest, retryFailed: Bool = false) async {
+        let generation = request.generation
+        guard let target = fileURL, let revision, savedText?.isEqual(to: request.text) != true,
+              retryFailed || autosaveFailure?.generation != generation else { return }
+        writingGeneration = generation
+        defer { writingGeneration = nil }
         guard app.reserveSave(to: target, identity: fileIdentity, for: self) else {
             autosaveFailure = (generation, "The file is already open in another window.", false)
             return
         }
         defer { app.finishSave(to: target) }
         do {
-            try await write(editor.string, to: target, format: format, expected: revision)
+            try await write(request.text, to: target, format: format, expected: revision)
         } catch FileBufferError.changedOnDisk {
             autosaveFailure = (generation, "The file changed on disk. Use Save to review whether to replace it.", false)
         } catch {
             autosaveFailure = (generation, error.localizedDescription, false)
         }
+    }
+
+    func takeAutosaveFailure() -> String? {
+        guard let failure = autosaveFailure, !failure.reported, window.isDocumentEdited else { return nil }
+        autosaveFailure?.reported = true
+        return "“\(window.title)” — \(failure.detail)"
     }
 
     private func reportAutosaveFailure() {
@@ -357,6 +381,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             idleSave = nil
             requestAutosave()
         }
+    }
+
+    @objc private func undoOrRedo(_ notification: Notification) {
+        guard let manager = notification.object as? UndoManager, manager === editor.undoManager else { return }
+        textDidChange()
     }
 
     private func textDidChange() {
@@ -470,7 +499,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         syntaxHighlighting?.cancel()
         idleSave?.cancel()
         idleSave = nil
-        autosaveRequested = false
+        queuedAutosave = nil
         app.didClose(self)
     }
 

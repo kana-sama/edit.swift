@@ -239,6 +239,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         // The temporary startup window can be closed before restoration reads the saved session.
         if startup != nil && documents.isEmpty { return .terminateNow }
         isQuitting = true
+        controlPanel?.dismiss(restoreFocus: true)
         activeDocument?.persistFindSettings()
         for document in documents {
             if document.editor.hasMarkedText() { document.editor.unmarkText() }
@@ -264,6 +265,14 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     }
                     try store.write(session)
                 }.value
+                if sender.isActive, let document = activeDocument {
+                    let failures = documents.compactMap { $0.takeAutosaveFailure() }
+                    if !failures.isEmpty {
+                        await document.showError("Could Not Autosave Some Files",
+                                                 detail: failures.joined(separator: "\n") +
+                                                    "\n\nYour edits are available as drafts the next time you open Edit.")
+                    }
+                }
                 sender.reply(toApplicationShouldTerminate: true)
             } catch {
                 isQuitting = false

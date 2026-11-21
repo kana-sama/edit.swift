@@ -10,8 +10,8 @@ Autosave writes changed text to the current file in the background. A buffer is 
 
 ## Writes and errors
 
-- Coalesce repeated requests and serialize them with explicit saves. Save a snapshot of the buffer and retain the edited marker when newer text has arrived. The next eligible request writes the newer text. A clean buffer needs no write.
-- Preserve local text and the current on-disk version if a file has changed externally, disappeared, or cannot be written. Report a background write error when Edit is active and its window can show an alert. Avoid repeating the same error for the same edit. Explicit Save still offers to replace an external version. If Quit leaves unsaved text, record it in the session.
+- Coalesce repeated requests and serialize them with explicit saves. Capture a text snapshot when an autosave is requested. Coalesce pending requests and retain the edited marker while newer text has yet to be saved. The next eligible request writes the newer text. A clean buffer needs no write.
+- Preserve local text and the current on-disk version if a file has changed externally, disappeared, or cannot be written. Report a background write error when Edit is active and its window can show an alert. Avoid repeating the same error for the same edit. Explicit Save still offers to replace an external version. If Quit leaves unsaved text, record it in the session. A failed autosave from an active application is reported before the app closes.
 
 ## Acceptance
 
