@@ -55,6 +55,11 @@ struct SyntaxSpan: Sendable {
     let color: SyntaxColor
 }
 
+struct SyntaxSnapshot: Sendable {
+    let language: SyntaxLanguage
+    let spans: [SyntaxSpan]
+}
+
 enum SyntaxEngine {
     private typealias Capture = @convention(c) (UnsafeMutableRawPointer?, UInt32, UInt32, UnsafePointer<CChar>?) -> Void
     private typealias Preview = @convention(c) (UnsafeMutableRawPointer?) -> Void
@@ -111,6 +116,13 @@ enum SyntaxEngine {
     }()
 
     private static let queries = Bundle.main.resourceURL?.appending(path: "syntax/queries").path
+
+    static func prepareSmallDocument(_ text: String, language: SyntaxLanguage) -> SyntaxSnapshot? {
+        // Keep large documents on the progressive path so their first display won't wait for a full query.
+        guard language != .plainText, text.utf8.count <= 32 * 1_024,
+              let spans = spans(in: text, language: language) else { return nil }
+        return SyntaxSnapshot(language: language, spans: spans)
+    }
 
     static func spans(
         in text: String, language: SyntaxLanguage, visibleRange: NSRange? = nil,

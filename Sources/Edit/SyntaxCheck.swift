@@ -8,6 +8,8 @@ enum SyntaxCheck {
     }
 
     static func run(in app: Edit) async throws {
+        try await checkFirstDraw(in: app, appearance: .aqua)
+        try await checkFirstDraw(in: app, appearance: .darkAqua)
         try await Task.detached { try checkGrammars() }.value
         let document = app.makeDocument()
         defer { document.window.close() }
@@ -39,6 +41,57 @@ enum SyntaxCheck {
         guard document.resolvedSyntaxLanguage == .plainText, document.manualSyntaxLanguage == .plainText else {
             throw Failure("Session restoration lost the manual Plain Text mode.")
         }
+    }
+
+    private static func checkFirstDraw(in app: Edit, appearance: NSAppearance.Name) async throws {
+        let document = app.makeDocument()
+        let scrollView = document.scrollView
+        let clip = scrollView.contentView
+        document.window.appearance = NSAppearance(named: appearance)
+        let source = String(repeating: "let marker = \"sample\";\n", count: 85)
+            + String(repeating: "// comment in a different viewport\n", count: 150)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Syntax display-\(UUID()).rs")
+        try Data(source.utf8).write(to: url)
+        let start = ContinuousClock.now
+        guard try await app.openFile(url, in: document) === document else {
+            throw Failure("Could not open the small syntax drawing fixture.")
+        }
+        document.window.layoutIfNeeded()
+
+        // Inspect the actual first frame. Polling layout or the attribute map can hide a missed draw.
+        try expectDrawnColor(in: clip, primaryChannel: 0, after: "opening the small Rust file")
+        let opened = start.duration(to: .now)
+        let scrollStart = ContinuousClock.now
+        clip.scroll(to: NSPoint(x: 0, y: clip.documentRect.maxY - clip.bounds.height))
+        scrollView.reflectScrolledClipView(clip)
+        try expectDrawnColor(in: clip, primaryChannel: 1, after: "scrolling to comment lines")
+        let scrolled = scrollStart.duration(to: .now)
+        clip.scroll(to: .zero)
+        scrollView.reflectScrolledClipView(clip)
+        try expectDrawnColor(in: clip, primaryChannel: 0, after: "scrolling back to string literals")
+        print("Syntax in the first frame of a \(source.utf8.count)-byte file: open \(opened), scroll \(scrolled).")
+    }
+
+    private static func expectDrawnColor(in clip: NSClipView, primaryChannel: Int, after action: String) throws {
+        let bounds = clip.bounds
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: Int(bounds.width), pixelsHigh: Int(bounds.height),
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ) else { throw Failure("Could not capture the editor viewport.") }
+        bitmap.size = bounds.size
+        clip.cacheDisplay(in: bounds, to: bitmap)
+        guard let pixels = bitmap.bitmapData else { throw Failure("No viewport pixels were drawn.") }
+        let otherChannel = 1 - primaryChannel
+        for y in 0..<bitmap.pixelsHigh {
+            for x in 0..<min(300, bitmap.pixelsWide) {
+                let offset = y * bitmap.bytesPerRow + x * 4
+                let color = Int(pixels[offset + primaryChannel])
+                if color - Int(pixels[offset + otherChannel]) > 32,
+                   color - Int(pixels[offset + 2]) > 32 { return }
+            }
+        }
+        throw Failure("Missing syntax color in the first frame after \(action).")
     }
 
     private static func checkScrolling(document: DocumentWindow, manager: NSTextLayoutManager) async throws {

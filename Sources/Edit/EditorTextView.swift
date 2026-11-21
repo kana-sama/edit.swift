@@ -526,6 +526,15 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         onTextChange?()
     }
 
+    override func textViewportLayoutController(
+        _ controller: NSTextViewportLayoutController, configureRenderingSurfaceFor fragment: NSTextLayoutFragment
+    ) {
+        if let manager = controller.textLayoutManager {
+            syntaxHighlighting?.prepareForDrawing(fragment, using: manager)
+        }
+        super.textViewportLayoutController(controller, configureRenderingSurfaceFor: fragment)
+    }
+
     override func textViewportLayoutControllerDidLayout(_ controller: NSTextViewportLayoutController) {
         super.textViewportLayoutControllerDidLayout(controller)
         requestLineRefresh()
@@ -539,7 +548,6 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             guard let self else { return }
             self.refreshCurrentLine()
             self.lineRefreshPending = false
-            self.syntaxHighlighting?.viewportChanged()
             self.onFindViewportChange?()
         }
     }

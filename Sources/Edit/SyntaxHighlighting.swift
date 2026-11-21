@@ -4,7 +4,6 @@ import AppKit
 final class SyntaxHighlighting {
     private weak var editor: EditorTextView?
     private var spans: [SyntaxSpan] = []
-    private var paintedViewport: NSRange?
     private var hasRenderingColors = false
     private var task: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
@@ -14,21 +13,12 @@ final class SyntaxHighlighting {
     init(editor: EditorTextView) {
         self.editor = editor
         editor.syntaxHighlighting = self
-        editor.textLayoutManager?.renderingAttributesValidator = { [weak self] manager, fragment in
-            MainActor.assumeIsolated {
-                self?.paint(fragment.rangeInElement, using: manager)
-            }
-        }
     }
 
     func update(language: SyntaxLanguage, immediate: Bool) {
-        generation &+= 1
+        cancelPending()
         let request = generation
-        task?.cancel()
-        task = nil
-        stopProgress()
         spans = []
-        paintedViewport = nil
         if immediate { clearColors() }
         guard language != .plainText else { return }
 
@@ -50,10 +40,7 @@ final class SyntaxHighlighting {
             await withTaskCancellationHandler {
                 for await result in updates {
                     guard !Task.isCancelled, let self, self.generation == request else { break }
-                    self.clearColors()
-                    self.spans = result
-                    self.paintedViewport = nil
-                    self.viewportChanged()
+                    self.display(result)
                     self.stopProgress()
                 }
             } onCancel: {
@@ -70,13 +57,28 @@ final class SyntaxHighlighting {
         }
     }
 
-    func cancel() {
+    func install(_ result: [SyntaxSpan]) {
+        cancelPending()
+        display(result)
+    }
+
+    func cancel(clearingColors: Bool = true) {
+        cancelPending()
+        if clearingColors { display([]) }
+    }
+
+    private func cancelPending() {
+        generation &+= 1
         task?.cancel()
         task = nil
         stopProgress()
-        spans = []
-        paintedViewport = nil
+    }
+
+    private func display(_ result: [SyntaxSpan]) {
+        let needsRedraw = hasRenderingColors || !result.isEmpty
         clearColors()
+        spans = result
+        if needsRedraw { redrawSyntax() }
     }
 
     private func visibleRange() -> NSRange? {
@@ -85,15 +87,18 @@ final class SyntaxHighlighting {
         return editor.charRange(visible, in: manager)
     }
 
-    func viewportChanged() {
-        guard !spans.isEmpty, let editor, let manager = editor.textLayoutManager,
-              let visible = manager.textViewportLayoutController.viewportRange else { return }
-        let range = editor.charRange(visible, in: manager)
-        guard range != paintedViewport else { return }
-        // TextKit can reuse a previously validated range as its viewport moves.
-        // Explicitly apply the current snapshot to each newly visible region.
-        paintedViewport = range
-        paint(visible, using: manager)
+    func prepareForDrawing(_ fragment: NSTextLayoutFragment, using manager: NSTextLayoutManager) {
+        paint(fragment.rangeInElement, using: manager)
+    }
+
+    private func redrawSyntax() {
+        guard let editor, let manager = editor.textLayoutManager else { return }
+        let viewport = manager.textViewportLayoutController
+        if let visible = viewport.viewportRange {
+            paint(visible, using: manager)
+        }
+        viewport.layoutViewport()
+        editor.setNeedsDisplay(editor.visibleRect)
     }
 
     private func clearColors() {

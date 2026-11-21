@@ -10,7 +10,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     enum CloseDestination {
         case window
-        case buffer(FileBuffer?)
+        case buffer(FileBuffer?, preparedSyntax: SyntaxSnapshot? = nil)
     }
 
     private struct AutosaveRequest {
@@ -185,11 +185,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         Task { @MainActor [weak self] in self?.reportAutosaveFailure() }
     }
 
-    func load(_ file: FileBuffer, storedSyntaxLanguage: String? = nil) {
+    func load(_ file: FileBuffer, storedSyntaxLanguage: String? = nil, preparedSyntax: SyntaxSnapshot? = nil) {
         updateIdentity(from: file)
         manualSyntaxLanguage = storedSyntaxLanguage.flatMap(SyntaxLanguage.init(rawValue:))
             ?? app.syntaxOverrides.language(for: fileURL)
-        installText(file.text)
+        installText(file.text, preparedSyntax: preparedSyntax)
     }
 
     func restoreDraft(_ record: SessionDocument, text: String, identity: FileIdentity? = nil) {
@@ -407,7 +407,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         refreshSyntax(immediate: false)
     }
 
-    private func refreshSyntax(immediate: Bool) {
+    private func refreshSyntax(immediate: Bool, preparedSyntax: SyntaxSnapshot? = nil) {
         let language = resolvedSyntaxLanguage
         if language == .plainText {
             syntaxHighlighting?.cancel()
@@ -416,7 +416,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if syntaxHighlighting == nil {
             syntaxHighlighting = SyntaxHighlighting(editor: editor)
         }
-        syntaxHighlighting?.update(language: language, immediate: immediate)
+        if let preparedSyntax, preparedSyntax.language == language {
+            syntaxHighlighting?.install(preparedSyntax.spans)
+        } else {
+            syntaxHighlighting?.update(language: language, immediate: immediate)
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -432,10 +436,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     @discardableResult
-    func replaceBuffer(with file: FileBuffer?) async -> Bool {
+    func replaceBuffer(with file: FileBuffer?, preparedSyntax: SyntaxSnapshot? = nil) async -> Bool {
         guard canReplaceBuffer, !app.isQuitting else { return false }
         promptingToClose = true
-        return await closeBuffer(destination: .buffer(file))
+        return await closeBuffer(destination: .buffer(file, preparedSyntax: preparedSyntax))
     }
 
     @discardableResult
@@ -478,12 +482,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
 
         switch destination {
-        case .buffer(let file):
+        case .buffer(let file, let preparedSyntax):
             autosaveFailure = nil
             editor.breakUndoCoalescing()
             if let file {
                 // Saving the outgoing draft to the target already installed the latest revision.
-                if file.url != fileURL { load(file) }
+                if file.url != fileURL { load(file, preparedSyntax: preparedSyntax) }
             } else {
                 fileURL = nil
                 manualSyntaxLanguage = nil
@@ -522,7 +526,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         persistFindSettings()
-        syntaxHighlighting?.cancel()
+        syntaxHighlighting?.cancel(clearingColors: false)
         idleSave?.cancel()
         idleSave = nil
         queuedAutosave = nil
@@ -564,7 +568,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    private func installText(_ text: String) {
+    private func installText(_ text: String, preparedSyntax: SyntaxSnapshot? = nil) {
         editor.preferredLineEnding = format.lineEnding
         editor.resetMultiCarets()
         editor.string = text
@@ -573,7 +577,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.undoManager?.removeAllActions()
         updateTitle()
         updateEditedState()
-        refreshSyntax(immediate: true)
+        refreshSyntax(immediate: true, preparedSyntax: preparedSyntax)
         findPanel?.bufferReplaced()
     }
 

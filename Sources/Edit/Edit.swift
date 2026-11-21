@@ -354,16 +354,16 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         var restored: [(index: Int, document: DocumentWindow)] = []
         var warnings: [String] = []
         for (index, record) in previous.documents.enumerated() {
-            let file: FileBuffer?
+            let opened: (file: FileBuffer, syntax: SyntaxSnapshot?)?
             if record.draft == nil, let path = record.path {
                 do {
-                    file = try await Task.detached { try FileBuffer.read(URL(fileURLWithPath: path)) }.value
+                    opened = try await readForOpening(URL(fileURLWithPath: path), storedLanguage: record.syntaxLanguage)
                 } catch {
                     warnings.append("“\(URL(fileURLWithPath: path).lastPathComponent)” — \(error.localizedDescription)")
                     continue
                 }
             } else {
-                file = nil
+                opened = nil
             }
             let document = restored.isEmpty && documents.contains(where: { $0 === placeholder }) && placeholder.isReusable
                 ? placeholder : makeDocument()
@@ -373,8 +373,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     record.path.flatMap { FileIdentity.at(URL(fileURLWithPath: $0)) }
                 }.value
                 document.restoreDraft(record, text: draft, identity: identity)
-            } else if let file {
-                document.load(file, storedSyntaxLanguage: record.syntaxLanguage)
+            } else if let opened {
+                document.load(opened.file, storedSyntaxLanguage: record.syntaxLanguage, preparedSyntax: opened.syntax)
             }
             if let path = record.path { await recentFiles.record(URL(fileURLWithPath: path)) }
             if isQuitting { document.editor.isEditable = false }
@@ -428,11 +428,22 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             return document
         }
 
-        let file = try await Task.detached { try FileBuffer.read(canonical, allowMissing: allowMissing) }.value
+        let opened = try await readForOpening(canonical, allowMissing: allowMissing)
         guard documents.contains(where: { $0 === document }),
-              await document.replaceBuffer(with: file) else { return nil }
-        if file.identity != nil { await recentFiles.record(url) }
+              await document.replaceBuffer(with: opened.file, preparedSyntax: opened.syntax) else { return nil }
+        if opened.file.identity != nil { await recentFiles.record(url) }
         return document
+    }
+
+    private func readForOpening(
+        _ url: URL, allowMissing: Bool = false, storedLanguage: String? = nil
+    ) async throws -> (file: FileBuffer, syntax: SyntaxSnapshot?) {
+        let override = storedLanguage.flatMap(SyntaxLanguage.init(rawValue:)) ?? syntaxOverrides.language(for: url)
+        return try await Task.detached(priority: .userInitiated) {
+            let file = try FileBuffer.read(url, allowMissing: allowMissing)
+            let language = override ?? SyntaxLanguage.detected(at: file.url)
+            return (file, SyntaxEngine.prepareSmallDocument(file.text, language: language))
+        }.value
     }
 
     func manualIconLanguage(for recent: RecentFile) -> String? {
