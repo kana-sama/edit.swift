@@ -401,14 +401,13 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let oldFrame = window.frame
         let editorPane = NSView(frame: NSRect(origin: .zero, size: previousSize))
         let scroll = document.scrollView
-        scroll.automaticallyAdjustsContentInsets = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
         editorPane.addSubview(scroll)
         NSLayoutConstraint.activate([
             scroll.leadingAnchor.constraint(equalTo: editorPane.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: editorPane.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: editorPane.bottomAnchor),
-            scroll.topAnchor.constraint(equalTo: editorPane.safeAreaLayoutGuide.topAnchor),
+            scroll.topAnchor.constraint(equalTo: editorPane.topAnchor),
         ])
         editorController.view = editorPane
         let editorItem = NSSplitViewItem(viewController: editorController)
@@ -423,13 +422,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         split.addSplitViewItem(sidebarItem)
         split.addSplitViewItem(editorItem)
         split.view.setFrameSize(previousSize)
-        window.styleMask.insert(.fullSizeContentView)
-        window.titlebarAppearsTransparent = true
         window.contentViewController = split
         let toolbar = NSToolbar(identifier: "Edit.Search")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
-        window.toolbarStyle = .unifiedCompact
         window.toolbar = toolbar
         if window.frame != oldFrame { window.setFrame(oldFrame, display: window.isVisible) }
         window.initialFirstResponder = document.editor
@@ -501,7 +497,11 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     private func beginSidebarTransition() -> UInt64 {
-        layoutAnchor = document.scrollView.contentView.bounds.origin
+        let scroll = document.scrollView
+        // Anchor to the visible edge below the titlebar if its inset changes during layout.
+        var anchor = scroll.contentView.bounds.origin
+        anchor.y += scroll.contentInsets.top
+        layoutAnchor = anchor
         sidebarAnimation &+= 1
         return sidebarAnimation
     }
@@ -535,9 +535,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     private func restoreEditorAnchor() {
-        guard let layoutAnchor else { return }
+        guard var layoutAnchor else { return }
         let scroll = document.scrollView
         let clip = scroll.contentView
+        layoutAnchor.y -= scroll.contentInsets.top
         let bounds = clip.constrainBoundsRect(NSRect(origin: layoutAnchor, size: clip.bounds.size))
         guard clip.bounds.origin != bounds.origin else { return }
         clip.scroll(to: bounds.origin)

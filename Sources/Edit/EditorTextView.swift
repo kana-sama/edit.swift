@@ -46,6 +46,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
+        scrollView.automaticallyAdjustsContentInsets = true
         scrollView.backgroundColor = .textBackgroundColor
 
         let editor = EditorTextView(usingTextLayoutManager: true)

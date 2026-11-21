@@ -68,7 +68,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         self.app = app
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 480),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -83,6 +83,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             Task { @MainActor in self?.updateTitleIcon() }
         }
         window.contentView = scrollView
+        let toolbar = NSToolbar(identifier: "Edit.Document")
+        toolbar.displayMode = .iconOnly
+        window.toolbarStyle = .unified
+        window.toolbar = toolbar
         window.initialFirstResponder = editor
         window.makeFirstResponder(editor)
         editor.onTextChange = { [weak self] in self?.textDidChange() }

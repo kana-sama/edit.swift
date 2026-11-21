@@ -67,7 +67,8 @@ enum FindCheck {
     private static func checkSidebarLayout(in document: DocumentWindow) async throws {
         let window = document.window
         let editor = document.editor
-        let clip = document.scrollView.contentView
+        let scroll = document.scrollView
+        let clip = scroll.contentView
         let lines = (0..<100).map { index in
             "checksum = \"" + String(index) + String(repeating: "abcdef0123456789", count: 12) + "\""
         }
@@ -79,6 +80,27 @@ enum FindCheck {
         editor.setSelectedRange(caret)
         window.layoutIfNeeded()
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        let titlebarBottom = window.contentLayoutRect.maxY
+        let titlebarInset = scroll.contentInsets.top
+        let initialFrame = scroll.convert(scroll.bounds, to: nil)
+        try expect(window.styleMask.contains(.fullSizeContentView) && window.toolbar?.isVisible == true &&
+                   !window.titlebarAppearsTransparent && scroll.automaticallyAdjustsContentInsets &&
+                   initialFrame.maxY > titlebarBottom && titlebarInset > 0,
+                   "the native titlebar overlaps the editor's scroll view before Search opens")
+        func firstLineFrame() -> NSRect {
+            let bounds = editor.firstRect(forCharacterRange: NSRange(location: 0, length: 0), actualRange: nil)
+            return window.convertFromScreen(bounds)
+        }
+        let firstAtTop = firstLineFrame()
+        try expect(firstAtTop.height > 0 && firstAtTop.maxY <= titlebarBottom,
+                   "the system inset keeps the first line below the titlebar at the top")
+        clip.scroll(to: .zero)
+        scroll.reflectScrolledClipView(clip)
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        let firstUnderTitlebar = firstLineFrame()
+        try expect(firstUnderTitlebar.height > 0 && firstUnderTitlebar.minY >= titlebarBottom &&
+                   firstUnderTitlebar.maxY <= initialFrame.maxY,
+                   "the first line scrolls up under the native titlebar")
         editor.scrollRangeToVisible(NSRange(location: editor.string.utf16.count - 1, length: 1))
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         clip.scroll(to: NSPoint(x: 0, y: 40))
@@ -96,8 +118,10 @@ enum FindCheck {
         let sidebarFrame = sidebar.convert(sidebar.bounds, to: nil)
         try expect(sidebarFrame.maxY > window.contentLayoutRect.maxY && sidebarFrame.minY <= window.contentLayoutRect.minY,
                    "sidebar spans the window including titlebar (\(sidebarFrame), content \(window.contentLayoutRect))")
-        let editorFrame = document.scrollView.convert(document.scrollView.bounds, to: nil)
-        try expect(editorFrame.maxY <= window.contentLayoutRect.maxY + 1, "editor starts below the titlebar")
+        let editorFrame = scroll.convert(scroll.bounds, to: nil)
+        try expect(editorFrame.maxY > window.contentLayoutRect.maxY && abs(editorFrame.maxY - sidebarFrame.maxY) < 1 &&
+                   abs(scroll.contentInsets.top - titlebarInset) < 1,
+                   "the editor still scrolls under the same titlebar when the sidebar opens")
         let icon = FileIcons.image(for: url, appearance: window.effectiveAppearance)
         try expect(icon != nil && window.standardWindowButton(.documentIconButton)?.image === icon,
                    "the title proxy retains its Seti icon with the sidebar toolbar installed")
