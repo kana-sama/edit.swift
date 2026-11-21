@@ -484,6 +484,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             textStorage?.addAttribute(.paragraphStyle, value: paragraph, range: range)
         }
         typingAttributes = [.font: font, .foregroundColor: NSColor.textColor, .paragraphStyle: paragraph]
+        if range.length > 0 {
+            // Rebuild the visible fragments after changing both the font and paragraph metrics.
+            textLayoutManager?.textViewportLayoutController.layoutViewport()
+        }
         requestLineRefresh()
     }
 

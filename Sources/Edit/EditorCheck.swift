@@ -98,6 +98,75 @@ enum EditorCheck {
         editor.refreshCurrentLine()
     }
 
+    static func checkScrolledZoom(in document: DocumentWindow) async throws {
+        let window = document.window
+        let editor = document.editor
+        let clip = document.scrollView.contentView
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
+        // Keep AppKit's backing layers live without displaying or activating the test window.
+        window.orderBack(nil)
+        defer { window.orderOut(nil) }
+        try expect(window.isVisible && !NSApp.isActive && window.alphaValue == 0, "quiet live zoom check")
+
+        let text = (0..<1_200).map { row in
+            "\tlet row_\(row) = \"This line should always stay visible when resizing the editor font.\";"
+        }.joined(separator: "\n")
+        let caret = NSRange(location: 0, length: 0)
+        editor.string = text
+        editor.setSelectedRange(caret)
+        document.setSyntaxLanguage(.rust)
+        window.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(80))
+
+        let range = (text as NSString).range(of: "row_920 =")
+        editor.resetTextSize(nil)
+        editor.scrollRangeToVisible(range)
+        try await checkTextPaint(in: clip, after: "scrolling deep into the buffer")
+        try expect(clip.bounds.minY > 10_000, "the zoom test starts deep in the buffer")
+        editor.decreaseTextSize(nil)
+        try await checkTextPaint(in: clip, after: "decreasing text size without scrolling")
+        editor.increaseTextSize(nil)
+        try await checkTextPaint(in: clip, after: "increasing text size without scrolling")
+        editor.increaseTextSize(nil)
+        editor.resetTextSize(nil)
+        try await checkTextPaint(in: clip, after: "resetting text size without scrolling")
+        try expect(editor.string == text && editor.selectedRange() == caret, "zoom preserves text and selection")
+    }
+
+    private static func checkTextPaint(in clip: NSClipView, after action: String) async throws {
+        // Let Core Animation commit the frame. Do not force layout or display while inspecting it.
+        try await Task.sleep(for: .milliseconds(80))
+        let bounds = clip.bounds
+        guard let layer = clip.layer,
+              let bitmap = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: Int(bounds.width), pixelsHigh: Int(bounds.height),
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+              ),
+              let bytes = bitmap.bitmapData else { throw Failure("capturing the live zoom viewport") }
+        bitmap.size = bounds.size
+        guard let graphics = NSGraphicsContext(bitmapImageRep: bitmap) else { throw Failure("zoom graphics context") }
+        let rendered = layer.presentation() ?? layer
+        let context = graphics.cgContext
+        context.translateBy(x: 0, y: bounds.height)
+        context.scaleBy(x: 1, y: -1)
+        context.translateBy(x: -rendered.bounds.minX, y: -rendered.bounds.minY)
+        rendered.render(in: context)
+
+        var blankHeight = 0
+        for y in stride(from: 52, to: bitmap.pixelsHigh - 12, by: 2) {
+            let hasText = stride(from: 8, to: min(bitmap.pixelsWide - 18, 385), by: 2).contains { x in
+                let offset = y * bitmap.bytesPerRow + 4 * x
+                return max(bytes[offset], bytes[offset + 1], bytes[offset + 2]) > 135
+            }
+            blankHeight = hasText ? 0 : blankHeight + 2
+            try expect(blankHeight < 50, "zoom keeps the viewport painted after \(action)")
+        }
+    }
+
     private static func expect(_ condition: @autoclosure () -> Bool, _ description: String) throws {
         guard condition() else { throw Failure(description) }
     }

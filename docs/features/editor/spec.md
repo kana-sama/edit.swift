@@ -12,7 +12,7 @@ Use the system monospaced font at 13 points initially and highlight the caret's 
 - Option-Up and Option-Down move the current line or selected block up or down and keep the selection with the moved text. At the document boundary the block stays in place.
 - Command-Return inserts below and Shift-Command-Return inserts above with matching indentation. Command-] and Command-[ indent or outdent each affected line. Outdent removes one leading tab or up to four leading spaces.
 - Command-Delete deletes the prefix of a line, and Command-Forward Delete deletes the suffix. At the relevant line boundary these commands join adjacent lines.
-- Command-= and Command-- change the text size by one point, from 6 to 72. Command-0 and a fresh launch restore 13 points.
+- Command-= and Command-- change the text size by one point, from 6 to 72. Command-0 and a fresh launch restore 13 points. Text remains visible when changing size while scrolled.
 
 The Edit menu has a Lines submenu with the six line commands. The View menu offers text sizing and native full screen. The Window menu offers Minimize, Zoom, and Close Window. The Help menu uses macOS command search.
 
@@ -20,5 +20,5 @@ The Edit menu has a Lines submenu with the six line commands. The View menu offe
 
 - Open a new untitled window and start typing. Select and replace Unicode text and use native undo and redo.
 - Exercise indentation, inserting and moving lines, boundary deletion, and whole-line clipboard behavior. Undo each discrete line edit.
-- Open a wide and tall sample within the scratch buffer. Confirm native horizontal and vertical scrolling, active-line highlighting, and a text-size change without a change to the window size.
+- Open a wide and tall sample within the scratch buffer. Confirm native horizontal and vertical scrolling and active-line highlighting. Scroll deep into the buffer and zoom out and in. Check that the viewport stays painted and the window keeps its size.
 - Run `./script/check` to exercise native editing and render the implemented buffer without stealing focus.
