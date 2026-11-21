@@ -495,9 +495,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         }
         views.append(title)
         if let detail = match.entry.detail {
-            let path = makeLabel(detail, highlights: match.detailCharacters, secondary: true)
-            path.lineBreakMode = .byTruncatingHead
-            views.append(path)
+            views.append(makeLabel(detail, highlights: match.detailCharacters, secondary: true, lineBreak: .byTruncatingHead))
         }
         if let shortcut = match.entry.shortcut {
             views.append(NSView())
@@ -521,14 +519,20 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         return stack
     }
 
-    private func makeLabel(_ text: String, highlights: Set<Int>, secondary: Bool) -> NSTextField {
+    private func makeLabel(
+        _ text: String, highlights: Set<Int>, secondary: Bool, lineBreak: NSLineBreakMode = .byTruncatingTail
+    ) -> NSTextField {
         let field = NSTextField(labelWithString: text)
         field.font = secondary ? .systemFont(ofSize: NSFont.smallSystemFontSize) : .systemFont(ofSize: NSFont.systemFontSize)
         field.textColor = secondary ? .secondaryLabelColor : .labelColor
-        field.lineBreakMode = .byTruncatingTail
+        field.lineBreakMode = lineBreak
         field.maximumNumberOfLines = 1
         field.cell?.usesSingleLineMode = true
-        let styled = NSMutableAttributedString(string: text, attributes: [.font: field.font!, .foregroundColor: field.textColor!])
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = lineBreak
+        let styled = NSMutableAttributedString(string: text, attributes: [
+            .font: field.font!, .foregroundColor: field.textColor!, .paragraphStyle: paragraph
+        ])
         var offset = 0
         for (index, character) in text.enumerated() {
             let length = String(character).utf16.count
