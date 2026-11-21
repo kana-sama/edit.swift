@@ -30,7 +30,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     private var monitor: Any?
     private var entries: [ControlMatch] = []
     private var request: Task<Void, Never>?
-    private var folderScan: (folder: URL, task: Task<[ControlEntry], Never>)?
+    private var folderScan: (folder: URL, task: Task<FolderFileSearch.Index, Never>)?
+    private var resultsFolder: URL?
     private var generation = 0
     private var opening = 0
     private var pending = false
@@ -75,8 +76,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let query = failure?.query ?? ""
         input.stringValue = query
         clearButton.isHidden = query.isEmpty
-        apply(ControlMatching.rank(sourceEntries(), query: query), selected: failure?.id ?? initialID,
-              error: failure?.message)
+        let searchesFolder = mode == .files && document.folderURL != nil
+        let rows = searchesFolder ? [] : ControlMatching.rank(sourceEntries(), query: query)
+        apply(rows, selected: failure?.id ?? initialID, error: failure?.message)
+        if searchesFolder {
+            if failure == nil { feedback.isHidden = true }
+            search(preserving: failure?.id ?? initialID, error: failure?.message)
+        }
         if !app.isAgentCheck {
             document.window.addChildWindow(panel, ordered: .above)
             panel.makeKeyAndOrderFront(nil)
@@ -89,13 +95,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             NotificationCenter.default.addObserver(self, selector: #selector(parentResized),
                                                    name: NSWindow.didResizeNotification, object: document.window)
         }
-        if let failure {
-            if document.folderURL != nil && !query.allSatisfy(\.isWhitespace) {
-                search(preserving: failure.id, error: failure.message)
-            }
-        } else {
-            refreshFiles(for: document)
-        }
+        if failure == nil { refreshFiles(for: document) }
     }
 
     private func configure(_ mode: Mode) {
@@ -126,10 +126,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     private func refreshFiles(for document: DocumentWindow) {
         guard mode == .files else { return }
         let current = opening
+        let recent = app.recentFiles.entries
         Task { [weak self] in
             guard let self else { return }
             await app.recentFiles.prune()
-            guard mode == .files, self.document === document, current == opening, !isHovering else { return }
+            guard mode == .files, self.document === document, current == opening, !isHovering,
+                  app.recentFiles.entries != recent else { return }
             search(preserving: selectedID)
         }
     }
@@ -143,6 +145,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         request = nil
         folderScan?.task.cancel()
         folderScan = nil
+        resultsFolder = nil
         pending = false
         deferredRefresh = false
         setSearching(false)
@@ -395,11 +398,11 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         entries.indices.contains(table.selectedRow) ? entries[table.selectedRow].entry.id : nil
     }
 
-    private func scanFolder(_ folder: URL?) -> Task<[ControlEntry], Never>? {
+    private func scanFolder(_ folder: URL?) -> Task<FolderFileSearch.Index, Never>? {
         if let folderScan, folderScan.folder == folder { return folderScan.task }
         folderScan?.task.cancel()
         folderScan = folder.map { folder in
-            (folder, Task.detached(priority: .userInitiated) { FolderFileSearch.entries(in: folder) })
+            (folder, Task.detached(priority: .userInitiated) { FolderFileSearch.index(in: folder) })
         }
         return folderScan?.task
     }
@@ -411,16 +414,21 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let rows = sourceEntries()
         let query = input.stringValue
         let folder = mode == .files ? document?.folderURL : nil
-        let scan = scanFolder(query.allSatisfy(\.isWhitespace) ? nil : folder)
+        let path = folder == nil ? nil : FolderFileSearch.DirectoryQuery(query)
+        let scan = scanFolder(path != nil || query.allSatisfy(\.isWhitespace) ? nil : folder)
         clearButton.isHidden = query.isEmpty
         if error == nil { feedback.stringValue = "" }
         pending = true
         request = Task { [weak self] in
             let worker = Task.detached(priority: .userInitiated) {
                 if let scan {
-                    let folderFiles = await scan.value
+                    let index = await scan.value
                     guard !Task.isCancelled else { return [ControlMatch]() }
-                    return FolderFileSearch.rank(rows, folderFiles: folderFiles, query: query)
+                    return index.rank(rows, query: query)
+                }
+                if let folder {
+                    if let path { return path.rank(rows, in: folder) }
+                    return FolderFileSearch.recentMatches(rows, in: folder)
                 }
                 return ControlMatching.rank(rows, query: query)
             }
@@ -441,6 +449,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
                 return
             }
             pending = false
+            resultsFolder = folder
             setSearching(false)
             apply(results, selected: id, error: error)
         }
@@ -652,6 +661,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let file = FileBuffer.canonicalURL(file)
         show(in: document)
         defer { dismiss(restoreFocus: false) }
+        while pending { await request?.value }
         guard folderScan == nil, !entries.isEmpty, entries.allSatisfy({ $0.entry.recent != nil }) else {
             throw CheckFailure.invalidFolderResults("blank query")
         }
@@ -681,6 +691,38 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let matchingFiles = entries.filter { ($0.entry.recent?.canonicalURL ?? $0.entry.folderFileURL)?.path == file.path }
         guard matchingFiles.count == 1, matchingFiles.first?.entry.recent != nil else {
             throw CheckFailure.invalidFolderResults("recent file deduplication")
+        }
+    }
+
+    func checkFolderQueries(
+        in document: DocumentWindow, expectations: [(query: String, files: [URL])], opening file: URL
+    ) async throws {
+        guard app.isAgentCheck, let root = document.folderURL else { return }
+        show(in: document)
+        defer { dismiss(restoreFocus: false) }
+        for (query, files) in expectations {
+            input.stringValue = query
+            search()
+            while pending { await request?.value }
+            let found = entries.compactMap { match in
+                (match.entry.recent?.canonicalURL ?? match.entry.folderFileURL)?.path
+            }.filter { $0.hasPrefix(root.path + "/") }
+            let expected = files.map { FileBuffer.canonicalURL($0).path }
+            guard found.sorted() == expected.sorted() else {
+                throw CheckFailure.invalidFolderResults("query \(String(reflecting: query)), files \(found)")
+            }
+            if FolderFileSearch.DirectoryQuery(query) != nil || query.isEmpty {
+                guard folderScan == nil else { throw CheckFailure.invalidFolderResults("unnecessary recursive scan") }
+            }
+        }
+        let target = FileBuffer.canonicalURL(file)
+        guard let row = entries.firstIndex(where: { ($0.entry.recent?.canonicalURL ?? $0.entry.folderFileURL) == target }),
+              let activation = activate(row: row) else {
+            throw CheckFailure.invalidFolderResults("activating an explicit path")
+        }
+        await activation.value
+        guard document.fileURL == target && document.folderURL == root else {
+            throw CheckFailure.invalidFolderResults("opening an excluded file in the current folder window")
         }
     }
 
@@ -785,7 +827,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             return nil
         }
         guard let url = entry.fileURL else { return nil }
-        if entry.folderFileURL != nil && document.folderURL != folderScan?.folder {
+        if entry.folderFileURL != nil && document.folderURL != resultsFolder {
             configure(mode)
             search()
             return nil

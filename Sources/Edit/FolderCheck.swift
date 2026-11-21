@@ -85,8 +85,68 @@ enum FolderCheck {
         try expect(recovered[2].fileURL == FileBuffer.canonicalURL(newReadme),
                    "a folder with a missing remembered file falls back to its README")
 
+        try await checkControlExclusions(in: app, root: root)
         try await checkRecentMenu(in: app, root: root)
         return placeholder.window
+    }
+
+    private static func checkControlExclusions(in app: Edit, root: URL) async throws {
+        let repo = root.appending(path: "Ignore Repository")
+        let project = repo.appending(path: "Project")
+        try makeDirectory(repo.appending(path: ".git"))
+        _ = try write("/Project/from-parent/\n", to: repo.appending(path: ".gitignore"))
+        try makeDirectory(project)
+        _ = try write("a\nprobe-c.txt\nignored*/\n!ignored-keep/\n**/Generated/\n",
+                      to: project.appending(path: ".gitignore"))
+
+        func file(_ path: String) throws -> URL {
+            let url = project.appending(path: path)
+            try makeDirectory(url.deletingLastPathComponent())
+            return try write("sample", to: url)
+        }
+
+        let b = try file("a/probe-b.txt")
+        let g = try file("a/e/probe-g.txt")
+        let c = try file("probe-c.txt")
+        let d = try file("probe-d.txt")
+        let dotFile = try file(".probe-config")
+        let dotDirectory = try file("src/.hidden/probe-h.txt")
+        let generated = try file("src/Generated/probe-generated.txt")
+        let dependency = try file("node_modules/probe-module.txt")
+        let keep = try file("ignored-keep/probe-keep.txt")
+        let ignored = try file("ignored-other/probe-other.txt")
+        let inherited = try file("from-parent/probe-parent.txt")
+        let nestedIgnored = try file("src/one/probe-x.txt")
+        let nestedIncluded = try file("elsewhere/one/probe-y.txt")
+        let rustTarget = try file("Rust/target/probe-build.txt")
+        let ordinaryTarget = try file("Other/target/probe-source.txt")
+        _ = try file("Rust/Cargo.toml")
+        _ = try write("/one/\n", to: project.appending(path: "src/.gitignore"))
+
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        _ = try await app.openFile(project, in: document)
+        for recent in [b, g, c, dotDirectory, generated, inherited, nestedIgnored, rustTarget] {
+            await app.recentFiles.record(recent)
+        }
+        try await ControlPanel(app: app).checkFolderQueries(in: document, expectations: [
+            ("", [c]),
+            ("probe", [c, d, dotFile, keep, nestedIncluded, ordinaryTarget]),
+            ("a/", [b]),
+            ("a/ probe-g", []),
+            ("a/e/", [g]),
+            ("a/e/probe-g", [g]),
+            ("src/.hidden/", [dotDirectory]),
+            ("src/Generated/", [generated]),
+            ("node_modules/", [dependency]),
+            ("ignored-other/", [ignored]),
+            ("from-parent/", [inherited]),
+            ("src/one/", [nestedIgnored]),
+            ("Rust/target/", [rustTarget]),
+            ("../", []),
+            ("", [c]),
+            ("a/e/probe-g", [g]),
+        ], opening: g)
     }
 
     private static func checkRecentMenu(in app: Edit, root: URL) async throws {

@@ -6,7 +6,7 @@ Open the last file opened within the folder if it is readable. Otherwise look fo
 
 File → Open Recent shows the ten most recently opened folders before a separator and the ten most recently opened files. Choosing a folder follows the same rules as Open. A folder's remembered file persists across launches and is independent of the menu limit.
 
-With a folder open, a nonempty ⌘P query searches recent files and regular files within the folder, including subfolders. Search uses the existing fuzzy matcher and coalesces duplicate results. It skips Git metadata, package contents, and symbolic directory links. Clearing the query shows only recent files.
+With a folder open, a nonempty ⌘P query searches recent files and regular files within the folder according to the [Control folder search rules](../control/spec.md). Clearing the query shows only eligible recent files.
 
 The native title bar displays the current file or “Untitled” followed by the folder name. Session restoration reopens the folder alongside the window's current file or draft. If that file is missing or unreadable and there is no draft, keep the folder window open with an untitled buffer.
 

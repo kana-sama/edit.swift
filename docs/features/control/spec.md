@@ -6,6 +6,17 @@ Up and Down wrap through results. Unmodified Return and row clicks open the sele
 
 Swift Edit uses [autosave](../autosave/spec.md) when Control takes focus and when it opens a file. An edited scratch buffer gets the save or discard prompt before replacement. Cancel returns to the current buffer.
 
+## Folder search
+
+The recursive search skips directories whose names start with a dot, plus `node_modules`, `bower_components`, `venv`, `__pycache__`, `DerivedData`, and `zig-out`. Skip `target` next to a `Cargo.toml`. Package contents and symbolic directory links are skipped during the recursive walk.
+
+Apply `.gitignore` patterns to directories, including scoped rules, glob patterns, and exceptions in nested ignore files. When the active folder sits inside a Git repository, use ancestor ignore files up to the repository root. An ignored directory is never traversed by the recursive search. Individual files that match ignore patterns are still searchable if their parent directories are included. The same directory exclusions apply to recent files inside the active folder, including with an empty query.
+
+Type a literal path from the active folder followed by a slash to list its immediate files. This also works in an excluded directory. Type the next path component and a slash to descend another level. Text after the last slash filters the files at that level.
+
 ## Acceptance
 
 Open documents, close one, and open Control. Filter by name and path, navigate in both directions, and open an entry with Return. Check that the file opens in the current window, even if another window has the same path, and that recently deleted paths can be removed. With two results, select the second row and verify that both fit without scrolling. Scroll a long list, then narrow it to two results and check that the list returns to the top. Escape returns to the previous focus. With Control open, verify that ⌘Return does not insert a line, ⌘W closes the palette, and ⌘A and ⌘Z operate on the query.
+
+
+In a folder containing `a/b`, `a/e/g`, `c`, and `d`, put `a` and `c` in `.gitignore`. Only `c` and `d` are eligible in a recursive search. `a/` shows `b`, and `a/e/` shows `g`. Repeat with a dot directory and with a recent file in an excluded directory.
