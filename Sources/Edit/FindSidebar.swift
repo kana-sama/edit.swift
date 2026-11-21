@@ -10,6 +10,16 @@ enum FindCommand {
 private final class FindSplitView: NSSplitView {
     var trackDivider: ((() -> Void) -> Void)?
 
+    @objc dynamic var animatedDividerPosition: CGFloat {
+        get { arrangedSubviews.first?.frame.maxX ?? 0 }
+        set { setPosition(newValue, ofDividerAt: 0) }
+    }
+
+    override class func defaultAnimation(forKey key: NSAnimatablePropertyKey) -> Any? {
+        if key == #keyPath(FindSplitView.animatedDividerPosition) { return CABasicAnimation() }
+        return super.defaultAnimation(forKey: key)
+    }
+
     override func mouseDown(with event: NSEvent) {
         if let trackDivider {
             trackDivider { super.mouseDown(with: event) }
@@ -22,6 +32,9 @@ private final class FindSplitView: NSSplitView {
 @MainActor
 final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
     private static let refreshItem = NSToolbarItem.Identifier("Search.Refresh")
+    private static let minimumSidebarWidth: CGFloat = 185
+    private static let minimumEditorWidth: CGFloat = 128
+    private static let contentInset: CGFloat = 10
     private unowned let document: DocumentWindow
     private let writesPreferences: Bool
     private var settings: FindSettings
@@ -39,6 +52,9 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private let resultScroll = NSScrollView()
     private let replaceRow = NSStackView()
     private let split = NSSplitViewController()
+    private let splitView = FindSplitView(frame: .zero)
+    private var contentTrailing: NSLayoutConstraint?
+    private var contentWidth: NSLayoutConstraint?
     private let sidebar = NSViewController()
     private let editorController = NSViewController()
     private lazy var sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
@@ -305,12 +321,16 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         content.translatesAutoresizingMaskIntoConstraints = false
         let view = FindSidebarSurface(frame: NSRect(x: 0, y: 0, width: settings.width, height: 500))
         view.appearanceChanged = { [weak self] in self?.updateName() }
+        view.clipsToBounds = true
         view.addSubview(content)
         sidebar.view = view
         updateName()
+        let trailing = content.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Self.contentInset)
+        contentTrailing = trailing
+        contentWidth = content.widthAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
-            content.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
+            content.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Self.contentInset),
+            trailing,
             content.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 6),
             content.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             resultScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 0),
@@ -425,21 +445,25 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         ])
         editorController.view = editorPane
         let editorItem = NSSplitViewItem(viewController: editorController)
-        editorItem.minimumThickness = 128
-        sidebarItem.minimumThickness = 185
+        editorItem.minimumThickness = Self.minimumEditorWidth
+        sidebarItem.minimumThickness = Self.minimumSidebarWidth
         sidebarItem.allowsFullHeightLayout = true
         sidebarItem.maximumThickness = 650
         sidebarItem.canCollapse = true
         sidebarItem.preferredThicknessFraction = min(0.7, CGFloat(settings.width) / max(previousSize.width, 1))
         sidebarItem.isCollapsed = true
-        let splitView = FindSplitView(frame: .zero)
         splitView.isVertical = true
         splitView.dividerStyle = .thin
         splitView.trackDivider = { [weak self] track in
-            let transition = self?.beginSidebarTransition()
+            guard let self else {
+                track()
+                return
+            }
+            guard !sidebarAnimating else { return }
+            let transition = beginSidebarTransition()
             track()
             // NSTextView can scroll to its caret as AppKit ends live resize, after the last split notification.
-            if let transition { self?.finishSidebarTransition(transition) }
+            finishSidebarTransition(transition)
         }
         split.splitView = splitView
         split.addSplitViewItem(sidebarItem)
@@ -461,6 +485,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     @objc private func splitResized(_ notification: Notification) {
         guard installed else { return }
         restoreEditorAnchor()
+        guard !sidebarAnimating else { return }
         settings.visible = !sidebarItem.isCollapsed
         let width = sidebar.view.frame.width
         if settings.visible && width >= sidebarItem.minimumThickness {
@@ -484,11 +509,13 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let window = document.window
         let responder = window.firstResponder
         let desiredWidth = settings.width
-        let transition = !installed || sidebarItem.isCollapsed ? beginSidebarTransition() : nil
+        let transition = !installed || !settings.visible || sidebarItem.isCollapsed ? beginSidebarTransition() : nil
         installIfNeeded()
         settings.visible = true
         if let transition {
-            sidebarItem.preferredThicknessFraction = min(0.7, CGFloat(desiredWidth) / max(split.view.bounds.width, 1))
+            if !sidebarAnimating {
+                sidebarItem.preferredThicknessFraction = min(0.7, CGFloat(desiredWidth) / max(splitView.bounds.width, 1))
+            }
             setSidebarCollapsed(false, animate: animate, transition: transition, desiredWidth: desiredWidth)
         }
         if let input {
@@ -536,8 +563,16 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private func setSidebarCollapsed(
         _ collapsed: Bool, animate: Bool, transition: UInt64, desiredWidth: CGFloat? = nil
     ) {
-        sidebarAnimating = animate && document.window.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if sidebarAnimating {
+        let canAnimate = animate && document.window.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let availableWidth = splitView.bounds.width - Self.minimumEditorWidth - splitView.dividerThickness
+        let width = min(desiredWidth ?? settings.width, availableWidth)
+        let dividerIsAnimating = contentWidth?.isActive == true
+        if dividerIsAnimating || (canAnimate && !sidebarAnimating && width >= Self.minimumSidebarWidth) {
+            animateDivider(to: collapsed ? 0 : max(0, width), openWidth: width,
+                           animated: canAnimate, transition: transition)
+        } else if canAnimate {
+            // AppKit provides the overlay sidebar when the window cannot fit both panes.
+            sidebarAnimating = true
             updateRefreshVisibility()
             NSAnimationContext.runAnimationGroup { _ in
                 sidebarItem.animator().isCollapsed = collapsed
@@ -546,16 +581,48 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             }
         } else {
             sidebarItem.isCollapsed = collapsed
-            if let desiredWidth { split.splitView.setPosition(desiredWidth, ofDividerAt: 0) }
+            if let desiredWidth { splitView.setPosition(desiredWidth, ofDividerAt: 0) }
             finishSidebarTransition(transition)
+        }
+    }
+
+    private func animateDivider(to position: CGFloat, openWidth: CGFloat, animated: Bool, transition: UInt64) {
+        sidebarAnimating = true
+        updateRefreshVisibility()
+        if contentWidth?.isActive != true {
+            // The sidebar clips its contents as the native divider moves.
+            contentTrailing?.isActive = false
+            contentWidth?.constant = max(0, openWidth - 2 * Self.contentInset)
+            contentWidth?.isActive = true
+            sidebarItem.minimumThickness = 0
+            sidebarItem.canCollapse = false
+            if sidebarItem.isCollapsed {
+                sidebarItem.isCollapsed = false
+                splitView.animatedDividerPosition = 0
+            }
+        }
+        let distance = abs(position - splitView.animatedDividerPosition)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = animated ? context.duration * Double(min(1, distance / max(openWidth, 1))) : 0
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            splitView.animator().animatedDividerPosition = position
+        } completionHandler: { [weak self] in
+            Task { @MainActor in self?.finishSidebarTransition(transition) }
         }
     }
 
     private func finishSidebarTransition(_ transition: UInt64) {
         guard sidebarTransition == transition else { return }
+        if contentWidth?.isActive == true {
+            if !settings.visible { sidebarItem.isCollapsed = true }
+            sidebarItem.minimumThickness = Self.minimumSidebarWidth
+            sidebarItem.canCollapse = true
+            contentWidth?.isActive = false
+            contentTrailing?.isActive = true
+        }
         sidebarAnimating = false
-        updateRefreshVisibility()
         document.window.layoutIfNeeded()
+        updateRefreshVisibility()
         restoreEditorAnchor()
         // AppKit also reconciles its text viewport after focus and split changes.
         Task { @MainActor [weak self] in

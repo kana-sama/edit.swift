@@ -73,6 +73,7 @@ enum FindCheck {
         document.performFind(.next)
         try expect(editor.string == "cat cat\ncat", "finding with the sidebar hidden preserves text")
         try await checkSidebarLayout(in: app.makeDocument())
+        try await checkSidebarReversal(in: app.makeDocument())
         try expect(NSApplication.shared.activationPolicy() == .prohibited &&
                    !NSApplication.shared.isActive && !window.isVisible, "Find stays in the isolated hidden window")
     }
@@ -214,6 +215,64 @@ enum FindCheck {
         await Task.yield()
         try expect(abs(clip.bounds.origin.x - scrolled.x) < 1,
                    "reopening the sidebar preserves a nonzero horizontal scroll offset")
+    }
+
+    private static func checkSidebarReversal(in document: DocumentWindow) async throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let window = document.window
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
+        // AppKit animates an ordered window. Keep this one invisible and non-interactive.
+        window.orderBack(nil)
+        defer { window.orderOut(nil) }
+        try expect(window.isVisible && !NSApp.isActive && window.alphaValue == 0,
+                   "live sidebar animation runs without interrupting the user")
+
+        document.performFind(.toggleSidebar)
+        let split = try require(window.contentViewController as? NSSplitViewController, "native animated split view")
+        let sidebar = split.splitViewItems[0]
+        let editorPane = split.splitViewItems[1].viewController.view
+        let refresh = try require(window.toolbar?.items.first { $0.itemIdentifier.rawValue == "Search.Refresh" },
+                                  "Refresh toolbar item")
+        func divider() -> CGFloat { editorPane.convert(editorPane.bounds, to: split.splitView).minX }
+        func sidebarEdge() -> CGFloat {
+            let view = sidebar.viewController.view
+            return view.convert(view.bounds, to: split.splitView).maxX
+        }
+        func reverse(with command: FindCommand) throws {
+            let position = divider()
+            let edge = sidebarEdge()
+            document.performFind(command)
+            try expect(abs(divider() - position) < 1 && abs(sidebarEdge() - edge) < 1,
+                       "reversing keeps both panes at their current positions")
+            try expect(refresh.isHidden, "Refresh stays hidden until the sidebar settles")
+        }
+
+        try await waitUntil("sidebar fully opens") { !refresh.isHidden }
+        let openPosition = divider()
+        document.performFind(.toggleSidebar)
+        try await waitUntil("sidebar is partway closed") { divider() > 0 && divider() < openPosition * 0.8 }
+        try reverse(with: .find)
+        try expect(window.firstResponder is FindFieldTextView, "reopening with Command-F focuses Find")
+        try await waitUntil("reversed sidebar finishes opening") { !refresh.isHidden }
+        try expect(abs(divider() - openPosition) < 1, "reopening preserves the sidebar width")
+
+        document.performFind(.toggleSidebar)
+        try await waitUntil("sidebar fully closes") { sidebar.isCollapsed }
+        document.performFind(.toggleSidebar)
+        try await waitUntil("sidebar is partway open") { divider() > openPosition * 0.2 && divider() < openPosition }
+        try reverse(with: .toggleSidebar)
+        try await waitUntil("reversed sidebar finishes closing") { sidebar.isCollapsed }
+        try expect(divider() < 1 && window.firstResponder === document.editor,
+                   "closing leaves the editor focused")
+
+        document.performFind(.toggleSidebar)
+        document.performFind(.toggleSidebar)
+        document.performFind(.find)
+        try await waitUntil("rapid toggles leave the sidebar open") { !refresh.isHidden }
+        try expect(abs(divider() - openPosition) < 1 && window.firstResponder is FindFieldTextView,
+                   "superseded animations leave the latest width and focus")
     }
 
     private static func dragDivider(_ splitView: NSSplitView, sidebar: NSView, in window: NSWindow, by distance: CGFloat) throws {

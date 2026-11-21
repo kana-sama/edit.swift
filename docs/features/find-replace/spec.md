@@ -1,6 +1,6 @@
 # Find and Replace
 
-Search the current document, including unsaved text, in a native AppKit sidebar. The sidebar belongs to the window, extends behind the title bar beneath the traffic lights, and can be resized. The toolbar places Refresh above the sidebar and the document title above the editor. Refresh appears without its own animation after the sidebar finishes opening and disappears when closing starts. The editor keeps its selection and scroll position when the sidebar opens, closes, or resizes during a divider drag. It remembers the last query, replacement, options, width, and visibility across launches.
+Search the current document, including unsaved text, in a native AppKit sidebar. The sidebar belongs to the window, extends behind the title bar beneath the traffic lights, and can be resized. The toolbar places Refresh above the sidebar and the document title above the editor. Refresh appears without its own animation after the sidebar finishes opening and disappears when closing starts. Reversing an in-progress transition continues from the current divider position and animates the remaining distance. The editor keeps its selection and scroll position when the sidebar opens, closes, or resizes during a divider drag. It remembers the last query, replacement, options, width, and visibility across launches.
 
 ## Search
 
@@ -27,4 +27,4 @@ Command Mode exposes refresh, option toggles, replacement, and result actions wh
 - Dismiss one of three matches, replace one of the others, then Replace All. Confirm the dismissed text remains, Undo reverses each operation, and Refresh restores the dismissed occurrence.
 - Select consecutive visible results and confirm that the highlighted match follows the selection. Double-click a result with Replace open and confirm that focus moves to the editor and the caret lands after the match. Verify that the preview and navigation leave the buffer unchanged and Command-G works with the panel hidden.
 - With a long unwrapped line, open and close the sidebar and drag its divider. Repeat from the editor’s left edge and from a horizontally scrolled position. Verify the text keeps its position, long excerpts stay on one row at the narrowest sidebar width, and the next editor line remains visible during preview.
-- Resize and reopen the sidebar, restart Edit, and verify that its query, options, replacement, visibility, and width are restored.
+- Reopen the sidebar partway through closing, then close it partway through opening. The sidebar changes direction without jumping and reaches its previous width when reopened. Resize and reopen the sidebar, restart Edit, and verify that its query, options, replacement, visibility, and width are restored.
