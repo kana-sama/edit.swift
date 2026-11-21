@@ -19,20 +19,6 @@ enum FindCheck {
         )
         try await waitUntil("initial matches") { table.numberOfRows == 3 }
         try expect(editor.selectedRange() == NSRange(location: 0, length: 3), "opening Find preserves selection")
-        let manager = try require(editor.textLayoutManager, "Find uses the editor's TextKit layout")
-        for (row, location) in [(0, 0), (1, 4)] {
-            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            var activeMatches: [Int] = []
-            let start = manager.documentRange.location
-            manager.enumerateRenderingAttributes(from: start, reverse: false) { _, attributes, range in
-                if let color = attributes[.backgroundColor] as? NSColor, color.alphaComponent > 0.5 {
-                    activeMatches.append(manager.offset(from: start, to: range.location))
-                }
-                return true
-            }
-            try expect(activeMatches == [location], "the active editor highlight follows the selected result")
-        }
-
         document.performFind(.replace)
         let replacement = try require(
             window.firstResponder as? NSTextView, "Replace focuses its native input"
@@ -72,10 +58,93 @@ enum FindCheck {
         try expect(window.firstResponder === editor, "hiding Find restores editor focus")
         document.performFind(.next)
         try expect(editor.string == "cat cat\ncat", "finding with the sidebar hidden preserves text")
+        try await checkRenderedHighlights(in: app.makeDocument())
         try await checkSidebarLayout(in: app.makeDocument())
         try await checkSidebarReversal(in: app.makeDocument())
         try expect(NSApplication.shared.activationPolicy() == .prohibited &&
                    !NSApplication.shared.isActive && !window.isVisible, "Find stays in the isolated hidden window")
+    }
+
+    private static func checkRenderedHighlights(in document: DocumentWindow) async throws {
+        let window = document.window
+        let editor = document.editor
+        let clip = document.scrollView.contentView
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
+        let text = "use first::Item;\n\nuse second::Item;\n" +
+            String(repeating: "fn example() {}\n", count: 70) + "use third::Item;\nuse fourth::Item;\n"
+        editor.string = text
+        document.setSyntaxLanguage(.rust)
+        document.performFind(.find)
+        let input = try require(window.firstResponder as? FindFieldTextView, "Find input for the render check")
+        let table = try require(descendant(of: window.contentView, type: FindResultsTable.self), "render check result table")
+        let manager = try require(editor.textLayoutManager, "TextKit 2 for the render check")
+        input.insertText("us", replacementRange: NSRange(location: 0, length: 0))
+        // Use the backing layer of a non-interactive, transparent window without repainting for the capture.
+        window.orderBack(nil)
+        defer { window.orderOut(nil) }
+        try expect(window.isVisible && !NSApp.isActive && window.alphaValue == 0, "quiet search render check")
+        try await waitUntil("the Rust sample has syntax colors and search results") {
+            var hasSyntax = false
+            manager.enumerateRenderingAttributes(from: manager.documentRange.location, reverse: false) { _, attrs, _ in
+                hasSyntax = attrs[.foregroundColor] is NSColor
+                return !hasSyntax
+            }
+            return table.numberOfRows == 4 && hasSyntax
+        }
+
+        let wordStarts = ["use first", "use second", "use third", "use fourth"].map {
+            (text as NSString).range(of: $0).location
+        }
+        func hasPaint(active: Int, other: Int) -> Bool {
+            let bounds = clip.bounds
+            guard let layer = clip.layer,
+                  let bitmap = clip.bitmapImageRepForCachingDisplay(in: bounds),
+                  let graphics = NSGraphicsContext(bitmapImageRep: bitmap) else { return false }
+            let rendered = layer.presentation() ?? layer
+            let context = graphics.cgContext
+            context.translateBy(x: 0, y: bounds.height)
+            context.scaleBy(x: 1, y: -1)
+            context.translateBy(x: -rendered.bounds.minX, y: -rendered.bounds.minY)
+            rendered.render(in: context)
+
+            func sample(_ index: Int) -> NSColor? {
+                let range = NSRange(location: wordStarts[index], length: 2)
+                let screenRect = editor.firstRect(forCharacterRange: range, actualRange: nil)
+                let rect = clip.convert(window.convertFromScreen(screenRect), from: nil)
+                let point = NSPoint(x: rect.minX + 1, y: rect.minY + 1)
+                guard bounds.contains(point) else { return nil }
+                let x = Int((point.x - bounds.minX) * CGFloat(bitmap.pixelsWide) / bounds.width)
+                let y = Int((point.y - bounds.minY) * CGFloat(bitmap.pixelsHigh) / bounds.height)
+                return bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB)
+            }
+            guard let current = sample(active), let passive = sample(other) else { return false }
+            return current.redComponent - current.greenComponent > 0.12 &&
+                passive.redComponent - passive.greenComponent < 0.12 &&
+                passive.redComponent - passive.blueComponent > 0.12
+        }
+
+        document.performFind(.next)
+        try await waitUntil("the first selected result is orange and the second is yellow") { hasPaint(active: 0, other: 1) }
+        table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        try await waitUntil("the painted highlight moves to the selected row") { hasPaint(active: 1, other: 0) }
+
+        document.performFind(.previous)
+        let viewport = try require(manager.textViewportLayoutController.viewportRange, "visible Rust text")
+        manager.invalidateRenderingAttributes(for: viewport)
+        manager.textViewportLayoutController.layoutViewport()
+        try await waitUntil("the painted highlights survive a reset of TextKit's rendering attributes") {
+            hasPaint(active: 0, other: 1)
+        }
+
+        table.selectRowIndexes(IndexSet(integer: 2), byExtendingSelection: false)
+        try await waitUntil("the editor scrolls to and paints the distant result") { hasPaint(active: 2, other: 3) }
+        document.performFind(.next)
+        try await waitUntil("the painted highlight follows forward navigation") { hasPaint(active: 3, other: 2) }
+        document.performFind(.next)
+        try await waitUntil("navigation wraps and paints the first result again") { hasPaint(active: 0, other: 1) }
     }
 
     private static func checkSidebarLayout(in document: DocumentWindow) async throws {

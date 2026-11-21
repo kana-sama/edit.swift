@@ -13,24 +13,23 @@ final class FindDecorations {
     private var selected: NSRange?
     private var preview: (NSRange, String)?
     private var snapshot = ""
-    private var installed: [NSRange: Bool] = [:]
+    private var matchRects: [NSRect] = []
+    private var activeRects: [NSRect] = []
     private var previewView: FindPreviewView?
     private var layingOut = false
     private var previewPadding: (range: NSRange, height: CGFloat, source: String)?
 
-    init(editor: EditorTextView) { self.editor = editor }
+    init(editor: EditorTextView) {
+        self.editor = editor
+        editor.onDrawFindHighlights = { [weak self] dirtyRect in self?.drawHighlights(in: dirtyRect) }
+    }
 
     func update(snapshot: String, ranges: [NSRange], selected: NSRange?, preview: (NSRange, String)?) {
-        let selectionChanged = self.selected != selected
         self.snapshot = snapshot
         self.ranges = ranges
         self.selected = selected
         self.preview = preview
         layout()
-        if selectionChanged, let editor, let manager = editor.textLayoutManager {
-            manager.textViewportLayoutController.layoutViewport()
-            editor.setNeedsDisplay(editor.visibleRect)
-        }
     }
 
     func layout() {
@@ -38,44 +37,66 @@ final class FindDecorations {
         layingOut = true
         defer { layingOut = false }
 
-        if editor.string != snapshot {
-            if !installed.isEmpty {
-                manager.removeRenderingAttribute(.backgroundColor, for: manager.documentRange)
-                installed.removeAll()
-            }
+        if (ranges.isEmpty && selected == nil && preview == nil) || editor.string != snapshot {
+            setHighlightRects(matches: [], active: [], in: editor)
             clearPreview()
             return
         }
 
-        var desired: [NSRange: Bool] = [:]
-        if let viewport = manager.textViewportLayoutController.viewportRange {
-            let first = manager.offset(from: manager.documentRange.location, to: viewport.location)
-            let last = manager.offset(from: manager.documentRange.location, to: viewport.endLocation)
-            if first >= 0 && last >= first {
-                var index = firstRangeEnding(after: first)
-                while index < ranges.count && ranges[index].location < last {
-                    let range = ranges[index]
-                    if range.length > 0 { desired[range] = range == selected }
-                    index += 1
-                }
-            }
-        }
-        if let selected, selected.length > 0 { desired[selected] = true }
-        let length = editor.textStorage?.length ?? 0
-        for (range, active) in installed where desired[range] != active {
-            if let textRange = layoutRange(range, length: length, manager: manager) {
-                manager.removeRenderingAttribute(.backgroundColor, for: textRange)
-            }
-        }
-        for (range, active) in desired where installed[range] != active {
-            if let textRange = layoutRange(range, length: length, manager: manager) {
-                let color = active ? NSColor.systemOrange.withAlphaComponent(0.55)
-                    : NSColor.systemYellow.withAlphaComponent(0.30)
-                manager.addRenderingAttribute(.backgroundColor, value: color, for: textRange)
-            }
-        }
-        installed = desired
         updatePreview(in: editor)
+        guard let viewport = manager.textViewportLayoutController.viewportRange else {
+            setHighlightRects(matches: [], active: [], in: editor)
+            return
+        }
+        let visible = editor.charRange(viewport, in: manager)
+        guard visible.location >= 0, visible.location != NSNotFound, visible.length > 0 else {
+            setHighlightRects(matches: [], active: [], in: editor)
+            return
+        }
+
+        // Use TextKit's segment geometry while drawing the search background independently of syntax attributes.
+        let origin = editor.textContainerOrigin
+        func rects(for range: NSRange) -> [NSRect] {
+            let intersection = NSIntersectionRange(visible, range)
+            guard intersection.length > 0, let segment = editor.textRange(intersection, in: manager) else { return [] }
+            var frames: [NSRect] = []
+            manager.enumerateTextSegments(in: segment, type: .standard, options: .rangeNotRequired) { _, frame, _, _ in
+                if !frame.isEmpty { frames.append(frame.offsetBy(dx: origin.x, dy: origin.y)) }
+                return true
+            }
+            return frames
+        }
+
+        var matchRects: [NSRect] = []
+        var index = firstRangeEnding(after: visible.location)
+        while index < ranges.count && ranges[index].location < NSMaxRange(visible) {
+            let range = ranges[index]
+            if range != selected { matchRects.append(contentsOf: rects(for: range)) }
+            index += 1
+        }
+        let activeRects = selected.map { rects(for: $0) } ?? []
+        setHighlightRects(matches: matchRects, active: activeRects, in: editor)
+    }
+
+    private func setHighlightRects(matches: [NSRect], active: [NSRect], in editor: EditorTextView) {
+        guard matches != matchRects || active != activeRects else { return }
+        let previous = (matchRects + activeRects).reduce(NSRect.null) { $0.union($1) }
+        let next = (matches + active).reduce(NSRect.null) { $0.union($1) }
+        matchRects = matches
+        activeRects = active
+        if !previous.isNull { editor.setNeedsDisplay(previous) }
+        if !next.isNull && previous != next { editor.setNeedsDisplay(next) }
+    }
+
+    private func drawHighlights(in dirtyRect: NSRect) {
+        if !matchRects.isEmpty {
+            NSColor.systemYellow.withAlphaComponent(0.30).setFill()
+            for rect in matchRects where rect.intersects(dirtyRect) { rect.intersection(dirtyRect).fill() }
+        }
+        if !activeRects.isEmpty {
+            NSColor.systemOrange.withAlphaComponent(0.55).setFill()
+            for rect in activeRects where rect.intersects(dirtyRect) { rect.intersection(dirtyRect).fill() }
+        }
     }
 
     private func firstRangeEnding(after offset: Int) -> Int {
@@ -90,13 +111,6 @@ final class FindDecorations {
             }
         }
         return lower
-    }
-
-    private func layoutRange(_ range: NSRange, length: Int, manager: NSTextLayoutManager) -> NSTextRange? {
-        guard NSMaxRange(range) <= length,
-              let start = manager.location(manager.documentRange.location, offsetBy: range.location),
-              let end = manager.location(start, offsetBy: range.length) else { return nil }
-        return NSTextRange(location: start, end: end)
     }
 
     private func updatePreview(in editor: EditorTextView) {
@@ -154,6 +168,7 @@ final class FindDecorations {
     private func setPreviewPadding(range: NSRange?, height: CGFloat) -> Bool {
         guard let editor, let storage = editor.textStorage else { return false }
         let old = previewPadding
+        if old == nil && range == nil { return false }
         let source = editor.string
         if old?.range == range && (old?.height ?? 0) == height && (old == nil || old?.source == source) { return false }
         previewPadding = range.map { ($0, height, source) }

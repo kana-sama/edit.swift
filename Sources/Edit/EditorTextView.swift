@@ -38,6 +38,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var onBlur: (() -> Void)?
     var onFindEditorInteraction: (() -> Void)?
     var onFindViewportChange: (() -> Void)?
+    var onDrawFindHighlights: ((NSRect) -> Void)?
     weak var syntaxHighlighting: SyntaxHighlighting?
     var preferredLineEnding = "\n"
 
@@ -590,6 +591,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             NSColor.labelColor.withAlphaComponent(0.06).setFill()
             stripe.fill()
         }
+        onDrawFindHighlights?(dirtyRect)
         drawSecondarySelections(in: dirtyRect)
     }
 }
