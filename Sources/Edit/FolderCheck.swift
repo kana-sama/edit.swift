@@ -110,6 +110,12 @@ enum FolderCheck {
         let c = try file("probe-c.txt")
         let d = try file("probe-d.txt")
         let dotFile = try file(".probe-config")
+        let findCheck = try file("Sources/Edit/FindCheck.swift")
+        let highlight = try file("Sources/EditSyntax/Highlight.m")
+        let dsStore = try file("Sources/.DS_Store")
+        let hiddenDSStore = try file("a/.DS_Store")
+        let outsideDSStore = try write("sample", to: repo.appending(path: ".DS_Store"))
+        _ = try file(".DS_Store")
         let dotDirectory = try file("src/.hidden/probe-h.txt")
         let generated = try file("src/Generated/probe-generated.txt")
         let dependency = try file("node_modules/probe-module.txt")
@@ -126,12 +132,17 @@ enum FolderCheck {
         let document = app.makeDocument()
         defer { document.window.close() }
         _ = try await app.openFile(project, in: document)
-        for recent in [b, g, c, dotDirectory, generated, inherited, nestedIgnored, rustTarget] {
+        for recent in [b, g, c, dotDirectory, generated, inherited, nestedIgnored, rustTarget, findCheck, dsStore, hiddenDSStore, outsideDSStore] {
             await app.recentFiles.record(recent)
         }
         try await ControlPanel(app: app).checkFolderQueries(in: document, expectations: [
-            ("", [c]),
+            ("", [c, findCheck]),
             ("probe", [c, d, dotFile, keep, nestedIncluded, ordinaryTarget]),
+            ("FindCheck", [findCheck]),
+            ("Sources/", [findCheck, highlight]),
+            ("Sources/Highlight", [highlight]),
+            ("Sources/Edit/", [findCheck]),
+            (".DS_Store", []),
             ("a/", [b]),
             ("a/ probe-g", []),
             ("a/e/", [g]),
@@ -144,9 +155,9 @@ enum FolderCheck {
             ("src/one/", [nestedIgnored]),
             ("Rust/target/", [rustTarget]),
             ("../", []),
-            ("", [c]),
+            ("", [c, findCheck]),
             ("a/e/probe-g", [g]),
-        ], opening: g)
+        ], relativeDetails: [findCheck: "Sources/Edit", highlight: "Sources/EditSyntax"], opening: g)
     }
 
     private static func checkRecentMenu(in app: Edit, root: URL) async throws {

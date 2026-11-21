@@ -30,7 +30,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     private var monitor: Any?
     private var entries: [ControlMatch] = []
     private var request: Task<Void, Never>?
-    private var folderScan: (folder: URL, task: Task<FolderFileSearch.Index, Never>)?
+    private var folderScan: (scope: FolderFileSearch.Scope, task: Task<FolderFileSearch.Index, Never>)?
     private var resultsFolder: URL?
     private var generation = 0
     private var opening = 0
@@ -354,10 +354,18 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     }
 
     private func fileEntries() -> [ControlEntry] {
-        app.recentFiles.entries.map { file in
-            ControlEntry(id: file.url.absoluteString, title: file.url.lastPathComponent,
-                         detail: (file.url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath,
-                         recent: file)
+        let folder = document?.folderURL
+        return app.recentFiles.entries.compactMap { file in
+            guard !FolderFileSearch.isExcludedFile(file.url), !FolderFileSearch.isExcludedFile(file.canonicalURL) else {
+                return nil
+            }
+            let relative = folder.flatMap {
+                FolderFileSearch.relativeDirectory(of: file.url, in: $0)
+                    ?? FolderFileSearch.relativeDirectory(of: file.canonicalURL, in: $0)
+            }
+            let parent = relative ?? (file.url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath
+            return ControlEntry(id: file.url.absoluteString, title: file.url.lastPathComponent,
+                                detail: parent.isEmpty ? nil : parent, recent: file)
         }
     }
 
@@ -398,11 +406,11 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         entries.indices.contains(table.selectedRow) ? entries[table.selectedRow].entry.id : nil
     }
 
-    private func scanFolder(_ folder: URL?) -> Task<FolderFileSearch.Index, Never>? {
-        if let folderScan, folderScan.folder == folder { return folderScan.task }
+    private func scanFolder(_ scope: FolderFileSearch.Scope?) -> Task<FolderFileSearch.Index, Never>? {
+        if let folderScan, folderScan.scope == scope { return folderScan.task }
         folderScan?.task.cancel()
-        folderScan = folder.map { folder in
-            (folder, Task.detached(priority: .userInitiated) { FolderFileSearch.index(in: folder) })
+        folderScan = scope.map { scope in
+            (scope, Task.detached(priority: .userInitiated) { FolderFileSearch.index(in: scope) })
         }
         return folderScan?.task
     }
@@ -415,7 +423,9 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let query = input.stringValue
         let folder = mode == .files ? document?.folderURL : nil
         let path = folder == nil ? nil : FolderFileSearch.DirectoryQuery(query)
-        let scan = scanFolder(path != nil || query.allSatisfy(\.isWhitespace) ? nil : folder)
+        let scope = folder.map { FolderFileSearch.Scope(folder: $0, components: path?.components) }
+        let scan = scanFolder(query.allSatisfy(\.isWhitespace) ? nil : scope)
+        let filter = path?.filter ?? query
         clearButton.isHidden = query.isEmpty
         if error == nil { feedback.stringValue = "" }
         pending = true
@@ -424,10 +434,9 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
                 if let scan {
                     let index = await scan.value
                     guard !Task.isCancelled else { return [ControlMatch]() }
-                    return index.rank(rows, query: query)
+                    return index.rank(rows, query: filter)
                 }
                 if let folder {
-                    if let path { return path.rank(rows, in: folder) }
                     return FolderFileSearch.recentMatches(rows, in: folder)
                 }
                 return ControlMatching.rank(rows, query: query)
@@ -695,11 +704,15 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     }
 
     func checkFolderQueries(
-        in document: DocumentWindow, expectations: [(query: String, files: [URL])], opening file: URL
+        in document: DocumentWindow, expectations: [(query: String, files: [URL])],
+        relativeDetails: [URL: String], opening file: URL
     ) async throws {
         guard app.isAgentCheck, let root = document.folderURL else { return }
         show(in: document)
         defer { dismiss(restoreFocus: false) }
+        let expectedDetails = Dictionary(uniqueKeysWithValues: relativeDetails.map {
+            (FileBuffer.canonicalURL($0.key), $0.value)
+        })
         for (query, files) in expectations {
             input.stringValue = query
             search()
@@ -711,8 +724,24 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             guard found.sorted() == expected.sorted() else {
                 throw CheckFailure.invalidFolderResults("query \(String(reflecting: query)), files \(found)")
             }
-            if FolderFileSearch.DirectoryQuery(query) != nil || query.isEmpty {
-                guard folderScan == nil else { throw CheckFailure.invalidFolderResults("unnecessary recursive scan") }
+            for (row, match) in entries.enumerated() {
+                guard let url = match.entry.recent?.canonicalURL ?? match.entry.folderFileURL else { continue }
+                guard url.lastPathComponent != ".DS_Store" else {
+                    throw CheckFailure.invalidFolderResults("Finder metadata in query \(String(reflecting: query))")
+                }
+                guard let expected = expectedDetails[url] else { continue }
+                let cell = tableView(table, viewFor: table.tableColumns.first, row: row) as? NSStackView
+                let labels = cell?.arrangedSubviews.compactMap { ($0 as? NSTextField)?.stringValue }
+                guard labels?.contains(expected) == true else {
+                    throw CheckFailure.invalidFolderResults("relative directory for \(url.lastPathComponent)")
+                }
+            }
+            if let path = FolderFileSearch.DirectoryQuery(query) {
+                guard folderScan?.scope.components == path.components else {
+                    throw CheckFailure.invalidFolderResults("scan limited to the requested path")
+                }
+            } else if query.isEmpty {
+                guard folderScan == nil else { throw CheckFailure.invalidFolderResults("unnecessary scan") }
             }
         }
         let target = FileBuffer.canonicalURL(file)

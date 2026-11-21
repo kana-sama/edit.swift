@@ -12,46 +12,92 @@ enum FolderFileSearch {
             components = path.split(separator: "/").map(String.init).filter { $0 != "." }
             filter = String(query[query.index(after: slash)...])
         }
+    }
 
-        func rank(_ recent: [ControlEntry], in folder: URL) -> [ControlMatch] {
+    struct Scope: Equatable, Sendable {
+        let folder: URL
+        let components: [String]?
+
+        fileprivate var directory: (url: URL, insidePackage: Bool)? {
             var directory = folder
-            for component in components {
-                if Task.isCancelled || component == ".." || component.utf8.contains(0) { return [] }
+            var insidePackage = false
+            for component in components ?? [] {
+                if Task.isCancelled || component == ".." || component.utf8.contains(0) { return nil }
                 directory = directory.appending(path: component, directoryHint: .isDirectory)
-                guard let values = try? directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
-                      values.isDirectory == true, values.isSymbolicLink != true else { return [] }
+                guard let values = try? directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isPackageKey]),
+                      values.isDirectory == true, values.isSymbolicLink != true else { return nil }
+                insidePackage = insidePackage || values.isPackage == true
             }
-
-            guard let urls = try? FileManager.default.contentsOfDirectory(
-                at: directory, includingPropertiesForKeys: Array(fileKeys)
-            ) else { return [] }
-            let files = fileEntries(urls, relativeTo: folder)
-            let paths = Set(files.compactMap { $0.folderFileURL?.path })
-            let localRecents = recent.filter { $0.recent.map { paths.contains($0.canonicalURL.path) } == true }
-            return FolderFileSearch.rank(localRecents, folderFiles: files, query: filter)
+            return (directory, insidePackage)
         }
     }
 
     struct Index: Sendable {
+        fileprivate enum RecentScope: Sendable {
+            case project(FolderSearchExclusions)
+            case listedFiles(Set<String>)
+        }
+
         fileprivate let files: [ControlEntry]
-        fileprivate let exclusions: FolderSearchExclusions
+        fileprivate let recentScope: RecentScope
 
         func rank(_ recent: [ControlEntry], query: String) -> [ControlMatch] {
-            var exclusions = exclusions
-            return FolderFileSearch.rank(exclusions.filter(recent), folderFiles: files, query: query)
+            let eligible: [ControlEntry]
+            switch recentScope {
+            case .project(var exclusions):
+                eligible = exclusions.filter(recent)
+            case .listedFiles(let paths):
+                eligible = recent.filter { $0.recent.map { paths.contains($0.canonicalURL.path) } == true }
+            }
+            return FolderFileSearch.rank(eligible, folderFiles: files, query: query)
         }
     }
 
     private static let fileKeys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .linkCountKey]
 
-    static func index(in folder: URL) -> Index {
-        var exclusions = FolderSearchExclusions(root: folder)
+    static func isExcludedFile(_ url: URL) -> Bool {
+        url.lastPathComponent.caseInsensitiveCompare(".DS_Store") == .orderedSame
+    }
+
+    static func relativeDirectory(of file: URL, in folder: URL) -> String? {
+        let folderPath = folder.path
+        let prefix = folderPath.hasSuffix("/") ? folderPath : folderPath + "/"
+        let path = file.path
+        guard path.hasPrefix(prefix) else { return nil }
+        let relative = path.dropFirst(prefix.count)
+        guard let slash = relative.lastIndex(of: "/") else { return "" }
+        return String(relative[..<slash])
+    }
+
+    static func index(in scope: Scope) -> Index {
+        guard let (directory, insidePackage) = scope.directory else {
+            return Index(files: [], recentScope: .listedFiles([]))
+        }
+        var exclusions = FolderSearchExclusions(root: scope.folder)
+        let files: [ControlEntry]
+        if !insidePackage, exclusions.includes(directory) {
+            files = recursiveFiles(in: directory, relativeTo: scope.folder, exclusions: &exclusions)
+        } else {
+            // An explicit path can reveal an excluded directory or a package one level at a time.
+            let children = try? FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: Array(fileKeys)
+            )
+            files = fileEntries(children ?? [], relativeTo: scope.folder)
+        }
+        if scope.components != nil {
+            return Index(files: files, recentScope: .listedFiles(Set(files.compactMap { $0.folderFileURL?.path })))
+        }
+        return Index(files: files, recentScope: .project(exclusions))
+    }
+
+    private static func recursiveFiles(in directory: URL, relativeTo folder: URL,
+                                       exclusions: inout FolderSearchExclusions) -> [ControlEntry] {
         var files: [ControlEntry] = []
         let keys = fileKeys.union([.isDirectoryKey])
-        if let urls = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: Array(keys),
+        if let urls = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: Array(keys),
                                                      options: [.skipsPackageDescendants]) {
             for case let url as URL in urls {
-                if Task.isCancelled { return Index(files: [], exclusions: exclusions) }
+                if Task.isCancelled { return [] }
                 guard let values = try? url.resourceValues(forKeys: keys), values.isSymbolicLink != true else { continue }
                 if values.isDirectory == true {
                     if !exclusions.includes(url) { urls.skipDescendants() }
@@ -60,7 +106,7 @@ enum FolderFileSearch {
                 }
             }
         }
-        return Index(files: files.sorted { $0.id < $1.id }, exclusions: exclusions)
+        return files.sorted { $0.id < $1.id }
     }
 
     static func recentMatches(_ recent: [ControlEntry], in folder: URL) -> [ControlMatch] {
@@ -80,10 +126,8 @@ enum FolderFileSearch {
     }
 
     private static func fileEntry(_ url: URL, values: URLResourceValues, relativeTo folder: URL) -> ControlEntry? {
-        guard values.isRegularFile == true else { return nil }
-        let folderPath = folder.path
-        let prefixLength = folderPath.hasSuffix("/") ? folderPath.count : folderPath.count + 1
-        let parent = String(url.deletingLastPathComponent().path.dropFirst(prefixLength))
+        guard values.isRegularFile == true, !isExcludedFile(url),
+              let parent = relativeDirectory(of: url, in: folder) else { return nil }
         let identity = (values.linkCount ?? 1) > 1 ? FileIdentity.at(url) : nil
         return ControlEntry(id: url.absoluteString, title: url.lastPathComponent,
                             detail: parent.isEmpty ? nil : parent, folderFileURL: url, folderFileIdentity: identity)
