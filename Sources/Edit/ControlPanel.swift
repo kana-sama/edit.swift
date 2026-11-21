@@ -4,7 +4,13 @@ import AppKit
 final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private unowned let app: Edit
     private let panel = ControlWindow()
+    enum Mode { case files, commands }
+
     private let input = NSSearchField()
+    private let commandMark = NSTextField(labelWithString: ">")
+    private lazy var history = ControlCommandHistory(persist: !app.isAgentCheck)
+    private var commands: [String: ControlCommand] = [:]
+    private var mode: Mode = .files
     private let progress = NSProgressIndicator()
     private let table = ControlTable()
     private let scroll = NSScrollView()
@@ -27,15 +33,17 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         buildPanel()
     }
 
-    func toggle(in document: DocumentWindow) {
-        if self.document === document {
+    func toggle(in document: DocumentWindow, mode: Mode = .files) {
+        if self.document === document, self.mode == mode {
             dismiss(restoreFocus: true)
+        } else if self.document === document {
+            switchMode(to: mode, query: input.stringValue)
         } else {
-            show(in: document)
+            show(in: document, mode: mode)
         }
     }
 
-    private func show(in document: DocumentWindow) {
+    private func show(in document: DocumentWindow, mode: Mode = .files) {
         dismiss(restoreFocus: false)
         guard document.window.attachedSheet == nil else { return }
         document.requestAutosave()
@@ -47,9 +55,10 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             originalFocus = focus
         }
 
+        configure(mode)
         input.stringValue = ""
         feedback.stringValue = ""
-        apply(ControlMatching.rank(fileEntries(), query: ""), selected: nil)
+        apply(ControlMatching.rank(sourceEntries(), query: ""), selected: nil)
         position()
         if !app.isAgentCheck {
             document.window.addChildWindow(panel, ordered: .above)
@@ -62,11 +71,35 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             NotificationCenter.default.addObserver(self, selector: #selector(parentResized),
                                                    name: NSWindow.didResizeNotification, object: document.window)
         }
+        refreshFiles(for: document)
+    }
+
+    private func configure(_ mode: Mode) {
+        self.mode = mode
+        commandMark.isHidden = mode == .files
+        input.placeholderString = mode == .commands ? "Search commands" : "Search recent files"
+        input.setAccessibilityLabel(input.placeholderString)
+    }
+
+    private func switchMode(to mode: Mode, query: String) {
+        configure(mode)
+        input.stringValue = query
+        panel.makeFirstResponder(input)
+        if let field = input.currentEditor() as? NSTextView {
+            field.undoManager?.removeAllActions()
+            field.setSelectedRange(NSRange(location: query.utf16.count, length: 0))
+        }
+        search()
+        if let document { refreshFiles(for: document) }
+    }
+
+    private func refreshFiles(for document: DocumentWindow) {
+        guard mode == .files else { return }
         let current = opening
         Task { [weak self] in
             guard let self else { return }
             await app.recentFiles.prune()
-            guard self.document === document, current == opening, !isHovering else { return }
+            guard mode == .files, self.document === document, current == opening, !isHovering else { return }
             search(preserving: selectedID)
         }
     }
@@ -142,7 +175,10 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         progress.translatesAutoresizingMaskIntoConstraints = false
         progress.widthAnchor.constraint(equalToConstant: 16).isActive = true
         progress.heightAnchor.constraint(equalToConstant: 16).isActive = true
-        let header = NSStackView(views: [input, progress])
+        commandMark.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .medium)
+        commandMark.textColor = .secondaryLabelColor
+        commandMark.isHidden = true
+        let header = NSStackView(views: [commandMark, input, progress])
         header.spacing = 8
         header.alignment = .centerY
 
@@ -207,6 +243,17 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         }
     }
 
+    private func sourceEntries() -> [ControlEntry] {
+        guard mode == .commands, let document, let menu = NSApplication.shared.mainMenu else {
+            return fileEntries()
+        }
+        let available = ControlCommand.fromMenu(menu).filter { $0.isAvailable(in: document, focus: originalFocus) }
+        let arranged = history.arrange(available)
+        commands = Dictionary(arranged.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var ids: Set<String> = []
+        return arranged.filter { ids.insert($0.id).inserted }.map(\.result)
+    }
+
     private var selectedID: String? {
         entries.indices.contains(table.selectedRow) ? entries[table.selectedRow].entry.id : nil
     }
@@ -215,7 +262,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         request?.cancel()
         generation &+= 1
         let current = generation
-        let rows = fileEntries()
+        let rows = sourceEntries()
         let query = input.stringValue
         feedback.stringValue = ""
         pending = true
@@ -240,7 +287,14 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         }
     }
 
-    func controlTextDidChange(_ obj: Notification) { search() }
+    func controlTextDidChange(_ obj: Notification) {
+        if mode == .files, input.stringValue.hasPrefix(">"),
+           (input.currentEditor() as? NSTextView)?.hasMarkedText() != true {
+            switchMode(to: .commands, query: String(input.stringValue.dropFirst()))
+        } else {
+            search()
+        }
+    }
 
     private func apply(_ results: [ControlMatch], selected id: String?) {
         entries = results
@@ -270,6 +324,10 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         case 125: moveSelection(by: 1)
         case 126: moveSelection(by: -1)
         case 36, 76: activate(row: table.selectedRow)
+        case 51 where mode == .commands && (input.currentEditor() as? NSTextView)?.selectedRange() == NSRange(location: 0, length: 0):
+            let query = input.stringValue
+            switchMode(to: .files, query: query)
+            (input.currentEditor() as? NSTextView)?.setSelectedRange(NSRange(location: 0, length: 0))
         default: return event
         }
         return nil
@@ -296,6 +354,11 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         }
         apply(ControlMatching.rank(fileEntries(), query: "not-a-real-result"), selected: nil)
         guard table.numberOfRows == 0, !feedback.isHidden else { throw CheckFailure.invalidPanel }
+        configure(.commands)
+        let commands = sourceEntries()
+        guard !commands.isEmpty, ControlMatching.rank(commands, query: "save").first?.entry.title == "File: Save" else {
+            throw CheckFailure.invalidPanel
+        }
     }
 
     private enum CheckFailure: LocalizedError {
@@ -304,8 +367,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
     }
 
     private func activate(row: Int) {
-        guard !pending, !activating, entries.indices.contains(row),
-              let document, let recent = entries[row].entry.recent else { return }
+        guard !pending, !activating, entries.indices.contains(row), let document else { return }
+        let entry = entries[row].entry
+        if mode == .commands {
+            runCommand(entry, in: document)
+            return
+        }
+        guard let recent = entry.recent else { return }
         activating = true
         document.requestAutosave()
         let current = generation
@@ -330,6 +398,20 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             }
             activating = false
         }
+    }
+
+    private func runCommand(_ entry: ControlEntry, in document: DocumentWindow) {
+        guard let command = commands[entry.id], command.isAvailable(in: document, focus: originalFocus) else {
+            search(preserving: entry.id)
+            return
+        }
+        history.record(command.id)
+        if command.item.action == #selector(Edit.showGoToFile(_:)) {
+            switchMode(to: .files, query: "")
+            return
+        }
+        dismiss(restoreFocus: true)
+        command.run()
     }
 
     @objc private func dismissRecent(_ button: NSButton) {

@@ -129,11 +129,14 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         requestOpen([url])
     }
 
-    @objc func showGoToFile(_ sender: Any?) {
+    @objc func showGoToFile(_ sender: Any?) { showControl(.files) }
+    @objc func showCommandMode(_ sender: Any?) { showControl(.commands) }
+
+    private func showControl(_ mode: ControlPanel.Mode) {
         guard let document = activeDocument, !isQuitting else { return }
         let panel = controlPanel ?? ControlPanel(app: self)
         controlPanel = panel
-        panel.toggle(in: document)
+        panel.toggle(in: document, mode: mode)
     }
 
     @objc func newDocument(_ sender: Any?) {
@@ -174,7 +177,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         guard !isQuitting else { return false }
         switch item.action {
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
-        case #selector(showGoToFile(_:)): return activeDocument.map { $0.window.attachedSheet == nil } ?? false
+        case #selector(showGoToFile(_:)), #selector(showCommandMode(_:)): return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(newWindow(_:)), #selector(openRecentDocument(_:)): return true
         case #selector(openDocument(_:)): return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)):
@@ -450,6 +453,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         edit.addItem(withTitle: "Lines", action: nil, keyEquivalent: "").submenu = lines
 
         let view = addMenu("View")
+        view.addCommand("Command Mode…", #selector(showCommandMode(_:)), "p", [.command, .shift]).target = self
+        view.addItem(.separator())
         view.addCommand("Increase Text Size", #selector(EditorTextView.increaseTextSize(_:)), "=")
         view.addCommand("Decrease Text Size", #selector(EditorTextView.decreaseTextSize(_:)), "-")
         view.addCommand("Reset Text Size", #selector(EditorTextView.resetTextSize(_:)), "0")

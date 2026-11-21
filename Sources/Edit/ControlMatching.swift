@@ -16,7 +16,9 @@ struct ControlMatch: Sendable {
 
 enum ControlMatching {
     static func rank(_ entries: [ControlEntry], query: String) -> [ControlMatch] {
-        let terms = terms(in: query).map {
+        let parts = terms(in: query)
+        let queryName = parts.joined(separator: " ")
+        let terms = parts.map {
             $0.map { String($0).lowercased() }
         }
         if terms.isEmpty {
@@ -53,6 +55,9 @@ enum ControlMatching {
                 }
             }
             guard found == terms.count else { continue }
+            let label = entry.title.split(separator: ":", maxSplits: 1).last?.trimmingCharacters(in: .whitespaces)
+            if entry.title.compare(queryName, options: .caseInsensitive) == .orderedSame ||
+                label?.compare(queryName, options: .caseInsensitive) == .orderedSame { score += 150 }
             matches.append((score, index, ControlMatch(entry: entry, titleCharacters: titleCharacters,
                                                        detailCharacters: detailCharacters)))
         }
