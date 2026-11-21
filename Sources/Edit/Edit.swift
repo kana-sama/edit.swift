@@ -6,6 +6,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     let isAgentCheck = CommandLine.arguments.dropFirst().first == "--agent-check"
     private lazy var sessionStore = SessionStore.application()
     private weak var recentMenu: NSMenu?
+    private var controlPanel: ControlPanel?
     private(set) lazy var recentFiles = RecentFiles(url: recentHistoryURL)
 
     private var recentHistoryURL: URL {
@@ -53,6 +54,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     initial.window.close()
                     makeDocument()
                     let sample = try await FilesCheck.run(in: self)
+                    try ControlPanel(app: self).checkHidden(in: sample)
                     try checkWindow(sample.window, screenshot: CommandLine.arguments.dropFirst(2).first)
                     print("Edit passed its native editing and file-session checks without activation.")
                     exit(EXIT_SUCCESS)
@@ -127,6 +129,13 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         requestOpen([url])
     }
 
+    @objc func showGoToFile(_ sender: Any?) {
+        guard let document = activeDocument, !isQuitting else { return }
+        let panel = controlPanel ?? ControlPanel(app: self)
+        controlPanel = panel
+        panel.toggle(in: document)
+    }
+
     @objc func newDocument(_ sender: Any?) {
         guard let document = activeDocument, !isQuitting else { return }
         Task { await document.newBuffer() }
@@ -165,6 +174,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         guard !isQuitting else { return false }
         switch item.action {
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
+        case #selector(showGoToFile(_:)): return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(newWindow(_:)), #selector(openRecentDocument(_:)): return true
         case #selector(openDocument(_:)): return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)):
@@ -414,6 +424,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         recent.delegate = self
         file.addItem(withTitle: "Open Recent", action: nil, keyEquivalent: "").submenu = recent
         recentMenu = recent
+        file.addCommand("Go to File…", #selector(showGoToFile(_:)), "p").target = self
         file.addItem(.separator())
         file.addCommand("Save", #selector(saveDocument(_:)), "s").target = self
         file.addCommand("Save As…", #selector(saveDocumentAs(_:)), "s", [.command, .shift]).target = self

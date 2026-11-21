@@ -168,6 +168,20 @@ enum FilesCheck {
         app.menuWillOpen(menu)
         try expect(menu.items.first?.representedObject as? URL == alias, "native Open Recent shows the history")
         try expect(menu.items.count <= 10, "Open Recent is capped at ten entries")
+
+        let entries = [
+            ControlEntry(id: "folder", title: "helper.rs", detail: "~/src/main"),
+            ControlEntry(id: "split", title: "m_a_i_n.rs", detail: "~/src"),
+            ControlEntry(id: "exact", title: "main.rs", detail: "~/src"),
+            ControlEntry(id: "space", title: "Meeting Notes.md", detail: "~/docs"),
+        ]
+        let ranked = ControlMatching.rank(entries, query: "src main").map(\.entry.id)
+        try expect(ranked.first == "exact" && ranked.contains("folder"), "prefer a filename match across all terms")
+        try expect(ControlMatching.rank(entries, query: "MAIN src").map(\.entry.id) == ranked,
+                   "Control terms can appear in any order")
+        try expect(ControlMatching.rank(entries, query: "docs Meeting\\ Notes").first?.entry.id == "space",
+                   "a backslash escapes a literal space")
+        try expect(ControlMatching.rank(entries, query: "src missing").isEmpty, "all terms must match")
     }
 
     private static func checkEncodings(in app: Edit, directory: URL) async throws {
