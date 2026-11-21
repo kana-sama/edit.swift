@@ -1,6 +1,6 @@
 # Editor
 
-The Edit window opens with a focused, empty plain-text buffer and one caret. It is a scratch buffer for the lifetime of the window. The system supplies the window title bar, traffic lights, menus, scrollbars, caret, and selection appearance. AppKit and TextKit 2 handle text input and layout.
+A new untitled Edit window opens with a focused, empty plain-text buffer and one caret. [Files](../files/spec.md) defines how to open, save, and restore documents. The system supplies the window title bar, traffic lights, menus, scrollbars, caret, and selection appearance. AppKit and TextKit 2 handle text input and layout.
 
 Use the system monospaced font at 13 points initially and highlight the caret's current line across the viewport. Use a single text surface that follows macOS appearance. Lines can extend beyond the viewport and scroll horizontally without wrapping. Both axes use native macOS scrollbar preferences.
 
@@ -18,7 +18,7 @@ The Edit menu has a Lines submenu with the six line commands. The View menu offe
 
 ## Acceptance
 
-- Launch and start typing in the empty buffer. Select and replace Unicode text and use native undo and redo.
+- Open a new untitled window and start typing. Select and replace Unicode text and use native undo and redo.
 - Exercise indentation, inserting and moving lines, boundary deletion, and whole-line clipboard behavior. Undo each discrete line edit.
 - Open a wide and tall sample within the scratch buffer. Confirm native horizontal and vertical scrolling, active-line highlighting, and a text-size change without a change to the window size.
 - Run `./script/check` to exercise native editing and render the implemented buffer without stealing focus.

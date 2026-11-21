@@ -6,6 +6,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     private var fontSize = EditorTextView.defaultFontSize
     private var currentLine = NSRect.zero
     private var lineRefreshPending = false
+    var onTextChange: (() -> Void)?
+    var preferredLineEnding = "\n"
 
     static func scrollingEditor(in frame: NSRect) -> (NSScrollView, EditorTextView) {
         let scrollView = NSScrollView(frame: frame)
@@ -81,7 +83,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             end += 1
         }
         let indent = text.substring(with: NSRange(location: start, length: end - start))
-        replace(selection, with: "\n" + indent, coalesce: true)
+        replace(selection, with: preferredLineEnding + indent, coalesce: true)
     }
 
     @objc func indentLines(_ sender: Any?) {
@@ -142,7 +144,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         let caret = selectedRange().location
         let line = LineEditing.line(at: caret, in: text)
         let contents = text.substring(with: NSRange(location: line.start, length: line.end - line.start))
-        let completeLine = line.end == line.contentEnd ? contents + "\n" : contents
+        let completeLine = line.end == line.contentEnd ? contents + preferredLineEnding : contents
         pasteboard.declareTypes([.string, Self.linePasteType], owner: nil)
         pasteboard.setString(completeLine, forType: .string)
         pasteboard.setString(completeLine, forType: Self.linePasteType)
@@ -258,7 +260,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func textViewDidChangeSelection(_ notification: Notification) { requestLineRefresh() }
-    func textDidChange(_ notification: Notification) { requestLineRefresh() }
+    func textDidChange(_ notification: Notification) {
+        requestLineRefresh()
+        onTextChange?()
+    }
 
     override func textViewportLayoutControllerDidLayout(_ controller: NSTextViewportLayoutController) {
         super.textViewportLayoutControllerDidLayout(controller)

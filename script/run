@@ -1,6 +1,23 @@
 #!/bin/bash
 set -euo pipefail
+caller_dir="$PWD"
 cd "$(dirname "$0")/.."
 
 ./script/build
-exec /usr/bin/open -n "${EDIT_BUILD_DIR:-$PWD/.build}/app/debug/Edit.app"
+app="${EDIT_BUILD_DIR:-$PWD/.build}/app/debug/Edit.app"
+if [[ "$app" != /* ]]; then
+    app="$PWD/$app"
+fi
+
+if (( $# == 0 )); then
+    exec /usr/bin/open "$app"
+fi
+
+files=()
+for path in "$@"; do
+    if [[ "$path" != /* ]]; then
+        path="$caller_dir/$path"
+    fi
+    files+=("$path")
+done
+exec /usr/bin/open -a "$app" "${files[@]}"
