@@ -1,5 +1,9 @@
 import AppKit
 
+enum SidebarMode: String, Codable, Sendable {
+    case search, worktree
+}
+
 enum FindCommand {
     case find, replace, next, previous, toggleSidebar
     case refresh, toggleReplace, toggleCase, toggleWholeWord, toggleRegex
@@ -36,6 +40,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private static let minimumEditorWidth: CGFloat = 128
     private static let contentInset: CGFloat = 10
     private unowned let document: DocumentWindow
+    private unowned let app: Edit
     private var settings: FindSettings {
         get { document.findSettings }
         set { document.findSettings = newValue }
@@ -55,6 +60,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private let replaceRow = NSStackView()
     private let split = NSSplitViewController()
     private let splitView = FindSplitView(frame: .zero)
+    private let sidebarContent = NSView()
+    private let searchContent = NSStackView()
+    private(set) var worktree: WorktreeSidebar?
+    private weak var sidebarMenu: NSMenu?
     private var contentTrailing: NSLayoutConstraint?
     private var contentWidth: NSLayoutConstraint?
     private let sidebar = NSViewController()
@@ -85,8 +94,9 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private weak var pendingResultFocus: FindFieldTextView?
     private var advanceFrom: Int?
 
-    init(document: DocumentWindow) {
+    init(document: DocumentWindow, app: Edit) {
         self.document = document
+        self.app = app
         bufferSnapshot = document.editor.string
         super.init()
         configure()
@@ -101,10 +111,80 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         activity?.cancel()
     }
 
+    private var searchVisible: Bool { settings.visible && document.sidebarMode == .search }
+    private var worktreeVisible: Bool { settings.visible && document.sidebarMode == .worktree }
+
     func restoreVisibility() {
         guard settings.visible else { return }
-        present(focusing: nil, animate: false)
-        requestSearch()
+        if worktreeVisible {
+            showWorktree(focus: false, animate: false)
+        } else {
+            present(focusing: nil, animate: false)
+            requestSearch()
+        }
+    }
+
+    func toggleWorktree() {
+        if worktreeVisible {
+            hide()
+        } else {
+            showWorktree()
+        }
+    }
+
+    private func showWorktree(focus: Bool = true, animate: Bool = true) {
+        guard let folder = document.folderURL else { return }
+        document.requestAutosave()
+        let browser: WorktreeSidebar
+        if let worktree {
+            browser = worktree
+        } else {
+            browser = WorktreeSidebar(document: document, app: app)
+            worktree = browser
+            if document.worktreeShowsHidden { browser.setShowsHidden(true) }
+            let view = browser.view
+            view.translatesAutoresizingMaskIntoConstraints = false
+            sidebarContent.addSubview(view)
+            NSLayoutConstraint.activate([
+                view.leadingAnchor.constraint(equalTo: sidebarContent.leadingAnchor),
+                view.trailingAnchor.constraint(equalTo: sidebarContent.trailingAnchor),
+                view.topAnchor.constraint(equalTo: sidebarContent.topAnchor),
+                view.bottomAnchor.constraint(equalTo: sidebarContent.bottomAnchor),
+            ])
+        }
+        selectMode(.worktree)
+        browser.update(folder: folder, currentFile: document.fileURL)
+        present(focusing: focus ? browser.outline : nil, animate: animate)
+        browser.setActive(true)
+    }
+
+    private func selectMode(_ mode: SidebarMode) {
+        let changed = mode != document.sidebarMode
+        document.sidebarMode = mode
+        searchContent.isHidden = mode != .search
+        worktree?.view.isHidden = mode != .worktree
+        if mode != .worktree { worktree?.setActive(false) }
+        if changed && mode == .worktree {
+            previewRequested = false
+            pendingResultFocus = nil
+            queuedDirection = nil
+            requestSearchIfNeeded()
+        }
+        updateSidebarMenu()
+    }
+
+    func folderChanged() {
+        if let folder = document.folderURL {
+            if worktreeVisible { worktree?.update(folder: folder, currentFile: document.fileURL) }
+        } else if document.sidebarMode == .worktree {
+            let wasFocused = focusIsInSidebar
+            selectMode(.search)
+            if settings.visible {
+                if wasFocused { document.window.makeFirstResponder(findInput.input) }
+                requestSearchIfNeeded()
+            }
+        }
+        updateSidebarMenu()
     }
 
     func canPerform(_ action: FindCommand) -> Bool {
@@ -114,16 +194,16 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         case .next, .previous:
             return !settings.query.isEmpty
         case .refresh, .toggleReplace, .toggleCase, .toggleWholeWord, .toggleRegex:
-            return settings.visible
+            return searchVisible
         case .replaceAll:
-            return settings.visible && settings.showsReplacement && validResults && !matches.isEmpty &&
+            return searchVisible && settings.showsReplacement && validResults && !matches.isEmpty &&
                 document.editor.isEditable && !document.editor.hasMarkedText()
         case .replaceSelected:
             return canPerform(.replaceAll) && selected != nil
         case .dismissSelected:
-            return settings.visible && validResults && selected != nil
+            return searchVisible && validResults && selected != nil
         case .clearSelection:
-            return settings.visible && selected != nil
+            return searchVisible && selected != nil
         }
     }
 
@@ -139,11 +219,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         case .previous:
             moveResult(by: -1)
         case .toggleSidebar:
-            if settings.visible {
+            if searchVisible {
                 hide()
             } else {
-                present(focusing: nil, animate: true)
-                if !validResults && !pending { requestSearch() }
+                showSearch(focusing: focusIsInSidebar ? findInput.input : nil)
             }
         case .refresh:
             resetMatches()
@@ -173,6 +252,12 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         resultFile.stringValue = document.displayName
         resultIcon.image = FileIcons.image(for: document.fileURL, appearance: sidebar.view.effectiveAppearance,
                                            language: document.manualSyntaxLanguage?.iconIdentifier)
+    }
+
+    func updateCurrentFile() {
+        if worktreeVisible, let folder = document.folderURL {
+            worktree?.update(folder: folder, currentFile: document.fileURL)
+        }
     }
 
     func bufferReplaced() {
@@ -296,7 +381,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         ])
         setupResults()
 
-        let content = NSStackView(views: [findRow, replaceRow, resultHeader, resultScroll])
+        let content = searchContent
+        for control in [findRow, replaceRow, resultHeader, resultScroll] {
+            content.addArrangedSubview(control)
+        }
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 5
@@ -305,15 +393,21 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let view = FindSidebarSurface(frame: NSRect(x: 0, y: 0, width: settings.width, height: 500))
         view.appearanceChanged = { [weak self] in self?.updateName() }
         view.clipsToBounds = true
-        view.addSubview(content)
+        sidebarContent.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(sidebarContent)
+        sidebarContent.addSubview(content)
         sidebar.view = view
         updateName()
-        let trailing = content.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Self.contentInset)
+        let trailing = sidebarContent.trailingAnchor.constraint(equalTo: view.trailingAnchor)
         contentTrailing = trailing
-        contentWidth = content.widthAnchor.constraint(equalToConstant: 0)
+        contentWidth = sidebarContent.widthAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Self.contentInset),
+            sidebarContent.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             trailing,
+            sidebarContent.topAnchor.constraint(equalTo: view.topAnchor),
+            sidebarContent.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            content.leadingAnchor.constraint(equalTo: sidebarContent.leadingAnchor, constant: Self.contentInset),
+            content.trailingAnchor.constraint(equalTo: sidebarContent.trailingAnchor, constant: -Self.contentInset),
             content.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 6),
             content.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             resultScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 0),
@@ -381,13 +475,31 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         item.showsIndicator = false
 
         let menu = NSMenu(title: "Sidebars")
+        item.menu = menu
+        sidebarMenu = menu
+        updateSidebarMenu()
+        return item
+    }
+
+    private func updateSidebarMenu() {
+        guard let menu = sidebarMenu else { return }
+        menu.removeAllItems()
         let search = menu.addItem(withTitle: "Search", action: #selector(selectSearchSidebar(_:)), keyEquivalent: "")
         search.target = self
-        search.state = .on
+        search.state = document.sidebarMode == .search ? .on : .off
+        if document.folderURL != nil {
+            let tree = menu.addItem(withTitle: "Worktree", action: #selector(selectWorktreeSidebar(_:)), keyEquivalent: "")
+            tree.target = self
+            tree.state = document.sidebarMode == .worktree ? .on : .off
+        }
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Refresh Search", action: #selector(refreshSearch(_:)), keyEquivalent: "").target = self
-        item.menu = menu
-        return item
+        if document.sidebarMode == .worktree, let worktree {
+            let hidden = menu.addItem(withTitle: "Show Hidden Files", action: #selector(toggleHiddenFiles(_:)), keyEquivalent: "")
+            hidden.target = self
+            hidden.state = worktree.showsHidden ? .on : .off
+        } else {
+            menu.addItem(withTitle: "Refresh Search", action: #selector(refreshSearch(_:)), keyEquivalent: "").target = self
+        }
     }
 
     private func setupResults() {
@@ -485,6 +597,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             settings.width = width
         }
         updateSidebarToolbarVisibility()
+        worktree?.setActive(worktreeVisible)
         if !settings.visible {
             previewRequested = false
             if focusIsInSidebar { document.window.makeFirstResponder(document.editor) }
@@ -497,7 +610,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         return view.isDescendant(of: sidebar.view)
     }
 
-    private func present(focusing input: NSTextView?, animate: Bool) {
+    private func present(focusing input: NSView?, animate: Bool) {
         let window = document.window
         let responder = window.firstResponder
         let desiredWidth = settings.width
@@ -525,6 +638,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let animation = beginSidebarTransition()
         if focusIsInSidebar { document.window.makeFirstResponder(document.editor) }
         settings.visible = false
+        worktree?.setActive(false)
         updateSidebarToolbarVisibility()
         previewRequested = false
         setSidebarCollapsed(true, animate: true, transition: animation)
@@ -584,7 +698,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         if contentWidth?.isActive != true {
             // The sidebar clips its contents as the native divider moves.
             contentTrailing?.isActive = false
-            contentWidth?.constant = max(0, openWidth - 2 * Self.contentInset)
+            contentWidth?.constant = max(0, openWidth)
             contentWidth?.isActive = true
             sidebarItem.minimumThickness = 0
             sidebarItem.canCollapse = false
@@ -647,6 +761,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
                 }
             }
         }
+        selectMode(.search)
         if replace { setReplacementVisible(true) }
         present(focusing: replace ? replaceInput.input : findInput.input, animate: true)
         previewRequested = false
@@ -679,7 +794,22 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     @objc private func selectSearchSidebar(_ sender: Any?) {
         document.requestAutosave()
-        present(focusing: findInput.input, animate: true)
+        showSearch(focusing: findInput.input)
+    }
+
+    @objc private func selectWorktreeSidebar(_ sender: Any?) { showWorktree() }
+
+    @objc private func toggleHiddenFiles(_ sender: Any?) {
+        guard worktreeVisible, let worktree else { return }
+        worktree.setShowsHidden(!worktree.showsHidden)
+        document.worktreeShowsHidden = worktree.showsHidden
+        updateSidebarMenu()
+    }
+
+    private func showSearch(focusing input: NSView?) {
+        selectMode(.search)
+        present(focusing: input, animate: true)
+        if !validResults && !pending { requestSearch() }
     }
 
     @objc private func changeOptions(_ sender: Any?) {
@@ -711,7 +841,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     private func requestSearchIfNeeded() {
-        if settings.visible || queuedDirection != nil {
+        if searchVisible || queuedDirection != nil {
             requestSearch()
         } else {
             generation &+= 1
@@ -782,9 +912,9 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         updateReplaceAvailability()
         if let advanceFrom {
             self.advanceFrom = nil
-            if settings.visible, let next = matches.firstIndex(where: { $0.range.location >= advanceFrom }) {
+            if searchVisible, let next = matches.firstIndex(where: { $0.range.location >= advanceFrom }) {
                 selectRow(next, reveal: true, preview: true)
-            } else if settings.visible && document.window.firstResponder === results {
+            } else if searchVisible && document.window.firstResponder === results {
                 document.window.makeFirstResponder(findInput.input)
             }
         } else if let queuedDirection {
@@ -817,7 +947,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
         guard !matches.isEmpty else { return }
         let base = selected ?? (direction > 0 ? -1 : 0)
-        selectRow((base + direction + matches.count) % matches.count, reveal: true, preview: focusIsInSidebar)
+        selectRow((base + direction + matches.count) % matches.count, reveal: true, preview: searchVisible && focusIsInSidebar)
     }
 
     private func advanceFindFocus() {
@@ -829,7 +959,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     private func focusFirstResult() {
-        guard settings.visible else { return }
+        guard searchVisible else { return }
         let window = document.window
         if pending || bufferSearchScheduled {
             queuedDirection = nil
@@ -846,7 +976,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
         let previous = selected
         selected = index
-        previewRequested = index != nil && preview && settings.showsReplacement && settings.visible
+        previewRequested = index != nil && preview && settings.showsReplacement && searchVisible
         if results.selectedRow != (index ?? -1) {
             editingResults = true
             if let index {
@@ -917,7 +1047,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     private func apply(_ hits: [FindHit], advance: Bool) {
-        guard validResults, settings.visible, settings.showsReplacement,
+        guard validResults, searchVisible, settings.showsReplacement,
               document.editor.isEditable, !document.editor.hasMarkedText(),
               let first = hits.first, let last = hits.last, document.editor.string == resultSnapshot else { return }
         let source = resultSnapshot as NSString
@@ -960,11 +1090,11 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     private func refreshDecorations() {
         let hit = validResults ? selected.map { matches[$0] } : nil
-        let preview = previewRequested && settings.visible && settings.showsReplacement
+        let preview = previewRequested && searchVisible && settings.showsReplacement
             ? hit.map { ($0.range, $0.replacement(using: settings.replacement, in: resultSnapshot as NSString,
                                                   isRegex: settings.options.regularExpression)) }
             : nil
-        decorations.update(snapshot: resultSnapshot, ranges: settings.visible && validResults ? matches.map(\.range) : [],
+        decorations.update(snapshot: resultSnapshot, ranges: searchVisible && validResults ? matches.map(\.range) : [],
                            selected: hit?.range, preview: preview)
     }
 

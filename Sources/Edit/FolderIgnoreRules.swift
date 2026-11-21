@@ -27,13 +27,13 @@ struct FolderIgnoreRules: Sendable {
         return FolderIgnoreRules(directoryPrefix: prefix, rules: rules)
     }
 
-    func ignores(_ directory: URL) -> Bool? {
-        let path = directory.path
+    func ignores(_ url: URL, isDirectory: Bool = true) -> Bool? {
+        let path = url.path
         guard path.hasPrefix(directoryPrefix) else { return nil }
         let relative = path.dropFirst(directoryPrefix.count)
         let components = relative.split(separator: "/").map(String.init)
         guard !components.isEmpty else { return nil }
-        for rule in rules.reversed() where rule.matches(components) {
+        for rule in rules.reversed() where (isDirectory || !rule.directoriesOnly) && rule.matches(components) {
             return rule.excludes
         }
         return nil
@@ -41,6 +41,7 @@ struct FolderIgnoreRules: Sendable {
 
     private struct Rule: Sendable {
         let excludes: Bool
+        let directoriesOnly: Bool
         let matchesBasename: Bool
         let pattern: [String]
 
@@ -56,8 +57,8 @@ struct FolderIgnoreRules: Sendable {
             excludes = first != "!"
             if !excludes { text.removeFirst() }
 
-            // All paths tested here are directories, so the directory marker needs no separate flag.
-            if text.last == "/" { text.removeLast() }
+            directoriesOnly = text.last == "/"
+            if directoriesOnly { text.removeLast() }
             matchesBasename = !text.contains("/")
             if text.first == "/" { text.removeFirst() }
             guard let components = Self.components(in: text) else { return nil }

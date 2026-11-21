@@ -32,9 +32,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private(set) var folderURL: URL?
     var displayName: String { fileURL?.lastPathComponent ?? "Untitled" }
 
-    func setFolder(_ url: URL) {
+    func setFolder(_ url: URL?) {
+        guard folderURL != url else { return }
         folderURL = url
         updateTitle()
+        findPanel?.folderChanged()
     }
 
     private var detectedSyntaxLanguage: SyntaxLanguage = .plainText
@@ -46,6 +48,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var pendingFullScreen = false
     private var saving = false
     private var promptingToClose = false
+    private var worktreeMutation = false
+    private var worktreePriorEditability = true
     private var editGeneration: UInt = 0
     private var idleSave: Task<Void, Never>?
     private var autosaveTask: Task<Void, Never>?
@@ -55,6 +59,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var syntaxHighlighting: SyntaxHighlighting?
     private var findPanel: FindSidebar?
     var findSettings = FindSettings()
+    var sidebarMode: SidebarMode = .search
+    var worktreeShowsHidden = false
+    var worktreeSidebar: WorktreeSidebar? { findPanel?.worktree }
     private var appearanceObservation: NSKeyValueObservation?
     private(set) var manualSyntaxLanguage: SyntaxLanguage?
 
@@ -70,7 +77,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         refreshSyntax(immediate: true)
     }
 
-    var isBusy: Bool { saving || promptingToClose }
+    var isBusy: Bool { saving || promptingToClose || worktreeMutation }
     var canReplaceBuffer: Bool { !isBusy && window.attachedSheet == nil }
     var isReusable: Bool {
         folderURL == nil && fileURL == nil && findPanel == nil && !window.isDocumentEdited && canReplaceBuffer
@@ -130,6 +137,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         searchPanel().perform(command)
     }
 
+    func toggleWorktreeSidebar() {
+        guard !app.isQuitting, window.attachedSheet == nil, folderURL != nil else { return }
+        searchPanel().toggleWorktree()
+    }
+
     func restoreFindSettings(_ settings: FindSettings) {
         findSettings = settings
         if settings.visible {
@@ -137,9 +149,15 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
     }
 
+    func restoreSidebar(_ record: SessionDocument) {
+        sidebarMode = folderURL == nil ? .search : record.sidebarMode ?? .search
+        worktreeShowsHidden = record.worktreeShowsHidden ?? false
+        if let settings = record.findSettings { restoreFindSettings(settings) }
+    }
+
     private func searchPanel() -> FindSidebar {
         if let findPanel { return findPanel }
-        let panel = FindSidebar(document: self)
+        let panel = FindSidebar(document: self, app: app)
         findPanel = panel
         editor.onFindEditorInteraction = { [weak panel] in panel?.editorInteracted() }
         editor.onFindViewportChange = { [weak panel] in panel?.viewportChanged() }
@@ -231,7 +249,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             syntaxLanguage: manualSyntaxLanguage?.rawValue,
             folderPath: folderURL?.path,
             findSettings: findSettings == FindSettings() ? nil : findSettings,
-            editorPosition: editor.capturePosition()
+            editorPosition: editor.capturePosition(),
+            sidebarMode: sidebarMode == .search ? nil : sidebarMode,
+            worktreeShowsHidden: (worktreeSidebar?.showsHidden ?? worktreeShowsHidden) ? true : nil
         )
     }
 
@@ -251,7 +271,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     @discardableResult
     func save(asNew: Bool = false, to selectedURL: URL? = nil, encoding: FileTextEncoding? = nil) async -> Bool {
-        guard !saving else { return false }
+        guard !saving, !worktreeMutation else { return false }
         saving = true
         if editor.hasMarkedText() { editor.unmarkText() }
         defer {
@@ -394,6 +414,86 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         } catch {
             autosaveFailure = (generation, error.localizedDescription, false)
         }
+    }
+
+    func worktreeMutationAffects(_ sources: [URL]) -> Bool {
+        sources.contains { source in
+            [fileURL, folderURL].compactMap { $0 }.contains { Self.worktreePathSuffix(from: source, to: $0) != nil }
+        }
+    }
+
+    func beginWorktreeMutation() {
+        if editor.hasMarkedText() { editor.unmarkText() }
+        worktreeMutation = true
+        worktreePriorEditability = editor.isEditable
+        editor.isEditable = false
+        idleSave?.cancel()
+        idleSave = nil
+    }
+
+    func waitForWorktreeWrites() async {
+        await autosaveTask?.value
+    }
+
+    func finishWorktreeMutation() {
+        worktreeMutation = false
+        editor.isEditable = worktreePriorEditability
+        startRequestedAutosave()
+        if autosaveTask == nil { scheduleIdleAutosave() }
+    }
+
+    func retargetMovedFile(from source: URL, to destination: URL) {
+        if let folderURL, let suffix = Self.worktreePathSuffix(from: source, to: folderURL) {
+            let movedFolder = suffix.isEmpty ? destination : destination.appending(path: suffix, directoryHint: .isDirectory)
+            setFolder(URL(filePath: movedFolder.path, directoryHint: .isDirectory))
+        }
+        guard let original = fileURL, let suffix = Self.worktreePathSuffix(from: source, to: original) else { return }
+        let previousLanguage = resolvedSyntaxLanguage
+        let movedFile = suffix.isEmpty ? destination : destination.appending(path: suffix, directoryHint: .notDirectory)
+        fileURL = URL(filePath: movedFile.path, directoryHint: .notDirectory)
+        fileIdentity = fileURL.flatMap { FileIdentity.at($0) }
+        if let manualSyntaxLanguage {
+            app.syntaxOverrides.set(nil, for: original)
+            app.syntaxOverrides.set(manualSyntaxLanguage, for: fileURL)
+        }
+        autosaveFailure = nil
+        updateTitle()
+        if resolvedSyntaxLanguage != previousLanguage { refreshSyntax(immediate: true) }
+        if let fileURL {
+            let recents = app.recentFiles
+            let folder = folderURL
+            Task { await recents.record(fileURL, in: folder) }
+        }
+    }
+
+    func detachTrashedFile(at source: URL) {
+        if let folderURL, Self.worktreePathSuffix(from: source, to: folderURL) != nil { setFolder(nil) }
+        guard let fileURL, Self.worktreePathSuffix(from: source, to: fileURL) != nil else { return }
+        let edited = window.isDocumentEdited
+        let previousLanguage = resolvedSyntaxLanguage
+        self.fileURL = nil
+        fileIdentity = nil
+        savedText = "" as NSString
+        revision = nil
+        queuedAutosave = nil
+        autosaveFailure = nil
+        if edited {
+            manualSyntaxLanguage = previousLanguage == .plainText ? nil : previousLanguage
+            updateTitle()
+            updateEditedState()
+        } else {
+            manualSyntaxLanguage = nil
+            format = FileFormat()
+            installText("")
+        }
+    }
+
+    static func worktreePathSuffix(from source: URL, to file: URL) -> String? {
+        let sourcePath = WorktreeFileOperations.path(source)
+        let filePath = WorktreeFileOperations.path(file)
+        if sourcePath == filePath { return "" }
+        let prefix = sourcePath.hasSuffix("/") ? sourcePath : sourcePath + "/"
+        return filePath.hasPrefix(prefix) ? String(filePath.dropFirst(prefix.count)) : nil
     }
 
     func takeAutosaveFailure() -> String? {
@@ -643,6 +743,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
         titleBar.update()
         findPanel?.updateName()
+        findPanel?.updateCurrentFile()
     }
 
     private func updateEditedState() {

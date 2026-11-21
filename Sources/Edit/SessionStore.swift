@@ -57,6 +57,8 @@ struct SessionDocument: Codable, Sendable {
     var folderPath: String? = nil
     var findSettings: FindSettings? = nil
     var editorPosition: EditorPosition? = nil
+    var sidebarMode: SidebarMode? = nil
+    var worktreeShowsHidden: Bool? = nil
 }
 
 struct EditorSession: Codable, Sendable {

@@ -20,6 +20,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     private var receivedInitialSession = false
     private var pendingFiles: [(urls: [URL], allowMissing: Bool, document: DocumentWindow?)] = []
     private var saveTargets: [URL: FileIdentity?] = [:]
+    private var worktreeMutationPaths: [URL] = []
+    private var worktreeMutationGeneration: UInt64 = 0
     private var lastPlacement: WindowPlacement?
     private var sessionReadFailed = false
     private var pendingFullScreen: [DocumentWindow] = []
@@ -65,6 +67,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     let folderWindow = try await FolderCheck.run(in: self)
                     try checkWindow(folderWindow, screenshot: nil)
                     try await HeaderCheck.run(in: self)
+                    try await WorktreeCheck.run(in: self)
                     print("Edit passed its native editing and file-session checks without activation.")
                     exit(EXIT_SUCCESS)
                 } catch {
@@ -232,6 +235,11 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     @objc func findPrevious(_ sender: Any?) { activeDocument?.performFind(.previous) }
     @objc func toggleFindSidebar(_ sender: Any?) { activeDocument?.performFind(.toggleSidebar) }
 
+    @objc func toggleWorktreeSidebar(_ sender: Any?) {
+        controlPanel?.dismiss(restoreFocus: true)
+        activeDocument?.toggleWorktreeSidebar()
+    }
+
     @objc func performFindControlAction(_ sender: NSMenuItem) {
         if let command = sender.representedObject as? FindCommand { activeDocument?.performFind(command) }
     }
@@ -248,6 +256,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             return activeDocument.map { !$0.isBusy && $0.window.attachedSheet == nil } ?? false
         case #selector(openFind(_:)), #selector(openReplace(_:)), #selector(toggleFindSidebar(_:)):
             return activeDocument.map { $0.window.attachedSheet == nil } ?? false
+        case #selector(toggleWorktreeSidebar(_:)):
+            return activeDocument.map { $0.folderURL != nil && $0.window.attachedSheet == nil } ?? false
         case #selector(findNext(_:)): return activeDocument?.canPerformFind(.next) ?? false
         case #selector(findPrevious(_:)): return activeDocument?.canPerformFind(.previous) ?? false
         case #selector(performFindControlAction(_:)):
@@ -264,7 +274,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if isAgentCheck { return .terminateNow }
         if isQuitting { return .terminateLater }
-        guard !documents.contains(where: { $0.isBusy || $0.window.attachedSheet != nil }) else {
+        guard worktreeMutationPaths.isEmpty,
+              !documents.contains(where: { $0.isBusy || $0.window.attachedSheet != nil }) else {
             return .terminateCancel
         }
         // The temporary startup window can be closed before restoration reads the saved session.
@@ -360,6 +371,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     func reserveSave(to url: URL, identity: FileIdentity?, for document: DocumentWindow) -> Bool {
         // Buffers already associated with a path compare their revisions before writing.
         // Save As must not claim a path owned by another window.
+        guard !isWorktreeMutationPath(url) else { return false }
         guard url == document.fileURL || !documents.contains(where: {
             $0 !== document && ($0.fileURL == url || (identity != nil && $0.fileIdentity == identity))
         }) else { return false }
@@ -372,6 +384,35 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     func finishSave(to url: URL) {
         saveTargets.removeValue(forKey: url)
+    }
+
+    func performWorktreeMutation<T: Sendable>(
+        affecting sources: [URL], operation: @MainActor () async throws -> T
+    ) async throws -> T {
+        let affected = documents.filter { $0.worktreeMutationAffects(sources) }
+        guard !isQuitting, worktreeMutationPaths.isEmpty, affected.allSatisfy(\.canReplaceBuffer) else {
+            throw worktreeBusyError()
+        }
+        worktreeMutationPaths = sources
+        worktreeMutationGeneration &+= 1
+        for document in affected { document.beginWorktreeMutation() }
+        defer {
+            worktreeMutationPaths = []
+            for document in affected { document.finishWorktreeMutation() }
+        }
+        for document in affected { await document.waitForWorktreeWrites() }
+        guard !isQuitting, !saveTargets.keys.contains(where: isWorktreeMutationPath) else {
+            throw worktreeBusyError()
+        }
+        return try await operation()
+    }
+
+    private func isWorktreeMutationPath(_ url: URL) -> Bool {
+        worktreeMutationPaths.contains { DocumentWindow.worktreePathSuffix(from: $0, to: url) != nil }
+    }
+
+    private func worktreeBusyError() -> CocoaError {
+        CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: "Edit is busy with another file operation."])
     }
 
     func sessionSnapshot() -> EditorSession {
@@ -412,7 +453,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             } else if let opened {
                 document.load(opened.file, storedSyntaxLanguage: record.syntaxLanguage, preparedSyntax: opened.syntax)
             }
-            if let settings = record.findSettings { document.restoreFindSettings(settings) }
+            document.restoreSidebar(record)
             document.restoreEditorPosition(record.editorPosition)
             if let path = record.path { await recentFiles.record(URL(fileURLWithPath: path)) }
             if isQuitting { document.editor.isEditable = false }
@@ -450,7 +491,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     @discardableResult
     func openFile(_ url: URL, allowMissing: Bool = false, in sourceDocument: DocumentWindow? = nil) async throws -> DocumentWindow? {
         guard !isQuitting, let document = sourceDocument ?? activeDocument, document.canReplaceBuffer,
-              documents.contains(where: { $0 === document }) else { return nil }
+              documents.contains(where: { $0 === document }), !isWorktreeMutationPath(url) else { return nil }
+        let mutationGeneration = worktreeMutationGeneration
 
         let (canonical, identity, isFolder) = await Task.detached {
             let path = FileBuffer.canonicalURL(url)
@@ -459,7 +501,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             if identity == nil { _ = FileManager.default.fileExists(atPath: path.path, isDirectory: &isDirectory) }
             return (path, identity, isDirectory.boolValue)
         }.value
-        guard !isQuitting, document.canReplaceBuffer, documents.contains(where: { $0 === document }) else { return nil }
+        guard !isQuitting, document.canReplaceBuffer, documents.contains(where: { $0 === document }),
+              mutationGeneration == worktreeMutationGeneration, !isWorktreeMutationPath(canonical) else { return nil }
         if isFolder {
             let folder = URL(filePath: canonical.path, directoryHint: .isDirectory)
             return try await openFolder(url, canonical: folder, in: document)
@@ -470,13 +513,15 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         }
 
         let opened = try await readForOpening(canonical, allowMissing: allowMissing)
-        guard documents.contains(where: { $0 === document }),
+        guard documents.contains(where: { $0 === document }), mutationGeneration == worktreeMutationGeneration,
+              !isWorktreeMutationPath(canonical),
               await document.replaceBuffer(with: opened.file, preparedSyntax: opened.syntax) else { return nil }
         if opened.file.identity != nil { await recentFiles.record(url, in: document.folderURL) }
         return document
     }
 
     private func openFolder(_ url: URL, canonical folder: URL, in document: DocumentWindow) async throws -> DocumentWindow? {
+        let mutationGeneration = worktreeMutationGeneration
         var opened: (file: FileBuffer, syntax: SyntaxSnapshot?)?
         if let last = await recentFiles.lastFile(in: folder) {
             opened = try? await readForOpening(last, within: folder)
@@ -490,7 +535,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 }
             }
         }
-        guard !isQuitting, document.canReplaceBuffer, documents.contains(where: { $0 === document }) else { return nil }
+        guard !isQuitting, document.canReplaceBuffer, documents.contains(where: { $0 === document }),
+              mutationGeneration == worktreeMutationGeneration,
+              opened.map({ !isWorktreeMutationPath($0.file.url) }) ?? true else { return nil }
         if opened == nil || opened?.file.url != document.fileURL {
             guard await document.replaceBuffer(with: opened?.file, preparedSyntax: opened?.syntax) else { return nil }
         }
@@ -630,6 +677,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
         let view = addMenu("View")
         view.addCommand("Toggle Search Sidebar", #selector(toggleFindSidebar(_:)), "b").target = self
+        view.addCommand("Toggle Worktree Sidebar", #selector(toggleWorktreeSidebar(_:)), "e", [.command, .shift]).target = self
         view.addCommand("Command Mode…", #selector(showCommandMode(_:)), "p", [.command, .shift]).target = self
         view.addCommand("Change Language Mode…", #selector(showLanguageModes(_:))).target = self
         view.addItem(.separator())
