@@ -295,10 +295,10 @@ static bool runGrammar(Input input, const char *name, NSString *directory, uint3
     return parsed && !cancelled(&input);
 }
 
-EDIT_VISIBLE bool edit_syntax_highlight(const char *language, const char *queryDirectory,
-                                       const uint16_t *units, uint32_t count,
-                                       uint32_t previewStart, uint32_t previewEnd, EditPreview publishPreview,
-                                       EditCapture callback, EditCancelled check, void *context) {
+EDIT_VISIBLE bool edit_syntax_highlight_with_viewport(const char *language, const char *queryDirectory,
+                                                     const uint16_t *units, uint32_t count,
+                                                     uint32_t previewStart, uint32_t previewEnd, EditPreview publishPreview,
+                                                     EditCapture callback, EditCancelled check, void *context) {
     if (!language || !queryDirectory || !units || !callback || count > UINT32_MAX / 2u) return false;
     @autoreleasepool {
         NSString *directory = [NSString stringWithUTF8String:queryDirectory];
@@ -308,4 +308,12 @@ EDIT_VISIBLE bool edit_syntax_highlight(const char *language, const char *queryD
         const bool canPreview = publishPreview && previewStart < previewEnd && previewEnd <= count;
         return runGrammar(input, language, directory, 0, 0, canPreview ? &preview : NULL);
     }
+}
+
+/* A running editor may first open a highlighted file after its development bundle is rebuilt. */
+EDIT_VISIBLE bool edit_syntax_highlight(const char *language, const char *queryDirectory,
+                                       const uint16_t *units, uint32_t count,
+                                       EditCapture callback, EditCancelled check, void *context) {
+    return edit_syntax_highlight_with_viewport(language, queryDirectory, units, count,
+                                             0, 0, NULL, callback, check, context);
 }

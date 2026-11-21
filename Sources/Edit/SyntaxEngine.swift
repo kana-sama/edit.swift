@@ -103,7 +103,7 @@ enum SyntaxEngine {
               let handle = dlopen(directory.appending(path: "libEditSyntax.dylib").path, RTLD_LOCAL | RTLD_NOW) else {
             return nil
         }
-        guard let entry = dlsym(handle, "edit_syntax_highlight") else {
+        guard let entry = dlsym(handle, "edit_syntax_highlight_with_viewport") else {
             dlclose(handle)
             return nil
         }
