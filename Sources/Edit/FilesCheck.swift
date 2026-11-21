@@ -347,13 +347,22 @@ enum FilesCheck {
         try expect(try Data(contentsOf: file) == Data(("\u{feff}" + editor.string).utf8),
                    "an earlier autosave cannot overwrite a manual save")
 
+        let undo = try resolve(editor.undoManager)
+        let groupsByEvent = undo.groupsByEvent
         editor.breakUndoCoalescing()
+        while undo.groupingLevel > 0 { undo.endUndoGrouping() }
+        // This quiet check has no key event to delimit the edit's undo group.
+        undo.groupsByEvent = false
+        undo.beginUndoGrouping()
         let beforeUndo = editor.string
         editor.insertText("Undo this\r\n", replacementRange: editor.selectedRange())
         editor.breakUndoCoalescing()
-        _ = await document.save()
-        editor.undoManager?.undo()
-        try expect(editor.string == beforeUndo && window.isDocumentEdited, "native Undo marks the buffer edited")
+        undo.endUndoGrouping()
+        let savedBeforeUndo = await document.save()
+        undo.undo()
+        undo.groupsByEvent = groupsByEvent
+        try expect(savedBeforeUndo && editor.string == beforeUndo && window.isDocumentEdited,
+                   "native Undo marks the buffer edited")
         document.requestAutosave()
         try await waitFor("an Undo is autosaved") { !window.isDocumentEdited }
         try expect(try Data(contentsOf: file) == Data(("\u{feff}" + beforeUndo).utf8),

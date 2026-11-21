@@ -111,7 +111,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func performFind(_ command: FindCommand) {
         guard !app.isQuitting, window.attachedSheet == nil, canPerformFind(command) else { return }
+        let previousToolbar = window.toolbar
         searchPanel().perform(command)
+        if window.toolbar !== previousToolbar { updateTitleIcon() }
     }
 
     func persistFindSettings() { findPanel?.persistSettings() }

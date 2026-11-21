@@ -59,8 +59,91 @@ enum FindCheck {
         try expect(window.firstResponder === editor, "hiding Find restores editor focus")
         document.performFind(.next)
         try expect(editor.string == "cat cat\ncat", "finding with the sidebar hidden preserves text")
+        try await checkSidebarLayout(in: app.makeDocument())
         try expect(NSApplication.shared.activationPolicy() == .prohibited &&
                    !NSApplication.shared.isActive && !window.isVisible, "Find stays in the isolated hidden window")
+    }
+
+    private static func checkSidebarLayout(in document: DocumentWindow) async throws {
+        let window = document.window
+        let editor = document.editor
+        let clip = document.scrollView.contentView
+        let lines = (0..<100).map { index in
+            "checksum = \"" + String(index) + String(repeating: "abcdef0123456789", count: 12) + "\""
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Search layout.toml")
+        let text = lines.joined(separator: "\n")
+        try Data(text.utf8).write(to: url)
+        document.load(try FileBuffer.read(url))
+        let caret = NSRange(location: lines[0].utf16.count, length: 0)
+        editor.setSelectedRange(caret)
+        window.layoutIfNeeded()
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        editor.scrollRangeToVisible(NSRange(location: editor.string.utf16.count - 1, length: 1))
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        clip.scroll(to: NSPoint(x: 0, y: 40))
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        document.scrollView.reflectScrolledClipView(clip)
+        let origin = clip.bounds.origin
+        document.performFind(.find)
+        try await Task.sleep(for: .milliseconds(30))
+        try expect(abs(clip.bounds.origin.x - origin.x) < 1 && abs(clip.bounds.origin.y - origin.y) < 1,
+                   "opening the sidebar preserves editor scroll position (\(origin) to \(clip.bounds.origin))")
+        try expect(editor.selectedRange() == caret, "sidebar layout preserves the editor selection")
+
+        let split = try require(window.contentViewController as? NSSplitViewController, "Find uses a native split view")
+        let sidebar = split.splitViewItems[0].viewController.view
+        let sidebarFrame = sidebar.convert(sidebar.bounds, to: nil)
+        try expect(sidebarFrame.maxY > window.contentLayoutRect.maxY && sidebarFrame.minY <= window.contentLayoutRect.minY,
+                   "sidebar spans the window including titlebar (\(sidebarFrame), content \(window.contentLayoutRect))")
+        let editorFrame = document.scrollView.convert(document.scrollView.bounds, to: nil)
+        try expect(editorFrame.maxY <= window.contentLayoutRect.maxY + 1, "editor starts below the titlebar")
+        let icon = FileIcons.image(for: url, appearance: window.effectiveAppearance)
+        try expect(icon != nil && window.standardWindowButton(.documentIconButton)?.image === icon,
+                   "the title proxy retains its Seti icon with the sidebar toolbar installed")
+
+        let query = try require(window.firstResponder as? NSTextView, "Find focuses its input")
+        query.insertText("checksum", replacementRange: NSRange(location: 0, length: query.string.utf16.count))
+        document.performFind(.replace)
+        let replacement = try require(window.firstResponder as? NSTextView, "Replace focuses its input")
+        replacement.insertText("digest", replacementRange: NSRange(location: 0, length: replacement.string.utf16.count))
+        let table = try require(descendant(of: sidebar, type: FindResultsTable.self), "Find has a native results table")
+        try await waitUntil("one result per long source line") { table.numberOfRows == lines.count }
+        table.selectRowIndexes(IndexSet(integer: 4), byExtendingSelection: false)
+        window.layoutIfNeeded()
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        for width in [280.0, 185.0] {
+            split.splitView.setPosition(width, ofDividerAt: 0)
+            window.layoutIfNeeded()
+            let cell = try require(table.view(atColumn: 0, row: 4, makeIfNecessary: true), "a visible match has a row")
+            cell.layoutSubtreeIfNeeded()
+            let field = try require(descendant(of: cell, type: NSTextField.self), "result has an excerpt")
+            try expect(field.stringValue.hasPrefix("checksum ="), "long excerpts keep their matching prefix")
+            try expect(field.frame.height <= cell.bounds.height && field.maximumNumberOfLines == 1,
+                       "long excerpts are one line and fit at sidebar width \(width)")
+        }
+        let fourthLine = lines.prefix(4).reduce(0) { $0 + $1.utf16.count + 1 }
+        let followingLine = fourthLine + lines[4].utf16.count + 1
+        func lineRect(_ location: Int) -> NSRect {
+            editor.firstRect(forCharacterRange: NSRange(location: location, length: 0), actualRange: nil)
+        }
+        let previewDistance = abs(lineRect(fourthLine).minY - lineRect(followingLine).minY)
+        try expect(previewDistance > lineRect(fourthLine).height * 1.75,
+                   "the next document line remains visible below the replacement preview")
+        try expect(editor.string == lines.joined(separator: "\n"), "the preview leaves the source buffer unchanged")
+        document.performFind(.clearSelection)
+        let plainDistance = abs(lineRect(fourthLine).minY - lineRect(followingLine).minY)
+        try expect(plainDistance < previewDistance, "clearing preview restores the original line spacing")
+
+        document.performFind(.toggleSidebar)
+        await Task.yield()
+        clip.scroll(to: NSPoint(x: 140, y: 40))
+        document.scrollView.reflectScrolledClipView(clip)
+        let scrolled = clip.bounds.origin
+        document.performFind(.toggleSidebar)
+        await Task.yield()
+        try expect(abs(clip.bounds.origin.x - scrolled.x) < 1,
+                   "reopening the sidebar preserves a nonzero horizontal scroll offset")
     }
 
     private static func checkMatcher() throws {

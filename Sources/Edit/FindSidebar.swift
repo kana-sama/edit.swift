@@ -7,19 +7,18 @@ enum FindCommand {
 }
 
 @MainActor
-final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
+    private static let refreshItem = NSToolbarItem.Identifier("Search.Refresh")
     private unowned let document: DocumentWindow
     private let writesPreferences: Bool
     private var settings: FindSettings
-    private let findInput = FindInput(name: "Find")
+    private let matchCase = NSButton(title: "Aa", target: nil, action: nil)
+    private let wholeWord = NSButton(title: "ab", target: nil, action: nil)
+    private let regex = NSButton(title: ".*", target: nil, action: nil)
+    private lazy var findInput = FindInput(name: "Find", options: [matchCase, wholeWord, regex])
     private let replaceInput = FindInput(name: "Replace")
-    private let findLabel = NSTextField(labelWithString: "Find")
-    private let replaceLabel = NSTextField(labelWithString: "Replace")
-    private let matchCase = NSButton(checkboxWithTitle: "Case", target: nil, action: nil)
-    private let wholeWord = NSButton(checkboxWithTitle: "Whole Word", target: nil, action: nil)
-    private let regex = NSButton(checkboxWithTitle: "Regex", target: nil, action: nil)
     private let replaceToggle = NSButton(title: "", target: nil, action: nil)
-    private let replaceButton = NSButton(title: "All", target: nil, action: nil)
+    private let replaceButton = NSButton(title: "", target: nil, action: nil)
     private let resultFile = NSTextField(labelWithString: "Untitled")
     private let resultIcon = NSImageView()
     private let resultStatus = NSTextField(labelWithString: "No results")
@@ -32,6 +31,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private lazy var sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
     private lazy var decorations = FindDecorations(editor: document.editor)
     private var installed = false
+    private var layoutAnchor: NSPoint?
+    private var sidebarAnimation: UInt64 = 0
     private var bufferSnapshot: String
     private var resultSnapshot = ""
     private var baseMatches: [FindHit] = []
@@ -209,8 +210,23 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     private func configure() {
-        let refresh = symbolButton("arrow.clockwise", label: "Refresh Search", action: #selector(refreshSearch(_:)))
-        let header = horizontal([NSTextField(labelWithString: "Search"), NSView(), refresh])
+        for (option, label) in [(matchCase, "Match Case"), (wholeWord, "Whole Word"), (regex, "Regular Expression")] {
+            option.setButtonType(.pushOnPushOff)
+            option.bezelStyle = .accessoryBar
+            option.controlSize = .small
+            option.image = optionImage(option.title, underlined: option === wholeWord)
+            option.imagePosition = .imageOnly
+            option.target = self
+            option.action = #selector(changeOptions(_:))
+            option.toolTip = label
+            option.setAccessibilityLabel(label)
+            option.widthAnchor.constraint(equalToConstant: 23).isActive = true
+            option.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        }
+        matchCase.state = settings.options.caseSensitive ? .on : .off
+        wholeWord.state = settings.options.wholeWord ? .on : .off
+        regex.state = settings.options.regularExpression ? .on : .off
+        updateSearchOptionsAppearance()
 
         findInput.value = settings.query
         replaceInput.value = settings.replacement
@@ -226,51 +242,52 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         findInput.onEscape = { [weak self] in self?.hide() }
         replaceInput.onEscape = { [weak self] in self?.hide() }
 
-        replaceToggle.title = ""
-        replaceToggle.target = self
-        replaceToggle.action = #selector(toggleReplaceSection(_:))
-        replaceToggle.toolTip = "Show or Hide Replace"
-        replaceToggle.setAccessibilityLabel("Show or Hide Replace")
-        replaceToggle.widthAnchor.constraint(equalToConstant: 30).isActive = true
-
-        replaceButton.target = self
-        replaceButton.action = #selector(replaceAllMatches(_:))
-        replaceButton.toolTip = "Replace All"
-        replaceButton.setAccessibilityLabel("Replace All")
-        replaceButton.widthAnchor.constraint(equalToConstant: 40).isActive = true
-
+        configureFieldAction(replaceToggle, label: "Show or Hide Replace", action: #selector(toggleReplaceSection(_:)))
+        configureFieldAction(replaceButton, label: "Replace All", action: #selector(replaceAllMatches(_:)))
+        replaceButton.image = optionImage("R*")
         let findRow = horizontal([findInput, replaceToggle])
         replaceRow.orientation = .horizontal
-        replaceRow.alignment = .centerY
+        replaceRow.alignment = .top
         replaceRow.spacing = 5
         replaceRow.addArrangedSubview(replaceInput)
         replaceRow.addArrangedSubview(replaceButton)
-        for option in [matchCase, wholeWord, regex] {
-            option.controlSize = .small
-            option.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-            option.target = self
-            option.action = #selector(changeOptions(_:))
-        }
-        matchCase.state = settings.options.caseSensitive ? .on : .off
-        wholeWord.state = settings.options.wholeWord ? .on : .off
-        regex.state = settings.options.regularExpression ? .on : .off
-        let options = horizontal([matchCase, wholeWord, regex])
         updateReplacementVisibility()
 
+        resultFile.maximumNumberOfLines = 1
         resultFile.lineBreakMode = .byTruncatingMiddle
         resultFile.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        resultFile.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        resultFile.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        resultStatus.lineBreakMode = .byTruncatingTail
         resultStatus.textColor = .secondaryLabelColor
+        resultStatus.setContentHuggingPriority(.required, for: .horizontal)
+        resultStatus.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         resultStatus.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         resultIcon.setAccessibilityElement(false)
-        resultIcon.widthAnchor.constraint(equalToConstant: 17).isActive = true
-        let resultHeader = horizontal([resultIcon, resultFile, NSView(), resultStatus])
+        resultIcon.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        resultIcon.heightAnchor.constraint(equalToConstant: 16).isActive = true
+        let resultHeader = NSView()
+        for label in [resultIcon, resultFile, resultStatus] {
+            label.translatesAutoresizingMaskIntoConstraints = false
+            resultHeader.addSubview(label)
+        }
+        NSLayoutConstraint.activate([
+            resultHeader.heightAnchor.constraint(equalToConstant: 24),
+            resultIcon.leadingAnchor.constraint(equalTo: resultHeader.leadingAnchor, constant: 4),
+            resultIcon.centerYAnchor.constraint(equalTo: resultHeader.centerYAnchor),
+            resultFile.leadingAnchor.constraint(equalTo: resultIcon.trailingAnchor, constant: 5),
+            resultFile.centerYAnchor.constraint(equalTo: resultHeader.centerYAnchor),
+            resultFile.trailingAnchor.constraint(lessThanOrEqualTo: resultStatus.leadingAnchor, constant: -5),
+            resultStatus.trailingAnchor.constraint(equalTo: resultHeader.trailingAnchor, constant: -4),
+            resultStatus.centerYAnchor.constraint(equalTo: resultHeader.centerYAnchor),
+        ])
         setupResults()
 
-        let controls = [header, findLabel, findRow, options, replaceLabel, replaceRow, resultHeader, resultScroll]
-        let content = NSStackView(views: controls)
+        let content = NSStackView(views: [findRow, replaceRow, resultHeader, resultScroll])
         content.orientation = .vertical
         content.alignment = .leading
-        content.spacing = 6
+        content.spacing = 5
+        content.setCustomSpacing(10, after: replaceRow)
         content.translatesAutoresizingMaskIntoConstraints = false
         let view = FindSidebarSurface(frame: NSRect(x: 0, y: 0, width: settings.width, height: 500))
         view.appearanceChanged = { [weak self] in self?.updateName() }
@@ -278,13 +295,13 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         sidebar.view = view
         updateName()
         NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 9),
-            content.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -9),
-            content.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
-            content.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8),
-            resultScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 32),
+            content.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
+            content.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
+            content.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 6),
+            content.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            resultScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 0),
         ])
-        for control in [header, findRow, replaceRow, resultHeader, resultScroll] {
+        for control in [findRow, replaceRow, resultHeader, resultScroll] {
             control.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         }
         resultScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
@@ -294,17 +311,58 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private func horizontal(_ views: [NSView]) -> NSStackView {
         let stack = NSStackView(views: views)
         stack.orientation = .horizontal
-        stack.alignment = .centerY
+        stack.alignment = .top
         stack.spacing = 5
         return stack
     }
 
-    private func symbolButton(_ symbol: String, label: String, action: Selector) -> NSButton {
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)!
-        let button = NSButton(image: image, target: self, action: action)
+    private func optionImage(_ title: String, underlined: Bool = false) -> NSImage {
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: NSColor.black,
+        ]
+        if underlined { attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue }
+        let text = NSAttributedString(string: title, attributes: attributes)
+        let size = NSSize(width: ceil(text.size().width), height: ceil(text.size().height))
+        let image = NSImage(size: size, flipped: false) { _ in
+            text.draw(at: .zero)
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
+    private func configureFieldAction(_ button: NSButton, label: String, action: Selector) {
+        button.target = self
+        button.action = action
+        button.bezelStyle = .accessoryBarAction
+        button.controlSize = .small
         button.toolTip = label
         button.setAccessibilityLabel(label)
-        return button
+        button.widthAnchor.constraint(equalToConstant: 26).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 26).isActive = true
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.flexibleSpace, Self.refreshItem, .sidebarTrackingSeparator]
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar)
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        guard identifier == Self.refreshItem else { return nil }
+        let item = NSToolbarItem(itemIdentifier: identifier)
+        item.isBordered = true
+        item.isHidden = !settings.visible
+        item.label = "Refresh Search"
+        item.toolTip = item.label
+        item.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: item.label)
+        item.target = self
+        item.action = #selector(refreshSearch(_:))
+        return item
     }
 
     private func setupResults() {
@@ -314,7 +372,11 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         results.addTableColumn(column)
         results.headerView = nil
         results.style = .sourceList
-        results.rowSizeStyle = .small
+        results.rowSizeStyle = .custom
+        results.rowHeight = 24
+        results.usesAutomaticRowHeights = false
+        results.intercellSpacing = .zero
+        results.backgroundColor = .clear
         results.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         results.allowsEmptySelection = true
         results.setAccessibilityLabel("Search Results")
@@ -325,6 +387,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         results.onReturn = { [weak self] in self?.activateResult() }
         results.onEscape = { [weak self] in self?.clearResultFocus() }
         resultScroll.drawsBackground = false
+        resultScroll.automaticallyAdjustsContentInsets = false
+        resultScroll.contentView.clipsToBounds = true
         resultScroll.hasVerticalScroller = true
         resultScroll.autohidesScrollers = true
         resultScroll.documentView = results
@@ -335,11 +399,22 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         let window = document.window
         let previousSize = window.contentView?.bounds.size ?? window.contentLayoutRect.size
         let oldFrame = window.frame
-        let scrollOrigin = document.scrollView.contentView.bounds.origin
-        editorController.view = document.scrollView
+        let editorPane = NSView(frame: NSRect(origin: .zero, size: previousSize))
+        let scroll = document.scrollView
+        scroll.automaticallyAdjustsContentInsets = false
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        editorPane.addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: editorPane.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: editorPane.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: editorPane.bottomAnchor),
+            scroll.topAnchor.constraint(equalTo: editorPane.safeAreaLayoutGuide.topAnchor),
+        ])
+        editorController.view = editorPane
         let editorItem = NSSplitViewItem(viewController: editorController)
         editorItem.minimumThickness = 128
         sidebarItem.minimumThickness = 185
+        sidebarItem.allowsFullHeightLayout = true
         sidebarItem.maximumThickness = 650
         sidebarItem.canCollapse = true
         sidebarItem.preferredThicknessFraction = min(0.7, CGFloat(settings.width) / max(previousSize.width, 1))
@@ -348,11 +423,17 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         split.addSplitViewItem(sidebarItem)
         split.addSplitViewItem(editorItem)
         split.view.setFrameSize(previousSize)
+        window.styleMask.insert(.fullSizeContentView)
+        window.titlebarAppearsTransparent = true
         window.contentViewController = split
+        let toolbar = NSToolbar(identifier: "Edit.Search")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        window.toolbarStyle = .unifiedCompact
+        window.toolbar = toolbar
         if window.frame != oldFrame { window.setFrame(oldFrame, display: window.isVisible) }
         window.initialFirstResponder = document.editor
-        document.scrollView.contentView.scroll(to: scrollOrigin)
-        document.scrollView.reflectScrolledClipView(document.scrollView.contentView)
+        restoreEditorAnchor()
         NotificationCenter.default.addObserver(self, selector: #selector(splitResized(_:)),
                                                name: NSSplitView.didResizeSubviewsNotification, object: split.splitView)
         installed = true
@@ -360,11 +441,13 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
     @objc private func splitResized(_ notification: Notification) {
         guard installed else { return }
+        restoreEditorAnchor()
         settings.visible = !sidebarItem.isCollapsed
         let width = sidebar.view.frame.width
         if settings.visible && width >= sidebarItem.minimumThickness {
             settings.width = width
         }
+        updateRefreshVisibility()
         if !settings.visible {
             previewRequested = false
             if focusIsInSidebar { document.window.makeFirstResponder(document.editor) }
@@ -382,17 +465,15 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         let window = document.window
         let responder = window.firstResponder
         let desiredWidth = settings.width
+        let animation = beginSidebarTransition()
         installIfNeeded()
         settings.visible = true
+        updateRefreshVisibility()
         if sidebarItem.isCollapsed {
             sidebarItem.preferredThicknessFraction = min(0.7, CGFloat(desiredWidth) / max(split.view.bounds.width, 1))
-            if animate && window.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-                sidebarItem.animator().isCollapsed = false
-            } else {
-                sidebarItem.isCollapsed = false
-                split.view.layoutSubtreeIfNeeded()
-                split.splitView.setPosition(CGFloat(desiredWidth), ofDividerAt: 0)
-            }
+            setSidebarCollapsed(false, animate: animate, transition: animation, desiredWidth: desiredWidth)
+        } else {
+            finishSidebarTransition(animation)
         }
         if let input {
             window.makeFirstResponder(input)
@@ -405,16 +486,62 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
     private func hide() {
         guard installed && settings.visible else { return }
+        let animation = beginSidebarTransition()
         if focusIsInSidebar { document.window.makeFirstResponder(document.editor) }
         settings.visible = false
+        updateRefreshVisibility()
         previewRequested = false
-        if document.window.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            sidebarItem.animator().isCollapsed = true
-        } else {
-            sidebarItem.isCollapsed = true
-        }
+        setSidebarCollapsed(true, animate: true, transition: animation)
         refreshDecorations()
         schedulePreferencesWrite()
+    }
+
+    private func updateRefreshVisibility() {
+        document.window.toolbar?.items.first { $0.itemIdentifier == Self.refreshItem }?.isHidden = !settings.visible
+    }
+
+    private func beginSidebarTransition() -> UInt64 {
+        layoutAnchor = document.scrollView.contentView.bounds.origin
+        sidebarAnimation &+= 1
+        return sidebarAnimation
+    }
+
+    private func setSidebarCollapsed(
+        _ collapsed: Bool, animate: Bool, transition: UInt64, desiredWidth: CGFloat? = nil
+    ) {
+        if animate && document.window.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            NSAnimationContext.runAnimationGroup { _ in
+                sidebarItem.animator().isCollapsed = collapsed
+            } completionHandler: { [weak self] in
+                Task { @MainActor in self?.finishSidebarTransition(transition) }
+            }
+        } else {
+            sidebarItem.isCollapsed = collapsed
+            if let desiredWidth { split.splitView.setPosition(desiredWidth, ofDividerAt: 0) }
+            finishSidebarTransition(transition)
+        }
+    }
+
+    private func finishSidebarTransition(_ transition: UInt64) {
+        guard sidebarAnimation == transition else { return }
+        document.window.layoutIfNeeded()
+        restoreEditorAnchor()
+        // AppKit also reconciles its text viewport after focus and split changes.
+        Task { @MainActor [weak self] in
+            guard let self, sidebarAnimation == transition else { return }
+            restoreEditorAnchor()
+            layoutAnchor = nil
+        }
+    }
+
+    private func restoreEditorAnchor() {
+        guard let layoutAnchor else { return }
+        let scroll = document.scrollView
+        let clip = scroll.contentView
+        let bounds = clip.constrainBoundsRect(NSRect(origin: layoutAnchor, size: clip.bounds.size))
+        guard clip.bounds.origin != bounds.origin else { return }
+        clip.scroll(to: bounds.origin)
+        scroll.reflectScrolledClipView(clip)
     }
 
     private func openField(replace: Bool) {
@@ -458,7 +585,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private func updateReplacementVisibility() {
         replaceToggle.image = NSImage(systemSymbolName: settings.showsReplacement ? "chevron.down" : "chevron.right",
                                       accessibilityDescription: nil)
-        replaceLabel.isHidden = !settings.showsReplacement
         replaceRow.isHidden = !settings.showsReplacement
     }
 
@@ -469,8 +595,15 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     @objc private func changeOptions(_ sender: Any?) {
         settings.options = FindOptions(caseSensitive: matchCase.state == .on, wholeWord: wholeWord.state == .on,
                                        regularExpression: regex.state == .on)
+        updateSearchOptionsAppearance()
         resetMatches()
         schedulePreferencesWrite()
+    }
+
+    private func updateSearchOptionsAppearance() {
+        for option in [matchCase, wholeWord, regex] {
+            option.contentTintColor = option.state == .on ? .controlAccentColor : nil
+        }
     }
 
     private func queryChanged() {
@@ -683,6 +816,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         }
         let oldDismissed = dismissed
         dismissed = FindTextEdit.moving(dismissed, through: edits)
+        decorations.clearPreview()
         movingDismissalsForReplacement = true
         applyingEdits = true
         let changed = document.editor.replaceFoundText(in: span, with: output)
@@ -754,19 +888,23 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         var contentEnd = 0
         source.getLineStart(&start, end: &end, contentsEnd: &contentEnd,
                             for: NSRange(location: range.location, length: 0))
-        let from = max(start, range.location - 36)
-        let to = max(from, min(contentEnd, from + 150))
+        // Keep enough room for the match itself before the trailing row actions.
+        let from = max(start, range.location - 9)
+        let to = max(from, min(contentEnd, max(NSMaxRange(range), from + 100)))
         let excerptRange = source.rangeOfComposedCharacterSequences(for: NSRange(location: from, length: to - from))
         let prefix = excerptRange.location > start ? "…" : ""
         let suffix = NSMaxRange(excerptRange) < contentEnd ? "…" : ""
-        let text = source.substring(with: excerptRange)
-        if text.isEmpty { return NSAttributedString(string: "↵") }
-        let label = NSMutableAttributedString(string: prefix + text + suffix, attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular),
+        let text = source.substring(with: excerptRange).replacingOccurrences(of: "\t", with: " ")
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        let label = NSMutableAttributedString(string: text.isEmpty ? "↵" : prefix + text + suffix, attributes: [
+            .font: NSFont.systemFont(ofSize: 12),
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: style,
         ])
         let intersection = NSIntersectionRange(range, excerptRange)
         if intersection.length > 0 {
-            label.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.25),
+            label.addAttribute(.foregroundColor, value: NSColor.systemOrange,
                                range: NSRange(location: intersection.location - excerptRange.location + prefix.utf16.count,
                                               length: intersection.length))
         }
