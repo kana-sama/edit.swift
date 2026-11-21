@@ -29,7 +29,7 @@ final class FindInput: NSView, NSTextViewDelegate {
         bezel.drawsBackground = true
         focusRingType = .none
 
-        let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let font = EditorTextView.defaultFont
         input.isRichText = false
         input.importsGraphics = false
         input.allowsUndo = true
@@ -227,7 +227,8 @@ final class FindResultsTable: NSTableView {
 
 final class FindResultCell: NSTableCellView {
     private let excerpt = NSTextField(labelWithString: "")
-    private let actions = NSStackView()
+    private static let actionSize: CGFloat = 20
+    private static let actionSpacing: CGFloat = 1
     private let applyButton = NSButton(image: NSImage(systemSymbolName: "arrow.turn.down.right",
                                                         accessibilityDescription: nil)!,
                                              target: nil, action: nil)
@@ -236,9 +237,9 @@ final class FindResultCell: NSTableCellView {
     private var hover = false
     private var selected = false
     private var acceptsActions = false
+    private var replacementAvailable = false
     private var tracking: NSTrackingArea?
     private var excerptEnd: NSLayoutConstraint?
-    private var excerptBeforeActions: NSLayoutConstraint?
     private var onApply: (() -> Void)?
     private var onDismiss: (() -> Void)?
 
@@ -264,27 +265,24 @@ final class FindResultCell: NSTableCellView {
             button.action = action
             button.toolTip = label
             button.setAccessibilityLabel(label)
-            button.widthAnchor.constraint(equalToConstant: 20).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 20).isActive = true
+            button.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(button)
+            NSLayoutConstraint.activate([
+                button.widthAnchor.constraint(equalToConstant: Self.actionSize),
+                button.heightAnchor.constraint(equalToConstant: Self.actionSize),
+                button.centerYAnchor.constraint(equalTo: centerYAnchor),
+            ])
         }
-        actions.orientation = .horizontal
-        actions.alignment = .centerY
-        actions.spacing = 1
-        actions.addArrangedSubview(applyButton)
-        actions.addArrangedSubview(dismissButton)
         excerpt.translatesAutoresizingMaskIntoConstraints = false
-        actions.translatesAutoresizingMaskIntoConstraints = false
         addSubview(excerpt)
-        addSubview(actions)
         let end = excerpt.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4)
         excerptEnd = end
-        excerptBeforeActions = excerpt.trailingAnchor.constraint(equalTo: actions.leadingAnchor, constant: -4)
         NSLayoutConstraint.activate([
             excerpt.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 5),
             excerpt.heightAnchor.constraint(lessThanOrEqualTo: heightAnchor),
             excerpt.centerYAnchor.constraint(equalTo: centerYAnchor),
-            actions.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            actions.centerYAnchor.constraint(equalTo: centerYAnchor),
+            dismissButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            applyButton.trailingAnchor.constraint(equalTo: dismissButton.leadingAnchor, constant: -Self.actionSpacing),
             end,
         ])
     }
@@ -298,7 +296,7 @@ final class FindResultCell: NSTableCellView {
         excerpt.attributedStringValue = text
         setAccessibilityLabel(excerpt.stringValue)
         self.acceptsActions = acceptsActions
-        applyButton.isHidden = !replacementAvailable
+        self.replacementAvailable = replacementAvailable
         onApply = apply
         onDismiss = dismiss
         updateSelection(selected)
@@ -322,15 +320,13 @@ final class FindResultCell: NSTableCellView {
     override func mouseExited(with event: NSEvent) { hover = false; updateActions() }
 
     private func updateActions() {
-        let show = acceptsActions && (hover || selected)
-        actions.isHidden = !show
-        if show {
-            excerptEnd?.isActive = false
-            excerptBeforeActions?.isActive = true
-        } else {
-            excerptBeforeActions?.isActive = false
-            excerptEnd?.isActive = true
-        }
+        let showDismiss = acceptsActions && (hover || selected)
+        let showApply = showDismiss && replacementAvailable
+        dismissButton.isHidden = !showDismiss
+        applyButton.isHidden = !showApply
+        let dismissWidth = showDismiss ? Self.actionSize + 4 : 0
+        let applyWidth = showApply ? Self.actionSize + Self.actionSpacing : 0
+        excerptEnd?.constant = -(4 + dismissWidth + applyWidth)
     }
 
     @objc private func applyMatch(_ sender: Any?) { onApply?() }

@@ -19,6 +19,19 @@ enum FindCheck {
         )
         try await waitUntil("initial matches") { table.numberOfRows == 3 }
         try expect(editor.selectedRange() == NSRange(location: 0, length: 3), "opening Find preserves selection")
+        let manager = try require(editor.textLayoutManager, "Find uses the editor's TextKit layout")
+        for (row, location) in [(0, 0), (1, 4)] {
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            var activeMatches: [Int] = []
+            let start = manager.documentRange.location
+            manager.enumerateRenderingAttributes(from: start, reverse: false) { _, attributes, range in
+                if let color = attributes[.backgroundColor] as? NSColor, color.alphaComponent > 0.5 {
+                    activeMatches.append(manager.offset(from: start, to: range.location))
+                }
+                return true
+            }
+            try expect(activeMatches == [location], "the active editor highlight follows the selected result")
+        }
 
         document.performFind(.replace)
         let replacement = try require(
@@ -145,6 +158,13 @@ enum FindCheck {
             try expect(field.stringValue.hasPrefix("checksum ="), "long excerpts keep their matching prefix")
             try expect(field.frame.height <= cell.bounds.height && field.maximumNumberOfLines == 1,
                        "long excerpts are one line and fit at sidebar width \(width)")
+            let font = field.attributedStringValue.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+            try expect(font == editor.font, "result excerpts use the editor font")
+            let dismiss = try require(
+                cell.subviews.first { $0.accessibilityLabel() == "Dismiss This Match" }, "the row has a Dismiss button"
+            )
+            try expect(!dismiss.isHidden && abs(dismiss.frame.maxX - (cell.bounds.maxX - 4)) < 1,
+                       "Dismiss stays at the right edge of the result row")
         }
         let fourthLine = lines.prefix(4).reduce(0) { $0 + $1.utf16.count + 1 }
         let followingLine = fourthLine + lines[4].utf16.count + 1

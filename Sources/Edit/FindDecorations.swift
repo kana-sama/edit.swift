@@ -21,11 +21,16 @@ final class FindDecorations {
     init(editor: EditorTextView) { self.editor = editor }
 
     func update(snapshot: String, ranges: [NSRange], selected: NSRange?, preview: (NSRange, String)?) {
+        let selectionChanged = self.selected != selected
         self.snapshot = snapshot
         self.ranges = ranges
         self.selected = selected
         self.preview = preview
         layout()
+        if selectionChanged, let editor, let manager = editor.textLayoutManager {
+            manager.textViewportLayoutController.layoutViewport()
+            editor.setNeedsDisplay(editor.visibleRect)
+        }
     }
 
     func layout() {

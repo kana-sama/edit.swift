@@ -26,6 +26,7 @@ private struct MultiCaretComposition {
 final class EditorTextView: NSTextView, NSTextViewDelegate {
     static let linePasteType = NSPasteboard.PasteboardType("dev.edit-swift.whole-line")
     private static let defaultFontSize: CGFloat = 13
+    static let defaultFont = NSFont.monospacedSystemFont(ofSize: defaultFontSize, weight: .regular)
     private var fontSize = EditorTextView.defaultFontSize
     private var currentLine = NSRect.zero
     private var lineRefreshPending = false
@@ -469,7 +470,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     private func setFontSize(_ size: CGFloat) {
         fontSize = min(max(size, 6), 72)
-        let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let font = fontSize == Self.defaultFontSize ? Self.defaultFont
+            : NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         self.font = font
 
         let paragraph = NSMutableParagraphStyle()

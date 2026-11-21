@@ -46,6 +46,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private var installed = false
     private var layoutAnchor: NSPoint?
     private var sidebarTransition: UInt64 = 0
+    private var sidebarAnimating = false
     private var bufferSnapshot: String
     private var resultSnapshot = ""
     private var baseMatches: [FindHit] = []
@@ -369,7 +370,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         guard identifier == Self.refreshItem else { return nil }
         let item = NSToolbarItem(itemIdentifier: identifier)
         item.isBordered = true
-        item.isHidden = !settings.visible
+        item.isHidden = true
         item.label = "Refresh Search"
         item.toolTip = item.label
         item.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: item.label)
@@ -396,7 +397,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         results.dataSource = self
         results.delegate = self
         results.target = self
-        results.action = #selector(clickedResult(_:))
+        results.doubleAction = #selector(openClickedResult(_:))
         results.onReturn = { [weak self] in self?.activateResult() }
         results.onEscape = { [weak self] in self?.clearResultFocus() }
         resultScroll.drawsBackground = false
@@ -483,15 +484,12 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let window = document.window
         let responder = window.firstResponder
         let desiredWidth = settings.width
-        let animation = beginSidebarTransition()
+        let transition = !installed || sidebarItem.isCollapsed ? beginSidebarTransition() : nil
         installIfNeeded()
         settings.visible = true
-        updateRefreshVisibility()
-        if sidebarItem.isCollapsed {
+        if let transition {
             sidebarItem.preferredThicknessFraction = min(0.7, CGFloat(desiredWidth) / max(split.view.bounds.width, 1))
-            setSidebarCollapsed(false, animate: animate, transition: animation, desiredWidth: desiredWidth)
-        } else {
-            finishSidebarTransition(animation)
+            setSidebarCollapsed(false, animate: animate, transition: transition, desiredWidth: desiredWidth)
         }
         if let input {
             window.makeFirstResponder(input)
@@ -515,7 +513,14 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     private func updateRefreshVisibility() {
-        document.window.toolbar?.items.first { $0.itemIdentifier == Self.refreshItem }?.isHidden = !settings.visible
+        let hidden = !settings.visible || sidebarItem.isCollapsed || sidebarAnimating
+        guard let item = document.window.toolbar?.items.first(where: { $0.itemIdentifier == Self.refreshItem }),
+              item.isHidden != hidden else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            item.isHidden = hidden
+        }
     }
 
     private func beginSidebarTransition() -> UInt64 {
@@ -531,7 +536,9 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private func setSidebarCollapsed(
         _ collapsed: Bool, animate: Bool, transition: UInt64, desiredWidth: CGFloat? = nil
     ) {
-        if animate && document.window.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+        sidebarAnimating = animate && document.window.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if sidebarAnimating {
+            updateRefreshVisibility()
             NSAnimationContext.runAnimationGroup { _ in
                 sidebarItem.animator().isCollapsed = collapsed
             } completionHandler: { [weak self] in
@@ -546,6 +553,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     private func finishSidebarTransition(_ transition: UInt64) {
         guard sidebarTransition == transition else { return }
+        sidebarAnimating = false
+        updateRefreshVisibility()
         document.window.layoutIfNeeded()
         restoreEditorAnchor()
         // AppKit also reconciles its text viewport after focus and split changes.
@@ -598,8 +607,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
         settings.showsReplacement = visible
         updateReplacementVisibility()
-        results.reloadData()
         if let selected { selectRow(selected, reveal: false, preview: visible && previewRequested) }
+        refreshVisibleRows()
         refreshDecorations()
         updateReplaceAvailability()
         schedulePreferencesWrite()
@@ -709,6 +718,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         selected = nil
         editingResults = true
         results.reloadData()
+        results.deselectAll(nil)
         editingResults = false
         resultStatus.stringValue = invalid ? "Invalid regex" : matches.isEmpty ? "No results"
             : matches.count == 1 ? "1 match" : "\(matches.count) matches"
@@ -754,17 +764,26 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         selectRow(0, reveal: true, preview: true)
     }
 
-    private func selectRow(_ index: Int, reveal: Bool, preview: Bool) {
-        guard validResults, matches.indices.contains(index) else { return }
+    private func selectRow(_ index: Int?, reveal: Bool, preview: Bool) {
+        if let index {
+            guard validResults, matches.indices.contains(index) else { return }
+        }
         let previous = selected
         selected = index
-        previewRequested = preview && settings.showsReplacement && settings.visible
-        editingResults = true
-        results.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
-        editingResults = false
+        previewRequested = index != nil && preview && settings.showsReplacement && settings.visible
+        if results.selectedRow != (index ?? -1) {
+            editingResults = true
+            if let index {
+                results.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            } else {
+                results.deselectAll(nil)
+            }
+            editingResults = false
+        }
         updateRowSelection(previous)
-        updateRowSelection(index)
-        if reveal {
+        if previous != index { updateRowSelection(index) }
+        if reveal, let index {
+            layoutAnchor = nil
             results.scrollRowToVisible(index)
             document.editor.scrollRangeToVisible(matches[index].range)
         }
@@ -772,27 +791,30 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     private func clearResultFocus() {
-        selected = nil
-        previewRequested = false
-        results.deselectAll(nil)
+        selectRow(nil, reveal: false, preview: false)
         document.window.makeFirstResponder(findInput.input)
-        refreshDecorations()
     }
 
-    @objc private func clickedResult(_ sender: Any?) {
-        if results.clickedRow >= 0 { selectRow(results.clickedRow, reveal: true, preview: true) }
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        validResults
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !editingResults else { return }
-        if results.selectedRow >= 0 {
-            selectRow(results.selectedRow, reveal: true, preview: true)
-        } else {
-            updateRowSelection(selected)
-            selected = nil
-            previewRequested = false
-            refreshDecorations()
-        }
+        let row = results.selectedRow
+        selectRow(row >= 0 ? row : nil, reveal: true, preview: true)
+    }
+
+    @objc private func openClickedResult(_ sender: NSTableView) {
+        let row = sender.clickedRow
+        guard validResults, matches.indices.contains(row) else { return }
+        layoutAnchor = nil
+        selectRow(row, reveal: false, preview: false)
+        let caret = NSRange(location: NSMaxRange(matches[row].range), length: 0)
+        let editor = document.editor
+        guard document.window.makeFirstResponder(editor) else { return }
+        editor.setCaretSelections([caret])
+        editor.scrollRangeToVisible(caret)
     }
 
     private func activateResult() {
@@ -921,7 +943,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let style = NSMutableParagraphStyle()
         style.lineBreakMode = .byTruncatingTail
         let label = NSMutableAttributedString(string: text.isEmpty ? "↵" : prefix + text + suffix, attributes: [
-            .font: NSFont.systemFont(ofSize: 12),
+            .font: EditorTextView.defaultFont,
             .foregroundColor: NSColor.labelColor,
             .paragraphStyle: style,
         ])
