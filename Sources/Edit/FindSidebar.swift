@@ -31,7 +31,6 @@ private final class FindSplitView: NSSplitView {
 
 @MainActor
 final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
-    private static let refreshItem = NSToolbarItem.Identifier("Search.Refresh")
     private static let sidebarMenuItem = NSToolbarItem.Identifier("Edit.SidebarMenu")
     private static let minimumSidebarWidth: CGFloat = 185
     private static let minimumEditorWidth: CGFloat = 128
@@ -379,7 +378,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, Self.refreshItem, Self.sidebarMenuItem, .sidebarTrackingSeparator]
+        [.flexibleSpace, Self.sidebarMenuItem, .sidebarTrackingSeparator]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -388,32 +387,22 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        if identifier == Self.sidebarMenuItem {
-            let item = NSMenuToolbarItem(itemIdentifier: identifier)
-            item.isBordered = true
-            item.isHidden = true
-            item.label = "Switch Sidebar"
-            item.toolTip = item.label
-            item.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: item.label)
-            item.showsIndicator = false
-
-            let menu = NSMenu(title: "Sidebars")
-            let search = NSMenuItem(title: "Search", action: #selector(selectSearchSidebar(_:)), keyEquivalent: "")
-            search.target = self
-            search.state = .on
-            menu.addItem(search)
-            item.menu = menu
-            return item
-        }
-        guard identifier == Self.refreshItem else { return nil }
-        let item = NSToolbarItem(itemIdentifier: identifier)
+        guard identifier == Self.sidebarMenuItem else { return nil }
+        let item = NSMenuToolbarItem(itemIdentifier: identifier)
         item.isBordered = true
         item.isHidden = true
-        item.label = "Refresh Search"
+        item.label = "Sidebar Menu"
         item.toolTip = item.label
-        item.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: item.label)
-        item.target = self
-        item.action = #selector(refreshSearch(_:))
+        item.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: item.label)
+        item.showsIndicator = false
+
+        let menu = NSMenu(title: "Sidebars")
+        let search = menu.addItem(withTitle: "Search", action: #selector(selectSearchSidebar(_:)), keyEquivalent: "")
+        search.target = self
+        search.state = .on
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Refresh Search", action: #selector(refreshSearch(_:)), keyEquivalent: "").target = self
+        item.menu = menu
         return item
     }
 
@@ -491,6 +480,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let toolbar = NSToolbar(identifier: "Edit.Search")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
+        toolbar.allowsDisplayModeCustomization = false
         window.toolbar = toolbar
         if window.frame != oldFrame { window.setFrame(oldFrame, display: window.isVisible) }
         window.initialFirstResponder = document.editor
@@ -559,16 +549,12 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     private func updateSidebarToolbarVisibility() {
         let hidden = !settings.visible || sidebarItem.isCollapsed || sidebarAnimating
-        guard let toolbar = document.window.toolbar else { return }
-        let items = toolbar.items.filter { item in
-            (item.itemIdentifier == Self.refreshItem || item.itemIdentifier == Self.sidebarMenuItem) &&
-                item.isHidden != hidden
-        }
-        guard !items.isEmpty else { return }
+        guard let item = document.window.toolbar?.items.first(where: { $0.itemIdentifier == Self.sidebarMenuItem }),
+              item.isHidden != hidden else { return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
             context.allowsImplicitAnimation = false
-            for item in items { item.isHidden = hidden }
+            item.isHidden = hidden
         }
     }
 

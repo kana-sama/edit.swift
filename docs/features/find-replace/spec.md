@@ -1,6 +1,6 @@
 # Find and Replace
 
-Search the current document, including unsaved text, in a native AppKit sidebar. The sidebar belongs to the window, extends behind the title bar beneath the traffic lights, and can be resized. The toolbar places Refresh above the sidebar and the document title above the editor. Refresh appears without its own animation after the sidebar finishes opening and disappears when closing starts. Reversing an in-progress transition continues from the current divider position and animates the remaining distance. The editor keeps its selection and scroll position when the sidebar opens, closes, or resizes during a divider drag. It remembers the last query, replacement, options, width, and visibility across launches.
+Search the current document, including unsaved text, in a native AppKit sidebar. The sidebar belongs to the window, extends behind the title bar beneath the traffic lights, and can be resized. The toolbar places the [sidebar menu](../sidebar-menu/spec.md) above the sidebar and the document title above the editor. Reversing an in-progress transition continues from the current divider position and animates the remaining distance. The editor keeps its selection and scroll position when the sidebar opens, closes, or resizes during a divider drag. It remembers the last query, replacement, options, width, and visibility across launches.
 
 ## Search
 

@@ -85,6 +85,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         window.contentView = scrollView
         let toolbar = NSToolbar(identifier: "Edit.Document")
         toolbar.displayMode = .iconOnly
+        toolbar.allowsDisplayModeCustomization = false
         window.toolbarStyle = .unifiedCompact
         window.toolbar = toolbar
         window.initialFirstResponder = editor

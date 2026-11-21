@@ -52,8 +52,11 @@ enum FindCheck {
         try expect(editor.string == "cat cat\ncat", "a second Undo restores Replace Selected")
         try await waitUntil("matches restored by undo; text=\(editor.string)") { table.numberOfRows == 2 }
 
-        document.performFind(.refresh)
-        try await waitUntil("dismissed match restored by refresh") { table.numberOfRows == 3 }
+        let menu = try sidebarMenu(in: window).menu
+        let refreshIndex = menu.indexOfItem(withTitle: "Refresh Search")
+        try expect(refreshIndex >= 0, "Refresh Search is in the sidebar menu")
+        menu.performActionForItem(at: refreshIndex)
+        try await waitUntil("dismissed match restored by the Refresh Search menu item") { table.numberOfRows == 3 }
         document.performFind(.toggleSidebar)
         try expect(window.firstResponder === editor, "hiding Find restores editor focus")
         document.performFind(.next)
@@ -163,6 +166,9 @@ enum FindCheck {
         editor.setSelectedRange(caret)
         window.layoutIfNeeded()
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        let documentToolbar = try require(window.toolbar, "document toolbar")
+        try expect(documentToolbar.displayMode == .iconOnly && !documentToolbar.allowsDisplayModeCustomization,
+                   "the document toolbar uses fixed icon display")
         let titlebarBottom = window.contentLayoutRect.maxY
         let titlebarInset = scroll.contentInsets.top
         let initialFrame = scroll.convert(scroll.bounds, to: nil)
@@ -211,12 +217,15 @@ enum FindCheck {
 
         let query = try require(window.firstResponder as? NSTextView, "Find focuses its input")
         query.insertText("checksum", replacementRange: NSRange(location: 0, length: query.string.utf16.count))
-        let picker = try require(
-            window.toolbar?.items.first { $0.itemIdentifier.rawValue == "Edit.SidebarMenu" } as? NSMenuToolbarItem,
-            "the sidebar header contains a native menu"
-        )
-        try expect(!picker.isHidden && picker.menu.items.map(\.title) == ["Search"] &&
-                   picker.menu.items.first?.state == .on, "Search is the active sidebar menu entry")
+        let sidebarToolbar = try require(window.toolbar, "sidebar toolbar")
+        try expect(sidebarToolbar.displayMode == .iconOnly && !sidebarToolbar.allowsDisplayModeCustomization &&
+                   !sidebarToolbar.items.contains { $0.itemIdentifier.rawValue == "Search.Refresh" },
+                   "the sidebar toolbar uses fixed icons without a separate Refresh button")
+        let picker = try sidebarMenu(in: window)
+        let items = picker.menu.items
+        try expect(!picker.isHidden && items.count == 3 && items[0].title == "Search" && items[0].state == .on &&
+                   items[1].isSeparatorItem && items[2].title == "Refresh Search",
+                   "the sidebar menu lists the active sidebar before the Refresh Search command")
         window.makeFirstResponder(editor)
         picker.menu.performActionForItem(at: 0)
         try expect(window.firstResponder === query && query.string == "checksum",
@@ -334,8 +343,7 @@ enum FindCheck {
         let split = try require(window.contentViewController as? NSSplitViewController, "native animated split view")
         let sidebar = split.splitViewItems[0]
         let editorPane = split.splitViewItems[1].viewController.view
-        let refresh = try require(window.toolbar?.items.first { $0.itemIdentifier.rawValue == "Search.Refresh" },
-                                  "Refresh toolbar item")
+        let picker = try sidebarMenu(in: window)
         func divider() -> CGFloat { editorPane.convert(editorPane.bounds, to: split.splitView).minX }
         func sidebarEdge() -> CGFloat {
             let view = sidebar.viewController.view
@@ -347,16 +355,16 @@ enum FindCheck {
             document.performFind(command)
             try expect(abs(divider() - position) < 1 && abs(sidebarEdge() - edge) < 1,
                        "reversing keeps both panes at their current positions")
-            try expect(refresh.isHidden, "Refresh stays hidden until the sidebar settles")
+            try expect(picker.isHidden, "the menu button stays hidden until the sidebar settles")
         }
 
-        try await waitUntil("sidebar fully opens") { !refresh.isHidden }
+        try await waitUntil("sidebar fully opens") { !picker.isHidden }
         let openPosition = divider()
         document.performFind(.toggleSidebar)
         try await waitUntil("sidebar is partway closed") { divider() > 0 && divider() < openPosition * 0.8 }
         try reverse(with: .find)
         try expect(window.firstResponder is FindFieldTextView, "reopening with Command-F focuses Find")
-        try await waitUntil("reversed sidebar finishes opening") { !refresh.isHidden }
+        try await waitUntil("reversed sidebar finishes opening") { !picker.isHidden }
         try expect(abs(divider() - openPosition) < 1, "reopening preserves the sidebar width")
 
         document.performFind(.toggleSidebar)
@@ -371,9 +379,14 @@ enum FindCheck {
         document.performFind(.toggleSidebar)
         document.performFind(.toggleSidebar)
         document.performFind(.find)
-        try await waitUntil("rapid toggles leave the sidebar open") { !refresh.isHidden }
+        try await waitUntil("rapid toggles leave the sidebar open") { !picker.isHidden }
         try expect(abs(divider() - openPosition) < 1 && window.firstResponder is FindFieldTextView,
                    "superseded animations leave the latest width and focus")
+    }
+
+    private static func sidebarMenu(in window: NSWindow) throws -> NSMenuToolbarItem {
+        try require(window.toolbar?.items.first { $0.itemIdentifier.rawValue == "Edit.SidebarMenu" } as? NSMenuToolbarItem,
+                    "the sidebar header contains a native menu")
     }
 
     private static func dragDivider(_ splitView: NSSplitView, sidebar: NSView, in window: NSWindow, by distance: CGFloat) throws {
