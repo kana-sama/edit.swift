@@ -73,6 +73,11 @@ enum FilesCheck {
             try expect(bytes == Data("Externally changed draft file\n".utf8), "external version remains intact")
         }
 
+        let cli = URL(string: "dev-edit-swift://open?path=/tmp/Re%CC%81sume%20%23%26.txt")!
+        try expect(Edit.launcherFileURL(cli)?.path == "/tmp/Re\u{301}sume #&.txt", "launcher preserves Unicode and reserved characters")
+        let relative = URL(string: "dev-edit-swift://open?path=../file")!
+        try expect(Edit.launcherFileURL(relative) == nil, "launcher only accepts absolute file paths")
+
         let newPath = directory.appendingPathComponent("New empty file.txt")
         await app.openFiles([newPath], allowMissing: true)
         let newDocument = try resolve(app.documents.last)

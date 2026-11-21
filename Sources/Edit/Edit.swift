@@ -101,6 +101,15 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     func application(_ application: NSApplication, open urls: [URL]) {
         requestOpen(urls.filter(\.isFileURL))
+        requestOpen(urls.compactMap(Self.launcherFileURL), allowMissing: true)
+    }
+
+    nonisolated static func launcherFileURL(_ url: URL) -> URL? {
+        guard url.scheme == "dev-edit-swift", url.host == "open",
+              let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                .first(where: { $0.name == "path" })?.value,
+              path.hasPrefix("/"), !path.utf8.contains(0) else { return nil }
+        return URL(fileURLWithPath: path)
     }
 
     func applicationWillResignActive(_ notification: Notification) {
@@ -392,12 +401,12 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             ?? saveTargets.values.first { identity != nil && $0.identity == identity }?.document
     }
 
-    private func requestOpen(_ urls: [URL]) {
-        guard !isQuitting else { return }
+    private func requestOpen(_ urls: [URL], allowMissing: Bool = false) {
+        guard !urls.isEmpty, !isQuitting else { return }
         if !receivedInitialSession {
-            pendingFiles.append((urls, false))
+            pendingFiles.append((urls, allowMissing))
         } else {
-            Task { await openFiles(urls) }
+            Task { await openFiles(urls, allowMissing: allowMissing) }
         }
     }
 

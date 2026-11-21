@@ -16,11 +16,33 @@ if [[ -e "$destination" || -L "$destination" ]]; then
     fi
 fi
 
+bin_directory="${EDIT_BIN_DIRECTORY:-/opt/homebrew/bin}"
+mkdir -p -- "$bin_directory"
+launcher="$bin_directory/edit"
+marker='# Installed by Swift Edit.'
+if [[ -L "$launcher" ]] ||
+   [[ -e "$launcher" && ( ! -f "$launcher" || "$(sed -n '2{p;q;}' "$launcher")" != "$marker" ) ]]; then
+    printf '%s already exists\n' "$launcher" >&2
+    exit 1
+fi
+
 ./script/build release
 stage="$(mktemp -d "$application_directory/.edit-install.XXXXXX")"
-trap 'rm -rf -- "$stage"' EXIT
+trap 'rm -rf -- "$stage"
+if [[ -n ${launcher_stage:-} ]]; then
+    rm -f -- "$launcher_stage"
+fi' EXIT
 app="$stage/Edit.app"
 cp -cR "${EDIT_BUILD_DIR:-$PWD/.build}/app/release/Edit.app" "$app"
 verify_app "$app"
 publish_app "$app" "$destination"
 printf 'Installed %s\n' "$destination"
+
+launcher_stage="$(mktemp "$bin_directory/.edit-launcher.XXXXXX")"
+{
+    printf '#!/bin/bash\n%s\nset -- %q "$@"\n' "$marker" "$destination"
+    tail -n +2 script/open-app
+} > "$launcher_stage"
+chmod 755 "$launcher_stage"
+mv -fh -- "$launcher_stage" "$launcher"
+printf 'Installed %s\n' "$launcher"

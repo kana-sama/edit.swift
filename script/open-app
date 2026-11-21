@@ -1,0 +1,38 @@
+#!/bin/bash
+set -euo pipefail
+
+application="$1"
+shift
+if [[ ! -x "$application/Contents/MacOS/Edit" ]]; then
+    printf 'Edit executable unavailable in %s\n' "$application" >&2
+    exit 1
+fi
+if (( $# == 0 )); then
+    exec /usr/bin/open "$application"
+fi
+
+encode_path() {
+    local LC_ALL=C path="$1" byte encoded=''
+    local index octet
+    for ((index = 0; index < ${#path}; index++)); do
+        byte="${path:index:1}"
+        case "$byte" in
+            [a-zA-Z0-9._~/-]) encoded+="$byte" ;;
+            *)
+                printf -v octet '%d' "'$byte"
+                printf -v byte '%%%02X' "$((octet & 255))"
+                encoded+="$byte"
+                ;;
+        esac
+    done
+    printf '%s' "$encoded"
+}
+
+requests=()
+for path; do
+    if [[ "$path" != /* ]]; then
+        path="$PWD/$path"
+    fi
+    requests+=("dev-edit-swift://open?path=$(encode_path "$path")")
+done
+exec /usr/bin/open -a "$application" "${requests[@]}"
