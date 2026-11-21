@@ -323,8 +323,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             choice = .discard
         } else if app.isAgentCheck {
             choice = .cancel
+        } else if fileURL == nil {
+            let sheet = UntitledCloseSheet(window: window) { [self] destination in
+                await save(to: destination)
+            }
+            choice = await sheet.confirmClose() ? .discard : .cancel
         } else {
-            choice = fileURL == nil ? await confirmUntitledClose() : await confirmNamedClose()
+            choice = await confirmNamedClose()
         }
         await finishClose(choice, replacing: replacing)
     }
@@ -351,37 +356,6 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         } else {
             window.close()
         }
-    }
-
-    private func confirmUntitledClose() async -> CloseChoice {
-        let panel = makeSavePanel()
-        panel.message = "Save this new document before closing? You can save it now or delete the draft."
-        panel.showsTagField = false
-        panel.canSelectHiddenExtension = false
-        panel.isExtensionHidden = false
-
-        let delete = DeleteDraftAction(panel: panel)
-        let button = NSButton(title: "Delete", target: delete, action: #selector(DeleteDraftAction.deleteDraft(_:)))
-        button.bezelStyle = .push
-        button.hasDestructiveAction = true
-
-        let encoding = NSTextField(labelWithString: "Plain Text Encoding: Unicode (UTF-8)")
-        let accessory = NSStackView(views: [button, encoding])
-        accessory.orientation = .horizontal
-        accessory.alignment = .centerY
-        accessory.spacing = 16
-        accessory.setFrameSize(accessory.fittingSize)
-        panel.accessoryView = accessory
-
-        switch await response(to: panel) {
-        case .OK:
-            if let url = panel.url { return .save(to: url) }
-        case .cancel:
-            if delete.wasChosen { return .discard }
-        default:
-            break
-        }
-        return .cancel
     }
 
     private func confirmNamedClose() async -> CloseChoice {
@@ -474,20 +448,5 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if isEdited != window.isDocumentEdited {
             window.isDocumentEdited = isEdited
         }
-    }
-}
-
-@MainActor
-private final class DeleteDraftAction: NSObject {
-    private weak var panel: NSSavePanel?
-    private(set) var wasChosen = false
-
-    init(panel: NSSavePanel) {
-        self.panel = panel
-    }
-
-    @objc func deleteDraft(_ sender: NSButton) {
-        wasChosen = true
-        panel?.cancel(sender)
     }
 }
