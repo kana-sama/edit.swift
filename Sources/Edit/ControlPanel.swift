@@ -124,6 +124,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         NotificationCenter.default.removeObserver(self, name: NSWindow.didResizeNotification, object: document.window)
         if panel.parent === document.window { document.window.removeChildWindow(panel) }
         panel.orderOut(nil)
+        table.clearHover()
         if restoreFocus && !app.isAgentCheck {
             document.window.makeKey()
             document.window.makeFirstResponder(originalFocus ?? document.editor)
@@ -140,7 +141,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
     private func position() {
         guard let parent = document?.window else { return }
         let width = min(620, max(240, parent.frame.width - 32))
-        let rows = min(10, max(1, entries.count))
+        let availableRows = max(1, Int((parent.frame.height - 116) / table.rowHeight))
+        let rows = min(10, availableRows, max(1, entries.count))
         let listHeight = CGFloat(rows) * table.rowHeight
         height.constant = entries.isEmpty ? 0 : listHeight
         scroll.isHidden = entries.isEmpty
@@ -498,9 +500,11 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             views.append(path)
         }
         if let shortcut = match.entry.shortcut {
+            views.append(NSView())
             views.append(makeLabel(shortcut, highlights: [], secondary: true))
         }
         if match.entry.recent != nil {
+            views.append(NSView())
             let button = NSButton(image: NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: "Remove from recent files")!,
                                   target: self, action: #selector(dismissRecent(_:)))
             button.isBordered = false
@@ -522,6 +526,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         field.font = secondary ? .systemFont(ofSize: NSFont.smallSystemFontSize) : .systemFont(ofSize: NSFont.systemFontSize)
         field.textColor = secondary ? .secondaryLabelColor : .labelColor
         field.lineBreakMode = .byTruncatingTail
+        field.maximumNumberOfLines = 1
+        field.cell?.usesSingleLineMode = true
         let styled = NSMutableAttributedString(string: text, attributes: [.font: field.font!, .foregroundColor: field.textColor!])
         var offset = 0
         for (index, character) in text.enumerated() {
@@ -583,7 +589,9 @@ private final class ControlTable: NSTableView {
         setHover(row(at: convert(event.locationInWindow, from: nil)))
     }
 
-    override func mouseExited(with event: NSEvent) { setHover(-1) }
+    override func mouseExited(with event: NSEvent) { clearHover() }
+
+    func clearHover() { setHover(-1) }
 
     private func setHover(_ row: Int) {
         guard row != hovered else { return }
