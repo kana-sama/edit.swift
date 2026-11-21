@@ -2,7 +2,7 @@ import AppKit
 
 @main
 @MainActor
-final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations {
+final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, NSMenuDelegate {
     let isAgentCheck = CommandLine.arguments.dropFirst().first == "--agent-check"
     private lazy var sessionStore = SessionStore.application()
     private var startup: Task<Void, Never>?
@@ -90,14 +90,29 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations {
         requestOpen(urls.filter(\.isFileURL))
     }
 
+    func applicationWillResignActive(_ notification: Notification) {
+        activeDocument?.requestAutosave()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        activeDocument?.requestAutosave()
+    }
+
     @objc func newDocument(_ sender: Any?) {
+        guard let document = activeDocument, !isQuitting else { return }
+        Task { await document.newBuffer() }
+    }
+
+    @objc func newWindow(_ sender: Any?) {
         guard !isQuitting else { return }
         let placement = documents.isEmpty ? lastPlacement : nil
-        makeDocument(placement: placement).present()
+        let document = makeDocument(placement: placement)
+        if !isAgentCheck { document.present() }
     }
 
     @objc func openDocument(_ sender: Any?) {
         guard let document = activeDocument, document.window.attachedSheet == nil, !isQuitting else { return }
+        document.requestAutosave()
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
@@ -120,7 +135,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations {
     func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
         guard !isQuitting else { return false }
         switch item.action {
-        case #selector(newDocument(_:)): return true
+        case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
+        case #selector(newWindow(_:)): return true
         case #selector(openDocument(_:)): return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)):
             return activeDocument.map { !$0.isBusy && $0.window.attachedSheet == nil } ?? false
@@ -141,9 +157,13 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations {
         // The temporary startup window can be closed before restoration reads the saved session.
         if startup != nil && documents.isEmpty { return .terminateNow }
         isQuitting = true
-        for document in documents { document.editor.isEditable = false }
+        for document in documents {
+            if document.editor.hasMarkedText() { document.editor.unmarkText() }
+            document.editor.isEditable = false
+        }
         Task { @MainActor in
             await startup?.value
+            for document in documents { await document.flushAutosave() }
             let session = sessionSnapshot()
             let store = sessionStore
             let copyUnrestoredSession = sessionReadFailed
@@ -314,6 +334,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations {
         let menuBar = NSMenu()
         func addMenu(_ title: String) -> NSMenu {
             let menu = NSMenu(title: title)
+            menu.delegate = self
             menuBar.addItem(withTitle: title, action: nil, keyEquivalent: "").submenu = menu
             return menu
         }
@@ -323,6 +344,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations {
 
         let file = addMenu("File")
         file.addCommand("New", #selector(newDocument(_:)), "n").target = self
+        file.addCommand("New Window", #selector(newWindow(_:)), "n", [.command, .shift]).target = self
         file.addCommand("Open…", #selector(openDocument(_:)), "o").target = self
         file.addItem(.separator())
         file.addCommand("Save", #selector(saveDocument(_:)), "s").target = self

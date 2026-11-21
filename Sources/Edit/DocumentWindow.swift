@@ -21,9 +21,15 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var pendingFullScreen = false
     private var saving = false
     private var promptingToClose = false
+    private var editGeneration: UInt = 0
+    private var idleSave: Task<Void, Never>?
+    private var autosaveTask: Task<Void, Never>?
+    private var autosaveRequested = false
+    private var autosaveFailure: (generation: UInt, detail: String, reported: Bool)?
 
     var isBusy: Bool { saving || promptingToClose }
-    var isReusable: Bool { fileURL == nil && !window.isDocumentEdited && !isBusy }
+    var canReplaceBuffer: Bool { !isBusy && window.attachedSheet == nil }
+    var isReusable: Bool { fileURL == nil && !window.isDocumentEdited && canReplaceBuffer }
 
     init(app: Edit, placement: WindowPlacement? = nil) {
         self.app = app
@@ -43,7 +49,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         window.contentView = scrollView
         window.initialFirstResponder = editor
         window.makeFirstResponder(editor)
-        editor.onTextChange = { [weak self] in self?.updateEditedState() }
+        editor.onTextChange = { [weak self] in self?.textDidChange() }
+        editor.onBlur = { [weak self] in self?.requestAutosave() }
         if let placement {
             restorePlacement(placement)
         } else {
@@ -92,6 +99,22 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         normalFrame = nil
     }
 
+    func windowDidResignKey(_ notification: Notification) {
+        requestAutosave()
+    }
+
+    func windowDidMiniaturize(_ notification: Notification) {
+        requestAutosave()
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        reportAutosaveFailure()
+    }
+
+    func windowDidEndSheet(_ notification: Notification) {
+        Task { @MainActor [weak self] in self?.reportAutosaveFailure() }
+    }
+
     func load(_ file: FileBuffer) {
         updateIdentity(from: file)
         installText(file.text)
@@ -118,11 +141,16 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     @discardableResult
     func save(asNew: Bool = false, to selectedURL: URL? = nil) async -> Bool {
         guard !saving else { return false }
+        saving = true
+        defer {
+            saving = false
+            startRequestedAutosave()
+            reportAutosaveFailure()
+        }
+        await autosaveTask?.value
         if selectedURL == nil, !asNew, fileURL != nil, revision != .missing, !window.isDocumentEdited {
             return true
         }
-        saving = true
-        defer { saving = false }
 
         var destination = selectedURL ?? fileURL
         if selectedURL == nil, destination == nil || asNew {
@@ -140,15 +168,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         defer { app.finishSave(to: target) }
 
         let text = editor.string
-        let format = format
         let expected = target == fileURL ? revision : nil
 
         do {
-            let file: FileBuffer
             do {
-                file = try await Task.detached {
-                    try FileBuffer.save(text, to: target, format: format, expected: expected)
-                }.value
+                try await write(text, to: target, expected: expected)
             } catch FileBufferError.changedOnDisk {
                 guard !app.isAgentCheck else {
                     await showError("The file changed on disk.")
@@ -160,11 +184,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 alert.addButton(withTitle: "Cancel").keyEquivalent = "\r"
                 alert.addButton(withTitle: "Replace").hasDestructiveAction = true
                 guard await response(to: alert) == .alertSecondButtonReturn else { return false }
-                file = try await Task.detached { try FileBuffer.save(text, to: target, format: format, expected: nil) }.value
+                try await write(text, to: target, expected: nil)
             }
-            updateIdentity(from: file)
-            updateTitle()
-            updateEditedState()
             return true
         } catch {
             await showError("Could Not Save “\(target.lastPathComponent)”", detail: error.localizedDescription)
@@ -172,28 +193,163 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard !isBusy && !app.isQuitting else { return false }
-        guard window.isDocumentEdited else { return true }
-        guard !app.isAgentCheck else { return false }
+    private func write(_ text: String, to target: URL, expected: FileRevision?) async throws {
+        let format = format
+        let file = try await Task.detached {
+            try FileBuffer.save(text, to: target, format: format, expected: expected)
+        }.value
+        updateIdentity(from: file)
+        updateTitle()
+        updateEditedState()
+        autosaveFailure = nil
+    }
 
-        promptingToClose = true
-        Task { @MainActor in
-            let choice = fileURL == nil ? await confirmUntitledClose() : await confirmNamedClose()
-            await finishClose(choice)
+    func requestAutosave() {
+        guard fileURL != nil, !app.isQuitting,
+              window.isDocumentEdited || autosaveTask != nil || saving else { return }
+        if editor.hasMarkedText() {
+            scheduleIdleAutosave()
+            return
         }
+        autosaveRequested = true
+        startRequestedAutosave()
+    }
+
+    private func startRequestedAutosave() {
+        guard autosaveRequested, autosaveTask == nil, !isBusy, !app.isQuitting else { return }
+        autosaveTask = Task {
+            while autosaveRequested && !isBusy && !app.isQuitting {
+                autosaveRequested = false
+                if editor.hasMarkedText() {
+                    scheduleIdleAutosave()
+                    break
+                }
+                await writeAutosave()
+            }
+            autosaveTask = nil
+            reportAutosaveFailure()
+        }
+    }
+
+    // Closing, replacing, and quitting hold off new background writes while draining this one.
+    func flushAutosave() async {
+        idleSave?.cancel()
+        idleSave = nil
+        await autosaveTask?.value
+        autosaveRequested = false
+        await writeAutosave(retryFailed: true)
+    }
+
+    private func writeAutosave(retryFailed: Bool = false) async {
+        guard window.isDocumentEdited, let target = fileURL, let revision,
+              retryFailed || autosaveFailure?.generation != editGeneration else { return }
+        let generation = editGeneration
+        guard app.reserveSave(to: target, for: self) else {
+            autosaveFailure = (generation, "The file is already open in another window.", false)
+            return
+        }
+        defer { app.finishSave(to: target) }
+        do {
+            try await write(editor.string, to: target, expected: revision)
+        } catch FileBufferError.changedOnDisk {
+            autosaveFailure = (generation, "The file changed on disk. Use Save to review whether to replace it.", false)
+        } catch {
+            autosaveFailure = (generation, error.localizedDescription, false)
+        }
+    }
+
+    private func reportAutosaveFailure() {
+        guard let failure = autosaveFailure, !failure.reported, window.isDocumentEdited,
+              !isBusy, !app.isQuitting, !app.isAgentCheck, window.isKeyWindow,
+              NSApplication.shared.isActive, window.attachedSheet == nil else { return }
+        autosaveFailure?.reported = true
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Could Not Autosave “\(window.title)”"
+        alert.informativeText = failure.detail
+        alert.beginSheetModal(for: window)
+    }
+
+    private func scheduleIdleAutosave() {
+        idleSave?.cancel()
+        idleSave = nil
+        guard fileURL != nil, !app.isQuitting,
+              window.isDocumentEdited || autosaveTask != nil || saving else { return }
+        idleSave = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(1))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self else { return }
+            idleSave = nil
+            requestAutosave()
+        }
+    }
+
+    private func textDidChange() {
+        editGeneration &+= 1
+        updateEditedState()
+        scheduleIdleAutosave()
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard canReplaceBuffer, !app.isQuitting else { return false }
+        guard window.isDocumentEdited || autosaveTask != nil else { return true }
+        promptingToClose = true
+        Task { await closeBuffer(replacing: false) }
         return false
     }
 
-    func finishClose(_ choice: CloseChoice) async {
-        defer { promptingToClose = false }
+    func newBuffer() async {
+        guard canReplaceBuffer, !app.isQuitting else { return }
+        promptingToClose = true
+        await closeBuffer(replacing: true)
+    }
+
+    private func closeBuffer(replacing: Bool) async {
+        if editor.hasMarkedText() { editor.unmarkText() }
+        let wasEditable = editor.isEditable
+        editor.isEditable = false
+        defer {
+            editor.isEditable = wasEditable
+            promptingToClose = false
+            startRequestedAutosave()
+        }
+
+        await flushAutosave()
+        let choice: CloseChoice
+        if !window.isDocumentEdited {
+            choice = .discard
+        } else if app.isAgentCheck {
+            choice = .cancel
+        } else {
+            choice = fileURL == nil ? await confirmUntitledClose() : await confirmNamedClose()
+        }
+        await finishClose(choice, replacing: replacing)
+    }
+
+    func finishClose(_ choice: CloseChoice, replacing: Bool = false) async {
         switch choice {
         case .save(let url):
-            if await save(to: url), !window.isDocumentEdited { window.close() }
+            guard await save(to: url), !window.isDocumentEdited else { return }
         case .discard:
-            window.close()
-        case .cancel:
             break
+        case .cancel:
+            return
+        }
+
+        if replacing {
+            fileURL = nil
+            savedText = "" as NSString
+            format = FileFormat()
+            revision = nil
+            autosaveFailure = nil
+            editor.breakUndoCoalescing()
+            installText("")
+            window.makeFirstResponder(editor)
+        } else {
+            window.close()
         }
     }
 
@@ -231,7 +387,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private func confirmNamedClose() async -> CloseChoice {
         let alert = NSAlert()
         alert.messageText = "Save changes to “\(window.title)”?"
-        alert.informativeText = "Your edits will be lost if you close the window without saving."
+        let consequence = "Closing this document without saving discards your edits."
+        if let failure = autosaveFailure {
+            alert.informativeText = failure.detail + "\n\n" + consequence
+            autosaveFailure?.reported = true
+        } else {
+            alert.informativeText = consequence
+        }
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
         alert.addButton(withTitle: "Don’t Save").hasDestructiveAction = true
@@ -243,6 +405,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        idleSave?.cancel()
+        idleSave = nil
+        autosaveRequested = false
         app.didClose(self)
     }
 

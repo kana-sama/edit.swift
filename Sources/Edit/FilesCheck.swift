@@ -80,7 +80,8 @@ enum FilesCheck {
         let created = await newDocument.save()
         try expect(created && FileManager.default.fileExists(atPath: newPath.path), "Save creates an empty named file")
         try expect(newDocument.windowShouldClose(newDocument.window), "clean file closes without a prompt")
-        try expect(!recovered.windowShouldClose(recovered.window), "dirty file cannot close without a decision")
+        try expect(!recovered.windowShouldClose(recovered.window), "dirty file waits for autosave before closing")
+        try await waitFor("cancel after a conflicting autosave leaves the document available") { !recovered.isBusy }
         await recovered.finishClose(.cancel)
         try expect(app.documents.contains { $0 === recovered }, "Cancel keeps a dirty document open")
         await recovered.finishClose(.save(to: nil))
@@ -91,9 +92,12 @@ enum FilesCheck {
                    "Don’t Save preserves bytes on disk")
 
         newDocument.editor.insertText("Saved when closing", replacementRange: newDocument.editor.selectedRange())
-        await newDocument.finishClose(.save(to: nil))
-        try expect(!app.documents.contains { $0 === newDocument }, "Save closes the successfully saved window")
-        try expect(try Data(contentsOf: newPath) == Data("Saved when closing".utf8), "Save on close writes the edits")
+        newDocument.requestAutosave()
+        try expect(!newDocument.windowShouldClose(newDocument.window), "Close waits for a pending write")
+        try await waitFor("Close removes the successfully saved window") {
+            !app.documents.contains { $0 === newDocument }
+        }
+        try expect(try Data(contentsOf: newPath) == Data("Saved when closing".utf8), "autosave on close writes the edits")
 
         await untitled.finishClose(.cancel)
         try expect(app.documents.contains { $0 === untitled } && untitled.editor.string == "An untitled draft",
@@ -108,6 +112,8 @@ enum FilesCheck {
         try expect(!app.documents.contains { $0 === draftToSave }, "saving an untitled draft closes its window")
         try expect(try Data(contentsOf: draftPath) == Data("Save the draft".utf8),
                    "Save writes an untitled draft to the chosen path")
+
+        try await checkAutosaveAndNewBuffer(in: app, directory: directory)
 
         let preview = directory.appendingPathComponent("Meeting Notes.txt")
         let sampleText = "Meeting notes\n\nTuesday\n    Review the new editor\n    Bring a sample project\n"
@@ -126,6 +132,112 @@ enum FilesCheck {
         sample.editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         sample.editor.refreshCurrentLine()
         return sample
+    }
+
+    private static func checkAutosaveAndNewBuffer(in app: Edit, directory: URL) async throws {
+        let file = directory.appendingPathComponent("Autosave.txt")
+        let original = "\u{feff}Existing\r\n"
+        try Data(original.utf8).write(to: file)
+        await app.openFiles([file])
+        let document = try resolve(app.documents.last)
+        let editor = document.editor
+        let window = document.window
+
+        editor.insertText("Idle\r\n", replacementRange: editor.selectedRange())
+        try expect(try Data(contentsOf: file) == Data(original.utf8), "typing waits for the idle timer")
+        try await waitFor("the idle timer saves without a focus change", timeout: .seconds(3)) { !window.isDocumentEdited }
+        try expect(try Data(contentsOf: file) == Data("\u{feff}Idle\r\nExisting\r\n".utf8),
+                   "idle autosave preserves BOM and CRLF")
+
+        editor.insertText("Blur\r\n", replacementRange: editor.selectedRange())
+        try expect(window.makeFirstResponder(nil), "the editor gives up focus")
+        try await waitFor("resigning editor focus writes before the idle timer") {
+            !window.isDocumentEdited
+        }
+
+        let fileMenu = try resolve(NSApplication.shared.mainMenu?.item(withTitle: "File")?.submenu)
+        let new = try resolve(fileMenu.item(withTitle: "New"))
+        let newWindow = try resolve(fileMenu.item(withTitle: "New Window"))
+        try expect(new.keyEquivalent == "n" && new.keyEquivalentModifierMask == .command,
+                   "New uses Command-N")
+        try expect(newWindow.keyEquivalent == "n" && newWindow.keyEquivalentModifierMask == [.command, .shift],
+                   "New Window uses Shift-Command-N")
+
+        editor.insertText("Menu\r\n", replacementRange: editor.selectedRange())
+        app.menuWillOpen(fileMenu)
+        try await waitFor("opening the menu autosaves") { !window.isDocumentEdited }
+
+        // A manual save must drain an earlier request and write the current text.
+        editor.insertText("Earlier\r\n", replacementRange: editor.selectedRange())
+        document.requestAutosave()
+        await Task.yield()
+        editor.insertText("Latest\r\n", replacementRange: editor.selectedRange())
+        let didSave = await document.save()
+        try expect(didSave && !window.isDocumentEdited, "manual Save completes with the latest revision")
+        try expect(try Data(contentsOf: file) == Data(("\u{feff}" + editor.string).utf8),
+                   "an earlier autosave cannot overwrite a manual save")
+
+        editor.insertText("Before replacing\r\n", replacementRange: editor.selectedRange())
+        let lastText = editor.string
+        let frame = window.frame
+        let count = app.documents.count
+        app.newDocument(nil)
+        try await waitFor("New clears the current file") { document.fileURL == nil }
+        try expect(try Data(contentsOf: file) == Data(("\u{feff}" + lastText).utf8),
+                   "New saves the outgoing named buffer")
+        try expect(app.documents.count == count && app.documents.last === document
+                   && document.window === window && window.frame == frame,
+                   "New reuses the same window and its geometry")
+        try expect(editor.string.isEmpty && window.title == "Untitled" && !window.isDocumentEdited
+                   && editor.undoManager?.canUndo != true, "New clears text, identity, and undo")
+
+        editor.insertText("Keep this draft", replacementRange: editor.selectedRange())
+        await document.newBuffer()
+        try expect(editor.string == "Keep this draft" && window.isDocumentEdited,
+                   "cancelling the untitled sheet preserves the draft")
+        let destination = directory.appendingPathComponent("Draft saved by New.txt")
+        await document.finishClose(.save(to: destination), replacing: true)
+        try expect(try Data(contentsOf: destination) == Data("Keep this draft".utf8),
+                   "saving the untitled draft uses the chosen path")
+        try expect(document.fileURL == nil && editor.string.isEmpty && app.documents.count == count,
+                   "saving from New leaves a blank buffer in the same window")
+
+        await app.openFiles([file])
+        try expect(app.documents.last === document, "the blank replacement buffer can open a file")
+        editor.insertText("Local text\r\n", replacementRange: editor.selectedRange())
+        let localText = editor.string
+        let external = Data("External version\n".utf8)
+        try external.write(to: file)
+        await document.newBuffer()
+        try expect(try Data(contentsOf: file) == external, "failed autosave leaves the external version intact")
+        try expect(document.fileURL != nil && editor.string == localText && window.isDocumentEdited,
+                   "a conflict keeps the named buffer and local edits available")
+        try expect(document.sessionDocument().draft == localText, "a failed autosave is recoverable from the session")
+
+        app.newWindow(nil)
+        let separate = try resolve(app.documents.last)
+        try expect(app.documents.count == count + 1 && separate.window !== window
+                   && separate.fileURL == nil && separate.editor.string.isEmpty
+                   && editor.string == localText, "New Window leaves the current buffer and opens a blank window")
+        separate.window.close()
+
+        try Data(("\u{feff}" + lastText).utf8).write(to: file)
+        await document.newBuffer()
+        try expect(document.fileURL == nil && editor.string.isEmpty, "New retries a failed autosave")
+        try expect(try Data(contentsOf: file) == Data(("\u{feff}" + localText).utf8),
+                   "a retry after restoring the disk baseline writes the preserved edits")
+    }
+
+    private static func waitFor(
+        _ description: String,
+        timeout: Duration = .milliseconds(750),
+        _ condition: () -> Bool
+    ) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !condition() && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try expect(condition(), description)
     }
 
     private static func resolve<T>(_ value: T?) throws -> T {

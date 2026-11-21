@@ -7,6 +7,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     private var currentLine = NSRect.zero
     private var lineRefreshPending = false
     var onTextChange: (() -> Void)?
+    var onBlur: (() -> Void)?
     var preferredLineEnding = "\n"
 
     static func scrollingEditor(in frame: NSRect) -> (NSScrollView, EditorTextView) {
@@ -46,6 +47,12 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         editor.setFontSize(defaultFontSize)
         scrollView.documentView = editor
         return (scrollView, editor)
+    }
+
+    override func resignFirstResponder() -> Bool {
+        guard super.resignFirstResponder() else { return false }
+        onBlur?()
+        return true
     }
 
     override func insertTab(_ sender: Any?) {
