@@ -157,9 +157,15 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         guard let parent = document?.window else { return }
         let width = min(600, max(240, parent.frame.width - 32))
         let messageHeight = feedback.isHidden ? 0 : feedback.intrinsicContentSize.height + 16
-        let room = parent.frame.height - headerHeight - separatorHeight - messageHeight - 104
+        // AppKit's inset table provides a top gap but no space after the last row.
+        let edgePadding = entries.isEmpty ? 0 : table.rect(ofRow: 0).minY
+        if scroll.contentInsets.bottom != edgePadding {
+            scroll.contentInsets.bottom = edgePadding
+        }
+        let room = parent.frame.height - headerHeight - separatorHeight - messageHeight - 104 - 2 * edgePadding
         let rowCount = min(entries.count, 10, max(1, Int(room / (table.rowHeight + rowSpacing))))
-        let resultsHeight = rowCount == 0 ? 0 : table.rect(ofRow: rowCount - 1).maxY
+        let trailingPadding = rowCount == entries.count ? edgePadding : 0
+        let resultsHeight = rowCount == 0 ? 0 : table.rect(ofRow: rowCount - 1).maxY + trailingPadding
         listHeight.constant = resultsHeight
         feedbackHeight.constant = messageHeight
         scroll.isHidden = rowCount == 0
@@ -467,7 +473,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     }
 
     private func reveal(_ row: Int) {
-        if !table.visibleRect.contains(table.rect(ofRow: row)) {
+        if row == 0 || row == entries.count - 1 {
+            let clip = scroll.contentView
+            let bottom = table.rect(ofRow: row).maxY + scroll.contentInsets.bottom - clip.bounds.height
+            clip.scroll(to: NSPoint(x: 0, y: row == 0 ? 0 : max(0, bottom)))
+            scroll.reflectScrolledClipView(clip)
+        } else if !table.visibleRect.contains(table.rect(ofRow: row)) {
             table.scrollRowToVisible(row)
         }
     }
@@ -487,10 +498,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let files = Array(ControlMatching.rank(fileEntries(), query: "").prefix(2))
         guard files.count == 2 else { throw CheckFailure.invalidPanel }
         apply(files, selected: files.last?.entry.id)
+        let edgePadding = table.rect(ofRow: 0).minY
         guard !scroll.hasVerticalScroller, !scroll.hasHorizontalScroller,
               let content = panel.contentView, abs(scroll.frame.width - content.bounds.width) < 0.5,
               abs(scroll.frame.minY - content.bounds.minY) < 0.5,
               scroll.contentView.bounds.origin == .zero,
+              edgePadding > 0, abs(scroll.contentView.bounds.maxY - table.rect(ofRow: 1).maxY - edgePadding) < 0.5,
               scroll.contentView.bounds.contains(table.rect(ofRow: 1)) else {
             throw CheckFailure.invalidPanel
         }
@@ -505,8 +518,10 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             throw CheckFailure.invalidPanel
         }
         apply(ControlMatching.rank(commands, query: ""), selected: commands.last?.id)
+        let lastRow = table.rect(ofRow: table.selectedRow)
         guard commands.count > 10, scroll.contentView.bounds.minY > 0,
-              table.visibleRect.contains(table.rect(ofRow: table.selectedRow)) else { throw CheckFailure.invalidPanel }
+              abs(scroll.contentView.bounds.maxY - lastRow.maxY - edgePadding) < 0.5,
+              table.visibleRect.contains(lastRow) else { throw CheckFailure.invalidPanel }
         apply(files, selected: files.last?.entry.id)
         guard scroll.contentView.bounds.origin == .zero else { throw CheckFailure.invalidPanel }
         configure(.languages)
