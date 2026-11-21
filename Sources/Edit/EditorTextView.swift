@@ -37,6 +37,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var onBlur: (() -> Void)?
     var onFindEditorInteraction: (() -> Void)?
     var onFindViewportChange: (() -> Void)?
+    weak var syntaxHighlighting: SyntaxHighlighting?
     var preferredLineEnding = "\n"
 
     static func scrollingEditor(in frame: NSRect) -> (NSScrollView, EditorTextView) {
@@ -538,6 +539,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             guard let self else { return }
             self.refreshCurrentLine()
             self.lineRefreshPending = false
+            self.syntaxHighlighting?.viewportChanged()
             self.onFindViewportChange?()
         }
     }

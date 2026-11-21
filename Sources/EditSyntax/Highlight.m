@@ -8,6 +8,13 @@
 
 typedef void (*EditCapture)(void *context, uint32_t start, uint32_t end, const char *name);
 typedef bool (*EditCancelled)(void *context);
+typedef void (*EditPreview)(void *context);
+
+typedef struct {
+    uint32_t startByte;
+    uint32_t endByte;
+    EditPreview publish;
+} Preview;
 
 #define DECLARE(name) extern const TSLanguage *tree_sitter_##name(void)
 DECLARE(c);
@@ -192,19 +199,33 @@ static NSString *injectedLanguage(Input *input, const TSQuery *query, TSQueryMat
     return nil;
 }
 
-static bool runGrammar(Input input, const char *name, NSString *directory, uint32_t offset, int depth);
+static bool runGrammar(Input input, const char *name, NSString *directory, uint32_t offset, int depth, const Preview *preview);
 
-static TSQuery *loadQuery(const TSLanguage *language, NSString *path) {
-    NSData *data = [NSData dataWithContentsOfFile:path];
-    if (!data || data.length > UINT32_MAX) return NULL;
-    uint32_t errorOffset;
-    TSQueryError error;
-    return ts_query_new(language, data.bytes, (uint32_t) data.length, &errorOffset, &error);
+static const TSQuery *loadQuery(const TSLanguage *language, NSString *path) {
+    static NSMutableDictionary<NSString *, id> *queries;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ queries = [NSMutableDictionary dictionary]; });
+    @synchronized (queries) {
+        id cached = queries[path];
+        if (cached) return cached == NSNull.null ? NULL : [cached pointerValue];
+        NSData *data = [NSData dataWithContentsOfFile:path];
+        TSQuery *query = NULL;
+        if (data && data.length <= UINT32_MAX) {
+            uint32_t errorOffset;
+            TSQueryError error;
+            query = ts_query_new(language, data.bytes, (uint32_t) data.length, &errorOffset, &error);
+        }
+        // Queries are immutable and shared by the cursors for open documents. Keep
+        // this fixed set of bundled queries (and their capture names) available.
+        queries[path] = query ? [NSValue valueWithPointer:query] : NSNull.null;
+        return query;
+    }
 }
 
 static void runQuery(Input *input, const TSQuery *query, TSNode root, NSString *directory,
-                     uint32_t offset, int depth, bool injection) {
+                     uint32_t offset, int depth, bool injection, const Preview *preview) {
     TSQueryCursor *cursor = ts_query_cursor_new();
+    if (preview) ts_query_cursor_set_byte_range(cursor, preview->startByte, preview->endByte);
     const TSQueryCursorOptions options = {.payload = input, .progress_callback = queryProgress};
     ts_query_cursor_exec_with_options(cursor, query, root, &options);
     NSMutableDictionary<NSString *, id> *regexes = [NSMutableDictionary dictionary];
@@ -233,7 +254,7 @@ static void runQuery(Input *input, const TSQuery *query, TSNode root, NSString *
                     Input section = *input;
                     section.units += from / 2u;
                     section.bytes = to - from;
-                    runGrammar(section, nestedName, directory, offset + from / 2u, depth + 1);
+                    runGrammar(section, nestedName, directory, offset + from / 2u, depth + 1, NULL);
                 }
             }
         }
@@ -241,11 +262,11 @@ static void runQuery(Input *input, const TSQuery *query, TSNode root, NSString *
     ts_query_cursor_delete(cursor);
 }
 
-static bool runGrammar(Input input, const char *name, NSString *directory, uint32_t offset, int depth) {
+static bool runGrammar(Input input, const char *name, NSString *directory, uint32_t offset, int depth, const Preview *preview) {
     const TSLanguage *language = languageForName(name);
     if (!language || cancelled(&input)) return false;
     NSString *queryPath = [directory stringByAppendingPathComponent:[@(name) stringByAppendingString:@".scm"]];
-    TSQuery *query = loadQuery(language, queryPath);
+    const TSQuery *query = loadQuery(language, queryPath);
     if (!query) return false;
     TSParser *parser = ts_parser_new();
     bool ready = ts_parser_set_language(parser, language);
@@ -255,31 +276,36 @@ static bool runGrammar(Input input, const char *name, NSString *directory, uint3
     const bool parsed = tree != NULL;
     if (parsed) {
         TSNode root = ts_tree_root_node(tree);
-        runQuery(&input, query, root, directory, offset, depth, false);
+        const TSQuery *injections = NULL;
         if (depth < 4 && !cancelled(&input) &&
             (strcmp(name, "markdown") == 0 || strcmp(name, "markdown-inline") == 0 || strcmp(name, "html") == 0)) {
             NSString *injectionPath = [directory stringByAppendingPathComponent:[@(name) stringByAppendingString:@"-injections.scm"]];
-            TSQuery *injections = loadQuery(language, injectionPath);
-            if (injections) {
-                runQuery(&input, injections, root, directory, offset, depth, true);
-                ts_query_delete(injections);
-            }
+            injections = loadQuery(language, injectionPath);
         }
+        if (preview && !cancelled(&input)) {
+            runQuery(&input, query, root, directory, offset, depth, false, preview);
+            if (injections) runQuery(&input, injections, root, directory, offset, depth, true, preview);
+            if (!cancelled(&input)) preview->publish(input.context);
+        }
+        if (!cancelled(&input)) runQuery(&input, query, root, directory, offset, depth, false, NULL);
+        if (injections && !cancelled(&input)) runQuery(&input, injections, root, directory, offset, depth, true, NULL);
         ts_tree_delete(tree);
     }
     ts_parser_delete(parser);
-    ts_query_delete(query);
     return parsed && !cancelled(&input);
 }
 
 EDIT_VISIBLE bool edit_syntax_highlight(const char *language, const char *queryDirectory,
                                        const uint16_t *units, uint32_t count,
+                                       uint32_t previewStart, uint32_t previewEnd, EditPreview publishPreview,
                                        EditCapture callback, EditCancelled check, void *context) {
     if (!language || !queryDirectory || !units || !callback || count > UINT32_MAX / 2u) return false;
     @autoreleasepool {
         NSString *directory = [NSString stringWithUTF8String:queryDirectory];
         if (!directory) return false;
         Input input = {units, count * 2u, callback, check, context};
-        return runGrammar(input, language, directory, 0, 0);
+        Preview preview = {previewStart * 2u, previewEnd * 2u, publishPreview};
+        const bool canPreview = publishPreview && previewStart < previewEnd && previewEnd <= count;
+        return runGrammar(input, language, directory, 0, 0, canPreview ? &preview : NULL);
     }
 }

@@ -4,6 +4,8 @@ import AppKit
 final class SyntaxHighlighting {
     private weak var editor: EditorTextView?
     private var spans: [SyntaxSpan] = []
+    private var paintedViewport: NSRange?
+    private var hasRenderingColors = false
     private var task: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var activity: NSTitlebarAccessoryViewController?
@@ -11,6 +13,7 @@ final class SyntaxHighlighting {
 
     init(editor: EditorTextView) {
         self.editor = editor
+        editor.syntaxHighlighting = self
         editor.textLayoutManager?.renderingAttributesValidator = { [weak self] manager, fragment in
             MainActor.assumeIsolated {
                 self?.paint(fragment.rangeInElement, using: manager)
@@ -24,27 +27,38 @@ final class SyntaxHighlighting {
         task?.cancel()
         task = nil
         stopProgress()
-        clearColors()
+        spans = []
+        paintedViewport = nil
+        if immediate { clearColors() }
         guard language != .plainText else { return }
 
         task = Task { @MainActor [weak self] in
             if !immediate {
-                try? await Task.sleep(for: .milliseconds(70))
+                try? await Task.sleep(for: .milliseconds(45))
             }
-            guard !Task.isCancelled, let source = self?.editor?.string else { return }
-            let worker = Task.detached(priority: .userInitiated) { SyntaxEngine.spans(in: source, language: language) }
-            let result = await withTaskCancellationHandler {
-                await worker.value
+            guard !Task.isCancelled, let editor = self?.editor else { return }
+            let source = editor.string
+            let visibleRange = self?.visibleRange()
+            let (updates, continuation) = AsyncStream<[SyntaxSpan]>.makeStream(bufferingPolicy: .bufferingNewest(1))
+            let worker = Task.detached(priority: .userInitiated) {
+                defer { continuation.finish() }
+                let result = SyntaxEngine.spans(in: source, language: language, visibleRange: visibleRange) { preview in
+                    continuation.yield(preview)
+                }
+                if !Task.isCancelled { continuation.yield(result ?? []) }
+            }
+            await withTaskCancellationHandler {
+                for await result in updates {
+                    guard !Task.isCancelled, let self, self.generation == request else { break }
+                    self.clearColors()
+                    self.spans = result
+                    self.paintedViewport = nil
+                    self.viewportChanged()
+                    self.stopProgress()
+                }
             } onCancel: {
                 worker.cancel()
             }
-            guard !Task.isCancelled, let self, self.generation == request else { return }
-            self.spans = result ?? []
-            if let manager = self.editor?.textLayoutManager,
-               let visible = manager.textViewportLayoutController.viewportRange {
-                self.paint(visible, using: manager)
-            }
-            self.stopProgress()
         }
 
         if immediate {
@@ -60,12 +74,31 @@ final class SyntaxHighlighting {
         task?.cancel()
         task = nil
         stopProgress()
+        spans = []
+        paintedViewport = nil
         clearColors()
     }
 
+    private func visibleRange() -> NSRange? {
+        guard let editor, let manager = editor.textLayoutManager,
+              let visible = manager.textViewportLayoutController.viewportRange else { return nil }
+        return editor.charRange(visible, in: manager)
+    }
+
+    func viewportChanged() {
+        guard !spans.isEmpty, let editor, let manager = editor.textLayoutManager,
+              let visible = manager.textViewportLayoutController.viewportRange else { return }
+        let range = editor.charRange(visible, in: manager)
+        guard range != paintedViewport else { return }
+        // TextKit can reuse a previously validated range as its viewport moves.
+        // Explicitly apply the current snapshot to each newly visible region.
+        paintedViewport = range
+        paint(visible, using: manager)
+    }
+
     private func clearColors() {
-        guard !spans.isEmpty else { return }
-        spans = []
+        guard hasRenderingColors else { return }
+        hasRenderingColors = false
         if let manager = editor?.textLayoutManager {
             manager.removeRenderingAttribute(.foregroundColor, for: manager.documentRange)
         }
@@ -75,7 +108,7 @@ final class SyntaxHighlighting {
         guard !spans.isEmpty else { return }
         let origin = manager.documentRange.location
         let start = manager.offset(from: origin, to: range.location)
-        let end = manager.offset(from: origin, to: range.endLocation)
+        let end = start + manager.offset(from: range.location, to: range.endLocation)
         guard start < end else { return }
 
         var low = 0
@@ -91,10 +124,11 @@ final class SyntaxHighlighting {
         for index in low..<spans.count {
             let span = spans[index]
             if span.start >= end { break }
-            guard let from = manager.location(origin, offsetBy: max(start, span.start)),
-                  let to = manager.location(origin, offsetBy: min(end, span.end)),
+            guard let from = manager.location(range.location, offsetBy: max(0, span.start - start)),
+                  let to = manager.location(from, offsetBy: min(end, span.end) - max(start, span.start)),
                   let target = NSTextRange(location: from, end: to) else { continue }
             manager.addRenderingAttribute(.foregroundColor, value: span.color.nativeColor, for: target)
+            hasRenderingColors = true
         }
     }
 

@@ -57,14 +57,43 @@ struct SyntaxSpan: Sendable {
 
 enum SyntaxEngine {
     private typealias Capture = @convention(c) (UnsafeMutableRawPointer?, UInt32, UInt32, UnsafePointer<CChar>?) -> Void
+    private typealias Preview = @convention(c) (UnsafeMutableRawPointer?) -> Void
     private typealias Cancelled = @convention(c) (UnsafeMutableRawPointer?) -> Bool
     private typealias Highlight = @convention(c) (
         UnsafePointer<CChar>, UnsafePointer<CChar>, UnsafePointer<UInt16>, UInt32,
-        Capture, Cancelled, UnsafeMutableRawPointer?
+        UInt32, UInt32, Preview?, Capture, Cancelled, UnsafeMutableRawPointer?
     ) -> Bool
 
     private final class Captures {
         var values: [SyntaxSpan] = []
+        private var colors: [UnsafePointer<CChar>: SyntaxColor?] = [:]
+        private let length: Int
+        private let onPreview: (@Sendable ([SyntaxSpan]) -> Void)?
+
+        init(length: Int, onPreview: (@Sendable ([SyntaxSpan]) -> Void)?) {
+            self.length = length
+            self.onPreview = onPreview
+        }
+
+        func publishPreview() {
+            guard let onPreview else { return }
+            let spans = resolveOverlaps(values, length: length)
+            values.removeAll(keepingCapacity: true)
+            if !Task.isCancelled { onPreview(spans) }
+        }
+
+        func append(start: UInt32, end: UInt32, name: UnsafePointer<CChar>) {
+            let color: SyntaxColor?
+            if let cached = colors[name] {
+                color = cached
+            } else {
+                color = SyntaxColor(capture: String(cString: name))
+                colors.updateValue(color, forKey: name)
+            }
+            if let color {
+                values.append(SyntaxSpan(start: Int(start), end: Int(end), color: color))
+            }
+        }
     }
 
     // The signed library is loaded only when the first supported file needs highlighting.
@@ -83,19 +112,27 @@ enum SyntaxEngine {
 
     private static let queries = Bundle.main.resourceURL?.appending(path: "syntax/queries").path
 
-    static func spans(in text: String, language: SyntaxLanguage) -> [SyntaxSpan]? {
+    static func spans(
+        in text: String, language: SyntaxLanguage, visibleRange: NSRange? = nil,
+        onPreview: (@Sendable ([SyntaxSpan]) -> Void)? = nil
+    ) -> [SyntaxSpan]? {
         guard !text.isEmpty else { return [] }
         guard language != .plainText, let highlight, let queries, !Task.isCancelled else { return nil }
         let units = Array(text.utf16)
         guard let count = UInt32(exactly: units.count) else { return nil }
-        let sink = Captures()
+        let viewport = visibleRange ?? NSRange(location: 0, length: min(4_096, units.count))
+        let prioritizesViewport = onPreview != nil && units.count >= 64 * 1_024 && viewport.length < units.count / 4
+        let previewStart = prioritizesViewport ? UInt32(min(viewport.location, units.count)) : 0
+        let previewEnd = prioritizesViewport ? UInt32(min(NSMaxRange(viewport), units.count)) : 0
+        let sink = Captures(length: units.count, onPreview: onPreview)
         let context = Unmanaged.passUnretained(sink).toOpaque()
         let success = units.withUnsafeBufferPointer { buffer in
-            highlight(language.rawValue, queries, buffer.baseAddress!, count, { context, start, end, name in
-                guard let context, let name, let color = SyntaxColor(capture: String(cString: name)) else { return }
-                Unmanaged<Captures>.fromOpaque(context).takeUnretainedValue().values.append(
-                    SyntaxSpan(start: Int(start), end: Int(end), color: color)
-                )
+            highlight(language.rawValue, queries, buffer.baseAddress!, count, previewStart, previewEnd, { context in
+                guard let context else { return }
+                Unmanaged<Captures>.fromOpaque(context).takeUnretainedValue().publishPreview()
+            }, { context, start, end, name in
+                guard let context, let name else { return }
+                Unmanaged<Captures>.fromOpaque(context).takeUnretainedValue().append(start: start, end: end, name: name)
             }, { _ in Task.isCancelled }, context)
         }
         guard success, !Task.isCancelled else { return nil }

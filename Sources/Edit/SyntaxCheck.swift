@@ -23,26 +23,12 @@ enum SyntaxCheck {
               let manager = editor.textLayoutManager else {
             throw Failure("Changing syntax mode modified the document or selection.")
         }
-        let origin = manager.documentRange.location
         let token = (input as NSString).range(of: "main")
-        let deadline = ContinuousClock.now + .seconds(4)
-        var colored = false
-        repeat {
-            manager.textViewportLayoutController.layoutViewport()
-            manager.enumerateRenderingAttributes(from: origin, reverse: false) { _, attributes, range in
-                let offset = manager.offset(from: origin, to: range.location)
-                if offset == token.location, attributes[.foregroundColor] is NSColor {
-                    colored = true
-                    return false
-                }
-                return true
-            }
-            if !colored { try await Task.sleep(for: .milliseconds(20)) }
-        } while !colored && ContinuousClock.now < deadline
-        guard colored else { throw Failure("TextKit did not render Rust syntax.") }
+        try await waitForColor(at: token, in: manager)
+        try await checkScrolling(document: document, manager: manager)
         document.setSyntaxLanguage(.plainText)
         var coloredAfterReset = false
-        manager.enumerateRenderingAttributes(from: origin, reverse: false) { _, attributes, _ in
+        manager.enumerateRenderingAttributes(from: manager.documentRange.location, reverse: false) { _, attributes, _ in
             coloredAfterReset = coloredAfterReset || attributes[.foregroundColor] is NSColor
             return true
         }
@@ -53,6 +39,53 @@ enum SyntaxCheck {
         guard document.resolvedSyntaxLanguage == .plainText, document.manualSyntaxLanguage == .plainText else {
             throw Failure("Session restoration lost the manual Plain Text mode.")
         }
+    }
+
+    private static func checkScrolling(document: DocumentWindow, manager: NSTextLayoutManager) async throws {
+        let editor = document.editor
+        let lines = (0..<2_400).map { "    let token_\($0) = \"sample\"; // comment \($0)\n" }
+        let input = "fn main() {\n" + lines.joined() + "}\n"
+        let text = input as NSString
+        // Use a different mode first so the full-buffer installation requests an immediate result.
+        document.setSyntaxLanguage(.plainText)
+        editor.string = input
+        editor.didChangeText()
+        let start = ContinuousClock.now
+        document.setSyntaxLanguage(.rust)
+        let openingToken = text.range(of: "\"sample\"")
+        try await waitForColor(at: openingToken, in: manager)
+        let initial = start.duration(to: .now)
+        print("Syntax first visible color in \(text.length) UTF-16 units: \(initial).")
+
+        for line in [1_200, 2_370, 40] {
+            let marker = text.range(of: "token_\(line) = ")
+            let token = NSRange(location: NSMaxRange(marker), length: 8)
+            editor.scrollRangeToVisible(token)
+            manager.textViewportLayoutController.layoutViewport()
+            guard let viewport = manager.textViewportLayoutController.viewportRange,
+                  NSLocationInRange(token.location, editor.charRange(viewport, in: manager)) else {
+                throw Failure("The test scroll did not reach source line \(line).")
+            }
+            try await waitForColor(at: token, in: manager)
+        }
+    }
+
+    private static func waitForColor(at token: NSRange, in manager: NSTextLayoutManager) async throws {
+        let deadline = ContinuousClock.now + .seconds(4)
+        repeat {
+            manager.textViewportLayoutController.layoutViewport()
+            let origin = manager.documentRange.location
+            guard let start = manager.location(origin, offsetBy: token.location) else { break }
+            var colored = false
+            manager.enumerateRenderingAttributes(from: start, reverse: false) { _, attributes, range in
+                let offset = manager.offset(from: origin, to: range.location)
+                colored = offset == token.location && attributes[.foregroundColor] is NSColor
+                return false
+            }
+            if colored { return }
+            try await Task.sleep(for: .milliseconds(10))
+        } while ContinuousClock.now < deadline
+        throw Failure("TextKit did not render Rust syntax at offset \(token.location).")
     }
 
     private nonisolated static func checkGrammars() throws {
