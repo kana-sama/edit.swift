@@ -1,0 +1,58 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if [[ "${1:-}" == compile ]]; then
+    clang="$2"
+    sdk="$3"
+    target="$4"
+    stage="$5"
+    source_path="$6"
+    object_path="$stage/objects/${source_path//\//_}.o"
+    tuning=(-O0)
+    if [[ "$source_path" == "runtime/src/lib.c" || "$source_path" == *"/src/scanner.c" ]]; then
+        tuning=(-O2)
+    fi
+    "$clang" -target "$target" -isysroot "$sdk" -fvisibility=hidden -std=c11 -D_DARWIN_C_SOURCE \
+        "${tuning[@]}" -I "$stage/sources/runtime/include" -I "$stage/sources/${source_path%/*}" -c "$stage/sources/$source_path" -o "$object_path"
+    exit
+fi
+
+cache="$1"
+sdk="$2"
+target="$3"
+clang="$(xcrun --find clang)"
+key="$(
+    {
+        printf '%s\n' "$target" "$clang" "$sdk" &&
+        /usr/bin/stat -L -f '%i:%m:%c:%z' "$clang" "$sdk/SDKSettings.plist" &&
+        /usr/bin/shasum -a 256 script/build-syntax Sources/EditSyntax/Highlight.m resources/syntax/sources.tar.gz
+    } | /usr/bin/shasum -a 256
+)"
+key="${key%% *}"
+destination="$cache/syntax/libEditSyntax-$key.dylib"
+if [[ ! -f "$destination" ]]; then
+    mkdir -p "$cache/syntax"
+    stage="$(mktemp -d "$cache/syntax/.build.XXXXXX")"
+    trap 'rm -rf -- "$stage"' EXIT
+    mkdir "$stage/sources" "$stage/objects"
+    /usr/bin/tar -xzf resources/syntax/sources.tar.gz -C "$stage/sources"
+    jobs="$(getconf _NPROCESSORS_ONLN)"
+    if (( jobs > 8 )); then jobs=8; fi
+    {
+        printf 'runtime/src/lib.c\0'
+        (
+            cd "$stage/sources"
+            for source in */src/parser.c */src/scanner.c; do
+                if [[ -f "$source" && "$source" != runtime/* ]]; then printf '%s\0' "$source"; fi
+            done
+        )
+    } | /usr/bin/xargs -0 -n 1 -P "$jobs" "$PWD/script/build-syntax" compile "$clang" "$sdk" "$target" "$stage"
+
+    "$clang" -target "$target" -isysroot "$sdk" -dynamiclib -fobjc-arc -fvisibility=hidden -O2 \
+        -framework Foundation -I "$stage/sources/runtime/include" Sources/EditSyntax/Highlight.m \
+        "$stage/objects/"*.o -Wl,-install_name,@rpath/libEditSyntax.dylib -o "$stage/libEditSyntax.dylib"
+    /usr/bin/codesign --force --sign - "$stage/libEditSyntax.dylib"
+    /bin/mv -n "$stage/libEditSyntax.dylib" "$destination"
+fi
+printf '%s\n' "$destination"

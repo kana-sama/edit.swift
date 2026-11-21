@@ -4,7 +4,7 @@ import AppKit
 final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private unowned let app: Edit
     private let panel = ControlWindow()
-    enum Mode { case files, commands }
+    enum Mode { case files, commands, languages }
 
     private let input = NSSearchField()
     private let commandMark = NSTextField(labelWithString: ">")
@@ -37,7 +37,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         if self.document === document, self.mode == mode {
             dismiss(restoreFocus: true)
         } else if self.document === document {
-            switchMode(to: mode, query: input.stringValue)
+            switchMode(to: mode, query: self.mode == .languages ? "" : input.stringValue)
         } else {
             show(in: document, mode: mode)
         }
@@ -58,7 +58,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         configure(mode)
         input.stringValue = ""
         feedback.stringValue = ""
-        apply(ControlMatching.rank(sourceEntries(), query: ""), selected: nil)
+        apply(ControlMatching.rank(sourceEntries(), query: ""), selected: initialID)
         position()
         if !app.isAgentCheck {
             document.window.addChildWindow(panel, ordered: .above)
@@ -76,8 +76,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
 
     private func configure(_ mode: Mode) {
         self.mode = mode
-        commandMark.isHidden = mode == .files
-        input.placeholderString = mode == .commands ? "Search commands" : "Search recent files"
+        commandMark.isHidden = mode != .commands
+        switch mode {
+        case .files: input.placeholderString = "Search recent files"
+        case .commands: input.placeholderString = "Search commands"
+        case .languages: input.placeholderString = "Search languages"
+        }
         input.setAccessibilityLabel(input.placeholderString)
     }
 
@@ -89,7 +93,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             field.undoManager?.removeAllActions()
             field.setSelectedRange(NSRange(location: query.utf16.count, length: 0))
         }
-        search()
+        search(preserving: initialID)
         if let document { refreshFiles(for: document) }
     }
 
@@ -244,10 +248,29 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         }
     }
 
+    private var initialID: String? {
+        guard mode == .languages, let document else { return nil }
+        return document.manualSyntaxLanguage?.rawValue ?? "auto"
+    }
+
     private func sourceEntries() -> [ControlEntry] {
-        guard mode == .commands, let document, let menu = NSApplication.shared.mainMenu else {
-            return fileEntries()
+        if mode == .files { return fileEntries() }
+        guard let document else { return [] }
+        if mode == .languages {
+            let automatic = SyntaxLanguage.detected(at: document.fileURL)
+            var entries = [ControlEntry(id: "auto", title: "Auto Detect", detail: automatic.displayName,
+                                        shortcut: initialID == "auto" ? "✓" : nil,
+                                        iconLanguage: automatic.iconIdentifier)]
+            let languages = SyntaxLanguage.allCases.filter { $0 != .plainText }.sorted {
+                $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+            }
+            entries.append(contentsOf: ([.plainText] + languages).map {
+                ControlEntry(id: $0.rawValue, title: $0.displayName,
+                             shortcut: initialID == $0.rawValue ? "✓" : nil, iconLanguage: $0.iconIdentifier)
+            })
+            return entries
         }
+        guard let menu = NSApplication.shared.mainMenu else { return [] }
         let available = ControlCommand.fromMenu(menu).filter { $0.isAvailable(in: document, focus: originalFocus) }
         let arranged = history.arrange(available)
         commands = Dictionary(arranged.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -360,6 +383,11 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         guard !commands.isEmpty, ControlMatching.rank(commands, query: "save").first?.entry.title == "File: Save" else {
             throw CheckFailure.invalidPanel
         }
+        configure(.languages)
+        let choices = sourceEntries()
+        guard choices.count == 25, choices.first?.id == "auto", choices[1].id == SyntaxLanguage.plainText.rawValue else {
+            throw CheckFailure.invalidPanel
+        }
     }
 
     private enum CheckFailure: LocalizedError {
@@ -372,6 +400,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         let entry = entries[row].entry
         if mode == .commands {
             runCommand(entry, in: document)
+            return
+        }
+        if mode == .languages {
+            let language = SyntaxLanguage(rawValue: entry.id)
+            document.setSyntaxLanguage(language)
+            dismiss(restoreFocus: true)
             return
         }
         guard let recent = entry.recent else { return }
@@ -411,6 +445,10 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             switchMode(to: .files, query: "")
             return
         }
+        if command.item.action == #selector(Edit.showLanguageModes(_:)) {
+            switchMode(to: .languages, query: "")
+            return
+        }
         dismiss(restoreFocus: true)
         command.run()
     }
@@ -436,8 +474,10 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         let match = entries[row]
         let title = makeLabel(match.entry.title, highlights: match.titleCharacters, secondary: false)
         var views: [NSView] = []
-        if let file = match.entry.recent,
-           let image = FileIcons.image(for: file.url, appearance: tableView.effectiveAppearance) {
+        let file = match.entry.recent
+        let language = match.entry.iconLanguage ?? file.flatMap { app.manualIconLanguage(for: $0) }
+        if file != nil || language != nil,
+           let image = FileIcons.image(for: file?.url, appearance: tableView.effectiveAppearance, language: language) {
             let icon = NSImageView(image: image)
             icon.setAccessibilityElement(false)
             views.append(icon)

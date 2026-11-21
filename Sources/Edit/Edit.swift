@@ -5,6 +5,7 @@ import AppKit
 final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, NSMenuDelegate {
     let isAgentCheck = CommandLine.arguments.dropFirst().first == "--agent-check"
     private lazy var sessionStore = SessionStore.application()
+    lazy var syntaxOverrides = SyntaxLanguageOverrides(defaults: isAgentCheck ? nil : .standard)
     private weak var recentMenu: NSMenu?
     private var controlPanel: ControlPanel?
     private(set) lazy var recentFiles = RecentFiles(url: recentHistoryURL)
@@ -55,6 +56,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     makeDocument()
                     let sample = try await FilesCheck.run(in: self)
                     try ControlPanel(app: self).checkHidden(in: sample)
+                    try await SyntaxCheck.run(in: self)
                     try checkWindow(sample.window, screenshot: CommandLine.arguments.dropFirst(2).first)
                     print("Edit passed its native editing and file-session checks without activation.")
                     exit(EXIT_SUCCESS)
@@ -130,7 +132,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                                     keyEquivalent: "")
             item.target = self
             item.representedObject = recent.url
-            item.image = FileIcons.image(for: recent.url, appearance: NSApplication.shared.effectiveAppearance)
+            item.image = FileIcons.image(for: recent.url, appearance: NSApplication.shared.effectiveAppearance,
+                                        language: manualIconLanguage(for: recent))
         }
     }
 
@@ -141,6 +144,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     @objc func showGoToFile(_ sender: Any?) { showControl(.files) }
     @objc func showCommandMode(_ sender: Any?) { showControl(.commands) }
+    @objc func showLanguageModes(_ sender: Any?) { showControl(.languages) }
 
     private func showControl(_ mode: ControlPanel.Mode) {
         guard let document = activeDocument, !isQuitting else { return }
@@ -187,7 +191,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         guard !isQuitting else { return false }
         switch item.action {
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
-        case #selector(showGoToFile(_:)), #selector(showCommandMode(_:)): return activeDocument.map { $0.window.attachedSheet == nil } ?? false
+        case #selector(showGoToFile(_:)), #selector(showCommandMode(_:)), #selector(showLanguageModes(_:)): return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(newWindow(_:)), #selector(openRecentDocument(_:)): return true
         case #selector(openDocument(_:)): return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)):
@@ -327,7 +331,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 }.value
                 document.restoreDraft(record, text: draft, identity: identity)
             } else if let file {
-                document.load(file)
+                document.load(file, storedSyntaxLanguage: record.syntaxLanguage)
             }
             if let path = record.path { await recentFiles.record(URL(fileURLWithPath: path)) }
             if isQuitting { document.editor.isEditable = false }
@@ -393,6 +397,12 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         if !isAgentCheck { document.present() }
         if file.identity != nil { await recentFiles.record(url) }
         return document
+    }
+
+    func manualIconLanguage(for recent: RecentFile) -> String? {
+        let document = openDocument(at: recent.canonicalURL, identity: recent.identity)
+        return document?.manualSyntaxLanguage?.iconIdentifier
+            ?? syntaxOverrides.language(for: recent.canonicalURL)?.iconIdentifier
     }
 
     private func openDocument(at url: URL, identity: FileIdentity?) -> DocumentWindow? {
@@ -478,6 +488,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
         let view = addMenu("View")
         view.addCommand("Command Mode…", #selector(showCommandMode(_:)), "p", [.command, .shift]).target = self
+        view.addCommand("Change Language Mode…", #selector(showLanguageModes(_:))).target = self
         view.addItem(.separator())
         view.addCommand("Increase Text Size", #selector(EditorTextView.increaseTextSize(_:)), "=")
         view.addCommand("Decrease Text Size", #selector(EditorTextView.decreaseTextSize(_:)), "-")

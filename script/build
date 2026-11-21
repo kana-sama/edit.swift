@@ -32,7 +32,9 @@ build_fingerprint() {
         printf '%s\n' "$configuration" "$bundle_name" "$target" "$compiler" "$sdk" &&
         /usr/bin/stat -L -f '%i:%m:%c:%z' "$compiler" "$sdk/SDKSettings.plist" &&
         /usr/bin/shasum -a 256 "${sources[@]}" Package.swift resources/Info.plist \
-            script/build script/app-bundle.sh script/publish-app.c Sources/Edit/Resources/Seti/*
+            script/build script/build-syntax script/app-bundle.sh script/publish-app.c Sources/Edit/Resources/Seti/* \
+            Sources/EditSyntax/Highlight.m resources/syntax/sources.tar.gz \
+            resources/syntax/queries/*.scm resources/syntax/licenses/* resources/syntax/README.md
     } | /usr/bin/shasum -a 256
 }
 
@@ -55,8 +57,11 @@ trap 'rm -rf -- "$stage"' EXIT
     "${swift_flags[@]}" "${sources[@]}" -o "$stage/Edit"
 
 app="$stage/$bundle_name.app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/syntax" "$app/Contents/Frameworks"
 mv "$stage/Edit" "$app/Contents/MacOS/Edit"
+syntax_library="$(./script/build-syntax "$sdk_cache" "$sdk" "$target")"
+cp -p "$syntax_library" "$app/Contents/Frameworks/libEditSyntax.dylib"
+cp -R resources/syntax/queries resources/syntax/licenses resources/syntax/README.md "$app/Contents/Resources/syntax/"
 cp resources/Info.plist "$app/Contents/Info.plist"
 cp -R Sources/Edit/Resources/Seti "$app/Contents/Resources/"
 if [[ "$bundle_name" == 'Edit Agent' ]]; then

@@ -53,6 +53,7 @@ struct SessionDocument: Codable, Sendable {
     var format: FileFormat?
     var revision: FileRevision?
     var placement: WindowPlacement
+    var syntaxLanguage: String? = nil
 }
 
 struct EditorSession: Codable, Sendable {

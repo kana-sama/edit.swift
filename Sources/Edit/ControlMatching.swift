@@ -6,6 +6,7 @@ struct ControlEntry: Sendable {
     var detail: String? = nil
     var shortcut: String? = nil
     var recent: RecentFile? = nil
+    var iconLanguage: String? = nil
 }
 
 struct ControlMatch: Sendable {

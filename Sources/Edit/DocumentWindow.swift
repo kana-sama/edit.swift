@@ -13,7 +13,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     let scrollView: NSScrollView
 
     private unowned let app: Edit
-    private(set) var fileURL: URL?
+    private(set) var fileURL: URL? {
+        didSet {
+            if oldValue != fileURL { detectedSyntaxLanguage = SyntaxLanguage.detected(at: fileURL) }
+        }
+    }
+    private var detectedSyntaxLanguage: SyntaxLanguage = .plainText
     private(set) var fileIdentity: FileIdentity?
     private var savedText: NSString? = "" as NSString
     private var format = FileFormat()
@@ -27,6 +32,19 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var autosaveTask: Task<Void, Never>?
     private var autosaveRequested = false
     private var autosaveFailure: (generation: UInt, detail: String, reported: Bool)?
+    private var syntaxHighlighting: SyntaxHighlighting?
+    private(set) var manualSyntaxLanguage: SyntaxLanguage?
+
+    var resolvedSyntaxLanguage: SyntaxLanguage {
+        manualSyntaxLanguage ?? detectedSyntaxLanguage
+    }
+
+    func setSyntaxLanguage(_ language: SyntaxLanguage?) {
+        guard manualSyntaxLanguage != language else { return }
+        manualSyntaxLanguage = language
+        app.syntaxOverrides.set(language, for: fileURL)
+        refreshSyntax(immediate: true)
+    }
 
     var isBusy: Bool { saving || promptingToClose }
     var canReplaceBuffer: Bool { !isBusy && window.attachedSheet == nil }
@@ -116,8 +134,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         Task { @MainActor [weak self] in self?.reportAutosaveFailure() }
     }
 
-    func load(_ file: FileBuffer) {
+    func load(_ file: FileBuffer, storedSyntaxLanguage: String? = nil) {
         updateIdentity(from: file)
+        manualSyntaxLanguage = storedSyntaxLanguage.flatMap(SyntaxLanguage.init(rawValue:))
+            ?? app.syntaxOverrides.language(for: fileURL)
         installText(file.text)
     }
 
@@ -127,6 +147,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         savedText = fileURL == nil ? "" as NSString : nil
         format = record.format ?? FileFormat()
         revision = record.revision
+        manualSyntaxLanguage = record.syntaxLanguage.flatMap(SyntaxLanguage.init(rawValue:))
+            ?? app.syntaxOverrides.language(for: fileURL)
         installText(text)
     }
 
@@ -136,7 +158,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             draft: window.isDocumentEdited ? editor.string : nil,
             format: fileURL == nil ? nil : format,
             revision: revision,
-            placement: placement
+            placement: placement,
+            syntaxLanguage: manualSyntaxLanguage?.rawValue
         )
     }
 
@@ -208,7 +231,15 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         let file = try await Task.detached {
             try FileBuffer.save(text, to: target, format: format, expected: expected)
         }.value
+        let changedPath = fileURL != file.url
+        let previousLanguage = resolvedSyntaxLanguage
         updateIdentity(from: file)
+        if changedPath {
+            app.syntaxOverrides.set(manualSyntaxLanguage, for: fileURL)
+        }
+        if resolvedSyntaxLanguage != previousLanguage {
+            refreshSyntax(immediate: true)
+        }
         updateTitle()
         updateEditedState()
         autosaveFailure = nil
@@ -301,6 +332,19 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editGeneration &+= 1
         updateEditedState()
         scheduleIdleAutosave()
+        refreshSyntax(immediate: false)
+    }
+
+    private func refreshSyntax(immediate: Bool) {
+        let language = resolvedSyntaxLanguage
+        if language == .plainText {
+            syntaxHighlighting?.cancel()
+            return
+        }
+        if syntaxHighlighting == nil {
+            syntaxHighlighting = SyntaxHighlighting(editor: editor)
+        }
+        syntaxHighlighting?.update(language: language, immediate: immediate)
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -356,6 +400,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
         if replacing {
             fileURL = nil
+            manualSyntaxLanguage = nil
             fileIdentity = nil
             savedText = "" as NSString
             format = FileFormat()
@@ -390,6 +435,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        syntaxHighlighting?.cancel()
         idleSave?.cancel()
         idleSave = nil
         autosaveRequested = false
@@ -440,6 +486,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.undoManager?.removeAllActions()
         updateTitle()
         updateEditedState()
+        refreshSyntax(immediate: true)
     }
 
     private func updateIdentity(from file: FileBuffer) {
