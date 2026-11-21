@@ -32,6 +32,7 @@ private final class FindSplitView: NSSplitView {
 @MainActor
 final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
     private static let refreshItem = NSToolbarItem.Identifier("Search.Refresh")
+    private static let sidebarMenuItem = NSToolbarItem.Identifier("Edit.SidebarMenu")
     private static let minimumSidebarWidth: CGFloat = 185
     private static let minimumEditorWidth: CGFloat = 128
     private static let contentInset: CGFloat = 10
@@ -378,7 +379,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, Self.refreshItem, .sidebarTrackingSeparator]
+        [.flexibleSpace, Self.refreshItem, Self.sidebarMenuItem, .sidebarTrackingSeparator]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -387,6 +388,23 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        if identifier == Self.sidebarMenuItem {
+            let item = NSMenuToolbarItem(itemIdentifier: identifier)
+            item.isBordered = true
+            item.isHidden = true
+            item.label = "Switch Sidebar"
+            item.toolTip = item.label
+            item.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: item.label)
+            item.showsIndicator = false
+
+            let menu = NSMenu(title: "Sidebars")
+            let search = NSMenuItem(title: "Search", action: #selector(selectSearchSidebar(_:)), keyEquivalent: "")
+            search.target = self
+            search.state = .on
+            menu.addItem(search)
+            item.menu = menu
+            return item
+        }
         guard identifier == Self.refreshItem else { return nil }
         let item = NSToolbarItem(itemIdentifier: identifier)
         item.isBordered = true
@@ -491,7 +509,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         if settings.visible && width >= sidebarItem.minimumThickness {
             settings.width = width
         }
-        updateRefreshVisibility()
+        updateSidebarToolbarVisibility()
         if !settings.visible {
             previewRequested = false
             if focusIsInSidebar { document.window.makeFirstResponder(document.editor) }
@@ -532,21 +550,25 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let animation = beginSidebarTransition()
         if focusIsInSidebar { document.window.makeFirstResponder(document.editor) }
         settings.visible = false
-        updateRefreshVisibility()
+        updateSidebarToolbarVisibility()
         previewRequested = false
         setSidebarCollapsed(true, animate: true, transition: animation)
         refreshDecorations()
         schedulePreferencesWrite()
     }
 
-    private func updateRefreshVisibility() {
+    private func updateSidebarToolbarVisibility() {
         let hidden = !settings.visible || sidebarItem.isCollapsed || sidebarAnimating
-        guard let item = document.window.toolbar?.items.first(where: { $0.itemIdentifier == Self.refreshItem }),
-              item.isHidden != hidden else { return }
+        guard let toolbar = document.window.toolbar else { return }
+        let items = toolbar.items.filter { item in
+            (item.itemIdentifier == Self.refreshItem || item.itemIdentifier == Self.sidebarMenuItem) &&
+                item.isHidden != hidden
+        }
+        guard !items.isEmpty else { return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
             context.allowsImplicitAnimation = false
-            item.isHidden = hidden
+            for item in items { item.isHidden = hidden }
         }
     }
 
@@ -573,7 +595,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         } else if canAnimate {
             // AppKit provides the overlay sidebar when the window cannot fit both panes.
             sidebarAnimating = true
-            updateRefreshVisibility()
+            updateSidebarToolbarVisibility()
             NSAnimationContext.runAnimationGroup { _ in
                 sidebarItem.animator().isCollapsed = collapsed
             } completionHandler: { [weak self] in
@@ -588,7 +610,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     private func animateDivider(to position: CGFloat, openWidth: CGFloat, animated: Bool, transition: UInt64) {
         sidebarAnimating = true
-        updateRefreshVisibility()
+        updateSidebarToolbarVisibility()
         if contentWidth?.isActive != true {
             // The sidebar clips its contents as the native divider moves.
             contentTrailing?.isActive = false
@@ -622,7 +644,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
         sidebarAnimating = false
         document.window.layoutIfNeeded()
-        updateRefreshVisibility()
+        updateSidebarToolbarVisibility()
         restoreEditorAnchor()
         // AppKit also reconciles its text viewport after focus and split changes.
         Task { @MainActor [weak self] in
@@ -690,6 +712,11 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     @objc private func toggleReplaceSection(_ sender: Any?) { perform(.toggleReplace) }
     @objc private func replaceAllMatches(_ sender: Any?) { perform(.replaceAll) }
     @objc private func refreshSearch(_ sender: Any?) { perform(.refresh) }
+
+    @objc private func selectSearchSidebar(_ sender: Any?) {
+        document.requestAutosave()
+        present(focusing: findInput.input, animate: true)
+    }
 
     @objc private func changeOptions(_ sender: Any?) {
         settings.options = FindOptions(caseSensitive: matchCase.state == .on, wholeWord: wholeWord.state == .on,

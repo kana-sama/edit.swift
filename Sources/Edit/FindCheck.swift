@@ -142,6 +142,16 @@ enum FindCheck {
 
         let query = try require(window.firstResponder as? NSTextView, "Find focuses its input")
         query.insertText("checksum", replacementRange: NSRange(location: 0, length: query.string.utf16.count))
+        let picker = try require(
+            window.toolbar?.items.first { $0.itemIdentifier.rawValue == "Edit.SidebarMenu" } as? NSMenuToolbarItem,
+            "the sidebar header contains a native menu"
+        )
+        try expect(!picker.isHidden && picker.menu.items.map(\.title) == ["Search"] &&
+                   picker.menu.items.first?.state == .on, "Search is the active sidebar menu entry")
+        window.makeFirstResponder(editor)
+        picker.menu.performActionForItem(at: 0)
+        try expect(window.firstResponder === query && query.string == "checksum",
+                   "selecting Search focuses Find and preserves the query")
         document.performFind(.replace)
         let replacement = try require(window.firstResponder as? NSTextView, "Replace focuses its input")
         replacement.insertText("digest", replacementRange: NSRange(location: 0, length: replacement.string.utf16.count))
@@ -208,6 +218,7 @@ enum FindCheck {
 
         document.performFind(.toggleSidebar)
         await Task.yield()
+        try expect(picker.isHidden, "the menu is hidden with the sidebar")
         clip.scroll(to: NSPoint(x: 140, y: 40))
         document.scrollView.reflectScrolledClipView(clip)
         let scrolled = clip.bounds.origin
@@ -215,6 +226,7 @@ enum FindCheck {
         await Task.yield()
         try expect(abs(clip.bounds.origin.x - scrolled.x) < 1,
                    "reopening the sidebar preserves a nonzero horizontal scroll offset")
+        try expect(!picker.isHidden, "reopening the sidebar restores its menu")
     }
 
     private static func checkSidebarReversal(in document: DocumentWindow) async throws {
