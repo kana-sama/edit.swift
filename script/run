@@ -1,0 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+./script/build
+exec /usr/bin/open -n "${EDIT_BUILD_DIR:-$PWD/.build}/app/debug/Edit.app"

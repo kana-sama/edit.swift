@@ -1,0 +1,40 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+source script/app-bundle.sh
+
+configuration="${1:-debug}"
+case "$configuration" in
+    debug|release) ;;
+    *) printf 'Usage: %s [debug|release]\n' "$0" >&2; exit 2 ;;
+esac
+
+build_dir="${EDIT_BUILD_DIR:-$PWD/.build}"
+bundle_name=Edit
+if [[ "${EDIT_AGENT_BUILD:-0}" == 1 ]]; then
+    bundle_name='Edit Agent'
+fi
+
+swift_options=(--scratch-path "$build_dir" --manifest-cache local --configuration "$configuration")
+swift build "${swift_options[@]}" --product Edit --disable-index-store
+bin_path="$(swift build "${swift_options[@]}" --show-bin-path)"
+
+output="$build_dir/app/$configuration"
+mkdir -p "$output"
+stage="$(mktemp -d "$output/.edit-bundle.XXXXXX")"
+trap 'rm -rf -- "$stage"' EXIT
+app="$stage/$bundle_name.app"
+mkdir -p "$app/Contents/MacOS"
+cp -c "$bin_path/Edit" "$app/Contents/MacOS/Edit"
+cp resources/Info.plist "$app/Contents/Info.plist"
+if [[ "$bundle_name" == 'Edit Agent' ]]; then
+    /usr/libexec/PlistBuddy \
+        -c 'Set :CFBundleIdentifier dev.edit-swift.Edit.agent' \
+        -c 'Set :CFBundleName Edit Agent' \
+        -c 'Set :CFBundleDisplayName Edit Agent' \
+        -c 'Add :LSBackgroundOnly bool true' \
+        "$app/Contents/Info.plist"
+fi
+
+sign_app "$app"
+publish_app "$app" "$output/$bundle_name.app"

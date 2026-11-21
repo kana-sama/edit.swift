@@ -1,0 +1,22 @@
+#!/bin/bash
+set -euo pipefail
+if (( $# > 1 )); then
+    printf 'Usage: %s [screenshot-path]\n' "$0" >&2
+    exit 2
+fi
+
+screenshot="${1:-}"
+if [[ -n "$screenshot" && "$screenshot" != /* ]]; then
+    screenshot="$PWD/$screenshot"
+fi
+cd "$(dirname "$0")/.."
+
+EDIT_AGENT_BUILD=1 ./script/build
+agent_app="${EDIT_BUILD_DIR:-$PWD/.build}/app/debug/Edit Agent.app"
+profile="$(mktemp -d)"
+trap 'rm -rf -- "$profile"' EXIT
+if [[ -n "$screenshot" ]]; then
+    TMPDIR="$profile/" "$agent_app/Contents/MacOS/Edit" --agent-check "$screenshot"
+else
+    TMPDIR="$profile/" "$agent_app/Contents/MacOS/Edit" --agent-check
+fi

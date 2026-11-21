@@ -1,0 +1,26 @@
+#!/bin/bash
+set -euo pipefail
+application_directory="${1:-$HOME/Applications}"
+mkdir -p "$application_directory"
+application_directory="$(cd "$application_directory" && pwd -P)"
+cd "$(dirname "$0")/.."
+source script/app-bundle.sh
+
+destination="$application_directory/Edit.app"
+if [[ -e "$destination" || -L "$destination" ]]; then
+    bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
+        "$destination/Contents/Info.plist" 2>/dev/null || true)"
+    if [[ -L "$destination" || "$bundle_id" != dev.edit-swift.Edit ]]; then
+        printf 'Another application already occupies %s\n' "$destination" >&2
+        exit 1
+    fi
+fi
+
+./script/build release
+stage="$(mktemp -d "$application_directory/.edit-install.XXXXXX")"
+trap 'rm -rf -- "$stage"' EXIT
+app="$stage/Edit.app"
+cp -cR "${EDIT_BUILD_DIR:-$PWD/.build}/app/release/Edit.app" "$app"
+verify_app "$app"
+publish_app "$app" "$destination"
+printf 'Installed %s\n' "$destination"
