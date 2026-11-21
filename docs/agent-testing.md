@@ -22,4 +22,4 @@ Prefer process or model checks when a window is unnecessary. Test the real imple
 - Use synthetic files and a disposable profile. Identify the exact test instance before controlling it or closing it.
 - Verify quiet behavior without changing global macOS settings or interacting with the owner's running editor.
 
-Capture screenshots from the running test UI under the same isolation rules when review or the README needs them. If an operation would interrupt the owner, stop that operation and report the specific blocker.
+Use temporary captures of the running test UI under the same isolation rules when they help investigate a visual issue. If an operation would interrupt the owner, stop that operation and report the specific blocker.

@@ -12,7 +12,7 @@ Before changing revisions or integrating work, check the working state and ident
 
 ## Change ownership and status
 
-Build on the current tip and keep completed work on a linear history. Give each feature one owning commit titled `feat(feat-id): desc` and one living specification. Put its implementation, specification, and visual material together. Prepare unfinished work in the working copy. The initial `feat(init)` contains the skeleton, instructions, and build infrastructure.
+Build on the current tip and keep completed work on a linear history. Give each feature one owning commit titled `feat(feat-id): desc` and one living specification. Keep its implementation and specification together. Prepare unfinished work in the working copy. The initial `feat(init)` contains the skeleton, instructions, and build infrastructure.
 
 Use these descriptions for subsequent commits. The bracketed scope is optional.
 

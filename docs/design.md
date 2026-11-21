@@ -4,4 +4,4 @@ Use standard AppKit window controls, menus, toolbars, file panels, dialogs, and 
 
 Use system appearance, semantic colors, text styles, control metrics, and SF Symbols for interface chrome. Respect platform preferences for contrast and reduced transparency. Keep persistent controls focused on actions the owner needs.
 
-Record app-wide visual rules here when they are used across features. Document a feature's layout, controls, interaction states, and selected visual materials in its own specification.
+Record app-wide visual rules here when they are used across features. Record the feature's layout, controls, and interaction states in its own specification.

@@ -16,7 +16,7 @@ Research reference software when it affects a decision. BriskEdit is useful prio
 
 ## Visual design
 
-Follow the [shared design](design.md) for app-wide rules. Store feature-specific decisions in its specification and supporting materials in its `design/` directory. Record the selected option when alternatives mattered. Use a mockup when it helps the owner distinguish materially different designs. Use a small native trial when focus, scrolling, or dragging determines which design will work.
+Follow the [shared design](design.md) for app-wide rules. Record feature-specific decisions in the owning specification. Record the selected option when alternatives mattered. Use a mockup when it helps the owner distinguish materially different designs. Use a small native trial when focus, scrolling, or dragging determines which design will work.
 
 For a design requested on its own, hand off the design for review. When work has implementation authorization, use the agreed appearance and established native controls. Consult the owner before choosing a materially different visual direction.
 
@@ -44,9 +44,7 @@ When handing off an implementation for review or asking the owner to test, give 
 
 ## README maintenance
 
-Keep the README short. Document the build, launch, check, and install commands and link to each available feature's specification. Update the README in the feature change when capabilities or commands change.
-
-Every feature with a visible interface requires a representative README screenshot captured from the running implementation with synthetic data under the [quiet test rules](agent-testing.md). Store it in the feature's `design/` directory and use a relative link with meaningful alt text. Crop to show the relevant UI with enough context. Before completion, review the rendered README, verify links and commands, and confirm that the screenshot matches the feature at that revision. Report anything that prevented a required capture or inspection.
+Keep the README focused on setup and the build, launch, check, and install commands. Update it when those instructions change. Document feature behavior in the owning specification.
 
 ## Maintaining these instructions
 

@@ -1,8 +1,6 @@
 # Edit
 
-A personal macOS text editor in Swift and AppKit. [Editor](docs/features/editor/spec.md) provides native plain-text editing, line commands, and scrolling. [Files](docs/features/files/spec.md) opens and saves UTF-8 text, with one document per window and draft recovery on relaunch. See the [project principles](docs/principles.md).
-
-![Edit with a named file open in a native macOS window](docs/features/files/design/screenshot.png)
+A personal macOS text editor in Swift and AppKit.
 
 ## Build and run
 
@@ -18,4 +16,4 @@ Requires macOS 27 and Apple Command Line Tools with the macOS 27 SDK and Swift 6
 
 The app build reuses SDK modules under `.local/swift-sdk` even when `.build` is recreated.
 
-Use Command-O to open a file, Command-S to save, and Shift-Command-S to save under a new name. You can also choose Edit in Finder’s Open With menu. When Edit is already open, `./script/run` reuses that instance.
+When Edit is already open, `./script/run` reuses that instance.
