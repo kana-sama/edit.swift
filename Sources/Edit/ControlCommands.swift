@@ -5,12 +5,17 @@ struct ControlCommand {
     let id: String
     let title: String
     let item: NSMenuItem
+    var documentOnly = false
+    var displayedShortcut: String?
 
     var result: ControlEntry {
         ControlEntry(id: id, title: title, shortcut: shortcut)
     }
 
     private var shortcut: String? {
+        if let displayedShortcut { return displayedShortcut }
+        if item.action == #selector(EditorTextView.skipNextOccurrence(_:)) { return "⌘K ⌘D" }
+        if item.action == #selector(EditorTextView.outdentLines(_:)) { return "⌘[ · ⇧Tab" }
         guard !item.keyEquivalent.isEmpty else { return nil }
         let flags = item.keyEquivalentModifierMask
         let symbols: [(NSEvent.ModifierFlags, String)] = [(.control, "⌃"), (.option, "⌥"), (.shift, "⇧"), (.command, "⌘")]
@@ -22,6 +27,9 @@ struct ControlCommand {
 
     func isAvailable(in document: DocumentWindow, focus: NSResponder?) -> Bool {
         guard let action = item.action, !item.isHidden else { return false }
+        if documentOnly {
+            return document.window.attachedSheet == nil && document.editor.responds(to: action)
+        }
         if let target = item.target as? NSUserInterfaceValidations {
             return target.validateUserInterfaceItem(item)
         }
@@ -38,8 +46,9 @@ struct ControlCommand {
         return true
     }
 
-    func run() {
+    func run(in document: DocumentWindow) {
         guard let action = item.action else { return }
+        if documentOnly { document.window.makeFirstResponder(document.editor) }
         NSApplication.shared.sendAction(action, to: item.target, from: item)
     }
 
@@ -47,6 +56,47 @@ struct ControlCommand {
         menu.items.flatMap { top -> [ControlCommand] in
             guard let submenu = top.submenu, top.title != "Help" else { return [] }
             return commands(in: submenu, prefix: top.title)
+        }
+    }
+
+    static func editorCommands(for document: DocumentWindow) -> [ControlCommand] {
+        let nativeActions: [(String, String, String)] = [
+            ("Insert Line Break", "insertNewline:", "Return"),
+            ("Indent at Caret or Selection", "insertTab:", "Tab"),
+            ("Delete Backward", "deleteBackward:", "⌫"),
+            ("Delete Forward", "deleteForward:", "⌦"),
+            ("Delete Word Backward", "deleteWordBackward:", "⌥⌫"),
+            ("Delete Word Forward", "deleteWordForward:", "⌥⌦"),
+            ("Delete to Beginning of Line", "deleteToBeginningOfLine:", "⌘⌫"),
+            ("Delete to End of Line", "deleteToEndOfLine:", "⌘⌦"),
+            ("Move Caret Left", "moveLeft:", "←"), ("Move Caret Right", "moveRight:", "→"),
+            ("Move Caret Up", "moveUp:", "↑"), ("Move Caret Down", "moveDown:", "↓"),
+            ("Move to Previous Word Start", "moveWordLeft:", "⌥←"),
+            ("Move to Next Word End", "moveWordRight:", "⌥→"),
+            ("Move to Beginning of Line", "moveToBeginningOfLine:", "⌘←"),
+            ("Move to End of Line", "moveToEndOfLine:", "⌘→"),
+            ("Move to Beginning of Document", "moveToBeginningOfDocument:", "⌘↑"),
+            ("Move to End of Document", "moveToEndOfDocument:", "⌘↓"),
+            ("Extend Selection Left", "moveLeftAndModifySelection:", "⇧←"),
+            ("Extend Selection Right", "moveRightAndModifySelection:", "⇧→"),
+            ("Extend Selection Up", "moveUpAndModifySelection:", "⇧↑"),
+            ("Extend Selection Down", "moveDownAndModifySelection:", "⇧↓"),
+            ("Extend Selection to Previous Word Start", "moveWordLeftAndModifySelection:", "⌥⇧←"),
+            ("Extend Selection to Next Word End", "moveWordRightAndModifySelection:", "⌥⇧→"),
+            ("Extend Selection to Beginning of Line", "moveToBeginningOfLineAndModifySelection:", "⇧⌘←"),
+            ("Extend Selection to End of Line", "moveToEndOfLineAndModifySelection:", "⇧⌘→"),
+            ("Extend Selection to Beginning of Document", "moveToBeginningOfDocumentAndModifySelection:", "⇧⌘↑"),
+            ("Extend Selection to End of Document", "moveToEndOfDocumentAndModifySelection:", "⇧⌘↓"),
+            ("Scroll Page Up", "scrollPageUp:", "Page Up"), ("Scroll Page Down", "scrollPageDown:", "Page Down"),
+            ("Extend Selection One Page Up", "pageUpAndModifySelection:", "⇧Page Up"),
+            ("Extend Selection One Page Down", "pageDownAndModifySelection:", "⇧Page Down"),
+            ("Scroll to Beginning of Document", "scrollToBeginningOfDocument:", "Home"),
+            ("Scroll to End of Document", "scrollToEndOfDocument:", "End")
+        ]
+        return nativeActions.map { title, selector, shortcut in
+            let item = NSMenuItem(title: title, action: Selector(selector), keyEquivalent: "")
+            item.target = document.editor
+            return ControlCommand(id: selector, title: title, item: item, documentOnly: true, displayedShortcut: shortcut)
         }
     }
 

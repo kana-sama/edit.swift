@@ -271,7 +271,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             return entries
         }
         guard let menu = NSApplication.shared.mainMenu else { return [] }
-        let available = (ControlCommand.fromMenu(menu) + ControlCommand.searchCommands(for: app)).filter {
+        let available = (ControlCommand.fromMenu(menu) + ControlCommand.editorCommands(for: document)
+                         + ControlCommand.searchCommands(for: app)).filter {
             $0.isAvailable(in: document, focus: originalFocus)
         }
         let arranged = history.arrange(available)
@@ -382,7 +383,9 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
         guard table.numberOfRows == 0, !feedback.isHidden else { throw CheckFailure.invalidPanel }
         configure(.commands)
         let commands = sourceEntries()
-        guard !commands.isEmpty, ControlMatching.rank(commands, query: "save").first?.entry.title == "File: Save" else {
+        guard ControlMatching.rank(commands, query: "save").first?.entry.title == "File: Save",
+              ControlMatching.rank(commands, query: "sva").first?.entry.title == "File: Save As…",
+              commands.contains(where: { $0.title == "Move Caret Left" && $0.shortcut == "←" }) else {
             throw CheckFailure.invalidPanel
         }
         configure(.languages)
@@ -448,7 +451,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             return
         }
         if command.item.action == #selector(Edit.toggleFindSidebar(_:)) {
-            command.run()
+            command.run(in: document)
             return
         }
         if command.item.action == #selector(Edit.showLanguageModes(_:)) {
@@ -456,7 +459,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSSearchFieldDelegate, NST
             return
         }
         dismiss(restoreFocus: true)
-        command.run()
+        command.run(in: document)
     }
 
     @objc private func dismissRecent(_ button: NSButton) {
