@@ -1,10 +1,79 @@
+import CoreFoundation
 import CryptoKit
 import Darwin
 import Foundation
 
+enum FileTextEncoding: String, CaseIterable, Codable, Sendable {
+    case utf8, utf16LE, utf16BE, utf32LE, utf32BE
+    case macOSRoman, windowsCP1251, windowsCP1252, isoLatin1, shiftJIS
+
+    private static let unicodeBOMs: [Self] = [.utf32LE, .utf32BE, .utf8, .utf16LE, .utf16BE]
+
+    var foundation: String.Encoding {
+        switch self {
+        case .utf8: .utf8
+        case .utf16LE: .utf16LittleEndian
+        case .utf16BE: .utf16BigEndian
+        case .utf32LE: .utf32LittleEndian
+        case .utf32BE: .utf32BigEndian
+        case .macOSRoman: .macOSRoman
+        case .windowsCP1251: .windowsCP1251
+        case .windowsCP1252: .windowsCP1252
+        case .isoLatin1: .isoLatin1
+        case .shiftJIS: .shiftJIS
+        }
+    }
+
+    var title: String { NSString.localizedName(of: foundation.rawValue) }
+
+    var bom: [UInt8] {
+        switch self {
+        case .utf8: [0xEF, 0xBB, 0xBF]
+        case .utf16LE: [0xFF, 0xFE]
+        case .utf16BE: [0xFE, 0xFF]
+        case .utf32LE: [0xFF, 0xFE, 0x00, 0x00]
+        case .utf32BE: [0x00, 0x00, 0xFE, 0xFF]
+        default: []
+        }
+    }
+
+    static func fromBOM(in data: Data) -> Self? {
+        unicodeBOMs.first { data.starts(with: $0.bom) }
+    }
+
+    private var coreFoundation: CFStringEncoding {
+        CFStringConvertNSStringEncodingToEncoding(foundation.rawValue)
+    }
+
+    var attributeValue: String {
+        let name = CFStringConvertEncodingToIANACharSetName(coreFoundation) as String? ?? ""
+        return "\(name);\(coreFoundation)"
+    }
+
+    static func fromAttribute(_ attribute: String) -> Self? {
+        let fields = attribute.split(separator: ";", omittingEmptySubsequences: false)
+        if fields.count > 1, let value = UInt32(fields[1].prefix(while: { $0.isNumber })),
+           let encoding = allCases.first(where: { $0.coreFoundation == value }) {
+            return encoding
+        }
+        guard let name = fields.first, !name.isEmpty else { return nil }
+        let value = CFStringConvertIANACharSetNameToEncoding(String(name) as CFString)
+        return allCases.first { $0.coreFoundation == value }
+    }
+}
+
 struct FileFormat: Codable, Sendable, Equatable {
     var hasBOM: Bool = false
     var lineEnding: String = "\n"
+    // A missing encoding in older session drafts represents UTF-8.
+    var storedEncoding: FileTextEncoding?
+    var encoding: FileTextEncoding { storedEncoding ?? .utf8 }
+
+    func using(_ newEncoding: FileTextEncoding) -> Self {
+        guard newEncoding != encoding else { return self }
+        return Self(hasBOM: newEncoding != .utf8 && !newEncoding.bom.isEmpty, lineEnding: lineEnding,
+                    storedEncoding: newEncoding == .utf8 ? nil : newEncoding)
+    }
 }
 
 enum FileRevision: Codable, Sendable, Equatable {
@@ -21,7 +90,8 @@ enum FileBufferError: LocalizedError {
     case invalidPath(URL)
     case notRegularFile(URL)
     case notDirectory(URL)
-    case invalidUTF8(URL)
+    case invalidText(URL, FileTextEncoding)
+    case unrepresentableText(FileTextEncoding)
 
     var errorDescription: String? {
         switch self {
@@ -33,8 +103,10 @@ enum FileBufferError: LocalizedError {
             "“\(url.lastPathComponent)” is not a regular file."
         case .notDirectory(let url):
             "“\(url.lastPathComponent)” is not a directory."
-        case .invalidUTF8(let url):
-            "“\(url.lastPathComponent)” is not a UTF-8 text file."
+        case .invalidText(let url, let encoding):
+            "“\(url.lastPathComponent)” could not be read as \(encoding.title)."
+        case .unrepresentableText(let encoding):
+            "Some characters cannot be saved as \(encoding.title). Choose an encoding that supports them."
         }
     }
 }
@@ -45,7 +117,7 @@ struct FileBuffer: Sendable {
     let format: FileFormat
     let revision: FileRevision
 
-    private static let bom: [UInt8] = [0xEF, 0xBB, 0xBF]
+    private static let encodingAttribute = "com.apple.TextEncoding"
 
     static func canonicalURL(_ url: URL) -> URL {
         guard url.isFileURL else { return url }
@@ -64,20 +136,26 @@ struct FileBuffer: Sendable {
     static func read(_ url: URL, allowMissing: Bool = false) throws -> FileBuffer {
         guard url.isFileURL else { throw FileBufferError.invalidPath(url) }
         let url = canonicalURL(url)
-        guard let data = try diskContents(at: url) else {
+        guard let disk = try diskContents(at: url, readEncoding: true) else {
             guard allowMissing else { throw fileError(ENOENT, url) }
             try requireDirectory(url.deletingLastPathComponent())
             return FileBuffer(url: url, text: "", format: FileFormat(), revision: .missing)
         }
 
-        let hasBOM = data.starts(with: bom)
-        let contents = hasBOM ? data.dropFirst(bom.count) : data
-        guard let text = String(validating: contents, as: UTF8.self) else {
-            throw FileBufferError.invalidUTF8(url)
+        let taggedBOM = disk.encoding.flatMap { encoding in
+            !encoding.bom.isEmpty && disk.bytes.starts(with: encoding.bom) ? encoding : nil
         }
+        let bomEncoding = taggedBOM ?? FileTextEncoding.fromBOM(in: disk.bytes)
+        let encoding = bomEncoding ?? disk.encoding ?? .utf8
+        let contents = disk.bytes.dropFirst(bomEncoding?.bom.count ?? 0)
+        let decoded = encoding == .utf8
+            ? String(validating: contents, as: UTF8.self)
+            : String(data: contents, encoding: encoding.foundation)
+        guard let text = decoded else { throw FileBufferError.invalidText(url, encoding) }
 
-        let format = FileFormat(hasBOM: hasBOM, lineEnding: dominantLineEnding(in: text) ?? "\n")
-        return FileBuffer(url: url, text: text, format: format, revision: FileRevision(bytes: data))
+        let format = FileFormat(hasBOM: bomEncoding != nil, lineEnding: dominantLineEnding(in: text) ?? "\n",
+                                storedEncoding: encoding == .utf8 ? nil : encoding)
+        return FileBuffer(url: url, text: text, format: format, revision: FileRevision(bytes: disk.bytes))
     }
 
     static func save(
@@ -90,8 +168,18 @@ struct FileBuffer: Sendable {
         let url = canonicalURL(url)
         let parent = url.deletingLastPathComponent()
 
-        var bytes = format.hasBOM ? Data(bom) : Data()
-        bytes.append(contentsOf: text.utf8)
+        let encoding = format.encoding
+        var bytes = format.hasBOM ? Data(encoding.bom) : Data()
+        if encoding == .utf8 {
+            bytes.append(contentsOf: text.utf8)
+        } else {
+            guard let encoded = text.data(using: encoding.foundation, allowLossyConversion: false),
+                  let roundTrip = String(data: encoded, encoding: encoding.foundation),
+                  roundTrip.utf16.elementsEqual(text.utf16) else {
+                throw FileBufferError.unrepresentableText(encoding)
+            }
+            bytes.append(encoded)
+        }
         let revision = FileRevision(bytes: bytes)
         let temporary = parent.appendingPathComponent(".edit-\(UUID().uuidString).tmp", isDirectory: false)
         let descriptor = try withPath(temporary) { open($0, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o666) }
@@ -103,6 +191,15 @@ struct FileBuffer: Sendable {
             _ = try? withPath(temporary) { unlink($0) }
         }
         try handle.write(contentsOf: bytes)
+        let ambiguousBOM = encoding == .utf16LE && bytes.starts(with: FileTextEncoding.utf32LE.bom)
+        if encoding != .utf8 && (!format.hasBOM || ambiguousBOM) {
+            // The macOS encoding hint lets ambiguous text reopen without guessing.
+            let metadata = Data(encoding.attributeValue.utf8)
+            let result = metadata.withUnsafeBytes {
+                fsetxattr(descriptor, encodingAttribute, $0.baseAddress, $0.count, 0, 0)
+            }
+            if result != 0 { throw fileError(errno, url) }
+        }
 
         let status = try fileStatus(at: url)
         if status != nil && expected != .missing { try requireWritableFile(url) }
@@ -118,7 +215,7 @@ struct FileBuffer: Sendable {
             if expected == .missing {
                 guard try fileStatus(at: url) == nil else { throw FileBufferError.changedOnDisk }
             } else {
-                guard let current = try diskContents(at: url), FileRevision(bytes: current) == expected else {
+                guard let current = try diskContents(at: url), FileRevision(bytes: current.bytes) == expected else {
                     throw FileBufferError.changedOnDisk
                 }
             }
@@ -137,9 +234,8 @@ struct FileBuffer: Sendable {
             }
         }
 
-        let savedFormat = FileFormat(
-            hasBOM: format.hasBOM, lineEnding: dominantLineEnding(in: text) ?? format.lineEnding
-        )
+        var savedFormat = format
+        savedFormat.lineEnding = dominantLineEnding(in: text) ?? format.lineEnding
         return FileBuffer(url: url, text: text, format: savedFormat, revision: revision)
     }
 
@@ -151,7 +247,9 @@ struct FileBuffer: Sendable {
         }
     }
 
-    private static func diskContents(at url: URL) throws -> Data? {
+    private static func diskContents(
+        at url: URL, readEncoding: Bool = false
+    ) throws -> (bytes: Data, encoding: FileTextEncoding?)? {
         guard try fileStatus(at: url) != nil else { return nil }
 
         // Nonblocking open keeps a concurrent replacement with a FIFO from blocking.
@@ -168,6 +266,7 @@ struct FileBuffer: Sendable {
         guard fstat(descriptor, &before) == 0 else { throw fileError(errno, url) }
         guard before.st_mode & S_IFMT == S_IFREG else { throw FileBufferError.notRegularFile(url) }
         let data = try handle.readToEnd() ?? Data()
+        let encoding = readEncoding ? encodingHint(from: descriptor) : nil
 
         var after = stat()
         guard fstat(descriptor, &after) == 0 else { throw fileError(errno, url) }
@@ -178,7 +277,18 @@ struct FileBuffer: Sendable {
               before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec else {
             throw FileBufferError.changedOnDisk
         }
-        return data
+        return (data, encoding)
+    }
+
+    private static func encodingHint(from descriptor: Int32) -> FileTextEncoding? {
+        let length = fgetxattr(descriptor, encodingAttribute, nil, 0, 0, 0)
+        guard length > 0, length <= 4096 else { return nil }
+        var bytes = Data(count: length)
+        let count = bytes.withUnsafeMutableBytes {
+            fgetxattr(descriptor, encodingAttribute, $0.baseAddress, $0.count, 0, 0)
+        }
+        guard count == length, let attribute = String(data: bytes, encoding: .utf8) else { return nil }
+        return FileTextEncoding.fromAttribute(attribute)
     }
 
     private static func fileStatus(at url: URL) throws -> stat? {

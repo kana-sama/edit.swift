@@ -5,10 +5,11 @@ import UniformTypeIdentifiers
 @MainActor
 final class UntitledCloseSheet: NSDocument {
     private let parent: NSWindow
-    private let saveDraft: (URL) async -> Bool
+    private let saveDraft: (URL, FileTextEncoding) async -> Bool
+    private lazy var encodingAccessory = SaveEncodingAccessory(selected: .utf8)
     private var closeReply: CheckedContinuation<Bool, Never>?
 
-    init(window: NSWindow, saveDraft: @escaping (URL) async -> Bool) {
+    init(window: NSWindow, saveDraft: @escaping (URL, FileTextEncoding) async -> Bool) {
         parent = window
         self.saveDraft = saveDraft
         super.init()
@@ -48,20 +49,14 @@ final class UntitledCloseSheet: NSDocument {
         panel.canSelectHiddenExtension = false
         panel.isExtensionHidden = false
 
-        let encoding = NSTextField(labelWithString: "Plain Text Encoding: Unicode (UTF-8)")
-        let size = encoding.fittingSize
-        encoding.frame = NSRect(origin: NSPoint(x: 20, y: 10), size: size)
-        let width = max(panel.frame.width, size.width + 40)
-        let row = NSView(frame: NSRect(x: 0, y: 0, width: width, height: size.height + 20))
-        row.addSubview(encoding)
-        panel.accessoryView = row
+        panel.accessoryView = encodingAccessory
         return true
     }
 
     override func save(to url: URL, ofType typeName: String, for saveOperation: SaveOperationType,
                        completionHandler: @escaping ((any Error)?) -> Void) {
         Task {
-            let didSave = await saveDraft(url)
+            let didSave = await saveDraft(url, encodingAccessory.selection)
             completionHandler(didSave ? nil : CocoaError(.userCancelled))
         }
     }

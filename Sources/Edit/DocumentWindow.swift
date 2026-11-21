@@ -139,7 +139,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     @discardableResult
-    func save(asNew: Bool = false, to selectedURL: URL? = nil) async -> Bool {
+    func save(asNew: Bool = false, to selectedURL: URL? = nil, encoding: FileTextEncoding? = nil) async -> Bool {
         guard !saving else { return false }
         saving = true
         defer {
@@ -153,11 +153,15 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
 
         var destination = selectedURL ?? fileURL
+        var saveFormat = format.using(encoding ?? format.encoding)
         if selectedURL == nil, destination == nil || asNew {
             guard !app.isAgentCheck else { return false }
             let panel = makeSavePanel()
+            let accessory = SaveEncodingAccessory(selected: saveFormat.encoding)
+            panel.accessoryView = accessory
             guard await response(to: panel) == .OK else { return false }
             destination = panel.url
+            saveFormat = saveFormat.using(accessory.selection)
         }
         guard let destination else { return false }
         let target = await Task.detached { FileBuffer.canonicalURL(destination) }.value
@@ -172,7 +176,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
         do {
             do {
-                try await write(text, to: target, expected: expected)
+                try await write(text, to: target, format: saveFormat, expected: expected)
             } catch FileBufferError.changedOnDisk {
                 guard !app.isAgentCheck else {
                     await showError("The file changed on disk.")
@@ -184,7 +188,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 alert.addButton(withTitle: "Cancel").keyEquivalent = "\r"
                 alert.addButton(withTitle: "Replace").hasDestructiveAction = true
                 guard await response(to: alert) == .alertSecondButtonReturn else { return false }
-                try await write(text, to: target, expected: nil)
+                try await write(text, to: target, format: saveFormat, expected: nil)
             }
             return true
         } catch {
@@ -193,8 +197,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    private func write(_ text: String, to target: URL, expected: FileRevision?) async throws {
-        let format = format
+    private func write(_ text: String, to target: URL, format: FileFormat, expected: FileRevision?) async throws {
         let file = try await Task.detached {
             try FileBuffer.save(text, to: target, format: format, expected: expected)
         }.value
@@ -250,7 +253,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
         defer { app.finishSave(to: target) }
         do {
-            try await write(editor.string, to: target, expected: revision)
+            try await write(editor.string, to: target, format: format, expected: revision)
         } catch FileBufferError.changedOnDisk {
             autosaveFailure = (generation, "The file changed on disk. Use Save to review whether to replace it.", false)
         } catch {
@@ -324,8 +327,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         } else if app.isAgentCheck {
             choice = .cancel
         } else if fileURL == nil {
-            let sheet = UntitledCloseSheet(window: window) { [self] destination in
-                await save(to: destination)
+            let sheet = UntitledCloseSheet(window: window) { [self] destination, encoding in
+                await save(to: destination, encoding: encoding)
             }
             choice = await sheet.confirmClose() ? .discard : .cancel
         } else {

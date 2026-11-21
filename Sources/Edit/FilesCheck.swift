@@ -113,6 +113,7 @@ enum FilesCheck {
         try expect(try Data(contentsOf: draftPath) == Data("Save the draft".utf8),
                    "Save writes an untitled draft to the chosen path")
 
+        try await checkEncodings(in: app, directory: directory)
         try await checkAutosaveAndNewBuffer(in: app, directory: directory)
 
         let preview = directory.appendingPathComponent("Meeting Notes.txt")
@@ -132,6 +133,52 @@ enum FilesCheck {
         sample.editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         sample.editor.refreshCurrentLine()
         return sample
+    }
+
+    private static func checkEncodings(in app: Edit, directory: URL) async throws {
+        let oldFormat = Data(#"{"hasBOM":true,"lineEnding":"\r\n"}"#.utf8)
+        let restored = try JSONDecoder().decode(FileFormat.self, from: oldFormat)
+        try expect(restored.encoding == .utf8 && restored.hasBOM && restored.lineEnding == "\r\n",
+                   "older sessions still restore UTF-8")
+
+        for encoding in FileTextEncoding.allCases {
+            let file = directory.appendingPathComponent(encoding.rawValue + ".txt")
+            let text: String
+            switch encoding {
+            case .utf8, .utf16BE, .utf32LE, .utf32BE: text = "Привет 😀\r\n"
+            case .utf16LE: text = "\0Привет 😀\r\n"
+            case .windowsCP1251: text = "Привет\r\n"
+            case .shiftJIS: text = "日本語\r\n"
+            case .macOSRoman, .windowsCP1252, .isoLatin1: text = "Café\r\n"
+            }
+            let format = FileFormat().using(encoding)
+            _ = try FileBuffer.save(text, to: file, format: format, expected: .missing)
+            let decoded = try FileBuffer.read(file)
+            try expect(decoded.text == text && decoded.format.encoding == encoding
+                       && decoded.format.hasBOM == format.hasBOM && decoded.format.lineEnding == "\r\n",
+                       "reopening preserves " + encoding.rawValue + " and CRLF")
+        }
+
+        let file = directory.appendingPathComponent("windowsCP1251.txt")
+        await app.openFiles([file])
+        let document = try resolve(app.documents.last)
+        document.editor.insertText("Мир ", replacementRange: document.editor.selectedRange())
+        document.requestAutosave()
+        try await waitFor("named autosave preserves the file's encoding") { !document.window.isDocumentEdited }
+        let savedText = "Мир Привет\r\n"
+        let expected = try resolve(savedText.data(using: .windowsCP1251))
+        try expect(try Data(contentsOf: file) == expected, "autosave writes Windows Cyrillic bytes")
+        var detected: UInt = 0
+        let reopened = try NSString(contentsOf: file, usedEncoding: &detected)
+        try expect(reopened as String == savedText && detected == String.Encoding.windowsCP1251.rawValue,
+                   "macOS recognizes the encoding hint")
+
+        do {
+            _ = try FileBuffer.save("😀", to: file, format: FileFormat().using(.windowsCP1251), expected: nil)
+            throw Failure("expected an incompatible encoding error")
+        } catch FileBufferError.unrepresentableText(.windowsCP1251) {
+            try expect(try Data(contentsOf: file) == expected, "encoding errors leave existing bytes intact")
+        }
     }
 
     private static func checkAutosaveAndNewBuffer(in app: Edit, directory: URL) async throws {

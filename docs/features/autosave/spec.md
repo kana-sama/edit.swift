@@ -1,6 +1,6 @@
 # Autosave
 
-Autosave writes changed text to the current file in the background. A buffer is eligible when it has a path and a known on-disk revision, including a known missing file opened by path. An untitled draft becomes eligible after its first successful Save. Autosave preserves UTF-8, the BOM, and line endings through the same writer used by Save.
+Autosave writes changed text to the current file in the background. A buffer is eligible when it has a path and a known on-disk revision, including a known missing file opened by path. An untitled draft becomes eligible after its first successful Save. Autosave preserves the current encoding, byte order mark, and line endings through the same writer used by Save.
 
 ## Triggers
 
