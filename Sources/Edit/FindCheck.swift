@@ -391,8 +391,8 @@ enum FindCheck {
         scroll.scrollToVisibleContentOrigin(origin)
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         let icon = FileIcons.image(for: url, appearance: window.effectiveAppearance)
-        try expect(icon != nil && window.standardWindowButton(.documentIconButton)?.image === icon,
-                   "the title proxy retains its Seti icon with the sidebar toolbar installed")
+        try expect(icon != nil && HeaderCheck.fileIcon(in: document)?.image === icon,
+                   "the title bar retains its Seti icon with the sidebar toolbar installed")
 
         let query = try require(window.firstResponder as? NSTextView, "Find focuses its input")
         query.insertText("checksum", replacementRange: NSRange(location: 0, length: query.string.utf16.count))

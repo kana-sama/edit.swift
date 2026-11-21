@@ -361,7 +361,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, Self.sidebarMenuItem, .sidebarTrackingSeparator]
+        [.flexibleSpace, Self.sidebarMenuItem, .sidebarTrackingSeparator] + DocumentTitleBar.itemIdentifiers
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -370,6 +370,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        if let item = document.titleBar.makeItem(identifier) { return item }
         guard identifier == Self.sidebarMenuItem else { return nil }
         let item = NSMenuToolbarItem(itemIdentifier: identifier)
         item.isBordered = true

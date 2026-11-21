@@ -31,15 +31,15 @@ enum FolderCheck {
             document.folderURL?.path == canonicalProject && document.fileURL == FileBuffer.canonicalURL(readme)
         }
         try expect(document.editor.string == "Preferred README" && app.documents.count == count
-                   && document.window.frame == frame && document.window.title == "README.MD — Project One",
+                   && document.window.frame == frame && document.window.title == "Project One — README.MD",
                    "opening a folder preserves the window and updates its native title")
-        try expect(document.window.representedURL == document.fileURL, "folder title keeps the file's native proxy")
+        try expect(document.window.representedURL == document.fileURL, "folder title keeps the file's represented URL")
         try await ControlPanel(app: app).checkFolder(in: document, file: FileBuffer.canonicalURL(nested))
         try expect(document.folderURL?.path == canonicalProject && document.fileURL == FileBuffer.canonicalURL(nested),
                    "a file chosen in Control keeps its folder")
 
         _ = try await app.openFile(outside, in: document)
-        try expect(document.folderURL?.path == canonicalProject && document.window.title == "Notes.txt — Project One",
+        try expect(document.folderURL?.path == canonicalProject && document.window.title == "Project One — Notes.txt",
                    "opening an external file keeps the folder")
         let remembered = await app.recentFiles.lastFile(in: project)
         try expect(remembered == FileBuffer.canonicalURL(nested), "external files leave the folder's last file alone")
@@ -53,10 +53,10 @@ enum FolderCheck {
         let scratch = app.makeDocument()
         _ = try await app.openFile(empty, in: scratch)
         try expect(scratch.fileURL == nil && scratch.editor.string.isEmpty
-                   && scratch.window.title == "Untitled — Empty Project", "a folder with no README opens empty")
+                   && scratch.window.title == "Empty Project — Untitled", "a folder with no README opens empty")
         scratch.editor.insertText("Recover this scratch buffer", replacementRange: scratch.editor.selectedRange())
         let cancelled = try await app.openFile(other, in: scratch)
-        try expect(cancelled == nil && scratch.window.title == "Untitled — Empty Project"
+        try expect(cancelled == nil && scratch.window.title == "Empty Project — Untitled"
                    && scratch.editor.string == "Recover this scratch buffer", "Cancel keeps the folder and draft")
 
         let missing = app.makeDocument()
@@ -77,7 +77,7 @@ enum FolderCheck {
                    "restore the original file and frame in a folder")
         try expect(recovered[1].editor.string == "Recover this scratch buffer" && recovered[1].window.isDocumentEdited,
                    "restore the unsaved draft within its folder")
-        try expect(recovered[2].fileURL == nil && recovered[2].window.title == "Untitled — Project Two",
+        try expect(recovered[2].fileURL == nil && recovered[2].window.title == "Project Two — Untitled",
                    "restore a folder window after its named file is deleted")
 
         let newReadme = try write("New fallback", to: other.appending(path: "README.txt"))

@@ -18,8 +18,11 @@ final class SyntaxHighlighting {
     func update(language: SyntaxLanguage, immediate: Bool) {
         cancelPending()
         let request = generation
-        spans = []
-        if immediate { clearColors() }
+        if immediate {
+            display([], refreshVisibleLayout: true)
+        } else {
+            spans = []
+        }
         guard language != .plainText else { return }
 
         task = Task { @MainActor [weak self] in
@@ -40,7 +43,7 @@ final class SyntaxHighlighting {
             await withTaskCancellationHandler {
                 for await result in updates {
                     guard !Task.isCancelled, let self, self.generation == request else { break }
-                    self.display(result)
+                    self.display(result, refreshVisibleLayout: immediate)
                     self.stopProgress()
                 }
             } onCancel: {
@@ -64,7 +67,7 @@ final class SyntaxHighlighting {
 
     func cancel(clearingColors: Bool = true) {
         cancelPending()
-        if clearingColors { display([]) }
+        if clearingColors { display([], refreshVisibleLayout: true) }
     }
 
     private func cancelPending() {
@@ -74,11 +77,11 @@ final class SyntaxHighlighting {
         stopProgress()
     }
 
-    private func display(_ result: [SyntaxSpan]) {
+    private func display(_ result: [SyntaxSpan], refreshVisibleLayout: Bool = false) {
         let needsRedraw = hasRenderingColors || !result.isEmpty
         clearColors()
         spans = result
-        if needsRedraw { redrawSyntax() }
+        if needsRedraw { redrawSyntax(refreshVisibleLayout: refreshVisibleLayout) }
     }
 
     private func visibleRange() -> NSRange? {
@@ -91,13 +94,20 @@ final class SyntaxHighlighting {
         paint(fragment.rangeInElement, using: manager)
     }
 
-    private func redrawSyntax() {
+    private func redrawSyntax(refreshVisibleLayout: Bool) {
         guard let editor, let manager = editor.textLayoutManager else { return }
         let viewport = manager.textViewportLayoutController
+        let scroll = editor.enclosingScrollView
+        let origin = refreshVisibleLayout ? scroll?.visibleContentOrigin : nil
         if let visible = viewport.viewportRange {
+            // A new mode must update existing rendering surfaces even if the viewport hasn't moved.
+            if refreshVisibleLayout { manager.invalidateLayout(for: visible) }
             paint(visible, using: manager)
         }
         viewport.layoutViewport()
+        if let origin, let scroll, scroll.scrollToVisibleContentOrigin(origin) {
+            viewport.layoutViewport()
+        }
         editor.setNeedsDisplay(editor.visibleRect)
     }
 

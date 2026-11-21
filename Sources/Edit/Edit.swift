@@ -64,6 +64,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     receivedInitialSession = true
                     let folderWindow = try await FolderCheck.run(in: self)
                     try checkWindow(folderWindow, screenshot: nil)
+                    try await HeaderCheck.run(in: self)
                     print("Edit passed its native editing and file-session checks without activation.")
                     exit(EXIT_SUCCESS)
                 } catch {
@@ -166,8 +167,17 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     @objc func showCommandMode(_ sender: Any?) { showControl(.commands) }
     @objc func showLanguageModes(_ sender: Any?) { showControl(.languages) }
 
-    private func showControl(_ mode: ControlPanel.Mode) {
-        guard let document = activeDocument, !isQuitting else { return }
+    func checkHeaderLanguagePicker(in document: DocumentWindow) throws {
+        guard let controlPanel else { throw CocoaError(.featureUnsupported) }
+        try controlPanel.checkHeaderLanguagePicker(in: document)
+    }
+
+    func showLanguageModes(in document: DocumentWindow) {
+        showControl(.languages, in: document)
+    }
+
+    private func showControl(_ mode: ControlPanel.Mode, in source: DocumentWindow? = nil) {
+        guard let document = source ?? activeDocument, !isQuitting else { return }
         let panel = controlPanel ?? ControlPanel(app: self)
         controlPanel = panel
         panel.toggle(in: document, mode: mode)

@@ -170,13 +170,13 @@ enum FilesCheck {
         try expect(second.window !== first.window && second.editor.string == "version = 4",
                    "an explicitly created second window keeps its independent buffer")
         let icon = FileIcons.image(for: target, appearance: first.window.effectiveAppearance)
-        try expect(icon != nil && first.window.standardWindowButton(.documentIconButton)?.image === icon,
-                   "the title proxy uses the same Seti image as the file list")
+        try expect(icon != nil && HeaderCheck.fileIcon(in: first)?.image === icon,
+                   "the title icon uses the same Seti image as the file list")
         first.setSyntaxLanguage(.rust)
         let rustIcon = FileIcons.image(for: target, appearance: first.window.effectiveAppearance,
                                       language: SyntaxLanguage.rust.iconIdentifier)
-        try expect(rustIcon !== icon && first.window.standardWindowButton(.documentIconButton)?.image === rustIcon,
-                   "the title proxy follows a manual language override")
+        try expect(rustIcon !== icon && HeaderCheck.fileIcon(in: first)?.image === rustIcon,
+                   "the title icon follows a manual language override")
 
         first.editor.insertText("# newest\n", replacementRange: NSRange(location: 0, length: 0))
         let saved = await first.save()

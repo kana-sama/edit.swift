@@ -10,6 +10,7 @@ enum SyntaxCheck {
     static func run(in app: Edit) async throws {
         try await checkFirstDraw(in: app, appearance: .aqua)
         try await checkFirstDraw(in: app, appearance: .darkAqua)
+        try await checkModeRepaint(in: app)
         try await Task.detached { try checkGrammars() }.value
         let document = app.makeDocument()
         defer { document.window.close() }
@@ -70,6 +71,87 @@ enum SyntaxCheck {
         scrollView.reflectScrolledClipView(clip)
         try expectDrawnColor(in: clip, primaryChannel: 0, after: "scrolling back to string literals")
         print("Syntax in the first frame of a \(source.utf8.count)-byte file: open \(opened), scroll \(scrolled).")
+    }
+
+    private static func checkModeRepaint(in app: Edit) async throws {
+        let document = app.makeDocument()
+        let window = document.window
+        let scroll = document.scrollView
+        let clip = scroll.contentView
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
+        let source = String(repeating: "// comment only in Rust\n\n# Title only in Markdown\n\n", count: 750)
+        // An ordered but invisible test window gives AppKit a live backing layer.
+        window.orderBack(nil)
+        defer { window.orderOut(nil) }
+        guard window.isVisible, !NSApp.isActive else { throw Failure("Could not prepare the quiet syntax repaint fixture.") }
+        document.editor.string = source
+        window.layoutIfNeeded()
+
+        try await waitForPaint(in: clip, language: .plainText)
+        scroll.scrollToVisibleContentOrigin(NSPoint(x: 0, y: 16_000))
+        try await waitForPaint(in: clip, language: .plainText)
+        let origin = scroll.visibleContentOrigin
+        document.setSyntaxLanguage(.rust)
+        try await waitForPaint(in: clip, language: .rust)
+        document.setSyntaxLanguage(.markdown)
+        try await waitForPaint(in: clip, language: .markdown)
+        document.setSyntaxLanguage(.rust)
+        document.setSyntaxLanguage(.plainText)
+        try await waitForPaint(in: clip, language: .plainText)
+        try await Task.sleep(for: .milliseconds(100))
+        guard try paintMatches(in: clip, language: .plainText),
+              scroll.visibleContentOrigin == origin, document.editor.string == source else {
+            throw Failure("Changing syntax mode did not preserve the live text viewport.")
+        }
+    }
+
+    private static func waitForPaint(in clip: NSClipView, language: SyntaxLanguage) async throws {
+        let deadline = ContinuousClock.now + .seconds(2)
+        repeat {
+            if try paintMatches(in: clip, language: language) { return }
+            try await Task.sleep(for: .milliseconds(16))
+        } while ContinuousClock.now < deadline
+        throw Failure("Switching to \(language.displayName) did not repaint the visible glyphs.")
+    }
+
+    private static func paintMatches(in clip: NSClipView, language: SyntaxLanguage) throws -> Bool {
+        let bounds = clip.bounds
+        guard let layer = clip.layer?.presentation() ?? clip.layer else { return false }
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: Int(bounds.width), pixelsHigh: Int(bounds.height),
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ) else { throw Failure("Could not inspect the editor's live backing layer.") }
+        bitmap.size = bounds.size
+        guard let graphics = NSGraphicsContext(bitmapImageRep: bitmap) else {
+            throw Failure("Could not create the live syntax graphics context.")
+        }
+        let context = graphics.cgContext
+        context.translateBy(x: 0, y: bounds.height)
+        context.scaleBy(x: 1, y: -1)
+        context.translateBy(x: -layer.bounds.minX, y: -layer.bounds.minY)
+        // Rendering the presentation layer samples the current pixels without requesting display.
+        layer.render(in: context)
+
+        var hasText = false
+        var hasGreen = false
+        var hasBlue = false
+        for y in stride(from: 48, to: min(220, bitmap.pixelsHigh), by: 3) {
+            for x in stride(from: 8, to: min(240, bitmap.pixelsWide), by: 3) {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                if color.greenComponent - max(color.redComponent, color.blueComponent) > 0.1 { hasGreen = true }
+                if color.blueComponent - max(color.redComponent, color.greenComponent) > 0.1 { hasBlue = true }
+                if min(color.redComponent, color.greenComponent, color.blueComponent) > 0.64 { hasText = true }
+            }
+        }
+        switch language {
+        case .rust: return hasGreen
+        case .markdown: return hasBlue && !hasGreen
+        default: return hasText && !hasGreen && !hasBlue
+        }
     }
 
     private static func expectDrawnColor(in clip: NSClipView, primaryChannel: Int, after action: String) throws {

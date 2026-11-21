@@ -755,6 +755,18 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
     }
 
+    func checkHeaderLanguagePicker(in document: DocumentWindow) throws {
+        guard app.isAgentCheck, self.document === document, mode == .languages,
+              entries.prefix(2).map(\.entry.title) == ["Auto Detect", "Plain Text"],
+              let row = entries.firstIndex(where: { $0.entry.id == SyntaxLanguage.rust.rawValue }) else {
+            throw CheckFailure.invalidPanel
+        }
+        activate(row: row)
+        guard document.manualSyntaxLanguage == .rust && self.document == nil else {
+            throw CheckFailure.invalidPanel
+        }
+    }
+
     private func checkKeyboardRouting() throws {
         let probe = app.makeDocument()
         let text = "one one\ntwo\nthree"

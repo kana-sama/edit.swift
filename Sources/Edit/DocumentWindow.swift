@@ -21,6 +21,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     let window: NSWindow
     let editor: EditorTextView
     let scrollView: NSScrollView
+    private(set) lazy var titleBar = DocumentTitleBar(document: self, app: app)
 
     private unowned let app: Edit
     private(set) var fileURL: URL? {
@@ -86,15 +87,17 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         (scrollView, editor) = EditorTextView.scrollingEditor(in: window.contentLayoutRect)
         super.init()
         window.title = "Untitled"
+        window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false
         window.isRestorable = false
         window.tabbingMode = .disallowed
         window.delegate = self
         appearanceObservation = window.observe(\.effectiveAppearance) { [weak self] _, _ in
-            Task { @MainActor in self?.updateTitleIcon() }
+            Task { @MainActor in self?.titleBar.update() }
         }
         window.contentView = scrollView
         let toolbar = NSToolbar(identifier: "Edit.Document")
+        toolbar.delegate = titleBar
         toolbar.displayMode = .iconOnly
         toolbar.allowsDisplayModeCustomization = false
         window.toolbarStyle = .unifiedCompact
@@ -124,16 +127,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func performFind(_ command: FindCommand) {
         guard !app.isQuitting, window.attachedSheet == nil, canPerformFind(command) else { return }
-        let previousToolbar = window.toolbar
         searchPanel().perform(command)
-        if window.toolbar !== previousToolbar { updateTitleIcon() }
     }
 
     func restoreFindSettings(_ settings: FindSettings) {
         findSettings = settings
         if settings.visible {
             searchPanel().restoreVisibility()
-            updateTitleIcon()
         }
     }
 
@@ -637,19 +637,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if window.representedURL != fileURL { window.representedURL = fileURL }
         if let folderURL {
             let folderName = folderURL.lastPathComponent
-            window.title = "\(displayName) — \(folderName.isEmpty ? folderURL.path : folderName)"
+            window.title = "\(folderName.isEmpty ? folderURL.path : folderName) — \(displayName)"
         } else {
             window.title = displayName
         }
-        updateTitleIcon()
+        titleBar.update()
         findPanel?.updateName()
-    }
-
-    private func updateTitleIcon() {
-        guard let fileURL else { return }
-        window.standardWindowButton(.documentIconButton)?.image = FileIcons.image(
-            for: fileURL, appearance: window.effectiveAppearance, language: manualSyntaxLanguage?.iconIdentifier
-        )
     }
 
     private func updateEditedState() {
