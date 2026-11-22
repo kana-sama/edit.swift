@@ -1101,6 +1101,15 @@ private final class WorktreeRow: NSTableRowView {
         didSet { updateDisclosureImages() }
     }
 
+    // AppKit updates these independently of the row's own selection.
+    override var isPreviousRowSelected: Bool {
+        didSet { if isSelected && isPreviousRowSelected != oldValue { needsDisplay = true } }
+    }
+
+    override var isNextRowSelected: Bool {
+        didSet { if isSelected && isNextRowSelected != oldValue { needsDisplay = true } }
+    }
+
     init(outline: WorktreeOutline) {
         self.outline = outline
         super.init(frame: .zero)
@@ -1113,7 +1122,20 @@ private final class WorktreeRow: NSTableRowView {
         let color: NSColor = isEmphasized ? .selectedContentBackgroundColor : .unemphasizedSelectedContentBackgroundColor
         color.setFill()
         let highlight = bounds.insetBy(dx: 6, dy: 0)
-        NSBezierPath(roundedRect: highlight, xRadius: 8, yRadius: 8).fill()
+        let radius: CGFloat = 8
+        let joinsMinY = isFlipped ? isPreviousRowSelected : isNextRowSelected
+        let joinsMaxY = isFlipped ? isNextRowSelected : isPreviousRowSelected
+        var shape = highlight
+        if joinsMinY {
+            shape.origin.y -= radius
+            shape.size.height += radius
+        }
+        if joinsMaxY { shape.size.height += radius }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: highlight).addClip()
+        NSBezierPath(roundedRect: shape, xRadius: radius, yRadius: radius).fill()
+        NSGraphicsContext.restoreGraphicsState()
     }
 
     override func didAddSubview(_ subview: NSView) {

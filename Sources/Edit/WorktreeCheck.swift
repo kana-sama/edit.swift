@@ -47,6 +47,7 @@ enum WorktreeCheck {
         let disclose = try disclosure(at: sources, in: tree)
         try checkDisclosureStyle(disclose)
         try checkDisclosureContrast(disclose, in: document.window)
+        try checkSelectionShape(in: tree, window: document.window)
         let fileCell = try require(cell(at: log, in: tree), "file row")
         let fileIcon = try require(fileCell.imageView, "file icon")
         try expect(cell(at: sources, in: tree)?.imageView?.image == nil, "folders show only the disclosure symbol")
@@ -693,6 +694,44 @@ enum WorktreeCheck {
         try expectKeyboardStep("\u{F702}", code: 123, expanded: false)
         try expectKeyboardStep(" ", code: 49, expanded: true)
         try expectKeyboardStep(" ", code: 49, expanded: false)
+    }
+
+    private static func checkSelectionShape(in tree: NSOutlineView, window: NSWindow) throws {
+        let original = tree.selectedRowIndexes
+        let appearance = window.appearance
+        defer {
+            tree.selectRowIndexes(original, byExtendingSelection: false)
+            window.appearance = appearance
+        }
+        window.appearance = NSAppearance(named: .darkAqua)
+
+        func check(_ selection: IndexSet, _ edges: [(row: Int, top: Bool, bottom: Bool)], name: String) throws {
+            tree.selectRowIndexes(selection, byExtendingSelection: false)
+            window.layoutIfNeeded()
+            for edge in edges {
+                let row = try require(tree.rowView(atRow: edge.row, makeIfNecessary: true), "selected Worktree row")
+                let bounds = row.bounds
+                let image = try require(row.bitmapImageRepForCachingDisplay(in: bounds), "Worktree selection bitmap")
+                row.cacheDisplay(in: bounds, to: image)
+                let x = Int(7 * CGFloat(image.pixelsWide) / bounds.width)
+                let y = Int(CGFloat(image.pixelsHigh) / bounds.height)
+                let fill = try require(image.colorAt(x: x, y: image.pixelsHigh / 2)?.usingColorSpace(.sRGB), "selection fill")
+                try expect(fill.alphaComponent > 0.5, "the center of the selected row is painted")
+                func edgeIsFilled(y: Int) throws -> Bool {
+                    let pixel = try require(image.colorAt(x: x, y: y)?.usingColorSpace(.sRGB), "selection corner pixel")
+                    return abs(pixel.alphaComponent - fill.alphaComponent) < 0.08 &&
+                        abs(pixel.redComponent - fill.redComponent) < 0.08
+                }
+                let top = try edgeIsFilled(y: y)
+                let bottom = try edgeIsFilled(y: image.pixelsHigh - y - 1)
+                try expect(top == edge.top && bottom == edge.bottom,
+                           "\(name) selection rounds only exposed ends (row \(edge.row), top \(top), bottom \(bottom))")
+            }
+        }
+
+        try check(IndexSet([0, 2]), [(0, false, false), (2, false, false)], name: "disjoint")
+        try check(IndexSet(integersIn: 0...2), [(0, false, true), (1, true, true), (2, true, false)], name: "joined")
+        try check(IndexSet([0, 2]), [(0, false, false), (2, false, false)], name: "split-again")
     }
 
     private static func checkDisclosureStyle(_ button: NSButton) throws {
