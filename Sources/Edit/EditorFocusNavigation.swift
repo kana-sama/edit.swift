@@ -14,7 +14,98 @@ struct FocusNavigationSelection: Equatable {
     }
 }
 
+// Only the occurrence commands need a contiguous string. Keep source offsets
+// for each block so a match can paint and edit its pieces in the document.
+private struct FocusOccurrenceBuffer {
+    private struct Block {
+        let source: NSRange
+        let logical: NSRange
+    }
+
+    let text: NSString
+    private let blocks: [Block]
+
+    init(_ source: NSString, scope: [NSRange], separator: String) {
+        var parts: [String] = []
+        var blocks: [Block] = []
+        var offset = 0
+        let separatorLength = separator.utf16.count
+        for range in scope {
+            blocks.append(Block(source: range, logical: NSRange(location: offset, length: range.length)))
+            parts.append(source.substring(with: range))
+            offset += range.length + separatorLength
+        }
+        self.text = parts.joined(separator: separator) as NSString
+        self.blocks = blocks
+    }
+
+    func logicalRange(for range: NSRange) -> NSRange? {
+        guard let first = blocks.first(where: { $0.source.location <= range.location && range.location <= $0.source.upperBound }),
+              let last = blocks.first(where: { $0.source.location <= range.upperBound && range.upperBound <= $0.source.upperBound })
+        else { return nil }
+        let start = first.logical.location + range.location - first.source.location
+        let end = last.logical.location + range.upperBound - last.source.location
+        return NSRange(location: start, length: end - start)
+    }
+
+    func sourceSelection(for range: NSRange) -> FocusNavigationSelection? {
+        guard let first = blocks.first(where: { $0.logical.location <= range.location && range.location <= $0.logical.upperBound }),
+              let last = blocks.first(where: { $0.logical.location <= range.upperBound && range.upperBound <= $0.logical.upperBound })
+        else { return nil }
+        return FocusNavigationSelection(
+            anchor: first.source.location + range.location - first.logical.location,
+            head: last.source.location + range.upperBound - last.logical.location
+        )
+    }
+}
+
 extension EditorTextView {
+    enum FocusOccurrenceCommand {
+        case all, next, skip
+    }
+
+    func selectFocusedOccurrences(_ command: FocusOccurrenceCommand, in source: NSString) -> Bool {
+        guard let scope = focusRanges else { return false }
+        let selections = focusedSelections(in: scope)
+        guard let primary = selections.last, primary.extent.length > 0 else { return false }
+
+        let buffer = FocusOccurrenceBuffer(source, scope: scope, separator: preferredLineEnding)
+        let text = buffer.text
+        guard let selected = buffer.logicalRange(for: primary.extent), selected.length > 0 else { return true }
+        let needle = text.substring(with: selected)
+        let selectingAll = command == .all
+        let occupied = selectingAll ? [selected] : selections.compactMap { buffer.logicalRange(for: $0.extent) }
+        let searches = selectingAll
+            ? [NSRange(location: 0, length: text.length)]
+            : [NSRange(location: selected.upperBound, length: text.length - selected.upperBound),
+               NSRange(location: 0, length: selected.location)]
+
+        var matches: [FocusNavigationSelection] = []
+        for search in searches {
+            var start = search.location
+            while start < search.upperBound {
+                let found = text.range(of: needle, options: .literal,
+                                       range: NSRange(location: start, length: search.upperBound - start))
+                guard found.location != NSNotFound else { break }
+                if occupied.contains(where: { NSIntersectionRange($0, found).length > 0 }) {
+                    start = selectingAll ? selected.upperBound : found.upperBound
+                    continue
+                }
+                start = found.upperBound
+                guard let match = buffer.sourceSelection(for: found) else { continue }
+                if selectingAll {
+                    matches.append(match)
+                } else {
+                    let kept = command == .skip ? Array(selections.dropLast()) : selections
+                    setFocusedSelections(kept + [match], in: scope)
+                    scrollRangeToVisible(NSRange(location: match.head, length: 0))
+                    return true
+                }
+            }
+        }
+        if selectingAll { setFocusedSelections(matches + [primary], in: scope) }
+        return true
+    }
     var focusedSelectionGroups: [[NSRange]]? {
         guard let scope = focusRanges else { return nil }
         return focusedSelections(in: scope).map { $0.pieces(in: scope) }

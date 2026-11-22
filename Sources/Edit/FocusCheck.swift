@@ -130,6 +130,7 @@ enum FocusCheck {
                    "an outside click exits and places the native caret at the click")
 
         try verifyLineScope(in: app)
+        try verifyOccurrencesAcrossFocusBlocks(in: app)
         try await verifyFileLifecycle(in: app)
     }
 
@@ -213,6 +214,76 @@ enum FocusCheck {
         try expect(editor.focusRanges == [alpha] &&
                    editor.selectedRange() == NSRange(location: NSMaxRange(alpha), length: 0),
                    "a selection ending at the next line start excludes that row and keeps its caret in Focus")
+    }
+
+    private static func verifyOccurrencesAcrossFocusBlocks(in app: Edit) throws {
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        let editor = document.editor
+        let left = "AB\nAB\n\nAB"
+        let gap = "\nAB\n\nAB\n"
+        let right = "AB\n\nAB\nAB"
+        let original = left + gap + right
+        editor.string = original
+        let leftBlock = NSRange(location: 0, length: left.utf16.count)
+        let rightBlock = NSRange(location: leftBlock.upperBound + gap.utf16.count, length: right.utf16.count)
+        editor.setCaretSelections([leftBlock, rightBlock])
+        document.focusSelection()
+        try expect(editor.focusRanges == [leftBlock, rightBlock], "focus the occurrence fixture's whole-line blocks")
+        let needle = "B\nA"
+        let leftMatch = (left as NSString).range(of: needle)
+        let rightMatch = (original as NSString).range(of: needle, options: .literal, range: rightBlock)
+        let splitMatch = [NSRange(location: leftBlock.upperBound - 1, length: 1),
+                          NSRange(location: rightBlock.location, length: 1)]
+        let matches = Set([[leftMatch], splitMatch, [rightMatch]])
+
+        editor.setCaretSelections([leftMatch])
+        editor.doCommand(by: #selector(EditorTextView.selectAllOccurrences(_:)))
+        try expect(Set(editor.focusedSelectionGroups ?? []) == matches && editor.caretSelections.count == 4,
+                   "Select All Occurrences finds three logical matches, with two highlights for the virtual newline match")
+        try expect(editor.selectedRange() == leftMatch, "Select All Occurrences keeps the original primary selection")
+
+        editor.setCaretSelections([leftMatch])
+        editor.doCommand(by: #selector(EditorTextView.selectNextOccurrence(_:)))
+        try expect(editor.focusedSelectionGroups == [[leftMatch], splitMatch] &&
+                   editor.selectedRange() == splitMatch.last,
+                   "Select Next Occurrence selects the virtual newline match as one selection")
+        editor.doCommand(by: #selector(EditorTextView.selectNextOccurrence(_:)))
+        try expect(editor.focusedSelectionGroups == [[leftMatch], splitMatch, [rightMatch]] &&
+                   editor.selectedRange() == rightMatch,
+                   "Select Next Occurrence uses the entire split match as its needle")
+
+        editor.setCaretSelections([leftMatch])
+        editor.doCommand(by: #selector(EditorTextView.selectNextOccurrence(_:)))
+        editor.doCommand(by: #selector(EditorTextView.skipNextOccurrence(_:)))
+        try expect(editor.focusedSelectionGroups == [[leftMatch], [rightMatch]],
+                   "Skip to Next Occurrence drops both pieces of the split match")
+
+        editor.setCaretSelections([leftMatch])
+        editor.doCommand(by: #selector(EditorTextView.selectNextOccurrence(_:)))
+        editor.doCommand(by: #selector(EditorTextView.selectAllOccurrences(_:)))
+        try expect(Set(editor.focusedSelectionGroups ?? []) == matches && editor.selectedRange() == splitMatch.last,
+                   "Select All Occurrences uses the split needle and keeps its active piece in place")
+
+        let history = editor.editorUndoManager
+        history.groupsByEvent = false
+        editor.insertText("X", replacementRange: NSRange(location: NSNotFound, length: 0))
+        try expect(editor.string == "AXB\n\nAX" + gap + "B\n\nAXB",
+                   "typing replaces each logical match once and leaves the original gap intact")
+        history.undo()
+        try expect(editor.string == original && editor.focusRanges == [leftBlock, rightBlock] &&
+                   Set(editor.focusedSelectionGroups ?? []) == matches && editor.selectedRange() == splitMatch.last,
+                   "one Undo restores text, scope, and the grouped occurrence selections")
+
+        editor.setCaretSelections([NSRange(location: leftBlock.upperBound - 1, length: 0)])
+        editor.doCommand(by: #selector(NSResponder.moveRightAndModifySelection(_:)))
+        editor.doCommand(by: #selector(NSResponder.moveRightAndModifySelection(_:)))
+        let selectAll = #selector(EditorTextView.selectAllOccurrences(_:))
+        try expect(editor.selectedRange().length == 0 && editor.validateSelectionCommand(selectAll) == true,
+                   "the shortcut remains available when the logical selection ends at the start of the next block")
+        editor.doCommand(by: selectAll)
+        try expect(editor.focusedSelectionGroups?.count == 5,
+                   "a selected letter and virtual newline match real and virtual line endings")
     }
 
     private static func verifyFileLifecycle(in app: Edit) async throws {

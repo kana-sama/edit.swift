@@ -172,6 +172,7 @@ extension EditorTextView {
 
     private func addNextOccurrence(skipping: Bool) {
         guard let text = textStorage?.mutableString, let primary = caretSelections.last else { return }
+        if selectFocusedOccurrences(skipping ? .skip : .next, in: text) { return }
         if primary.length == 0 {
             var word = selectionRange(forProposedRange: primary, granularity: .selectByWord)
             if let scope = focusRanges {
@@ -187,11 +188,7 @@ extension EditorTextView {
         let selections = caretSelections
         let after = NSRange(location: NSMaxRange(primary), length: text.length - NSMaxRange(primary))
         let before = NSRange(location: 0, length: primary.location)
-        let searches = [after, before].flatMap { position in
-            (focusRanges ?? [NSRange(location: 0, length: text.length)])
-                .map { NSIntersectionRange($0, position) }.filter { $0.length > 0 }
-        }
-        for search in searches {
+        for search in [after, before] {
             var start = search.location
             while start < NSMaxRange(search) {
                 let result = text.range(of: needle, options: .literal,
@@ -208,22 +205,21 @@ extension EditorTextView {
     }
 
     @objc func selectAllOccurrences(_ sender: Any?) {
-        guard let text = textStorage?.mutableString,
-              let primary = caretSelections.last, primary.length > 0 else { return }
+        guard let text = textStorage?.mutableString else { return }
+        if selectFocusedOccurrences(.all, in: text) { return }
+        guard let primary = caretSelections.last, primary.length > 0 else { return }
         let needle = text.substring(with: primary)
         var matches: [NSRange] = []
-        for search in focusRanges ?? [NSRange(location: 0, length: text.length)] {
-            var start = search.location
-            while start < search.upperBound {
-                let range = text.range(of: needle, options: .literal,
-                                       range: NSRange(location: start, length: search.upperBound - start))
-                guard range.location != NSNotFound else { break }
-                if NSIntersectionRange(range, primary).length == 0 {
-                    matches.append(range)
-                    start = range.upperBound
-                } else {
-                    start = primary.upperBound
-                }
+        var start = 0
+        while start < text.length {
+            let range = text.range(of: needle, options: .literal,
+                                   range: NSRange(location: start, length: text.length - start))
+            guard range.location != NSNotFound else { break }
+            if NSIntersectionRange(range, primary).length == 0 {
+                matches.append(range)
+                start = range.upperBound
+            } else {
+                start = primary.upperBound
             }
         }
         setCaretSelections(matches + [primary])
@@ -282,7 +278,10 @@ extension EditorTextView {
         case #selector(undoSelection(_:)): return !multiCaret.undo.isEmpty
         case #selector(redoSelection(_:)): return !multiCaret.redo.isEmpty
         case #selector(keepPrimarySelection(_:)): return hasSecondarySelections
-        case #selector(selectAllOccurrences(_:)), #selector(addCaretsAtLineEnds(_:)):
+        case #selector(selectAllOccurrences(_:)):
+            let focusedLength = focusRanges == nil ? nil : multiCaret.focusNavigation?.last?.extent.length
+            return isSelectable && !hasMarkedText() && (focusedLength ?? caretSelections.last?.length ?? 0) > 0
+        case #selector(addCaretsAtLineEnds(_:)):
             return isSelectable && !hasMarkedText() && (caretSelections.last?.length ?? 0) > 0
         case #selector(addCaretAbove(_:)), #selector(addCaretBelow(_:)),
              #selector(selectNextOccurrence(_:)), #selector(skipNextOccurrence(_:)):
