@@ -242,6 +242,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     // The toolbar needs room for the window controls, Worktree title and options button.
     private static let minimumSidebarWidth: CGFloat = 208 + SidebarMenuItem.titleLeadingPadding
     private static let minimumEditorWidth: CGFloat = 128
+    private static let sidebarAnimationDuration: TimeInterval = 0.12
     private static let contentInset: CGFloat = 10
     private unowned let document: DocumentWindow
     private unowned let app: Edit
@@ -870,7 +871,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     @objc private func splitResized(_ notification: Notification) {
         guard installed else { return }
         resizeTitleBar()
-        guard !sidebarAnimating else { return }
+        if sidebarAnimating {
+            updateSidebarToolbarVisibility()
+            return
+        }
         settings.visible = !sidebarItem.isCollapsed
         let width = sidebar.view.frame.width
         if settings.visible && width >= sidebarItem.minimumThickness {
@@ -927,12 +931,15 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     private func updateSidebarToolbarVisibility() {
         guard let header = sidebarHeader, let options = header.options else { return }
-        let hidden = !settings.visible || sidebarItem.isCollapsed || sidebarAnimating
+        let headerFits = !sidebarAnimating ||
+            (contentWidth?.isActive == true && sidebar.view.frame.width >= Self.minimumSidebarWidth)
+        let hidden = !settings.visible || sidebarItem.isCollapsed || !headerFits
+        let optionsHidden = hidden || options.menu.items.isEmpty
+        guard header.isHidden != hidden || options.isHidden != optionsHidden || options.view?.isHidden != optionsHidden else { return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
             context.allowsImplicitAnimation = false
             if header.isHidden != hidden { header.isHidden = hidden }
-            let optionsHidden = hidden || options.menu.items.isEmpty
             if options.isHidden != optionsHidden { options.isHidden = optionsHidden }
             if options.view?.isHidden != optionsHidden { options.view?.isHidden = optionsHidden }
         }
@@ -958,7 +965,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             // AppKit provides the overlay sidebar when the window cannot fit both panes.
             sidebarAnimating = true
             updateSidebarToolbarVisibility()
-            NSAnimationContext.runAnimationGroup { _ in
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = Self.sidebarAnimationDuration
                 sidebarItem.animator().isCollapsed = collapsed
             } completionHandler: { [weak self] in
                 Task { @MainActor in self?.finishSidebarTransition(transition) }
@@ -987,7 +995,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
         let distance = abs(position - splitView.animatedDividerPosition)
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = animated ? context.duration * Double(min(1, distance / max(openWidth, 1))) : 0
+            context.duration = animated ? Self.sidebarAnimationDuration * Double(min(1, distance / max(openWidth, 1))) : 0
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             splitView.animator().animatedDividerPosition = position
         } completionHandler: { [weak self] in

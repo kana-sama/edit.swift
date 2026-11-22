@@ -701,10 +701,18 @@ enum FindCheck {
         try expect(window.isVisible && !NSApp.isActive && window.alphaValue == 0,
                    "live sidebar animation runs without interrupting the user")
 
-        document.performFind(.toggleSidebar)
+        let folder = FileManager.default.temporaryDirectory.appending(path: "Sidebar reveal \(UUID())")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        document.setFolder(folder)
+        let openPosition: CGFloat = 420
+        document.findSettings.width = openPosition
+        document.toggleSidebarFocus(.worktree)
         let split = try require(window.contentViewController as? NSSplitViewController, "native animated split view")
         let sidebar = split.splitViewItems[0]
-        let picker = try sidebarMenu(in: window)
+        let options = try sidebarMenu(in: window)
+        let title = try sidebarMenu(in: window, showsTitle: true)
+        let button = try require(options.view, "animated sidebar options button")
         func divider() -> CGFloat {
             if sidebar.isCollapsed { return 0 }
             let view = sidebar.viewController.view
@@ -716,16 +724,23 @@ enum FindCheck {
             document.performFind(command)
             try expect(abs(divider() - position) < 1 && abs(document.scrollView.visibleContentOrigin.x - origin.x) < 1,
                        "reversing preserves the divider position and the horizontal scroll offset")
-            try expect(picker.isHidden, "the menu button stays hidden until the sidebar settles")
+            try expect(document.findSettings.visible || options.isHidden,
+                       "reversing toward closed hides the options button immediately")
         }
 
-        try await waitUntil("sidebar fully opens") { !picker.isHidden }
-        let openPosition = divider()
+        try await waitUntil("Worktree controls are visible at the divider inset before it finishes opening") {
+            window.layoutIfNeeded()
+            let trailing = button.convert(button.bounds, to: nil).maxX
+            return divider() < openPosition - 1 && !title.isHidden && !options.isHidden &&
+                button.window === window && !button.isHiddenOrHasHiddenAncestor && abs(divider() - trailing - 10) <= 0.5
+        }
+        func fullyOpen() -> Bool { abs(divider() - openPosition) < 1 && !options.isHidden }
+        try await waitUntil("sidebar fully opens", fullyOpen)
         document.performFind(.toggleSidebar)
         try await waitUntil("sidebar is partway closed") { divider() > 0 && divider() < openPosition * 0.8 }
         try reverse(with: .find)
         try expect(window.firstResponder is FindFieldTextView, "reopening with Command-F focuses Find")
-        try await waitUntil("reversed sidebar finishes opening") { !picker.isHidden }
+        try await waitUntil("reversed sidebar finishes opening", fullyOpen)
         try expect(abs(divider() - openPosition) < 1, "reopening preserves the sidebar width")
 
         document.performFind(.toggleSidebar)
@@ -740,7 +755,7 @@ enum FindCheck {
         document.performFind(.toggleSidebar)
         document.performFind(.toggleSidebar)
         document.performFind(.find)
-        try await waitUntil("rapid toggles leave the sidebar open") { !picker.isHidden }
+        try await waitUntil("rapid toggles leave the sidebar open", fullyOpen)
         try expect(abs(divider() - openPosition) < 1 && window.firstResponder is FindFieldTextView,
                    "superseded animations leave the latest width and focus")
     }
