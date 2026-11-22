@@ -895,7 +895,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         if focusIsInSidebar { returnFocus(allowingModeChange: false) }
         settings.visible = false
         worktree?.setActive(false)
-        updateSidebarToolbarVisibility()
         previewRequested = false
         setSidebarCollapsed(true)
         refreshDecorations()
@@ -917,6 +916,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     private func setSidebarCollapsed(_ collapsed: Bool, desiredWidth: CGFloat? = nil) {
+        let previousHeaderLayer = sidebarHeader?.view?.superview?.layer
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
             context.allowsImplicitAnimation = false
@@ -931,6 +931,11 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
                 (header.view as? SidebarHeaderView)?.finishLayout()
             }
         }
+        // The toolbar installs its own scale and opacity animations when an item appears.
+        // Stop those on the header's container before AppKit presents the new layout.
+        let headerLayer = sidebarHeader?.view?.superview?.layer ?? previousHeaderLayer
+        headerLayer?.removeAnimation(forKey: #keyPath(CALayer.transform))
+        headerLayer?.removeAnimation(forKey: #keyPath(CALayer.opacity))
     }
 
     private func focusSearch() {

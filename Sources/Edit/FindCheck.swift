@@ -65,7 +65,7 @@ enum FindCheck {
         try await checkResumingResult(in: app)
         try await checkRenderedHighlights(in: app.makeDocument())
         try await checkSidebarLayout(in: app.makeDocument())
-        try checkInstantSidebar(in: app.makeDocument())
+        try await checkInstantSidebar(in: app.makeDocument())
         try await checkSidebarModes(in: app)
         try await checkWindowSession(in: app)
         try expect(NSApplication.shared.activationPolicy() == .prohibited &&
@@ -689,7 +689,7 @@ enum FindCheck {
         scroll.reflectScrolledClipView(clip)
     }
 
-    private static func checkInstantSidebar(in document: DocumentWindow) throws {
+    private static func checkInstantSidebar(in document: DocumentWindow) async throws {
         let window = document.window
         let folder = FileManager.default.temporaryDirectory.appending(path: "Sidebar reveal \(UUID())")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -725,13 +725,32 @@ enum FindCheck {
                        "show \(mode.title) and both controls at the final width before returning (width \(sidebarFrame.width), inset \(sidebarFrame.maxX - trailing))")
         }
 
+        func checkPresentedHeader() async throws {
+            let layer = try require(title.view?.superview?.layer, "the toolbar header has a live container layer")
+            window.displayIfNeeded()
+            try expect(layer.animation(forKey: #keyPath(CALayer.transform)) == nil &&
+                       layer.animation(forKey: #keyPath(CALayer.opacity)) == nil,
+                       "showing the sidebar header skips the toolbar's scale and fade")
+            try await Task.sleep(for: .milliseconds(25))
+            let presented = try require(layer.presentation(), "the sidebar header has a presentation layer")
+            try expect(CATransform3DEqualToTransform(presented.transform, layer.transform) &&
+                       abs(presented.opacity - layer.opacity) < 0.01,
+                       "the rendered header is full size and opacity on reveal")
+        }
+
         try checkOpen(.worktree, width: openWidth)
+        try await checkPresentedHeader()
         for _ in 0..<2 {
+            let previousLayer = title.view?.superview?.layer
             document.performFind(.toggleSidebar)
             try expect(sidebar.isCollapsed && options.isHidden && title.isHidden && window.firstResponder === document.editor,
                        "hide the sidebar immediately and return focus to the editor")
+            try expect(previousLayer?.animation(forKey: #keyPath(CALayer.transform)) == nil &&
+                       previousLayer?.animation(forKey: #keyPath(CALayer.opacity)) == nil,
+                       "hiding the sidebar header skips the toolbar's scale and fade")
             document.performFind(.toggleSidebar)
             try checkOpen(.worktree, width: openWidth)
+            try await checkPresentedHeader()
         }
         document.performFind(.toggleSidebar)
         window.setContentSize(NSSize(width: 400, height: window.frame.height))

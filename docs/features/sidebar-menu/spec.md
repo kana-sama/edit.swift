@@ -6,7 +6,7 @@ A borderless ellipsis stays at a fixed inset from the sidebar’s trailing edge 
 
 ## Acceptance
 
-Open the sidebar and choose Search from the title menu. Verify that Search is checked, the query stays intact, and the field receives focus. Dismiss a result, then choose Refresh Search from the ellipsis menu to restore it. Close and reopen the sidebar and verify that the menu button follows its visibility.
+Open the sidebar and choose Search from the title menu. Verify that Search is checked, the query stays intact, and the field receives focus. Dismiss a result, then choose Refresh Search from the ellipsis menu to restore it. Close and reopen the sidebar. The title and ellipsis appear at their final size and opacity with the panel and disappear on close.
 
 Switch between Search and Worktree in a window and in full screen. Verify that the menu opens with the checked row over the title for each mode, that press-drag-release switches modes, and that the ellipsis opens below its button and lists the current panel's actions. Drag the divider from a wide sidebar to its minimum width and back in each mode. Both controls stay visible. The title and its chevron stay in place, and the ellipsis follows the divider.
 
