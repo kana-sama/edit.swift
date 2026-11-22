@@ -1,6 +1,24 @@
 import AppKit
 
 @MainActor
+private final class EditorDocumentWindow: NSWindow {
+    // Focused controls get Escape before it reaches these window-level fallbacks.
+    override func cancelOperation(_ sender: Any?) {
+        guard !isFullScreenEscape(NSApp.currentEvent) else { return }
+        super.cancelOperation(sender)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        guard !isFullScreenEscape(event) else { return }
+        super.keyDown(with: event)
+    }
+
+    private func isFullScreenEscape(_ event: NSEvent?) -> Bool {
+        styleMask.contains(.fullScreen) && event?.type == .keyDown && event?.keyCode == 53
+    }
+}
+
+@MainActor
 final class DocumentWindow: NSObject, NSWindowDelegate {
     enum CloseChoice {
         case save(to: URL?)
@@ -85,7 +103,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     init(app: Edit, placement: WindowPlacement? = nil) {
         self.app = app
-        window = NSWindow(
+        window = EditorDocumentWindow(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 480),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
