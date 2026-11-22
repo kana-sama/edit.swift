@@ -35,6 +35,8 @@ enum WorktreeCheck {
         try expect(row(named: "Active.swift", in: tree) == nil, "do not expand unrelated directories")
         document.window.layoutIfNeeded()
         let disclose = try disclosure(at: sources, in: tree)
+        try expect(disclose.contentTintColor == .secondaryLabelColor,
+                   "a folder disclosure uses the system secondary label tint")
         let fileCell = try require(cell(at: log, in: tree), "file row")
         let fileIcon = try require(fileCell.imageView, "file icon")
         try expect(cell(at: sources, in: tree)?.imageView?.image == nil, "folders show only the disclosure symbol")
@@ -89,6 +91,9 @@ enum WorktreeCheck {
         sidebar.refresh()
         try expect(tree.numberOfRows == 1 && !tree.isItemExpanded(rootItem),
                    "refreshing the tree keeps the root collapsed")
+        let refreshedRootButton = try disclosure(at: 0, in: tree)
+        try expect(refreshedRootButton.contentTintColor == .secondaryLabelColor,
+                   "a refreshed folder disclosure keeps its tint")
         sidebar.setShowsHidden(false)
         _ = try await app.openFile(readme, in: document)
         try await waitFor("reveal a new file after manually collapsing the root") {

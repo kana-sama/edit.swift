@@ -386,6 +386,12 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         expanded.remove(item.path)
     }
 
+    func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
+        guard (item as? Item)?.isDirectory == true else { return nil }
+        return outlineView.makeView(withIdentifier: WorktreeDirectoryRow.reuseIdentifier, owner: nil) as? NSTableRowView
+            ?? WorktreeDirectoryRow()
+    }
+
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item object: Any) -> NSView? {
         guard let item = object as? Item else { return nil }
         let cell = outlineView.makeView(withIdentifier: WorktreeCell.identifier, owner: self) as? WorktreeCell
@@ -573,6 +579,27 @@ private final class WorktreeOutline: NSOutlineView {
 
     @objc func copy(_ sender: Any?) { owner?.copySelection() }
     @objc func paste(_ sender: Any?) { owner?.pasteIntoSelection() }
+}
+
+@MainActor
+private final class WorktreeDirectoryRow: NSTableRowView {
+    static let reuseIdentifier = NSUserInterfaceItemIdentifier("WorktreeDirectoryRow")
+
+    init() {
+        super.init(frame: .zero)
+        identifier = Self.reuseIdentifier
+    }
+
+    required init?(coder: NSCoder) { fatalError("Worktree rows are programmatically constructed") }
+
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        // AppKit can attach its disclosure button after adding the row to the outline.
+        guard let button = subview as? NSButton,
+              button.identifier == NSOutlineView.disclosureButtonIdentifier ||
+              button.identifier == NSOutlineView.showHideButtonIdentifier else { return }
+        button.contentTintColor = .secondaryLabelColor
+    }
 }
 
 @MainActor
