@@ -793,8 +793,10 @@ enum FindCheck {
             let ellipsisFrame = ellipsisButton.convert(ellipsisButton.bounds, to: nil)
             let sidebarFrame = sidebar.convert(sidebar.bounds, to: nil)
             try expect(!ellipsis.isHidden && !title.isHidden && titleButton.window === window && ellipsisButton.window === window &&
+                       !titleButton.isHiddenOrHasHiddenAncestor && !ellipsisButton.isHiddenOrHasHiddenAncestor &&
+                       titleButton.visibleRect.contains(titleButton.bounds) && ellipsisButton.visibleRect.contains(ellipsisButton.bounds) &&
                        titleButton.menu === title.menu && !titleButton.pullsDown &&
-                       titleFrame.maxX <= ellipsisFrame.minX && abs(sidebarFrame.maxX - ellipsisFrame.maxX - 10) < 0.5 &&
+                       titleFrame.maxX <= ellipsisFrame.minX && abs(sidebarFrame.maxX - ellipsisFrame.maxX - 10) <= 0.5 &&
                        abs(titleFrame.midY - ellipsisFrame.midY) < 0.5 &&
                        abs(window.contentLayoutRect.maxY - titlebarBottom) < 0.5,
                        "the title and ellipsis share the sidebar header (title \(titleFrame), ellipsis \(ellipsisFrame), sidebar \(sidebarFrame))")
@@ -857,7 +859,23 @@ enum FindCheck {
                    "choosing Search from Worktree opens the Find field")
         try expect(abs(titleLeadingEdge() - searchLeading) < 0.5, "returning to Search keeps the same left inset")
         try checkHeader()
-        document.toggleSidebarFocus(.worktree)
+        let longName = root.appending(path: "A document with a long name beside the sidebar controls.txt")
+        try Data("content".utf8).write(to: longName)
+        document.load(try FileBuffer.read(longName))
+        let toolbar = try require(window.toolbar, "dragging uses the native sidebar toolbar")
+        for mode in [SidebarMode.search, .worktree] {
+            if document.sidebarMode != mode { document.toggleSidebarFocus(mode) }
+            for width in [min(650, split.splitView.bounds.width - 129), 266, minimumWidth, sidebarWidth] {
+                try dragDivider(split.splitView, sidebar: sidebar, in: window, by: width - sidebar.frame.width)
+                try checkHeader()
+            }
+        }
+        try dragDivider(split.splitView, sidebar: sidebar, in: window, by: 460 - sidebar.frame.width)
+        try checkHeader()
+        toolbar.isVisible = false
+        try dragDivider(split.splitView, sidebar: sidebar, in: window, by: 266 - sidebar.frame.width)
+        toolbar.isVisible = true
+        try checkHeader()
 
         app.toggleSidebar(nil)
         try expect(!document.findSettings.visible && document.sidebarMode == .worktree && title.isHidden && ellipsis.isHidden,

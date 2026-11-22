@@ -34,6 +34,7 @@ private final class FindSplitView: NSSplitView {
 private final class SidebarHeaderView: NSView {
     private weak var sidebar: NSView?
     private let trailingInset: CGFloat
+    private var leadingInset: CGFloat?
     private lazy var headerWidth = widthAnchor.constraint(equalToConstant: 0)
 
     init(title: NSView, options: NSView, sidebar: NSView, trailingInset: CGFloat) {
@@ -70,10 +71,16 @@ private final class SidebarHeaderView: NSView {
     }
 
     func alignOptions() {
-        guard !isHiddenOrHasHiddenAncestor, let window, let sidebar, let sidebarWindow = sidebar.window else { return }
-        let divider = sidebarWindow.convertToScreen(sidebar.convert(sidebar.bounds, to: nil)).maxX
-        let leadingEdge = window.convertToScreen(convert(bounds, to: nil)).minX
-        let width = max(0, divider - leadingEdge - trailingInset)
+        guard let sidebar, let sidebarWindow = sidebar.window else { return }
+        let sidebarFrame = sidebarWindow.convertToScreen(sidebar.convert(sidebar.bounds, to: nil))
+        if let window, !isHiddenOrHasHiddenAncestor {
+            let leadingEdge = window.convertToScreen(convert(bounds, to: nil)).minX
+            leadingInset = leadingEdge - sidebarFrame.minX
+        }
+        // A toolbar item can be detached when AppKit moves it into overflow.
+        // Keep its fitting width current so it can fit again at the new divider position.
+        guard let leadingInset else { return }
+        let width = max(0, sidebarFrame.width - leadingInset - trailingInset)
         if headerWidth.constant != width {
             headerWidth.constant = width
             invalidateIntrinsicContentSize()
