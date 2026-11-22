@@ -569,6 +569,9 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         case ("w", .command):
             dismiss(restoreFocus: true)
             return nil
+        case ("b", .command):
+            document.performFind(.toggleSidebar)
+            return nil
         case ("f", .command), ("f", [.command, .option]):
             dismiss(restoreFocus: true)
             document.performFind(modifiers.contains(.option) ? .replace : .find)
@@ -1078,6 +1081,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             throw CheckFailure.shortcutEscaped
         }
 
+        guard !probe.findSettings.visible,
+              intercept(key("b", 11, .command)) == nil, probe.findSettings.visible, document === probe,
+              intercept(key("b", 11, .command)) == nil, !probe.findSettings.visible, document === probe else {
+            throw CheckFailure.shortcutEscaped
+        }
+
         undo.groupsByEvent = false
         undo.beginUndoGrouping()
         let typed = intercept(key("x", 7))
@@ -1174,7 +1183,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             switchMode(to: .files, query: "")
             return
         }
-        if command.item.action == #selector(Edit.toggleFindSidebar(_:)) {
+        if command.item.action == #selector(Edit.toggleSidebar(_:)) {
             command.run(in: document)
             return
         }

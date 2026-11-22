@@ -81,7 +81,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         tree.delegate = self
         tree.owner = self
         tree.target = self
-        tree.doubleAction = #selector(activateClickedRow(_:))
+        tree.doubleAction = #selector(activateClickedDirectory(_:))
         tree.registerForDraggedTypes([.fileURL])
         tree.setDraggingSourceOperationMask([.move, .copy], forLocal: true)
         tree.setDraggingSourceOperationMask(.copy, forLocal: false)
@@ -139,6 +139,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         guard rootChanged || currentPath != filePath else { return }
         currentPath = filePath
         currentDirectories = []
+        if !rootChanged, let outside { expanded.remove(outside.path) }
         outside = nil
         needsReveal = file != nil
         if let file, WorktreeFileOperations.contains(file, in: folder) {
@@ -149,10 +150,12 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
                 if ancestorPath == folderPath { break }
                 ancestor.deleteLastPathComponent()
             }
+            expanded.formUnion(currentDirectories)
         } else if let file {
             let parent = Item(file.deletingLastPathComponent(), directory: true, outside: true)
             parent.visibleChildren = [Item(file, directory: false, outside: true)]
             outside = parent
+            expanded.insert(parent.path)
         }
         reloadTree()
     }
@@ -187,9 +190,10 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         var pending = [item]
         var directories: [Item] = []
         while let next = pending.popLast() {
-            guard next === root || tree.isItemExpanded(next) else { continue }
+            let isExpanded = tree.isItemExpanded(next)
+            guard next === root || isExpanded else { continue }
             directories.append(next)
-            pending.append(contentsOf: next.visibleChildren.filter(\.isDirectory))
+            if isExpanded { pending.append(contentsOf: next.visibleChildren.filter(\.isDirectory)) }
         }
         return directories
     }
@@ -238,6 +242,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             return child
         }
         updateVisibleChildren(of: item)
+        guard tree.row(forItem: item) >= 0 else { return }
         let selection = selectedItems.map(\.path)
         reloading = true
         tree.reloadItem(item, reloadChildren: true)
@@ -275,14 +280,14 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         reloading = true
         tree.reloadData()
         if let root { restoreExpansion(from: root) }
-        if let outside { tree.expandItem(outside) }
+        if let outside { restoreExpansion(from: outside) }
         reloading = false
         restoreSelection(selection)
         revealCurrent()
     }
 
     private func restoreExpansion(from item: Item) {
-        guard item.isDirectory, expanded.contains(item.path) || currentDirectories.contains(item.path) else { return }
+        guard item.isDirectory, expanded.contains(item.path) else { return }
         tree.expandItem(item)
         load(item)
         for child in item.visibleChildren where child.isDirectory {
@@ -370,13 +375,8 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         (item as? Item)?.isDirectory == true
     }
 
-    func outlineView(_ outlineView: NSOutlineView, shouldCollapseItem item: Any) -> Bool {
-        guard let item = item as? Item else { return true }
-        return !item.outside && !currentDirectories.contains(item.path)
-    }
-
     func outlineViewItemDidExpand(_ notification: Notification) {
-        guard !reloading, let item = notification.userInfo?["NSObject"] as? Item, !item.outside else { return }
+        guard !reloading, let item = notification.userInfo?["NSObject"] as? Item else { return }
         expanded.insert(item.path)
         load(item, force: true)
     }
@@ -390,21 +390,25 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         guard let item = object as? Item else { return nil }
         let cell = outlineView.makeView(withIdentifier: WorktreeCell.identifier, owner: self) as? WorktreeCell
             ?? WorktreeCell()
-        let current = item.path == currentPath && !item.isDirectory
         let muted = item.isIgnored || (item !== root && isHidden(item))
         let icon = item.isDirectory
-            ? NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
+            ? nil
             : FileIcons.image(for: item.url, appearance: outlineView.effectiveAppearance,
                               language: app.syntaxOverrides.language(for: item.url)?.iconIdentifier)
-        cell.configure(name: item.name, path: item.path, icon: icon, muted: muted,
-                       emphasized: current || item === root, folder: item.isDirectory)
+        cell.configure(name: item.name, path: item.path, icon: icon, muted: muted)
         return cell
     }
 
     private var selectedItems: [Item] { tree.selectedRowIndexes.compactMap { tree.item(atRow: $0) as? Item } }
 
-    @objc private func activateClickedRow(_ sender: NSOutlineView) {
-        guard sender.clickedRow >= 0, let item = sender.item(atRow: sender.clickedRow) as? Item else { return }
+    func activateClickedFile(at row: Int) {
+        guard let item = tree.item(atRow: row) as? Item, !item.isDirectory else { return }
+        activate(item)
+    }
+
+    @objc private func activateClickedDirectory(_ sender: NSOutlineView) {
+        guard tree.isPlainPrimaryClick, sender.clickedRow >= 0,
+              let item = sender.item(atRow: sender.clickedRow) as? Item, item.isDirectory else { return }
         activate(item)
     }
 
@@ -416,7 +420,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     private func activate(_ item: Item) {
         if item.isDirectory {
-            if tree.isItemExpanded(item), outlineView(tree, shouldCollapseItem: item) { tree.collapseItem(item) }
+            if tree.isItemExpanded(item) { tree.collapseItem(item) }
             else { tree.expandItem(item) }
         } else if item.path == currentPath {
             document.window.makeFirstResponder(document.editor)
@@ -442,6 +446,11 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     func pasteIntoSelection() {
         guard let root, let directory = destination(for: selectedItems.first) else { return }
         _ = actions.paste(into: directory, within: root.url)
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, draggingSession session: NSDraggingSession,
+                     willBeginAt screenPoint: NSPoint, forItems draggedItems: [Any]) {
+        tree.didStartDrag = true
     }
 
     func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem object: Any) -> (any NSPasteboardWriting)? {
@@ -491,6 +500,67 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 @MainActor
 private final class WorktreeOutline: NSOutlineView {
     weak var owner: WorktreeSidebar?
+    private(set) var isPlainPrimaryClick = false
+    var didStartDrag = false
+
+    override func mouseDown(with event: NSEvent) {
+        isPlainPrimaryClick = event.modifierFlags.intersection([.command, .shift, .control, .option]).isEmpty
+        didStartDrag = false
+        defer { isPlainPrimaryClick = false }
+        let clicked = row(at: convert(event.locationInWindow, from: nil))
+        super.mouseDown(with: event)
+
+        // A table's action can skip already selected rows. Use the release from its native tracking.
+        guard isPlainPrimaryClick, !didStartDrag, clicked >= 0, event.clickCount == 1,
+              let release = NSApp.currentEvent, release.type == .leftMouseUp,
+              release.window === window, release.timestamp >= event.timestamp,
+              row(at: convert(release.locationInWindow, from: nil)) == clicked else { return }
+        owner?.activateClickedFile(at: clicked)
+    }
+
+    override func frameOfOutlineCell(atRow row: Int) -> NSRect {
+        let frame = super.frameOfOutlineCell(atRow: row)
+        guard !frame.isEmpty else { return frame }
+        return NSRect(x: frame.maxX - WorktreeCell.iconSize, y: frame.minY,
+                      width: WorktreeCell.iconSize, height: frame.height)
+    }
+
+    override func frameOfCell(atColumn column: Int, row: Int) -> NSRect {
+        let frame = super.frameOfCell(atColumn: column, row: row)
+        guard let outlineTableColumn, column == self.column(withIdentifier: outlineTableColumn.identifier),
+              row >= 0, let item = item(atRow: row), !isExpandable(item) else { return frame }
+        // Files put their icon in the same gutter AppKit reserves for folder disclosure.
+        return NSRect(x: frame.minX - WorktreeCell.iconSize, y: frame.minY,
+                      width: frame.width + WorktreeCell.iconSize, height: frame.height)
+    }
+
+    override func makeView(withIdentifier identifier: NSUserInterfaceItemIdentifier, owner: Any?) -> NSView? {
+        guard identifier == NSOutlineView.disclosureButtonIdentifier ||
+              identifier == NSOutlineView.showHideButtonIdentifier else {
+            return super.makeView(withIdentifier: identifier, owner: owner)
+        }
+        if let reused = super.makeView(withIdentifier: identifier, owner: owner) { return reused }
+        let configuration = NSImage.SymbolConfiguration(pointSize: WorktreeCell.iconSize, weight: .medium)
+        let button = NSButton()
+        button.identifier = identifier
+        button.setButtonType(.onOff)
+        button.image = NSImage(systemSymbolName: "chevron.forward", accessibilityDescription: nil)?
+            .withSymbolConfiguration(configuration)
+        button.alternateImage = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
+            .withSymbolConfiguration(configuration)
+        button.imagePosition = .imageOnly
+        button.isBordered = false
+        button.target = self
+        button.action = #selector(toggleDirectory(_:))
+        return button
+    }
+
+    @objc private func toggleDirectory(_ sender: NSButton) {
+        let row = row(for: sender)
+        guard row >= 0, let item = item(atRow: row) else { return }
+        if isItemExpanded(item) { collapseItem(item) }
+        else { expandItem(item) }
+    }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         owner?.menu(at: row(at: convert(event.locationInWindow, from: nil)))
@@ -508,8 +578,10 @@ private final class WorktreeOutline: NSOutlineView {
 @MainActor
 private final class WorktreeCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("WorktreeEntry")
+    static let iconSize: CGFloat = 15
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
+    private lazy var labelLeading = label.leadingAnchor.constraint(equalTo: leadingAnchor)
 
     init() {
         super.init(frame: .zero)
@@ -518,6 +590,7 @@ private final class WorktreeCell: NSTableCellView {
         textField = label
         icon.imageScaling = .scaleProportionallyDown
         label.lineBreakMode = .byTruncatingMiddle
+        label.font = .systemFont(ofSize: NSFont.systemFontSize)
         for view in [icon, label] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
@@ -525,9 +598,9 @@ private final class WorktreeCell: NSTableCellView {
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: leadingAnchor),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 15),
+            icon.widthAnchor.constraint(equalToConstant: Self.iconSize),
             icon.heightAnchor.constraint(equalTo: icon.widthAnchor),
-            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
+            labelLeading,
             label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
@@ -535,17 +608,18 @@ private final class WorktreeCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("Worktree cells are programmatically constructed") }
 
-    func configure(name: String, path: String, icon image: NSImage?, muted: Bool, emphasized: Bool, folder: Bool) {
+    func configure(name: String, path: String, icon image: NSImage?, muted: Bool) {
         label.stringValue = name
+        labelLeading.constant = image == nil ? 6 : Self.iconSize + 6
+        icon.isHidden = image == nil
         label.textColor = muted ? .secondaryLabelColor : .labelColor
-        label.font = .systemFont(ofSize: NSFont.systemFontSize, weight: emphasized ? .semibold : .regular)
         if muted, let image, !image.isTemplate, let template = image.copy() as? NSImage {
             template.isTemplate = true
             icon.image = template
         } else {
             icon.image = image
         }
-        icon.contentTintColor = muted ? .secondaryLabelColor : folder ? .controlAccentColor : .labelColor
+        icon.contentTintColor = muted ? .secondaryLabelColor : .labelColor
         toolTip = path
     }
 }

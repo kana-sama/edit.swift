@@ -24,6 +24,42 @@ private final class FindSplitView: NSSplitView {
 }
 
 @MainActor
+final class SidebarMenuItem: NSToolbarItem {
+    let menu = NSMenu(title: "Sidebars")
+
+    override init(itemIdentifier identifier: NSToolbarItem.Identifier) {
+        super.init(itemIdentifier: identifier)
+        label = "Sidebar Menu"
+        isHidden = true
+        autovalidates = false
+        menu.autoenablesItems = false
+        let image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: label)!
+        let button = NSButton(image: image, target: self, action: #selector(showMenu(_:)))
+        button.bezelStyle = .glass
+        button.controlSize = .small
+        button.toolTip = label
+        button.setAccessibilityLabel(label)
+        button.widthAnchor.constraint(equalToConstant: 26).isActive = true
+        button.heightAnchor.constraint(equalTo: button.widthAnchor).isActive = true
+        view = button
+
+        let overflow = NSMenuItem(title: label, action: nil, keyEquivalent: "")
+        overflow.submenu = menu
+        menuFormRepresentation = overflow
+    }
+
+    func popupOrigin(in button: NSView) -> NSPoint {
+        let bounds = button.bounds
+        let x = button.userInterfaceLayoutDirection == .rightToLeft ? bounds.maxX : bounds.maxX - menu.size.width
+        return NSPoint(x: x, y: button.isFlipped ? bounds.maxY : bounds.minY)
+    }
+
+    @objc private func showMenu(_ button: NSButton) {
+        menu.popUp(positioning: nil, at: popupOrigin(in: button), in: button)
+    }
+}
+
+@MainActor
 final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
     private static let sidebarMenuItem = NSToolbarItem.Identifier("Edit.SidebarMenu")
     private static let minimumSidebarWidth: CGFloat = 185
@@ -208,10 +244,12 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         case .previous:
             moveResult(by: -1)
         case .toggleSidebar:
-            if searchVisible {
+            if settings.visible {
                 hide()
+            } else if document.sidebarMode == .worktree && document.folderURL != nil {
+                showWorktree(focus: false)
             } else {
-                showSearch(focusing: focusIsInSidebar ? findInput.input : nil)
+                showSearch(focusing: nil)
             }
         case .refresh:
             resetMatches()
@@ -455,17 +493,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         if let item = document.titleBar.makeItem(identifier) { return item }
         guard identifier == Self.sidebarMenuItem else { return nil }
-        let item = NSMenuToolbarItem(itemIdentifier: identifier)
-        item.isBordered = true
-        item.isHidden = true
-        item.label = "Sidebar Menu"
-        item.toolTip = item.label
-        item.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: item.label)
-        item.showsIndicator = false
-
-        let menu = NSMenu(title: "Sidebars")
-        item.menu = menu
-        sidebarMenu = menu
+        let item = SidebarMenuItem(itemIdentifier: identifier)
+        sidebarMenu = item.menu
         updateSidebarMenu()
         return item
     }
@@ -476,11 +505,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let search = menu.addItem(withTitle: "Search", action: #selector(selectSearchSidebar(_:)), keyEquivalent: "")
         search.target = self
         search.state = document.sidebarMode == .search ? .on : .off
-        if document.folderURL != nil {
-            let tree = menu.addItem(withTitle: "Worktree", action: #selector(selectWorktreeSidebar(_:)), keyEquivalent: "")
-            tree.target = self
-            tree.state = document.sidebarMode == .worktree ? .on : .off
-        }
+        let tree = menu.addItem(withTitle: "Worktree", action: #selector(selectWorktreeSidebar(_:)), keyEquivalent: "")
+        tree.target = self
+        tree.state = document.sidebarMode == .worktree ? .on : .off
+        tree.isEnabled = document.folderURL != nil
         menu.addItem(.separator())
         if document.sidebarMode == .worktree, let worktree {
             let hidden = menu.addItem(withTitle: "Show Hidden Files", action: #selector(toggleHiddenFiles(_:)), keyEquivalent: "")

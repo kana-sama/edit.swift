@@ -251,7 +251,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     @objc func findNext(_ sender: Any?) { activeDocument?.performFind(.next) }
     @objc func findPrevious(_ sender: Any?) { activeDocument?.performFind(.previous) }
-    @objc func toggleFindSidebar(_ sender: Any?) { activeDocument?.performFind(.toggleSidebar) }
+    // Keep the selector used by existing Control pins and command history.
+    @objc(toggleFindSidebar:) func toggleSidebar(_ sender: Any?) { activeDocument?.performFind(.toggleSidebar) }
 
     @objc func toggleWorktreeSidebar(_ sender: Any?) {
         controlPanel?.dismiss(restoreFocus: true)
@@ -274,7 +275,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             return activeDocument?.canReplaceBuffer ?? false
         case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)):
             return activeDocument.map { !$0.isBusy && $0.window.attachedSheet == nil } ?? false
-        case #selector(openFind(_:)), #selector(openReplace(_:)), #selector(toggleFindSidebar(_:)):
+        case #selector(openFind(_:)), #selector(openReplace(_:)), #selector(toggleSidebar(_:)):
             return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(toggleWorktreeSidebar(_:)):
             return activeDocument.map { $0.folderURL != nil && $0.window.attachedSheet == nil } ?? false
@@ -698,7 +699,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         edit.addItem(withTitle: "Selection", action: nil, keyEquivalent: "").submenu = selection
 
         let view = addMenu("View")
-        view.addCommand("Toggle Search Sidebar", #selector(toggleFindSidebar(_:)), "b").target = self
+        view.addCommand("Toggle Sidebar", #selector(toggleSidebar(_:)), "b").target = self
         view.addCommand("Toggle Worktree Sidebar", #selector(toggleWorktreeSidebar(_:)), "e", [.command, .shift]).target = self
         view.addCommand("Command Mode…", #selector(showCommandMode(_:)), "p", [.command, .shift]).target = self
         view.addCommand("Change Language Mode…", #selector(showLanguageModes(_:))).target = self

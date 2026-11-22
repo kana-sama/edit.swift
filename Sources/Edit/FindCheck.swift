@@ -65,6 +65,7 @@ enum FindCheck {
         try await checkRenderedHighlights(in: app.makeDocument())
         try await checkSidebarLayout(in: app.makeDocument())
         try await checkSidebarReversal(in: app.makeDocument())
+        try await checkSidebarModes(in: app)
         try await checkWindowSession(in: app)
         try expect(NSApplication.shared.activationPolicy() == .prohibited &&
                    !NSApplication.shared.isActive && !window.isVisible, "Find stays in the isolated hidden window")
@@ -402,9 +403,15 @@ enum FindCheck {
                    "the sidebar toolbar uses fixed icons without a separate Refresh button")
         let picker = try sidebarMenu(in: window)
         let items = picker.menu.items
-        try expect(!picker.isHidden && items.count == 3 && items[0].title == "Search" && items[0].state == .on &&
-                   items[1].isSeparatorItem && items[2].title == "Refresh Search",
-                   "the sidebar menu lists the active sidebar before the Refresh Search command")
+        try expect(!picker.isHidden && items.count == 4 && items[0].title == "Search" && items[0].state == .on &&
+                   items[1].title == "Worktree" && !items[1].isEnabled && !items[1].isHidden &&
+                   items[2].isSeparatorItem && items[3].title == "Refresh Search",
+                   "the sidebar menu shows both modes and keeps Worktree disabled without a folder")
+        let menuButton = try require(picker.view as? NSButton, "native ellipsis button")
+        try expect(menuButton.target === picker && menuButton.action != nil, "the ellipsis has a native menu action")
+        let menuOrigin = picker.popupOrigin(in: menuButton)
+        try expect(abs(menuOrigin.x + picker.menu.size.width - menuButton.bounds.maxX) < 0.5 &&
+                   menuOrigin.x < menuButton.bounds.minX, "the menu opens to the left of the ellipsis")
         window.makeFirstResponder(editor)
         picker.menu.performActionForItem(at: 0)
         try expect(window.firstResponder === query && query.string == "checksum",
@@ -583,8 +590,54 @@ enum FindCheck {
                    "superseded animations leave the latest width and focus")
     }
 
-    private static func sidebarMenu(in window: NSWindow) throws -> NSMenuToolbarItem {
-        try require(window.toolbar?.items.first { $0.itemIdentifier.rawValue == "Edit.SidebarMenu" } as? NSMenuToolbarItem,
+    private static func checkSidebarModes(in app: Edit) async throws {
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        let root = FileManager.default.temporaryDirectory.appending(path: "Sidebar modes \(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        document.setFolder(root)
+        let window = document.window
+
+        app.openFind(nil)
+        try expect(document.findSettings.visible && document.sidebarMode == .search &&
+                   window.firstResponder is FindFieldTextView, "Command-F opens Search and focuses its field")
+        let menu = try sidebarMenu(in: window).menu
+        try expect(menu.item(withTitle: "Worktree")?.isEnabled == true, "opening a folder enables Worktree")
+        menu.performActionForItem(at: menu.indexOfItem(withTitle: "Worktree"))
+        try expect(document.findSettings.visible && document.sidebarMode == .worktree &&
+                   menu.items.map(\.title) == ["Search", "Worktree", "", "Show Hidden Files"] &&
+                   menu.item(withTitle: "Search")?.isEnabled == true && menu.item(withTitle: "Worktree")?.state == .on,
+                   "Worktree still offers Search alongside its own menu option")
+        menu.performActionForItem(at: menu.indexOfItem(withTitle: "Search"))
+        try expect(document.sidebarMode == .search && window.firstResponder is FindFieldTextView,
+                   "choosing Search from Worktree opens the Find field")
+        document.toggleWorktreeSidebar()
+
+        app.toggleSidebar(nil)
+        try expect(!document.findSettings.visible && document.sidebarMode == .worktree,
+                   "Command-B hides the open tree and remembers its mode")
+        app.toggleSidebar(nil)
+        try expect(document.findSettings.visible && document.sidebarMode == .worktree &&
+                   window.firstResponder === document.editor,
+                   "Command-B reopens the tree and keeps editor focus")
+        app.openFind(nil)
+        try expect(document.findSettings.visible && document.sidebarMode == .search &&
+                   window.firstResponder is FindFieldTextView, "Command-F switches an open tree directly to Search")
+
+        document.toggleWorktreeSidebar()
+        app.toggleSidebar(nil)
+        app.openFind(nil)
+        try expect(document.findSettings.visible && document.sidebarMode == .search &&
+                   window.firstResponder is FindFieldTextView, "Command-F also switches a hidden tree directly to Search")
+        document.setFolder(nil)
+        try expect(menu.item(withTitle: "Worktree")?.isEnabled == false &&
+                   menu.item(withTitle: "Worktree")?.isHidden == false,
+                   "losing the open folder leaves a disabled Worktree option")
+    }
+
+    private static func sidebarMenu(in window: NSWindow) throws -> SidebarMenuItem {
+        try require(window.toolbar?.items.first { $0.itemIdentifier.rawValue == "Edit.SidebarMenu" } as? SidebarMenuItem,
                     "the sidebar header contains a native menu")
     }
 

@@ -33,6 +33,26 @@ enum WorktreeCheck {
         try expect(cell(at: log, in: tree)?.textField?.textColor == .secondaryLabelColor, "Git-ignored files are gray")
         let sources = try require(row(named: "Sources", in: tree), "show the first level")
         try expect(row(named: "Active.swift", in: tree) == nil, "do not expand unrelated directories")
+        document.window.layoutIfNeeded()
+        let disclose = try disclosure(at: sources, in: tree)
+        let fileCell = try require(cell(at: log, in: tree), "file row")
+        let fileIcon = try require(fileCell.imageView, "file icon")
+        try expect(cell(at: sources, in: tree)?.imageView?.image == nil, "folders show only the disclosure symbol")
+        fileCell.layoutSubtreeIfNeeded()
+        let folderGlyphFrame = disclose.convert(disclose.bounds, to: tree)
+        let fileGlyphFrame = fileIcon.convert(fileIcon.bounds, to: tree)
+        try expect(abs(folderGlyphFrame.minX - fileGlyphFrame.minX) < 0.5 &&
+                   abs(folderGlyphFrame.width - fileGlyphFrame.width) < 0.5,
+                   "sibling folders and files use the same icon gutter (\(folderGlyphFrame) and \(fileGlyphFrame))")
+        try click(log, in: tree, modifiers: [.command])
+        try expect(tree.selectedRowIndexes.contains(log), "Command-click selects the file")
+        try await Task.sleep(for: .milliseconds(40))
+        try expect(document.fileURL.map(WorktreeFileOperations.path) == WorktreeFileOperations.path(readme),
+                   "Command-click selects without opening a file")
+        try click(log, in: tree)
+        try await waitFor("open a file from a single click on an already selected row") {
+            document.fileURL.map(WorktreeFileOperations.path) == WorktreeFileOperations.path(ignored)
+        }
         guard let sourceMenu = sidebar.menu(at: sources) else { throw Failure("a folder has a contextual menu") }
         for title in ["New File…", "New Folder…", "Copy Path", "Hide"] {
             try expect(sourceMenu.item(withTitle: title) != nil, "folder menu contains \(title)")
@@ -47,6 +67,8 @@ enum WorktreeCheck {
         }
         let active = try require(row(named: "Active.swift", in: tree), "find active row")
         try expect(tree.selectedRow == active, "scroll and select the newly opened file")
+        try expect(cell(at: active, in: tree)?.textField?.font == NSFont.systemFont(ofSize: NSFont.systemFontSize),
+                   "the selected file uses the same font as the other files")
         let activeItem = try require(tree.item(atRow: active), "retrieve active outline item")
         guard let writer = sidebar.outlineView(tree, pasteboardWriterForItem: activeItem) else {
             throw Failure("the active file can be dragged out")
@@ -57,6 +79,21 @@ enum WorktreeCheck {
         let exported = WorktreeActions.fileURLs(on: pasteboard).map { $0.standardizedFileURL.path }
         try expect(exported == [nested.standardizedFileURL.path],
                    "dragging exports a native file URL, received \(exported)")
+
+        let rootItem = try require(tree.item(atRow: 0), "retrieve Worktree root")
+        let rootButton = try disclosure(at: 0, in: tree)
+        rootButton.performClick(nil)
+        try expect(tree.numberOfRows == 1 && !tree.isItemExpanded(rootItem),
+                   "manually collapse the tree containing the current file")
+        sidebar.setShowsHidden(true)
+        sidebar.refresh()
+        try expect(tree.numberOfRows == 1 && !tree.isItemExpanded(rootItem),
+                   "refreshing the tree keeps the root collapsed")
+        sidebar.setShowsHidden(false)
+        _ = try await app.openFile(readme, in: document)
+        try await waitFor("reveal a new file after manually collapsing the root") {
+            tree.isItemExpanded(rootItem) && row(named: "README.md", in: tree) == tree.selectedRow
+        }
 
         _ = try await app.openFile(external, in: document)
         try await waitFor("show an open file outside the worktree") { row(named: "External.txt", in: tree) != nil }
@@ -102,6 +139,31 @@ enum WorktreeCheck {
         restored.restoreSidebar(document.sessionDocument())
         try expect(restored.worktreeSidebar?.showsHidden == true && restored.findSettings.visible,
                    "restore Worktree and its Show Hidden Files setting in that window's session")
+    }
+
+    private static func disclosure(at row: Int, in outline: NSOutlineView) throws -> NSButton {
+        let button = outline.rowView(atRow: row, makeIfNecessary: true)?.subviews
+            .compactMap { $0 as? NSButton }
+            .first { $0.identifier == NSOutlineView.disclosureButtonIdentifier ||
+                $0.identifier == NSOutlineView.showHideButtonIdentifier }
+        return try require(button, "native disclosure button")
+    }
+
+    private static func click(
+        _ row: Int, in outline: NSOutlineView, modifiers: NSEvent.ModifierFlags = []
+    ) throws {
+        let rect = outline.frameOfCell(atColumn: 0, row: row)
+        let location = outline.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+        let window = try require(outline.window, "outline window")
+        func event(_ type: NSEvent.EventType) throws -> NSEvent {
+            try require(NSEvent.mouseEvent(with: type, location: location, modifierFlags: modifiers,
+                                         timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                                         eventNumber: 1, clickCount: 1, pressure: 1), "outline click")
+        }
+        let down = try event(.leftMouseDown)
+        NSApp.postEvent(try event(.leftMouseUp), atStart: true)
+        window.makeFirstResponder(outline)
+        outline.mouseDown(with: down)
     }
 
     private static func row(named name: String, in outline: NSOutlineView) -> Int? {
