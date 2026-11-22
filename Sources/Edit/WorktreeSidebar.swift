@@ -759,13 +759,13 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     private func focusEditor() {
         guard let openingFile else {
-            document.window.makeFirstResponder(document.editor)
+            document.focusContent()
             return
         }
         Task { [weak self] in
             await openingFile.value
             guard let self, document.window.firstResponder === tree else { return }
-            document.window.makeFirstResponder(document.editor)
+            document.focusContent()
         }
     }
 

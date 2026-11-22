@@ -146,6 +146,85 @@ enum FilesCheck {
         return sample
     }
 
+    static func checkFilePreview(in app: Edit) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "file-preview-\(UUID())",
+                                                                       directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let binary = directory.appending(path: "actions")
+        let original = Data([0xff, 0xff, 0x00, 0x42])
+        try original.write(to: binary)
+
+        let draft = app.makeDocument()
+        draft.editor.insertText("Keep this draft", replacementRange: NSRange(location: 0, length: 0))
+        let cancelled = try await app.openFile(binary, in: draft)
+        try expect(cancelled == nil && draft.editor.string == "Keep this draft" && !draft.isShowingFilePreview,
+                   "an inline preview respects cancellation of the outgoing draft")
+        draft.window.close()
+
+        let text = directory.appending(path: "Preview source.svg")
+        try Data("<svg xmlns=\"http://www.w3.org/2000/svg\" />".utf8).write(to: text)
+        let document = app.makeDocument()
+        _ = try await app.openFile(text, in: document)
+        let selection = NSRange(location: 3, length: 4)
+        document.editor.setSelectedRange(selection)
+        let windowCount = app.documents.count
+        let opened = try await app.openFile(binary, in: document)
+        try expect(opened === document && app.documents.count == windowCount && document.window.attachedSheet == nil,
+                   "an unreadable file shows inline in the current window")
+        let surface = try resolve(document.contentResponder as? FilePreviewView)
+        try expect(document.window.representedURL == FileBuffer.canonicalURL(binary) &&
+                   document.scrollView.isHidden && !document.editor.isEditable && !document.window.isDocumentEdited,
+                   "the read-only preview replaces the editor and owns the file title")
+        try await waitFor("inline explanation and file metadata") {
+            let labels = views(in: surface, ofType: NSTextField.self).map(\.stringValue)
+            return labels.contains(where: { $0.contains("UTF-8") }) && labels.contains(where: { $0.contains("4 bytes") })
+                && labels.contains(FileBuffer.canonicalURL(binary).path)
+        }
+        let saved = await document.save()
+        let savedAs = await document.save(asNew: true, to: text)
+        try expect(!saved && !savedAs && (try Data(contentsOf: binary)) == original,
+                   "save commands cannot change a previewed file")
+
+        let record = document.sessionDocument()
+        let restored = app.makeDocument()
+        await app.restore(EditorSession(documents: [record], activeIndex: 0, lastWindow: nil), reusing: restored)
+        try expect(restored.isShowingFilePreview && restored.window.title == "actions" &&
+                   restored.window.firstResponder === restored.contentResponder, "restoration reopens the read-only preview")
+        restored.window.close()
+
+        let image = directory.appending(path: "Preview sample.png")
+        let bitmap = try resolve(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: 32, pixelsHigh: 20, bitsPerSample: 8,
+            samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ))
+        let blue = NSColor(deviceRed: 0.15, green: 0.45, blue: 0.95, alpha: 1)
+        for y in 0..<20 {
+            for x in 0..<32 { bitmap.setColor(blue, atX: x, y: y) }
+        }
+        try resolve(bitmap.representation(using: .png, properties: [:])).write(to: image)
+        _ = try await app.openFile(image, in: document)
+        let imageSurface = try resolve(document.contentResponder as? FilePreviewView)
+        try await waitFor("preview shows the decoded image and its dimensions") {
+            views(in: imageSurface, ofType: NSImageView.self).contains { $0.accessibilityLabel() == "Preview of Preview sample.png" }
+                && views(in: imageSurface, ofType: NSTextField.self).contains { $0.stringValue == "32 × 20" }
+        }
+        document.performFind(.toggleSidebar)
+        document.window.layoutIfNeeded()
+        try expect(imageSurface.window === document.window && !imageSurface.visibleRect.isEmpty,
+                   "installing the sidebar preserves the preview in the editor pane")
+
+        _ = try await app.openFile(text, in: document)
+        try expect(!document.isShowingFilePreview && document.editor.isEditable && !document.scrollView.isHidden
+                   && document.editor.selectedRange() == selection && document.window.firstResponder === document.editor,
+                   "returning to text restores editability, selection and focus")
+        document.window.close()
+    }
+
+    private static func views<T: NSView>(in root: NSView, ofType type: T.Type) -> [T] {
+        (root as? T).map { [$0] } ?? root.subviews.flatMap { views(in: $0, ofType: type) }
+    }
+
     private static func checkOpeningInPlace(in app: Edit, directory: URL) async throws {
         let source = directory.appendingPathComponent("Open from here.txt")
         let target = directory.appendingPathComponent("Cargo.lock")

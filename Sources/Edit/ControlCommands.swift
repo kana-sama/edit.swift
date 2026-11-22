@@ -28,7 +28,7 @@ struct ControlCommand {
     func isAvailable(in document: DocumentWindow, focus: NSResponder?) -> Bool {
         guard let action = item.action, !item.isHidden else { return false }
         if documentOnly {
-            return document.window.attachedSheet == nil && document.editor.responds(to: action)
+            return !document.isShowingFilePreview && document.window.attachedSheet == nil && document.editor.responds(to: action)
         }
         if let target = item.target as? NSUserInterfaceValidations {
             return target.validateUserInterfaceItem(item)
@@ -49,7 +49,8 @@ struct ControlCommand {
     func run(in document: DocumentWindow) {
         guard let action = item.action else { return }
         if documentOnly {
-            document.window.makeFirstResponder(document.editor)
+            guard !document.isShowingFilePreview else { return }
+            document.focusContent()
             document.editor.doCommand(by: action)
             return
         }

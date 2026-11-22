@@ -167,7 +167,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         table.clearHover()
         if restoreFocus && !app.isAgentCheck {
             document.window.makeKey()
-            document.window.makeFirstResponder(originalFocus ?? document.editor)
+            if let originalFocus = originalFocus as? NSView, originalFocus.window === document.window,
+               !originalFocus.isHiddenOrHasHiddenAncestor {
+                document.window.makeFirstResponder(originalFocus)
+            } else {
+                document.focusContent()
+            }
         }
         originalFocus = nil
     }

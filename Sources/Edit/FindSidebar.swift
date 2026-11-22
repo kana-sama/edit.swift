@@ -263,7 +263,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             refreshDecorations()
             return
         }
-        window.makeFirstResponder(document.editor)
+        document.focusContent()
         refreshDecorations()
     }
 
@@ -288,7 +288,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             ])
         }
         selectMode(.worktree)
-        browser.update(folder: folder, currentFile: document.fileURL)
+        browser.update(folder: folder, currentFile: document.displayedFileURL)
         present(focusing: focus ? browser.outline : nil, animate: animate)
         browser.setActive(true)
     }
@@ -310,7 +310,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     func folderChanged() {
         if let folder = document.folderURL {
-            if worktreeVisible { worktree?.update(folder: folder, currentFile: document.fileURL) }
+            if worktreeVisible { worktree?.update(folder: folder, currentFile: document.displayedFileURL) }
         } else if document.sidebarMode == .worktree {
             let wasFocused = focusIsInSidebar
             selectMode(.search)
@@ -388,13 +388,13 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     func updateName() {
         resultFile.stringValue = document.displayName
-        resultIcon.image = FileIcons.image(for: document.fileURL, appearance: sidebar.view.effectiveAppearance,
+        resultIcon.image = FileIcons.image(for: document.displayedFileURL, appearance: sidebar.view.effectiveAppearance,
                                            language: document.manualSyntaxLanguage?.iconIdentifier)
     }
 
     func updateCurrentFile(reveal: Bool) {
         if worktreeVisible, let folder = document.folderURL {
-            worktree?.update(folder: folder, currentFile: document.fileURL, revealCurrentFile: reveal)
+            worktree?.update(folder: folder, currentFile: document.displayedFileURL, revealCurrentFile: reveal)
         }
     }
 
@@ -706,17 +706,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let window = document.window
         let previousSize = window.contentView?.bounds.size ?? window.contentLayoutRect.size
         let oldFrame = window.frame
-        let editorPane = NSView(frame: NSRect(origin: .zero, size: previousSize))
-        let scroll = document.scrollView
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        editorPane.addSubview(scroll)
-        NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: editorPane.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: editorPane.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: editorPane.bottomAnchor),
-            scroll.topAnchor.constraint(equalTo: editorPane.topAnchor),
-        ])
-        editorController.view = editorPane
+        editorController.view = document.editorContentView
         let editorItem = NSSplitViewItem(viewController: editorController)
         editorItem.automaticallyAdjustsSafeAreaInsets = true
         editorItem.minimumThickness = Self.minimumEditorWidth
@@ -741,7 +731,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         sidebarToolbar = toolbar
         window.toolbar = toolbar
         if window.frame != oldFrame { window.setFrame(oldFrame, display: window.isVisible) }
-        window.initialFirstResponder = document.editor
+        window.initialFirstResponder = document.contentResponder
         NotificationCenter.default.addObserver(self, selector: #selector(splitResized(_:)),
                                                name: NSSplitView.didResizeSubviewsNotification, object: split.splitView)
         installed = true

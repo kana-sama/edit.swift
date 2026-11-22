@@ -128,12 +128,12 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         }
         fileTitle?.edgeInsets.left = document.folderURL == nil ? Self.leadingInset : 7
         fileLabel?.stringValue = document.displayName
-        fileLabel?.toolTip = document.fileURL?.path ?? document.displayName
+        fileLabel?.toolTip = document.displayedFileURL?.path ?? document.displayName
         if availableWidth == 0 { resize() } else { fitLabels() }
-        if document.fileURL == nil && document.manualSyntaxLanguage == nil {
+        if document.displayedFileURL == nil && document.manualSyntaxLanguage == nil {
             languageIcon?.image = NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
         } else {
-            languageIcon?.image = FileIcons.image(for: document.fileURL, appearance: document.window.effectiveAppearance,
+            languageIcon?.image = FileIcons.image(for: document.displayedFileURL, appearance: document.window.effectiveAppearance,
                                                   language: document.manualSyntaxLanguage?.iconIdentifier)
         }
     }
@@ -214,9 +214,9 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         let show: () -> Void
         if let folderLabel, document.folderURL != nil, hits(folderLabel) {
             show = { self.showFolderMenu(from: folderLabel) }
-        } else if let languageIcon, hits(languageIcon) {
+        } else if let languageIcon, !document.isShowingFilePreview, hits(languageIcon) {
             show = { self.showLanguagePicker() }
-        } else if let fileLabel, document.fileURL != nil, hits(fileLabel) {
+        } else if let fileLabel, document.displayedFileURL != nil, hits(fileLabel) {
             show = { self.showSiblingMenu(from: fileLabel) }
         } else {
             return false
@@ -234,11 +234,11 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
 
     private func showSiblingMenu(from label: TitleBarLabel) {
         siblingRequest?.cancel()
-        guard document.canReplaceBuffer, let file = document.fileURL else { return }
+        guard document.canReplaceBuffer, let file = document.displayedFileURL else { return }
         let wasKeyWindow = document.window.isKeyWindow
         siblingRequest = Task { [weak self, weak label] in
             let files = await Self.loadSiblingFiles(of: file)
-            guard !Task.isCancelled, let self, let label, document.fileURL == file,
+            guard !Task.isCancelled, let self, let label, document.displayedFileURL == file,
                   document.canReplaceBuffer, !wasKeyWindow || document.window.isKeyWindow else { return }
             popUp(siblingFilesMenu(files, current: file), from: label)
         }

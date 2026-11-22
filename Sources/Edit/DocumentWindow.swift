@@ -29,6 +29,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     enum CloseDestination {
         case window
         case buffer(FileBuffer?, focusEditor: Bool = true)
+        case preview(OpenFilePreview, focusEditor: Bool)
     }
 
     private struct AutosaveRequest {
@@ -39,6 +40,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     let window: NSWindow
     let editor: EditorTextView
     let scrollView: NSScrollView
+    let editorContentView: NSView
     private(set) lazy var titleBar = DocumentTitleBar(document: self, app: app)
 
     private unowned let app: Edit
@@ -48,7 +50,16 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
     }
     private(set) var folderURL: URL?
-    var displayName: String { fileURL?.lastPathComponent ?? "Untitled" }
+    private var filePreview: OpenFilePreview?
+    private var filePreviewView: FilePreviewView?
+    var isShowingFilePreview: Bool { filePreview != nil }
+    var displayedFileURL: URL? { filePreview?.url ?? fileURL }
+    var displayName: String { displayedFileURL?.lastPathComponent ?? "Untitled" }
+    var contentResponder: NSView { (filePreviewView as NSView?) ?? editor }
+
+    func focusContent() {
+        window.makeFirstResponder(contentResponder)
+    }
 
     func setFolder(_ url: URL?) {
         guard folderURL != url else { return }
@@ -88,7 +99,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func setSyntaxLanguage(_ language: SyntaxLanguage?) {
-        guard manualSyntaxLanguage != language else { return }
+        guard !isShowingFilePreview, manualSyntaxLanguage != language else { return }
         manualSyntaxLanguage = language
         app.syntaxOverrides.set(language, for: fileURL)
         updateTitle()
@@ -98,7 +109,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     var isBusy: Bool { saving || promptingToClose || worktreeMutation }
     var canReplaceBuffer: Bool { !isBusy && window.attachedSheet == nil }
     var isReusable: Bool {
-        folderURL == nil && fileURL == nil && findPanel == nil && !window.isDocumentEdited && canReplaceBuffer
+        folderURL == nil && displayedFileURL == nil && findPanel == nil && !window.isDocumentEdited && canReplaceBuffer
     }
 
     init(app: Edit, placement: WindowPlacement? = nil) {
@@ -110,6 +121,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             defer: false
         )
         (scrollView, editor) = EditorTextView.scrollingEditor(in: window.contentLayoutRect)
+        editorContentView = NSView(frame: scrollView.frame)
         super.init()
         window.title = "Untitled"
         window.titleVisibility = .hidden
@@ -120,7 +132,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         appearanceObservation = window.observe(\.effectiveAppearance) { [weak self] _, _ in
             Task { @MainActor in self?.titleBar.update() }
         }
-        window.contentView = scrollView
+        window.contentView = editorContentView
+        pinToEditorContent(scrollView)
         let toolbar = NSToolbar(identifier: "Edit.Document")
         toolbar.delegate = titleBar
         toolbar.displayMode = .iconOnly
@@ -142,6 +155,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func canPerformFind(_ command: FindCommand) -> Bool {
+        guard window.attachedSheet == nil else { return false }
+        if isShowingFilePreview { return command == .toggleSidebar }
         if let findPanel { return findPanel.canPerform(command) }
         switch command {
         case .find, .replace, .toggleSidebar: return true
@@ -240,6 +255,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func load(_ file: FileBuffer, storedSyntaxLanguage: String? = nil, preparedSyntax: SyntaxSnapshot? = nil) {
+        removeFilePreview()
         updateIdentity(from: file)
         manualSyntaxLanguage = storedSyntaxLanguage.flatMap(SyntaxLanguage.init(rawValue:))
             ?? app.syntaxOverrides.language(for: fileURL)
@@ -261,6 +277,45 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         return await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
     }
 
+    func loadPreview(_ preview: OpenFilePreview, revealInWorktree: Bool = true) {
+        removeFilePreview()
+        filePreview = preview
+        fileURL = nil
+        fileIdentity = preview.identity
+        manualSyntaxLanguage = nil
+        savedText = "" as NSString
+        format = FileFormat()
+        revision = nil
+        editor.isEditable = false
+        let view = FilePreviewView(url: preview.url, reason: preview.reason)
+        filePreviewView = view
+        pinToEditorContent(view)
+        window.initialFirstResponder = view
+        scrollView.isHidden = true
+        installText("", revealInWorktree: revealInWorktree)
+    }
+
+    private func removeFilePreview() {
+        guard let filePreviewView else { return }
+        window.initialFirstResponder = editor
+        self.filePreviewView = nil
+        filePreview = nil
+        filePreviewView.stop()
+        filePreviewView.removeFromSuperview()
+        scrollView.isHidden = false
+    }
+
+    private func pinToEditorContent(_ view: NSView) {
+        view.translatesAutoresizingMaskIntoConstraints = false
+        editorContentView.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: editorContentView.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: editorContentView.trailingAnchor),
+            view.topAnchor.constraint(equalTo: editorContentView.topAnchor),
+            view.bottomAnchor.constraint(equalTo: editorContentView.bottomAnchor),
+        ])
+    }
+
     func restoreDraft(_ record: SessionDocument, text: String, identity: FileIdentity? = nil) {
         fileURL = record.path.map { URL(fileURLWithPath: $0) }
         fileIdentity = identity
@@ -274,7 +329,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func sessionDocument() -> SessionDocument {
         SessionDocument(
-            path: fileURL?.path,
+            path: displayedFileURL?.path,
             draft: window.isDocumentEdited ? editor.string : nil,
             format: fileURL == nil ? nil : format,
             revision: revision,
@@ -282,9 +337,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             syntaxLanguage: manualSyntaxLanguage?.rawValue,
             folderPath: folderURL?.path,
             findSettings: findSettings == FindSettings() ? nil : findSettings,
-            editorPosition: editor.capturePosition(),
+            editorPosition: isShowingFilePreview ? nil : editor.capturePosition(),
             sidebarMode: sidebarMode == .search ? nil : sidebarMode,
-            worktreeShowsHidden: (worktreeSidebar?.showsHidden ?? worktreeShowsHidden) ? true : nil
+            worktreeShowsHidden: (worktreeSidebar?.showsHidden ?? worktreeShowsHidden) ? true : nil,
+            isFilePreview: isShowingFilePreview ? true : nil
         )
     }
 
@@ -303,7 +359,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     @discardableResult
     func save(asNew: Bool = false, to selectedURL: URL? = nil, encoding: FileTextEncoding? = nil) async -> Bool {
-        guard !saving, !worktreeMutation else { return false }
+        guard !isShowingFilePreview, !saving, !worktreeMutation else { return false }
         saving = true
         if editor.hasMarkedText() { editor.unmarkText() }
         defer {
@@ -450,7 +506,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func worktreeMutationAffects(_ sources: [URL]) -> Bool {
         sources.contains { source in
-            [fileURL, folderURL].compactMap { $0 }.contains { Self.worktreePathSuffix(from: source, to: $0) != nil }
+            [displayedFileURL, folderURL].compactMap { $0 }.contains { Self.worktreePathSuffix(from: source, to: $0) != nil }
         }
     }
 
@@ -469,7 +525,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func finishWorktreeMutation() {
         worktreeMutation = false
-        editor.isEditable = worktreePriorEditability
+        editor.isEditable = !isShowingFilePreview && worktreePriorEditability
         startRequestedAutosave()
         if autosaveTask == nil { scheduleIdleAutosave() }
     }
@@ -479,10 +535,20 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             let movedFolder = suffix.isEmpty ? destination : destination.appending(path: suffix, directoryHint: .isDirectory)
             setFolder(URL(filePath: movedFolder.path, directoryHint: .isDirectory))
         }
-        guard let original = fileURL, let suffix = Self.worktreePathSuffix(from: source, to: original) else { return }
-        let previousLanguage = resolvedSyntaxLanguage
+        guard let original = displayedFileURL, let suffix = Self.worktreePathSuffix(from: source, to: original) else { return }
         let movedFile = suffix.isEmpty ? destination : destination.appending(path: suffix, directoryHint: .notDirectory)
-        fileURL = URL(filePath: movedFile.path, directoryHint: .notDirectory)
+        let movedURL = URL(filePath: movedFile.path, directoryHint: .notDirectory)
+        if let filePreview {
+            let wasFocused = contentHasFocus
+            loadPreview(OpenFilePreview(url: movedURL, identity: FileIdentity.at(movedURL), reason: filePreview.reason),
+                        revealInWorktree: revealInWorktree)
+            if wasFocused { focusContent() }
+            let folder = folderURL
+            Task { await app.recentFiles.record(movedURL, in: folder) }
+            return
+        }
+        let previousLanguage = resolvedSyntaxLanguage
+        fileURL = movedURL
         fileIdentity = fileURL.flatMap { FileIdentity.at($0) }
         if let manualSyntaxLanguage {
             app.syntaxOverrides.set(nil, for: original)
@@ -500,7 +566,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func detachTrashedFile(at source: URL) {
         if let folderURL, Self.worktreePathSuffix(from: source, to: folderURL) != nil { setFolder(nil) }
-        guard let fileURL, Self.worktreePathSuffix(from: source, to: fileURL) != nil else { return }
+        guard let displayedFileURL, Self.worktreePathSuffix(from: source, to: displayedFileURL) != nil else { return }
+        let wasPreview = isShowingFilePreview
+        let wasFocused = contentHasFocus
+        removeFilePreview()
+        if wasPreview { worktreePriorEditability = true }
         let edited = window.isDocumentEdited
         let previousLanguage = resolvedSyntaxLanguage
         self.fileURL = nil
@@ -518,6 +588,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             format = FileFormat()
             installText("")
         }
+        if wasPreview && wasFocused { focusContent() }
+    }
+
+    private var contentHasFocus: Bool {
+        guard let view = window.firstResponder as? NSView else { return false }
+        return view.isDescendant(of: contentResponder)
     }
 
     static func worktreePathSuffix(from source: URL, to file: URL) -> String? {
@@ -612,13 +688,19 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         return await closeBuffer(destination: .buffer(file, focusEditor: focusEditor))
     }
 
+    func replaceBuffer(withPreview preview: OpenFilePreview, focusEditor: Bool) async -> Bool {
+        guard canReplaceBuffer, !app.isQuitting else { return false }
+        promptingToClose = true
+        return await closeBuffer(destination: .preview(preview, focusEditor: focusEditor))
+    }
+
     @discardableResult
     private func closeBuffer(destination: CloseDestination) async -> Bool {
         if editor.hasMarkedText() { editor.unmarkText() }
-        let wasEditable = editor.isEditable
+        let wasEditable = isShowingFilePreview || editor.isEditable
         editor.isEditable = false
         defer {
-            editor.isEditable = wasEditable
+            editor.isEditable = !isShowingFilePreview && wasEditable
             promptingToClose = false
             startRequestedAutosave()
         }
@@ -654,6 +736,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         switch destination {
         case .buffer(let file, let focusEditor):
             autosaveFailure = nil
+            let restoreFocus = focusEditor || contentHasFocus
             editor.breakUndoCoalescing()
             var position: EditorPosition?
             if let file {
@@ -667,6 +750,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 }
             } else {
                 rememberFilePosition()
+                removeFilePreview()
                 fileURL = nil
                 manualSyntaxLanguage = nil
                 fileIdentity = nil
@@ -675,8 +759,14 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 revision = nil
                 installText("")
             }
-            if focusEditor { window.makeFirstResponder(editor) }
+            if restoreFocus { focusContent() }
             restoreEditorPosition(position)
+        case .preview(let preview, let focusEditor):
+            let restoreFocus = focusEditor || contentHasFocus
+            autosaveFailure = nil
+            rememberFilePosition()
+            loadPreview(preview)
+            if restoreFocus { focusContent() }
         case .window:
             window.close()
         }
@@ -710,6 +800,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         rememberFilePosition()
+        filePreviewView?.stop()
         syntaxHighlighting?.cancel(clearingColors: false)
         idleSave?.cancel()
         idleSave = nil
@@ -752,7 +843,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    private func installText(_ text: String, preparedSyntax: SyntaxSnapshot? = nil) {
+    private func installText(
+        _ text: String, preparedSyntax: SyntaxSnapshot? = nil, revealInWorktree: Bool = true
+    ) {
         editor.preferredLineEnding = format.lineEnding
         editor.resetMultiCarets()
         syntaxHighlighting?.prepareForBufferReplacement()
@@ -761,7 +854,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.setSelectedRange(NSRange(location: 0, length: 0))
         editor.scrollRangeToVisible(editor.selectedRange())
         editor.undoManager?.removeAllActions()
-        updateTitle()
+        updateTitle(revealInWorktree: revealInWorktree)
         updateEditedState()
         findPanel?.bufferReplaced()
     }
@@ -776,7 +869,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func updateTitle(revealInWorktree: Bool = true) {
-        if window.representedURL != fileURL { window.representedURL = fileURL }
+        if window.representedURL != displayedFileURL { window.representedURL = displayedFileURL }
         if let folderURL {
             let folderName = folderURL.lastPathComponent
             window.title = "\(folderName.isEmpty ? folderURL.path : folderName) — \(displayName)"

@@ -1,4 +1,40 @@
 import AppKit
+import UniformTypeIdentifiers
+
+struct OpenFilePreview: Sendable {
+    let url: URL
+    let identity: FileIdentity?
+    let reason: String
+}
+
+private enum OpenedFile: Sendable {
+    case text(FileBuffer)
+    case preview(OpenFilePreview)
+
+    var url: URL {
+        switch self {
+        case .text(let file): file.url
+        case .preview(let preview): preview.url
+        }
+    }
+
+    var identity: FileIdentity? {
+        switch self {
+        case .text(let file): file.identity
+        case .preview(let preview): preview.identity
+        }
+    }
+
+    @MainActor
+    func replaceBuffer(in document: DocumentWindow, focusEditor: Bool) async -> Bool {
+        switch self {
+        case .text(let file):
+            await document.replaceBuffer(with: file, focusEditor: focusEditor)
+        case .preview(let preview):
+            await document.replaceBuffer(withPreview: preview, focusEditor: focusEditor)
+        }
+    }
+}
 
 @main
 @MainActor
@@ -79,6 +115,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try checkWindow(folderWindow, screenshot: nil)
                     try await HeaderCheck.run(in: self)
                     try await WorktreeCheck.run(in: self)
+                    try await FilesCheck.checkFilePreview(in: self)
                     print("Edit passed its native editing and file-session checks without activation.")
                     exit(EXIT_SUCCESS)
                 } catch {
@@ -211,7 +248,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     private func showControl(_ mode: ControlPanel.Mode, in source: DocumentWindow? = nil) {
-        guard let document = source ?? activeDocument, !isQuitting else { return }
+        guard let document = source ?? activeDocument, !isQuitting,
+              mode != .languages || !document.isShowingFilePreview else { return }
         let panel = controlPanel ?? ControlPanel(app: self)
         controlPanel = panel
         panel.toggle(in: document, mode: mode)
@@ -240,7 +278,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         let panel = openFilePanel ?? OpenFilePanel()
         openFilePanel = panel
         openPanelDocument = document
-        let directory = document.folderURL ?? document.fileURL?.deletingLastPathComponent()
+        let directory = document.folderURL ?? document.displayedFileURL?.deletingLastPathComponent()
         panel.open(in: directory) { [weak self, weak document] result in
             guard let self else { return }
             openPanelDocument = nil
@@ -298,15 +336,20 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         guard !isQuitting else { return false }
         switch item.action {
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
-        case #selector(showGoToFile(_:)), #selector(showCommandMode(_:)), #selector(showLanguageModes(_:)): return activeDocument.map { $0.window.attachedSheet == nil } ?? false
+        case #selector(showGoToFile(_:)), #selector(showCommandMode(_:)):
+            return activeDocument.map { $0.window.attachedSheet == nil } ?? false
+        case #selector(showLanguageModes(_:)):
+            return activeDocument.map { !$0.isShowingFilePreview && $0.window.attachedSheet == nil } ?? false
         case #selector(newWindow(_:)): return true
         case #selector(openDocument(_:)):
             return openFilePanel?.isOpening == true || activeDocument?.canReplaceBuffer == true
         case #selector(openRecentDocument(_:)):
             return activeDocument?.canReplaceBuffer ?? false
         case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)):
-            return activeDocument.map { !$0.isBusy && $0.window.attachedSheet == nil } ?? false
-        case #selector(openFind(_:)), #selector(openReplace(_:)), #selector(toggleSidebar(_:)):
+            return activeDocument.map { !$0.isShowingFilePreview && !$0.isBusy && $0.window.attachedSheet == nil } ?? false
+        case #selector(openFind(_:)): return activeDocument?.canPerformFind(.find) ?? false
+        case #selector(openReplace(_:)): return activeDocument?.canPerformFind(.replace) ?? false
+        case #selector(toggleSidebar(_:)):
             return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(toggleWorktreeSidebar(_:)):
             return activeDocument.map { $0.folderURL != nil && $0.window.attachedSheet == nil } ?? false
@@ -378,7 +421,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             } catch {
                 isQuitting = false
                 for document in documents {
-                    document.editor.isEditable = true
+                    document.editor.isEditable = !document.isShowingFilePreview
                     if !document.window.isVisible { document.window.orderFront(nil) }
                 }
                 let document = activeDocument ?? makeDocument(placement: lastPlacement)
@@ -427,7 +470,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         // Save As must not claim a path owned by another window.
         guard !isWorktreeMutationPath(url) else { return false }
         guard url == document.fileURL || !documents.contains(where: {
-            $0 !== document && ($0.fileURL == url || (identity != nil && $0.fileIdentity == identity))
+            $0 !== document && ($0.fileURL == url || (identity != nil && $0.fileURL != nil && $0.fileIdentity == identity))
         }) else { return false }
         guard !saveTargets.keys.contains(url),
               identity == nil || !saveTargets.values.contains(identity)
@@ -483,10 +526,13 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         var restored: [(index: Int, document: DocumentWindow)] = []
         var warnings: [String] = []
         for (index, record) in previous.documents.enumerated() {
-            let opened: FileBuffer?
+            let opened: OpenedFile?
             if record.draft == nil, let path = record.path {
                 do {
-                    opened = try await readForOpening(URL(fileURLWithPath: path))
+                    opened = try await readForOpening(
+                        URL(fileURLWithPath: path),
+                        allowsPreview: record.isFilePreview == true
+                    )
                 } catch {
                     warnings.append("“\(URL(fileURLWithPath: path).lastPathComponent)” — \(error.localizedDescription)")
                     guard record.folderPath != nil else { continue }
@@ -505,9 +551,15 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 }.value
                 document.restoreDraft(record, text: draft, identity: identity)
             } else if let opened {
-                let syntax = await document.prepareOpeningSyntax(opened, position: record.editorPosition,
-                                                                 storedSyntaxLanguage: record.syntaxLanguage)
-                document.load(opened, storedSyntaxLanguage: record.syntaxLanguage, preparedSyntax: syntax)
+                switch opened {
+                case .text(let file):
+                    let syntax = await document.prepareOpeningSyntax(file, position: record.editorPosition,
+                                                                     storedSyntaxLanguage: record.syntaxLanguage)
+                    document.load(file, storedSyntaxLanguage: record.syntaxLanguage, preparedSyntax: syntax)
+                case .preview(let preview):
+                    document.loadPreview(preview)
+                    document.focusContent()
+                }
             }
             document.restoreSidebar(record)
             document.restoreEditorPosition(record.editorPosition)
@@ -567,7 +619,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             let folder = URL(filePath: canonical.path, directoryHint: .isDirectory)
             return try await openFolder(url, canonical: folder, in: document, focusEditor: focusEditor)
         }
-        if document.fileURL == canonical || (identity != nil && identity == document.fileIdentity) {
+        if !document.isShowingFilePreview &&
+            (document.fileURL == canonical || (identity != nil && identity == document.fileIdentity)) {
             await recentFiles.record(url, in: document.folderURL)
             return document
         }
@@ -575,8 +628,12 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         let opened = try await readForOpening(canonical, allowMissing: allowMissing)
         guard documents.contains(where: { $0 === document }), mutationGeneration == worktreeMutationGeneration,
               !isWorktreeMutationPath(canonical),
-              await document.replaceBuffer(with: opened, focusEditor: focusEditor) else { return nil }
-        if opened.identity != nil { await recentFiles.record(url, in: document.folderURL) }
+              await opened.replaceBuffer(in: document, focusEditor: focusEditor) else { return nil }
+        if opened.identity != nil {
+            await recentFiles.record(url, in: document.folderURL)
+        } else if case .preview = opened {
+            await recentFiles.removeIfMissing(url)
+        }
         return document
     }
 
@@ -584,14 +641,15 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         _ url: URL, canonical folder: URL, in document: DocumentWindow, focusEditor: Bool
     ) async throws -> DocumentWindow? {
         let mutationGeneration = worktreeMutationGeneration
-        var opened: FileBuffer?
-        if let last = await recentFiles.lastFile(in: folder) {
-            opened = try? await readForOpening(last, within: folder)
+        var opened: OpenedFile?
+        if let last = await recentFiles.lastFile(in: folder),
+           let candidate = try? await readForOpening(last, within: folder), candidate.identity != nil {
+            opened = candidate
         }
         if opened == nil {
             let readmes = try await Task.detached { try Self.folderReadmes(folder) }.value
             for readme in readmes {
-                if let candidate = try? await readForOpening(readme, within: folder) {
+                if let candidate = try? await readForOpening(readme, within: folder, allowsPreview: false) {
                     opened = candidate
                     break
                 }
@@ -600,8 +658,12 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         guard !isQuitting, document.canReplaceBuffer, documents.contains(where: { $0 === document }),
               mutationGeneration == worktreeMutationGeneration,
               opened.map({ !isWorktreeMutationPath($0.url) }) ?? true else { return nil }
-        if opened == nil || opened?.url != document.fileURL {
-            guard await document.replaceBuffer(with: opened, focusEditor: focusEditor) else { return nil }
+        if let opened {
+            if opened.url != document.displayedFileURL {
+                guard await opened.replaceBuffer(in: document, focusEditor: focusEditor) else { return nil }
+            }
+        } else {
+            guard await document.replaceBuffer(with: nil, focusEditor: focusEditor) else { return nil }
         }
         if document.folderURL != folder {
             document.setFolder(folder)
@@ -628,7 +690,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         }.map(\.url)
     }
 
-    private func readForOpening(_ url: URL, allowMissing: Bool = false, within folder: URL? = nil) async throws -> FileBuffer {
+    private func readForOpening(
+        _ url: URL, allowMissing: Bool = false, within folder: URL? = nil, allowsPreview: Bool = true
+    ) async throws -> OpenedFile {
         try await Task.detached(priority: .userInitiated) {
             let target: URL
             if let folder {
@@ -638,13 +702,28 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             } else {
                 target = url
             }
-            return try FileBuffer.read(target, allowMissing: allowMissing)
+            // Media can be much larger than text. Let the system decoders read it on demand.
+            if allowsPreview, !target.pathExtension.isEmpty,
+               let type = UTType(filenameExtension: target.pathExtension),
+               type != .svg, !type.conforms(to: .text),
+               type.conforms(to: .image) || type.conforms(to: .movie) || type.conforms(to: .video),
+               let identity = FileIdentity.at(target) {
+                return .preview(OpenFilePreview(url: target, identity: identity, reason: ""))
+            }
+
+            do {
+                return try .text(FileBuffer.read(target, allowMissing: allowMissing))
+            } catch {
+                guard allowsPreview else { throw error }
+                return .preview(OpenFilePreview(url: target, identity: FileIdentity.at(target),
+                                                reason: error.localizedDescription))
+            }
         }.value
     }
 
     func manualIconLanguage(for recent: RecentFile) -> String? {
         if let document = activeDocument,
-           document.fileURL == recent.canonicalURL || document.fileIdentity == recent.identity {
+           document.displayedFileURL == recent.canonicalURL || document.fileIdentity == recent.identity {
             return document.manualSyntaxLanguage?.iconIdentifier
         }
         return syntaxOverrides.language(for: recent.canonicalURL)?.iconIdentifier
