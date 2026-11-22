@@ -203,16 +203,35 @@ enum FilesCheck {
             for x in 0..<32 { bitmap.setColor(blue, atX: x, y: y) }
         }
         try resolve(bitmap.representation(using: .png, properties: [:])).write(to: image)
+        let window = document.window
+        window.setContentSize(NSSize(width: 720, height: 300))
         _ = try await app.openFile(image, in: document)
         let imageSurface = try resolve(document.contentResponder as? FilePreviewView)
         try await waitFor("preview shows the decoded image and its dimensions") {
             views(in: imageSurface, ofType: NSImageView.self).contains { $0.accessibilityLabel() == "Preview of Preview sample.png" }
                 && views(in: imageSurface, ofType: NSTextField.self).contains { $0.stringValue == "32 × 20" }
         }
-        document.performFind(.toggleSidebar)
-        document.window.layoutIfNeeded()
-        try expect(imageSurface.window === document.window && !imageSurface.visibleRect.isEmpty,
-                   "installing the sidebar preserves the preview in the editor pane")
+        let scroll = try resolve(views(in: imageSurface, ofType: NSScrollView.self).first)
+        let previewImage = try resolve(views(in: imageSurface, ofType: NSImageView.self).first)
+        let path = try resolve(views(in: imageSurface, ofType: NSTextField.self).first {
+            $0.stringValue == FileBuffer.canonicalURL(image).path
+        })
+        try expect(path.alignment == .right, "the path is aligned with the other metadata values")
+
+        for sidebarVisible in [false, true] {
+            if sidebarVisible { document.performFind(.toggleSidebar) }
+            window.layoutIfNeeded()
+            let toolbarBottom = window.contentLayoutRect.maxY
+            try expect(scroll.contentInsets.top > 0 && scroll.convert(scroll.bounds, to: nil).maxY > toolbarBottom,
+                       "the preview scroll view extends behind the toolbar with its native top inset")
+            scroll.scrollToVisibleContentOrigin(.zero)
+            let start = previewImage.convert(previewImage.bounds, to: nil)
+            try expect(start.maxY <= toolbarBottom, "the preview starts below the toolbar")
+            scroll.scrollToVisibleContentOrigin(NSPoint(x: 0, y: 68))
+            let scrolled = previewImage.convert(previewImage.visibleRect, to: nil)
+            try expect(scrolled.maxY > toolbarBottom && scrolled.minY < toolbarBottom,
+                       "the image remains in the visible scroll area beneath the toolbar")
+        }
 
         _ = try await app.openFile(text, in: document)
         try expect(!document.isShowingFilePreview && document.editor.isEditable && !document.scrollView.isHidden

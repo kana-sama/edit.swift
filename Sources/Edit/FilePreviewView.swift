@@ -50,8 +50,10 @@ final class FilePreviewView: NSView {
         let viewport = scrollView.contentSize
         let width = min(544, max(1, viewport.width - 48))
         contentWidth.constant = width
-        mediaHeightLimit?.constant = min(330, max(108, floor(viewport.height * 0.52)))
-        let height = max(viewport.height, ceil(content.fittingSize.height) + 48)
+        let insets = scrollView.contentInsets
+        let visibleHeight = max(0, viewport.height - insets.top - insets.bottom)
+        mediaHeightLimit?.constant = min(330, max(108, floor(visibleHeight * 0.52)))
+        let height = max(visibleHeight, ceil(content.fittingSize.height) + 48)
         let size = NSSize(width: viewport.width, height: height)
         if document.frame.size != size {
             document.setFrameSize(size)
@@ -61,7 +63,7 @@ final class FilePreviewView: NSView {
     private func configure(reason: String) {
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.drawsBackground = false
-        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.automaticallyAdjustsContentInsets = true
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.documentView = document
@@ -111,8 +113,8 @@ final class FilePreviewView: NSView {
         NSLayoutConstraint.activate([
             scrollView.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: safeArea.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: safeArea.bottomAnchor),
+            scrollView.topAnchor.constraint(equalTo: topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
             content.centerXAnchor.constraint(equalTo: document.centerXAnchor),
             content.centerYAnchor.constraint(equalTo: document.centerYAnchor),
             contentWidth,
@@ -192,7 +194,7 @@ final class FilePreviewView: NSView {
         let field = NSTextField(wrappingLabelWithString: value)
         field.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         field.isSelectable = true
-        field.alignment = label == "Path" ? .left : .right
+        field.alignment = .right
         field.maximumNumberOfLines = 0
         field.lineBreakMode = .byCharWrapping
         let row = NSStackView(views: [name, field])
