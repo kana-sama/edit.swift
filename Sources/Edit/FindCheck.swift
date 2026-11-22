@@ -660,6 +660,21 @@ enum FindCheck {
                    menu.item(withTitle: "Source Control")?.isHidden == false &&
                    menu.item(withTitle: "Search")?.isEnabled == true && menu.item(withTitle: "Worktree")?.state == .on,
                    "Worktree still offers Search alongside its own menu option")
+        let semibold = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        func checkTitleWeight() throws {
+            for title in [titleButton.attributedTitle, titleButton.attributedAlternateTitle] {
+                try expect(title.string == "Worktree" &&
+                           title.attribute(.font, at: 0, effectiveRange: nil) as? NSFont == semibold,
+                           "Worktree stays semibold in the button's normal and pressed states")
+            }
+        }
+        try checkTitleWeight()
+        titleButton.highlight(true)
+        menu.update()
+        try checkTitleWeight()
+        titleButton.highlight(false)
+        try checkTitleWeight()
+
         let sidebarWidth = sidebar.frame.width
         split.splitView.setPosition(split.splitViewItems[0].minimumThickness, ofDividerAt: 0)
         try checkHeader()

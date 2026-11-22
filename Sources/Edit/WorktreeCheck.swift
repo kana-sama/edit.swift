@@ -38,9 +38,13 @@ enum WorktreeCheck {
         try expect(sources == 0 && tree.level(forRow: sources) == 0 && row(named: "Project", in: tree) == nil,
                    "the folder's contents start the tree at level zero")
         try checkRootContextMenu(in: tree)
+        let clip = try require(tree.enclosingScrollView?.contentView, "Worktree clip view")
+        let firstRow = tree.convert(tree.rect(ofRow: sources), to: clip)
+        try expect(abs(firstRow.minY - clip.bounds.minY) < 0.5,
+                   "the first Worktree row starts at the top of its scroll area")
         let disclose = try disclosure(at: sources, in: tree)
-        try expect(disclose.contentTintColor == .secondaryLabelColor,
-                   "a folder disclosure uses the system secondary label tint")
+        try checkDisclosureStyle(disclose)
+        try checkDisclosureContrast(disclose, in: document.window)
         let fileCell = try require(cell(at: log, in: tree), "file row")
         let fileIcon = try require(fileCell.imageView, "file icon")
         try expect(cell(at: sources, in: tree)?.imageView?.image == nil, "folders show only the disclosure symbol")
@@ -141,8 +145,7 @@ enum WorktreeCheck {
         try expect(!tree.isItemExpanded(sourceItem) && row(named: "Active.swift", in: tree) == nil,
                    "refreshing the tree keeps the folder collapsed")
         let refreshedSourceButton = try disclosure(at: sourceRow, in: tree)
-        try expect(refreshedSourceButton.contentTintColor == .secondaryLabelColor,
-                   "a refreshed folder disclosure keeps its tint")
+        try checkDisclosureStyle(refreshedSourceButton)
         sidebar.setShowsHidden(false)
         _ = try await app.openFile(readme, in: document)
         try await waitFor("select a file at the top level") {
@@ -369,6 +372,51 @@ enum WorktreeCheck {
         try expectKeyboardStep("\u{F702}", code: 123, expanded: false)
         try expectKeyboardStep(" ", code: 49, expanded: true)
         try expectKeyboardStep(" ", code: 49, expanded: false)
+    }
+
+    private static func checkDisclosureStyle(_ button: NSButton) throws {
+        try expect(button.image?.isTemplate == false && button.alternateImage?.isTemplate == false,
+                   "both disclosure states keep their assigned color through contextual menus")
+    }
+
+    private static func checkDisclosureContrast(_ button: NSButton, in window: NSWindow) throws {
+        let frameView = try require(window.contentView?.superview, "Worktree render frame")
+        let row = try require(button.superview as? NSTableRowView, "Worktree disclosure row")
+        let originalAppearance = window.appearance
+        let emphasized = row.isEmphasized
+        defer {
+            row.isEmphasized = emphasized
+            window.appearance = originalAppearance
+        }
+
+        func glyphBrightness(dark: Bool) throws -> CGFloat {
+            window.layoutIfNeeded()
+            let bounds = frameView.convert(button.bounds, from: button)
+            let bitmap = try require(frameView.bitmapImageRepForCachingDisplay(in: bounds), "Worktree disclosure render")
+            frameView.cacheDisplay(in: bounds, to: bitmap)
+            var extreme: CGFloat = dark ? 0 : 1
+            for y in 0..<bitmap.pixelsHigh {
+                for x in 0..<bitmap.pixelsWide {
+                    guard let pixel = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                    extreme = dark ? max(extreme, pixel.redComponent) : min(extreme, pixel.redComponent)
+                }
+            }
+            return extreme
+        }
+
+        try expect(!row.isSelected, "measure the color of an unselected disclosure")
+        window.appearance = NSAppearance(named: .darkAqua)
+        let before = try glyphBrightness(dark: true)
+        row.isEmphasized = !emphasized
+        let during = try glyphBrightness(dark: true)
+        row.isEmphasized = emphasized
+        let after = try glyphBrightness(dark: true)
+        try expect(before > 0.48 && abs(during - before) < 0.02 && abs(after - before) < 0.02,
+                   "the chevron draws at secondary-label contrast through emphasis changes (\(before), \(during), \(after))")
+
+        window.appearance = NSAppearance(named: .aqua)
+        let light = try glyphBrightness(dark: false)
+        try expect(light < 0.65, "the same chevron adapts to a light background (\(light))")
     }
 
     private static func disclosure(at row: Int, in outline: NSOutlineView) throws -> NSButton {

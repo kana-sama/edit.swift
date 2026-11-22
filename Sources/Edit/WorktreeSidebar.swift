@@ -93,8 +93,8 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         tree.addTableColumn(column)
         tree.outlineTableColumn = column
         tree.headerView = nil
-        // The source-list style makes selected labels heavier even with a regular font.
-        tree.style = .inset
+        // Keep regular-weight selections and start the outline at the top of the clip view.
+        tree.style = .fullWidth
         tree.indentationPerLevel = 12
         column.minWidth = 0
         tree.backgroundColor = .clear
@@ -780,6 +780,8 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
 @MainActor
 private final class WorktreeOutline: NSOutlineView {
+    private static let contentInset: CGFloat = 10
+
     weak var owner: WorktreeSidebar?
     private(set) var isPlainPrimaryClick = false
     var didStartDrag = false
@@ -802,12 +804,12 @@ private final class WorktreeOutline: NSOutlineView {
     override func frameOfOutlineCell(atRow row: Int) -> NSRect {
         let frame = super.frameOfOutlineCell(atRow: row)
         guard !frame.isEmpty else { return frame }
-        return NSRect(x: frame.maxX - WorktreeCell.iconSize, y: frame.minY,
+        return NSRect(x: frame.maxX - WorktreeCell.iconSize + Self.contentInset, y: frame.minY,
                       width: WorktreeCell.iconSize, height: frame.height)
     }
 
     override func frameOfCell(atColumn column: Int, row: Int) -> NSRect {
-        let frame = super.frameOfCell(atColumn: column, row: row)
+        let frame = super.frameOfCell(atColumn: column, row: row).insetBy(dx: Self.contentInset, dy: 0)
         guard let outlineTableColumn, column == self.column(withIdentifier: outlineTableColumn.identifier),
               row >= 0, let item = item(atRow: row), !isExpandable(item) else { return frame }
         // Files put their icon in the same gutter AppKit reserves for folder disclosure.
@@ -821,18 +823,11 @@ private final class WorktreeOutline: NSOutlineView {
             return super.makeView(withIdentifier: identifier, owner: owner)
         }
         if let reused = super.makeView(withIdentifier: identifier, owner: owner) { return reused }
-        let configuration = NSImage.SymbolConfiguration(pointSize: WorktreeCell.iconSize, weight: .medium)
         let button = NSButton()
         button.identifier = identifier
         button.setButtonType(.onOff)
-        button.image = NSImage(systemSymbolName: "chevron.forward", accessibilityDescription: nil)?
-            .withSymbolConfiguration(configuration)
-        button.alternateImage = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
-            .withSymbolConfiguration(configuration)
         button.imagePosition = .imageOnly
         button.isBordered = false
-        button.target = self
-        button.action = #selector(toggleDirectory(_:))
         return button
     }
 
@@ -894,7 +889,19 @@ private final class WorktreeOutline: NSOutlineView {
 @MainActor
 private final class WorktreeRow: NSTableRowView {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("WorktreeRow")
+    private static let normalChevrons = chevrons(color: .secondaryLabelColor)
+    private static let selectedChevrons = chevrons(color: .alternateSelectedControlTextColor)
+
     private weak var outline: WorktreeOutline?
+    private weak var disclosureButton: NSButton?
+
+    override var isSelected: Bool {
+        didSet { updateDisclosureImages() }
+    }
+
+    override var isEmphasized: Bool {
+        didSet { updateDisclosureImages() }
+    }
 
     init(outline: WorktreeOutline) {
         self.outline = outline
@@ -917,9 +924,33 @@ private final class WorktreeRow: NSTableRowView {
         guard let button = subview as? NSButton,
               button.identifier == NSOutlineView.disclosureButtonIdentifier ||
               button.identifier == NSOutlineView.showHideButtonIdentifier else { return }
-        button.contentTintColor = .secondaryLabelColor
+        disclosureButton = button
         button.target = outline
         button.action = #selector(WorktreeOutline.toggleDirectory(_:))
+        updateDisclosureImages()
+    }
+
+    private func updateDisclosureImages() {
+        guard let disclosureButton else { return }
+        let images = isSelected && isEmphasized ? Self.selectedChevrons : Self.normalChevrons
+        disclosureButton.image = images.collapsed
+        disclosureButton.alternateImage = images.expanded
+    }
+
+    private static func chevrons(color: NSColor) -> (collapsed: NSImage?, expanded: NSImage?) {
+        let configuration = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
+        func image(_ symbol: String) -> NSImage? {
+            guard let glyph = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+                .withSymbolConfiguration(configuration) else { return nil }
+            // Draw the semantic color into the symbol's mask to avoid AppKit applying a second tint.
+            return NSImage(size: glyph.size, flipped: false) { rect in
+                glyph.draw(in: rect)
+                color.setFill()
+                rect.fill(using: .sourceIn)
+                return true
+            }
+        }
+        return (image("chevron.forward"), image("chevron.down"))
     }
 }
 

@@ -32,6 +32,8 @@ private final class FindSplitView: NSSplitView {
 
 @MainActor
 final class SidebarMenuItem: NSToolbarItem {
+    private static let titleFont = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+
     let menu: NSMenu
     let showsTitle: Bool
 
@@ -56,15 +58,14 @@ final class SidebarMenuItem: NSToolbarItem {
         button.setAccessibilityLabel(label)
         button.heightAnchor.constraint(equalToConstant: 26).isActive = true
         if showsTitle {
-            let font = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
-            button.font = font
+            button.font = Self.titleFont
             button.alignment = .natural
             button.imagePosition = .imageTrailing
             button.imageHugsTitle = true
             button.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
                 .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
             // Reserve space for the longer title and the button cell’s horizontal insets.
-            let titleWidth = (SidebarMode.worktree.title as NSString).size(withAttributes: [.font: font]).width
+            let titleWidth = (SidebarMode.worktree.title as NSString).size(withAttributes: [.font: Self.titleFont]).width
             let chevronWidth = button.image?.size.width ?? 0
             button.widthAnchor.constraint(equalToConstant: ceil(titleWidth + chevronWidth) + 2).isActive = true
         } else {
@@ -83,8 +84,13 @@ final class SidebarMenuItem: NSToolbarItem {
 
     func updateTitle(for mode: SidebarMode) {
         guard let button = view as? NSButton else { return }
-        if showsTitle, let font = button.font {
-            button.attributedTitle = NSAttributedString(string: mode.title, attributes: [.font: font, .foregroundColor: NSColor.labelColor])
+        if showsTitle {
+            let title = NSAttributedString(string: mode.title, attributes: [
+                .font: Self.titleFont,
+                .foregroundColor: NSColor.labelColor,
+            ])
+            button.attributedTitle = title
+            button.attributedAlternateTitle = title
             button.setAccessibilityLabel("\(mode.title), Switch Sidebar")
         } else {
             button.setAccessibilityLabel("\(mode.title) Options")
@@ -601,25 +607,25 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let item = SidebarMenuItem(itemIdentifier: identifier, showsTitle: identifier == Self.sidebarTitleItem,
                                    mode: document.sidebarMode)
         item.menu.delegate = self
-        updateSidebarMenu(item)
+        updateSidebarMenuItems(item)
         return item
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         for case let item as SidebarMenuItem in sidebarToolbar?.items ?? [] where item.menu === menu {
-            updateSidebarMenu(item)
+            updateSidebarMenuItems(item)
         }
     }
 
     private func updateSidebarMenu() {
         for case let item as SidebarMenuItem in sidebarToolbar?.items ?? [] {
-            updateSidebarMenu(item)
+            item.updateTitle(for: document.sidebarMode)
+            updateSidebarMenuItems(item)
         }
         updateSidebarToolbarVisibility()
     }
 
-    private func updateSidebarMenu(_ item: SidebarMenuItem) {
-        item.updateTitle(for: document.sidebarMode)
+    private func updateSidebarMenuItems(_ item: SidebarMenuItem) {
         let menu = item.menu
         menu.removeAllItems()
         guard item.showsTitle else {
