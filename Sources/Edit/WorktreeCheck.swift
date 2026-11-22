@@ -428,6 +428,13 @@ enum WorktreeCheck {
         try await waitFor("animation fixture loads") { tree.numberOfRows == 2 }
         window.layoutIfNeeded()
         let item = try require(tree.item(atRow: 0), "animation folder")
+        let clip = try require(tree.enclosingScrollView?.contentView, "Worktree clip view")
+        func checkViewportWidth() throws {
+            let viewport = clip.bounds
+            let proposed = clip.constrainBoundsRect(viewport.offsetBy(dx: viewport.width, dy: 0))
+            try expect(abs(tree.frame.width - viewport.width) < 0.5 && abs(proposed.minX - viewport.minX) < 0.5,
+                       "expanding folders keeps the outline fixed horizontally (tree \(tree.frame.width), viewport \(viewport.width), reachable x \(proposed.minX))")
+        }
         let collapsedY = tree.rect(ofRow: 1).minY
         let rowHeight = tree.rect(ofRow: 1).height
         let expandedY = collapsedY + CGFloat(childCount) * rowHeight
@@ -464,9 +471,21 @@ enum WorktreeCheck {
         try await waitFor("the first mouse expansion slides the children and sibling together") {
             tree.isItemExpanded(item) && childrenMoveWithSibling(tree.rowView(atRow: childCount, makeIfNecessary: false))
         }
+        try checkViewportWidth()
         try await waitFor("the expanded rows settle") {
             abs((displayedY() ?? -1) - expandedY) < 0.5 && siblingRow()?.layer?.animationKeys()?.isEmpty != false
         }
+
+        try checkViewportWidth()
+        let split = try require(window.contentViewController as? NSSplitViewController, "Worktree split view")
+        let sidebarWidth = split.splitViewItems[0].viewController.view.frame.width
+        split.splitView.setPosition(sidebarWidth - 32, ofDividerAt: 0)
+        window.layoutIfNeeded()
+        try expect(clip.bounds.width < sidebarWidth, "resizing the sidebar narrows the visible Worktree")
+        try checkViewportWidth()
+        split.splitView.setPosition(sidebarWidth, ofDividerAt: 0)
+        window.layoutIfNeeded()
+        try checkViewportWidth()
 
         let lastChild = try require(tree.rowView(atRow: childCount, makeIfNecessary: false), "last expanded child")
         try clickChevron()

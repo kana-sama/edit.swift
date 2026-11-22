@@ -96,6 +96,8 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         // Keep regular-weight selections and start the outline at the top of the clip view.
         tree.style = .fullWidth
         tree.indentationPerLevel = 12
+        // Keep the column fitted to the sidebar as new indentation levels appear.
+        tree.autoresizesOutlineColumn = false
         column.minWidth = 0
         tree.backgroundColor = .clear
         tree.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
