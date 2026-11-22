@@ -782,6 +782,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 private final class WorktreeOutline: NSOutlineView {
     private static let contentInset: CGFloat = 10
 
+    private var disclosureActions: [NSUserInterfaceItemIdentifier: Selector] = [:]
     weak var owner: WorktreeSidebar?
     private(set) var isPlainPrimaryClick = false
     var didStartDrag = false
@@ -817,31 +818,41 @@ private final class WorktreeOutline: NSOutlineView {
                       width: frame.width + WorktreeCell.iconSize, height: frame.height)
     }
 
-    override func makeView(withIdentifier identifier: NSUserInterfaceItemIdentifier, owner: Any?) -> NSView? {
-        guard identifier == NSOutlineView.disclosureButtonIdentifier ||
-              identifier == NSOutlineView.showHideButtonIdentifier else {
-            return super.makeView(withIdentifier: identifier, owner: owner)
+    func installDisclosureAction(on button: NSButton) {
+        let action = #selector(toggleDirectory(_:))
+        // Remember AppKit's action even when the button is later reused by another row.
+        if button.target === self, let identifier = button.identifier,
+           let nativeAction = button.action, nativeAction != action {
+            disclosureActions[identifier] = nativeAction
         }
-        if let reused = super.makeView(withIdentifier: identifier, owner: owner) { return reused }
-        let button = NSButton()
-        button.identifier = identifier
-        button.setButtonType(.onOff)
-        button.imagePosition = .imageOnly
-        button.isBordered = false
-        return button
+        button.target = self
+        button.action = action
     }
 
-    @objc func toggleDirectory(_ sender: NSButton) {
-        owner?.toggleFolder(at: row(for: sender), animated: true)
+    @objc private func toggleDirectory(_ sender: NSButton) {
+        let row = row(for: sender)
+        guard row >= 0, let item = item(atRow: row) else { return }
+        sender.state = isItemExpanded(item) ? .on : .off
+        owner?.toggleFolder(at: row, animated: true)
     }
 
     func setFolderExpanded(_ item: Any, expanded: Bool, animated: Bool) {
+        if animated {
+            let row = row(forItem: item)
+            if row >= 0,
+               let view = rowView(atRow: row, makeIfNecessary: false) as? WorktreeRow,
+               let button = view.disclosureButton, let identifier = button.identifier,
+               let action = disclosureActions[identifier] {
+                // The disclosure action slides and clips the child rows with the rest of the outline.
+                button.state = expanded ? .on : .off
+                if NSApp.sendAction(action, to: self, from: button) { return }
+            }
+        }
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = animated ? 0.2 : 0
-            context.allowsImplicitAnimation = animated
-            let outline = animated ? animator() : self
-            if expanded { outline.expandItem(item) }
-            else { outline.collapseItem(item) }
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            if expanded { expandItem(item) }
+            else { collapseItem(item) }
         }
     }
 
@@ -893,7 +904,7 @@ private final class WorktreeRow: NSTableRowView {
     private static let selectedChevrons = chevrons(color: .alternateSelectedControlTextColor)
 
     private weak var outline: WorktreeOutline?
-    private weak var disclosureButton: NSButton?
+    private(set) weak var disclosureButton: NSButton?
 
     override var isSelected: Bool {
         didSet { updateDisclosureImages() }
@@ -925,8 +936,7 @@ private final class WorktreeRow: NSTableRowView {
               button.identifier == NSOutlineView.disclosureButtonIdentifier ||
               button.identifier == NSOutlineView.showHideButtonIdentifier else { return }
         disclosureButton = button
-        button.target = outline
-        button.action = #selector(WorktreeOutline.toggleDirectory(_:))
+        outline?.installDisclosureAction(on: button)
         updateDisclosureImages()
     }
 

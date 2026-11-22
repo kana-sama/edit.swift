@@ -313,7 +313,10 @@ enum WorktreeCheck {
         let root = directory.appending(path: "Animation", directoryHint: .isDirectory)
         let folder = root.appending(path: "Folder", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try Data().write(to: folder.appending(path: "Child.txt"))
+        let childCount = 6
+        for index in 1...childCount {
+            try Data().write(to: folder.appending(path: "Child \(index).txt"))
+        }
         try Data().write(to: root.appending(path: "README.md"))
         let document = app.makeDocument()
         let window = document.window
@@ -330,13 +333,21 @@ enum WorktreeCheck {
         window.layoutIfNeeded()
         let item = try require(tree.item(atRow: 0), "animation folder")
         let collapsedY = tree.rect(ofRow: 1).minY
-        let expandedY = collapsedY + tree.rect(ofRow: 1).height
+        let rowHeight = tree.rect(ofRow: 1).height
+        let expandedY = collapsedY + CGFloat(childCount) * rowHeight
         func siblingRow() -> NSTableRowView? {
             tree.rowView(atRow: tree.numberOfRows - 1, makeIfNecessary: false)
         }
         func displayedY() -> CGFloat? {
             guard let sibling = siblingRow() else { return nil }
             return sibling.layer?.presentation()?.frame.minY ?? sibling.frame.minY
+        }
+        func childrenMoveWithSibling(_ lastChild: NSTableRowView?) -> Bool {
+            guard let y = displayedY(), y > collapsedY + rowHeight && y < expandedY - rowHeight,
+                  let outlineLayer = tree.layer?.presentation(),
+                  let childLayer = lastChild?.layer?.presentation() else { return false }
+            let childBounds = outlineLayer.convert(childLayer.bounds, from: childLayer)
+            return abs(childBounds.maxY - y) < 0.5
         }
         func clickChevron() throws {
             let button = try disclosure(at: 0, in: tree)
@@ -354,17 +365,21 @@ enum WorktreeCheck {
 
         try await waitFor("render the collapsed rows") { abs((displayedY() ?? -1) - collapsedY) < 0.5 }
         try clickChevron()
-        try await waitFor("the first mouse expansion animates after loading the folder") {
-            guard tree.isItemExpanded(item), let y = displayedY() else { return false }
-            return y > collapsedY + 0.5 && y < expandedY - 0.5
+        try await waitFor("the first mouse expansion slides the children and sibling together") {
+            tree.isItemExpanded(item) && childrenMoveWithSibling(tree.rowView(atRow: childCount, makeIfNecessary: false))
         }
-        try await waitFor("the expanded rows settle") { abs((displayedY() ?? -1) - expandedY) < 0.5 }
+        try await waitFor("the expanded rows settle") {
+            abs((displayedY() ?? -1) - expandedY) < 0.5 && siblingRow()?.layer?.animationKeys()?.isEmpty != false
+        }
+
+        let lastChild = try require(tree.rowView(atRow: childCount, makeIfNecessary: false), "last expanded child")
         try clickChevron()
-        try await waitFor("mouse collapse animates the sibling back into place") {
-            guard !tree.isItemExpanded(item), let y = displayedY() else { return false }
-            return y > collapsedY + 0.5 && y < expandedY - 0.5
+        try await waitFor("mouse collapse slides the children and sibling together") {
+            !tree.isItemExpanded(item) && childrenMoveWithSibling(lastChild)
         }
-        try await waitFor("the collapsed rows settle") { abs((displayedY() ?? -1) - collapsedY) < 0.5 }
+        try await waitFor("the collapsed rows settle") {
+            abs((displayedY() ?? -1) - collapsedY) < 0.5 && siblingRow()?.layer?.animationKeys()?.isEmpty != false
+        }
 
         tree.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         window.makeFirstResponder(tree)
