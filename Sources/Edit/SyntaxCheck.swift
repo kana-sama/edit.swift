@@ -81,12 +81,19 @@ enum SyntaxCheck {
         defer { try? FileManager.default.removeItem(at: directory) }
         let warmup = directory.appending(path: "Warmup.swift")
         let target = directory.appending(path: "Target.swift")
-        let functionCount = requiresFirstFrame ? 360 : 720
-        let source = (0..<functionCount).map {
+        let source = (0..<720).map {
             "func sample\($0)(value: Int) -> Int {\n    let doubled = value * 2\n    return doubled\n}\n"
         }.joined() + String(repeating: "// comment in a different viewport\n", count: 250)
         try Data(String(repeating: "// warm up Swift\n", count: 35).utf8).write(to: warmup)
         try Data(source.utf8).write(to: target)
+        let anchor = (source as NSString).range(of: "func sample300").location
+        if !requiresFirstFrame {
+            app.recentFiles.rememberPosition(
+                EditorPosition(selections: [NSRange(location: anchor, length: 0)], horizontalOffset: 0,
+                               verticalOffset: 300 * 4 * 18, topLine: .init(textOffset: anchor, offsetIntoLine: 0)),
+                for: target, identity: FileIdentity.at(target)
+            )
+        }
 
         let document = app.makeDocument()
         let window = document.window
@@ -117,14 +124,13 @@ enum SyntaxCheck {
             let selection = editor.selectedRange()
             if requiresFirstFrame {
                 window.layoutIfNeeded()
-                try expectDrawnColor(in: clip, primaryChannel: 2, after: "opening a mid-size Swift file")
+                try expectDrawnColor(in: clip, primaryChannel: 2, after: "opening a Swift file with a prepared viewport")
                 try await waitForPaint(in: clip, language: .swift)
             } else {
                 // Do not scroll, force layout, or sample the layer while the async update settles.
                 try await Task.sleep(for: .milliseconds(200))
                 guard try paintMatches(in: clip, language: .swift),
-                      let color = editor.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor,
-                      color != .textColor else {
+                      editor.capturePosition().topLine?.textOffset == anchor else {
                     throw Failure("Deferred Swift highlighting did not repaint the stationary viewport.")
                 }
             }
@@ -135,8 +141,11 @@ enum SyntaxCheck {
         }
         print("Checked color in a \(source.utf8.count)-byte Swift file at \(start.duration(to: .now)).")
         let scrollStart = ContinuousClock.now
-        clip.scroll(to: NSPoint(x: 0, y: clip.documentRect.maxY - clip.bounds.height))
-        scroll.reflectScrolledClipView(clip)
+        let comment = (source as NSString).range(of: "// comment in a different viewport", options: .backwards)
+        guard let manager = document.editor.textLayoutManager else { throw Failure("Missing Swift text layout manager.") }
+        document.editor.scrollRangeToVisible(comment)
+        try await waitForColor(at: comment, in: manager)
+        document.editor.scrollRangeToVisible(comment)
         try expectDrawnColor(in: clip, primaryChannel: 1, after: "scrolling to newly visible Swift comments")
         print("Scroll to colored Swift comments: \(scrollStart.duration(to: .now)).")
     }
@@ -289,7 +298,7 @@ enum SyntaxCheck {
             if colored { return }
             try await Task.sleep(for: .milliseconds(10))
         } while ContinuousClock.now < deadline
-        throw Failure("TextKit did not render Rust syntax at offset \(token.location).")
+        throw Failure("TextKit did not render syntax at offset \(token.location).")
     }
 
     private nonisolated static func checkGrammars() throws {

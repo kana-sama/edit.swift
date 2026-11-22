@@ -58,6 +58,7 @@ struct SyntaxSpan: Sendable {
 struct SyntaxSnapshot: Sendable {
     let language: SyntaxLanguage
     let spans: [SyntaxSpan]
+    let coversDocument: Bool
 }
 
 enum SyntaxEngine {
@@ -117,13 +118,38 @@ enum SyntaxEngine {
 
     private static let queries = Bundle.main.resourceURL?.appending(path: "syntax/queries").path
 
-    private static let firstFrameByteLimit = 64 * 1_024
+    private static let viewportQueryByteThreshold = 64 * 1_024
 
-    static func prepareSmallDocument(_ text: String, language: SyntaxLanguage) -> SyntaxSnapshot? {
-        // Keep large documents on the progressive path so their first display won't wait for a full query.
-        guard language != .plainText, text.utf8.count <= firstFrameByteLimit,
-              let spans = spans(in: text, language: language) else { return nil }
-        return SyntaxSnapshot(language: language, spans: spans)
+    static func prepareOpening(
+        _ text: String, language: SyntaxLanguage, topOffset: Int, visibleLines: Int
+    ) -> SyntaxSnapshot? {
+        // Start at the beginning for lexical context, and bound the work before showing the file.
+        let maximumPrefixLength = 16 * 1_024
+        guard language != .plainText, topOffset >= 0, topOffset < maximumPrefixLength else { return nil }
+        let units = text.utf16
+        let prefix = units.prefix(maximumPrefixLength)
+        if prefix.endIndex == units.endIndex {
+            guard let colors = spans(in: text, language: language) else { return nil }
+            return SyntaxSnapshot(language: language, spans: colors, coversDocument: true)
+        }
+        let lines = String(decoding: prefix, as: UTF16.self) as NSString
+        guard topOffset <= lines.length else { return nil }
+
+        // A few extra lines preserve context at the edge and cover initial layout adjustments.
+        var end = lines.lineRange(for: NSRange(location: topOffset, length: 0)).location
+        for line in 0..<(visibleLines + 16) {
+            if end == lines.length { break }
+            let next = NSMaxRange(lines.lineRange(for: NSRange(location: end, length: 0)))
+            if next == lines.length {
+                // An unusually long line or a deep viewport can open without a preview.
+                guard line >= visibleLines else { return nil }
+                break
+            }
+            end = next
+        }
+
+        guard let colors = spans(in: lines.substring(to: end), language: language) else { return nil }
+        return SyntaxSnapshot(language: language, spans: colors, coversDocument: false)
     }
 
     static func spans(
@@ -135,7 +161,7 @@ enum SyntaxEngine {
         let units = Array(text.utf16)
         guard let count = UInt32(exactly: units.count) else { return nil }
         let viewport = visibleRange ?? NSRange(location: 0, length: min(4_096, units.count))
-        let prioritizesViewport = onPreview != nil && text.utf8.count > firstFrameByteLimit
+        let prioritizesViewport = onPreview != nil && text.utf8.count > viewportQueryByteThreshold
             && viewport.length < units.count / 4
         let previewStart = prioritizesViewport ? UInt32(min(viewport.location, units.count)) : 0
         let previewEnd = prioritizesViewport ? UInt32(min(NSMaxRange(viewport), units.count)) : 0

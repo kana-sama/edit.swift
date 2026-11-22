@@ -28,7 +28,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     enum CloseDestination {
         case window
-        case buffer(FileBuffer?, preparedSyntax: SyntaxSnapshot? = nil, focusEditor: Bool = true)
+        case buffer(FileBuffer?, focusEditor: Bool = true)
     }
 
     private struct AutosaveRequest {
@@ -244,6 +244,21 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         manualSyntaxLanguage = storedSyntaxLanguage.flatMap(SyntaxLanguage.init(rawValue:))
             ?? app.syntaxOverrides.language(for: fileURL)
         installText(file.text, preparedSyntax: preparedSyntax)
+    }
+
+    func prepareOpeningSyntax(
+        _ file: FileBuffer, position: EditorPosition?, storedSyntaxLanguage: String? = nil
+    ) async -> SyntaxSnapshot? {
+        let language = storedSyntaxLanguage.flatMap(SyntaxLanguage.init(rawValue:))
+            ?? app.syntaxOverrides.language(for: file.url) ?? SyntaxLanguage.detected(at: file.url)
+        guard language != .plainText, position?.topLine != nil || (position?.verticalOffset ?? 0) <= 0 else { return nil }
+        let topOffset = position?.topLine?.textOffset ?? 0
+        let lineHeight = max(1, editor.defaultParagraphStyle?.maximumLineHeight ?? 18)
+        let visibleLines = Int(ceil(scrollView.bounds.height / lineHeight)) + 2
+        let task = Task.detached(priority: .userInitiated) {
+            SyntaxEngine.prepareOpening(file.text, language: language, topOffset: topOffset, visibleLines: visibleLines)
+        }
+        return await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
     }
 
     func restoreDraft(_ record: SessionDocument, text: String, identity: FileIdentity? = nil) {
@@ -570,7 +585,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             syntaxHighlighting = SyntaxHighlighting(editor: editor)
         }
         if let preparedSyntax, preparedSyntax.language == language {
-            syntaxHighlighting?.install(preparedSyntax.spans)
+            syntaxHighlighting?.install(preparedSyntax)
         } else {
             syntaxHighlighting?.update(language: language, immediate: immediate)
         }
@@ -590,11 +605,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     @discardableResult
     func replaceBuffer(
-        with file: FileBuffer?, preparedSyntax: SyntaxSnapshot? = nil, focusEditor: Bool = true
+        with file: FileBuffer?, focusEditor: Bool = true
     ) async -> Bool {
         guard canReplaceBuffer, !app.isQuitting else { return false }
         promptingToClose = true
-        return await closeBuffer(destination: .buffer(file, preparedSyntax: preparedSyntax, focusEditor: focusEditor))
+        return await closeBuffer(destination: .buffer(file, focusEditor: focusEditor))
     }
 
     @discardableResult
@@ -637,7 +652,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
 
         switch destination {
-        case .buffer(let file, let preparedSyntax, let focusEditor):
+        case .buffer(let file, let focusEditor):
             autosaveFailure = nil
             editor.breakUndoCoalescing()
             var position: EditorPosition?
@@ -646,6 +661,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 if file.url != fileURL {
                     rememberFilePosition()
                     position = await app.recentFiles.position(for: file.url, identity: file.identity)
+                    let preparedSyntax = await prepareOpeningSyntax(file, position: position)
+                    guard !Task.isCancelled else { return false }
                     load(file, preparedSyntax: preparedSyntax)
                 }
             } else {

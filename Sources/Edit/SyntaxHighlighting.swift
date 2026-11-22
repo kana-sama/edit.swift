@@ -17,14 +17,16 @@ final class SyntaxHighlighting {
         editor.syntaxHighlighting = self
     }
 
-    func update(language: SyntaxLanguage, immediate: Bool) {
+    func update(language: SyntaxLanguage, immediate: Bool, keepingColors: Bool = false) {
         cancelPending()
         let request = generation
-        if immediate {
-            display([])
-        } else {
-            backingRangeWasEdited = backedColorRange != nil
-            spans = []
+        if !keepingColors {
+            if immediate {
+                display([])
+            } else {
+                backingRangeWasEdited = backedColorRange != nil
+                spans = []
+            }
         }
         guard language != .plainText else { return }
 
@@ -38,10 +40,12 @@ final class SyntaxHighlighting {
             let (updates, continuation) = AsyncStream<[SyntaxSpan]>.makeStream(bufferingPolicy: .bufferingNewest(1))
             let worker = Task.detached(priority: .userInitiated) {
                 defer { continuation.finish() }
-                let result = SyntaxEngine.spans(in: source, language: language, visibleRange: visibleRange) { preview in
+                let publishPreview: @Sendable ([SyntaxSpan]) -> Void = { preview in
                     continuation.yield(preview)
                 }
-                if !Task.isCancelled { continuation.yield(result ?? []) }
+                let result = SyntaxEngine.spans(in: source, language: language, visibleRange: visibleRange,
+                                                onPreview: keepingColors ? nil : publishPreview)
+                if !Task.isCancelled, result != nil || !keepingColors { continuation.yield(result ?? []) }
             }
             await withTaskCancellationHandler {
                 for await result in updates {
@@ -54,7 +58,7 @@ final class SyntaxHighlighting {
             }
         }
 
-        if immediate {
+        if immediate && !keepingColors {
             progressTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .milliseconds(150))
                 guard !Task.isCancelled, let self, self.generation == request else { return }
@@ -70,9 +74,12 @@ final class SyntaxHighlighting {
         updateBackingColors(in: nil)
     }
 
-    func install(_ result: [SyntaxSpan]) {
+    func install(_ snapshot: SyntaxSnapshot) {
         cancelPending()
-        display(result)
+        display(snapshot.spans)
+        if !snapshot.coversDocument {
+            update(language: snapshot.language, immediate: true, keepingColors: true)
+        }
     }
 
     func cancel(clearingColors: Bool = true) {

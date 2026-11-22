@@ -483,10 +483,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         var restored: [(index: Int, document: DocumentWindow)] = []
         var warnings: [String] = []
         for (index, record) in previous.documents.enumerated() {
-            let opened: (file: FileBuffer, syntax: SyntaxSnapshot?)?
+            let opened: FileBuffer?
             if record.draft == nil, let path = record.path {
                 do {
-                    opened = try await readForOpening(URL(fileURLWithPath: path), storedLanguage: record.syntaxLanguage)
+                    opened = try await readForOpening(URL(fileURLWithPath: path))
                 } catch {
                     warnings.append("“\(URL(fileURLWithPath: path).lastPathComponent)” — \(error.localizedDescription)")
                     guard record.folderPath != nil else { continue }
@@ -505,7 +505,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 }.value
                 document.restoreDraft(record, text: draft, identity: identity)
             } else if let opened {
-                document.load(opened.file, storedSyntaxLanguage: record.syntaxLanguage, preparedSyntax: opened.syntax)
+                let syntax = await document.prepareOpeningSyntax(opened, position: record.editorPosition,
+                                                                 storedSyntaxLanguage: record.syntaxLanguage)
+                document.load(opened, storedSyntaxLanguage: record.syntaxLanguage, preparedSyntax: syntax)
             }
             document.restoreSidebar(record)
             document.restoreEditorPosition(record.editorPosition)
@@ -573,8 +575,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         let opened = try await readForOpening(canonical, allowMissing: allowMissing)
         guard documents.contains(where: { $0 === document }), mutationGeneration == worktreeMutationGeneration,
               !isWorktreeMutationPath(canonical),
-              await document.replaceBuffer(with: opened.file, preparedSyntax: opened.syntax, focusEditor: focusEditor) else { return nil }
-        if opened.file.identity != nil { await recentFiles.record(url, in: document.folderURL) }
+              await document.replaceBuffer(with: opened, focusEditor: focusEditor) else { return nil }
+        if opened.identity != nil { await recentFiles.record(url, in: document.folderURL) }
         return document
     }
 
@@ -582,7 +584,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         _ url: URL, canonical folder: URL, in document: DocumentWindow, focusEditor: Bool
     ) async throws -> DocumentWindow? {
         let mutationGeneration = worktreeMutationGeneration
-        var opened: (file: FileBuffer, syntax: SyntaxSnapshot?)?
+        var opened: FileBuffer?
         if let last = await recentFiles.lastFile(in: folder) {
             opened = try? await readForOpening(last, within: folder)
         }
@@ -597,15 +599,15 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         }
         guard !isQuitting, document.canReplaceBuffer, documents.contains(where: { $0 === document }),
               mutationGeneration == worktreeMutationGeneration,
-              opened.map({ !isWorktreeMutationPath($0.file.url) }) ?? true else { return nil }
-        if opened == nil || opened?.file.url != document.fileURL {
-            guard await document.replaceBuffer(with: opened?.file, preparedSyntax: opened?.syntax, focusEditor: focusEditor) else { return nil }
+              opened.map({ !isWorktreeMutationPath($0.url) }) ?? true else { return nil }
+        if opened == nil || opened?.url != document.fileURL {
+            guard await document.replaceBuffer(with: opened, focusEditor: focusEditor) else { return nil }
         }
         if document.folderURL != folder {
             document.setFolder(folder)
             controlPanel?.folderDidChange(in: document)
         }
-        await recentFiles.recordFolder(url, opening: opened?.file.url)
+        await recentFiles.recordFolder(url, opening: opened?.url)
         return document
     }
 
@@ -626,11 +628,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         }.map(\.url)
     }
 
-    private func readForOpening(
-        _ url: URL, allowMissing: Bool = false, storedLanguage: String? = nil, within folder: URL? = nil
-    ) async throws -> (file: FileBuffer, syntax: SyntaxSnapshot?) {
-        let override = storedLanguage.flatMap(SyntaxLanguage.init(rawValue:)) ?? syntaxOverrides.language(for: url)
-        return try await Task.detached(priority: .userInitiated) {
+    private func readForOpening(_ url: URL, allowMissing: Bool = false, within folder: URL? = nil) async throws -> FileBuffer {
+        try await Task.detached(priority: .userInitiated) {
             let target: URL
             if let folder {
                 target = FileBuffer.canonicalURL(url)
@@ -639,9 +638,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             } else {
                 target = url
             }
-            let file = try FileBuffer.read(target, allowMissing: allowMissing)
-            let language = override ?? SyntaxLanguage.detected(at: file.url)
-            return (file, SyntaxEngine.prepareSmallDocument(file.text, language: language))
+            return try FileBuffer.read(target, allowMissing: allowMissing)
         }.value
     }
 
