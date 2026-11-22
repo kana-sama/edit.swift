@@ -8,6 +8,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     lazy var syntaxOverrides = SyntaxLanguageOverrides(defaults: isAgentCheck ? nil : .standard)
     private weak var recentMenu: NSMenu?
     private var controlPanel: ControlPanel?
+    private var openFilePanel: OpenFilePanel?
+    private weak var openPanelDocument: DocumentWindow?
     private(set) lazy var recentFiles = RecentFiles(url: recentHistoryURL)
 
     private var recentHistoryURL: URL {
@@ -38,6 +40,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     static func main() {
+        if OpenFilePanelHelper.runIfRequested() { return }
         let app = NSApplication.shared
         let delegate = Edit()
         app.delegate = delegate
@@ -56,6 +59,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     // The text editor check uses its own undo grouping and sample text.
                     initial.window.close()
                     makeDocument()
+                    try await OpenFilePanelCheck.run()
                     let sample = try await FilesCheck.run(in: self)
                     try ControlPanel(app: self).checkHidden(in: sample)
                     try await ControlPanel(app: self).checkPins(in: sample)
@@ -201,15 +205,27 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     @objc func openDocument(_ sender: Any?) {
-        guard let document = activeDocument, document.canReplaceBuffer, !isQuitting else { return }
+        guard !isQuitting else { return }
+        if let openFilePanel, openFilePanel.isOpening {
+            openFilePanel.bringForward()
+            return
+        }
+        guard let document = activeDocument, document.canReplaceBuffer else { return }
         document.requestAutosave()
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.directoryURL = document.folderURL ?? document.fileURL?.deletingLastPathComponent()
-        panel.beginSheetModal(for: document.window) { response in
-            panel.orderOut(nil)
-            if response == .OK, let url = panel.url { self.requestOpen([url], in: document) }
+        let panel = openFilePanel ?? OpenFilePanel()
+        openFilePanel = panel
+        openPanelDocument = document
+        let directory = document.folderURL ?? document.fileURL?.deletingLastPathComponent()
+        panel.open(in: directory) { [weak self, weak document] result in
+            guard let self else { return }
+            openPanelDocument = nil
+            guard !isQuitting, let document, documents.contains(where: { $0 === document }) else { return }
+            switch result {
+            case .success(let url):
+                if let url { requestOpen([url], in: document) }
+            case .failure(let error):
+                Task { await document.showError("Could Not Open", detail: error.localizedDescription) }
+            }
         }
     }
 
@@ -252,7 +268,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
         case #selector(showGoToFile(_:)), #selector(showCommandMode(_:)), #selector(showLanguageModes(_:)): return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(newWindow(_:)): return true
-        case #selector(openDocument(_:)), #selector(openRecentDocument(_:)):
+        case #selector(openDocument(_:)):
+            return openFilePanel?.isOpening == true || activeDocument?.canReplaceBuffer == true
+        case #selector(openRecentDocument(_:)):
             return activeDocument?.canReplaceBuffer ?? false
         case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)):
             return activeDocument.map { !$0.isBusy && $0.window.attachedSheet == nil } ?? false
@@ -283,6 +301,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         // The temporary startup window can be closed before restoration reads the saved session.
         if startup != nil && documents.isEmpty { return .terminateNow }
         isQuitting = true
+        openFilePanel?.cancel()
         controlPanel?.dismiss(restoreFocus: true)
         for document in documents {
             if document.editor.hasMarkedText() { document.editor.unmarkText() }
@@ -364,6 +383,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     func didClose(_ document: DocumentWindow) {
+        if openPanelDocument === document { openFilePanel?.cancel() }
         lastPlacement = document.placement
         pendingFullScreen.removeAll { $0 === document }
         didFinishFullScreenRestore(for: document)
