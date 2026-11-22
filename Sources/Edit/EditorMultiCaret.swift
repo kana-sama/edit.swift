@@ -1,3 +1,4 @@
+import Accessibility
 import AppKit
 
 @MainActor
@@ -8,7 +9,9 @@ final class MultiCaretState {
     var isApplying = false
     var pendingSkip = false
     var navigation: [NSRange: NSTextSelection] = [:]
-    var indicators: [NSTextInsertionIndicator] = []
+    var indicatorGroup: CaretIndicatorGroup?
+    var nativeCaretColor: NSColor?
+    var restartBlink = true
     var highlights: [NSRect] = []
 
     func remember(_ selection: [NSRange]) {
@@ -18,8 +21,50 @@ final class MultiCaretState {
     }
 }
 
-private final class SecondaryInsertionIndicator: NSTextInsertionIndicator {
+final class CaretIndicatorGroup: NSView {
+    static let blinkKey = "caretBlink"
+    private(set) var caretRects: [NSRect] = []
+    private var caretColor = NSColor.textColor
+
+    override var isFlipped: Bool { true }
+
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        caretColor.setFill()
+        for caret in caretRects where caret.intersects(dirtyRect) { caret.fill() }
+    }
+
+    func update(_ carets: [NSRect], viewport: NSRect, color: NSColor, restartBlink: Bool) {
+        if frame != viewport { frame = viewport }
+        let width = max(1, floor(convertToBacking(NSSize(width: 1.5, height: 0)).width))
+        let rects = carets.map { caret in
+            let backing = convertToBacking(caret.offsetBy(dx: -viewport.minX, dy: -viewport.minY))
+            // Adjacent lines share the same pixel at the boundary between their carets.
+            let top = backing.minY.rounded()
+            return convertFromBacking(NSRect(x: (backing.midX - width / 2).rounded(), y: top,
+                                             width: width, height: backing.maxY.rounded() - top))
+        }
+        if caretRects != rects || caretColor != color {
+            caretRects = rects
+            caretColor = color
+            needsDisplay = true
+        }
+
+        guard let layer else { return }
+        if AccessibilitySettings.prefersNonBlinkingTextInsertionIndicator {
+            layer.removeAnimation(forKey: Self.blinkKey)
+        } else if restartBlink || layer.animation(forKey: Self.blinkKey) == nil {
+            // Keep still after an edit, then blink the whole group on one timeline.
+            let blink = CAKeyframeAnimation(keyPath: "opacity")
+            blink.values = [1, 1, 0, 0, 1]
+            blink.keyTimes = [0, 0.45, 0.5, 0.95, 1]
+            blink.duration = 1.2
+            blink.repeatCount = .infinity
+            blink.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil)
+            layer.add(blink, forKey: Self.blinkKey)
+        }
+    }
 }
 
 extension EditorTextView {
@@ -37,6 +82,7 @@ extension EditorTextView {
         let previous = caretSelections
         if record, previous != selections { multiCaret.remember(previous) }
 
+        if previous != selections { multiCaret.restartBlink = true }
         multiCaret.isApplying = true
         multiCaret.selections = selections
         multiCaret.navigation = navigation
@@ -49,8 +95,9 @@ extension EditorTextView {
         guard !multiCaret.isApplying else { return }
         let previous = multiCaret.selections
         let native = [selectedRange()]
-        if !previous.isEmpty && previous != native {
-            multiCaret.remember(previous)
+        if previous != native {
+            multiCaret.restartBlink = true
+            if !previous.isEmpty { multiCaret.remember(previous) }
         }
         multiCaret.selections = native
         multiCaret.navigation = [:]
@@ -324,24 +371,25 @@ extension EditorTextView {
         return true
     }
 
-    func refreshSecondarySelections() {
+    func refreshCaretDecorations() {
+        let selections = caretSelections
+        let showCarets = isEditable && !hasMarkedText() && window?.isKeyWindow == true
+            && window?.firstResponder === self
         let old = multiCaret.highlights
         var highlights: [NSRect] = []
         var carets: [NSRect] = []
-        let secondary = caretSelections.dropLast()
-        let showInsertionIndicators = window?.isKeyWindow == true
-        if !secondary.isEmpty, let window, let layout = textLayoutManager,
-           let viewport = layout.textViewportLayoutController.viewportRange {
-            let visible = charRange(viewport, in: layout)
-            let focus = window.firstResponder === self
-            for range in secondary {
+        let viewportRect = visibleRect
+        if showCarets || selections.count > 1, let window, let layout = textLayoutManager {
+            let visible = layout.textViewportLayoutController.viewportRange.map { charRange($0, in: layout) }
+                ?? NSRange(location: 0, length: 0)
+            for (index, range) in selections.enumerated() {
                 if range.length == 0 {
-                    guard focus, range.location >= visible.location, range.location <= NSMaxRange(visible) else { continue }
-                    let caret = firstRect(forCharacterRange: range, actualRange: nil)
-                    if caret.height > 0 {
-                        carets.append(convert(window.convertFromScreen(caret), from: nil))
-                    }
-                } else {
+                    guard showCarets, range.location >= visible.location, range.location <= NSMaxRange(visible) else { continue }
+                    let screenRect = firstRect(forCharacterRange: range, actualRange: nil)
+                    let caret = convert(window.convertFromScreen(screenRect), from: nil)
+                    // TextKit can return a zero-width rectangle for a caret.
+                    if caret.height > 0, caret.insetBy(dx: -1, dy: 0).intersects(viewportRect) { carets.append(caret) }
+                } else if index < selections.count - 1 {
                     let visibleSelection = NSIntersectionRange(range, visible)
                     guard visibleSelection.length > 0, let selected = textRange(visibleSelection, in: layout) else { continue }
                     layout.enumerateTextSegments(in: selected, type: .selection, options: .rangeNotRequired) {
@@ -356,25 +404,26 @@ extension EditorTextView {
             multiCaret.highlights = highlights
             for rect in old + highlights { setNeedsDisplay(rect.intersection(visibleRect)) }
         }
-        while multiCaret.indicators.count > carets.count {
-            multiCaret.indicators.removeLast().removeFromSuperview()
+        guard showCarets, selections.contains(where: { $0.length == 0 }),
+              !carets.isEmpty || multiCaret.indicatorGroup != nil else {
+            hideSharedCarets()
+            return
         }
-        for (index, frame) in carets.enumerated() {
-            let target = NSRect(x: frame.minX, y: frame.minY, width: max(1, frame.width), height: frame.height)
-            if index == multiCaret.indicators.count {
-                let indicator = SecondaryInsertionIndicator(frame: target)
-                indicator.color = insertionPointColor
-                indicator.automaticModeOptions = []
-                indicator.displayMode = showInsertionIndicators ? .automatic : .hidden
-                addSubview(indicator)
-                multiCaret.indicators.append(indicator)
-            } else {
-                let indicator = multiCaret.indicators[index]
-                if indicator.frame != target { indicator.frame = target }
-                let display: NSTextInsertionIndicator.DisplayMode = showInsertionIndicators ? .automatic : .hidden
-                if indicator.displayMode != display { indicator.displayMode = display }
-            }
+        let group = multiCaret.indicatorGroup ?? CaretIndicatorGroup()
+        if multiCaret.indicatorGroup == nil {
+            multiCaret.indicatorGroup = group
+            group.wantsLayer = true
+            group.clipsToBounds = true
+            addSubview(group)
         }
+        if multiCaret.nativeCaretColor == nil {
+            // TextKit still owns text input and selection. The editor draws the caret.
+            multiCaret.nativeCaretColor = insertionPointColor
+            insertionPointColor = .clear
+        }
+        group.update(carets, viewport: viewportRect, color: multiCaret.nativeCaretColor ?? .textColor,
+                     restartBlink: multiCaret.restartBlink)
+        multiCaret.restartBlink = false
     }
 
     func drawSecondarySelections(in dirtyRect: NSRect) {
@@ -386,9 +435,20 @@ extension EditorTextView {
         }
     }
 
-    func hideSecondaryCarets() {
-        for indicator in multiCaret.indicators { indicator.removeFromSuperview() }
-        multiCaret.indicators.removeAll()
+    func hideCaretDecorations() {
+        hideSharedCarets()
         for rect in multiCaret.highlights { setNeedsDisplay(rect.intersection(visibleRect)) }
+    }
+
+    private func hideSharedCarets() {
+        if let color = multiCaret.nativeCaretColor {
+            insertionPointColor = color
+            multiCaret.nativeCaretColor = nil
+        }
+        guard let group = multiCaret.indicatorGroup else { return }
+        group.layer?.removeAnimation(forKey: CaretIndicatorGroup.blinkKey)
+        group.removeFromSuperview()
+        multiCaret.indicatorGroup = nil
+        multiCaret.restartBlink = true
     }
 }

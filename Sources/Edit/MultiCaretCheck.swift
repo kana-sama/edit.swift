@@ -1,3 +1,4 @@
+import Accessibility
 import AppKit
 
 @MainActor
@@ -151,11 +152,9 @@ enum MultiCaretCheck {
         window.layoutIfNeeded()
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         editor.refreshCurrentLine()
-        try expect(editor.multiCaret.highlights.count == 1 && editor.multiCaret.indicators.count == 1,
-                   "layout renders a secondary highlight and places a native insertion indicator")
-        try expect(editor.multiCaret.highlights.allSatisfy { $0.width > 0 && $0.height > 0 }
-                   && editor.multiCaret.indicators.allSatisfy { $0.frame.height > 0 },
-                   "decoration rectangles are measurable in the hidden window")
+        try expect(editor.multiCaret.highlights.count == 1 &&
+                   editor.multiCaret.highlights.allSatisfy { $0.width > 0 && $0.height > 0 },
+                   "the secondary selection renders a measurable highlight in the hidden window")
 
         set("one\ntwo\nthree", [range(5)])
         editor.scrollRangeToVisible(range(5))
@@ -167,6 +166,70 @@ enum MultiCaretCheck {
         editor.addCaretBelow(nil)
         try expect(editor.caretSelections.last?.location == 9, "add a caret below the last selected line")
         editor.resetMultiCarets()
+    }
+
+    static func checkBlink() throws {
+        let rect = NSRect(x: 0, y: 0, width: 400, height: 220)
+        let window = CaretCheckWindow(contentRect: rect, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let (scroll, editor) = EditorTextView.scrollingEditor(in: rect)
+        window.contentView = scroll
+        defer { window.close() }
+        editor.string = String(repeating: "abcdefgh\n", count: 100)
+        try expect(window.makeFirstResponder(editor) && !window.isVisible && !NSApp.isActive,
+                   "the isolated caret view has focus without activating Edit")
+        let near = NSRange(location: 3, length: 0)
+        let far = NSRange(location: 9 * 70 + 3, length: 0)
+        let separate = NSRange(location: 30, length: 0)
+        let primary = NSRange(location: 12, length: 0)
+        editor.setCaretSelections([near, far, separate, primary])
+        func layoutCarets() {
+            window.layoutIfNeeded()
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            editor.refreshCurrentLine()
+        }
+        layoutCarets()
+        guard let group = editor.multiCaret.indicatorGroup, let layer = group.layer else {
+            throw Failure("an active multiple selection has a shared insertion view")
+        }
+        let bars = group.caretRects.sorted { $0.minY < $1.minY }
+        try expect(bars.count == 3 && editor.insertionPointColor.alphaComponent == 0
+                   && bars.allSatisfy { $0.height > 0 && $0.width > 0 && $0.width < 2 },
+                   "the editor draws all visible carets with thin bars")
+        try expect(bars[0].minX == bars[1].minX && bars[0].maxY == bars[1].minY
+                   && bars[1].maxY < bars[2].minY,
+                   "same-column carets join only across adjacent rows")
+        let phase = layer.animation(forKey: CaretIndicatorGroup.blinkKey)?.beginTime
+        try expect((phase == nil) == AccessibilitySettings.prefersNonBlinkingTextInsertionIndicator,
+                   "one group animation respects the steady cursor setting")
+
+        editor.scrollRangeToVisible(far)
+        layoutCarets()
+        try expect(editor.multiCaret.indicatorGroup === group && group.caretRects.count == 1
+                   && layer.animation(forKey: CaretIndicatorGroup.blinkKey)?.beginTime == phase,
+                   "an offscreen caret enters the same animation phase after scrolling")
+
+        editor.keepPrimarySelection(nil)
+        editor.scrollRangeToVisible(primary)
+        layoutCarets()
+        try expect(group.caretRects.count == 1 && group.caretRects.first == bars[1]
+                   && editor.insertionPointColor.alphaComponent == 0,
+                   "returning to one caret keeps exactly the same geometry")
+
+        editor.resetMultiCarets()
+        editor.string = ""
+        editor.setSelectedRange(NSRange(location: 0, length: 0))
+        editor.scrollRangeToVisible(editor.selectedRange())
+        layoutCarets()
+        try expect(group.caretRects.count == 1 && group.caretRects[0].height > 0,
+                   "an empty buffer shows a caret")
+        try expect(window.makeFirstResponder(nil) && group.superview == nil
+                   && editor.insertionPointColor == .textColor,
+                   "leaving the editor removes its caret and restores the system cursor color")
+    }
+
+    private final class CaretCheckWindow: NSWindow {
+        override var isKeyWindow: Bool { true }
     }
 
     static func runComposition(in editor: EditorTextView) throws {

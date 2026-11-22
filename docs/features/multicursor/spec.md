@@ -1,6 +1,6 @@
 # Multiple carets
 
-Use multiple carets or selections to edit a document in one operation. TextKit supplies the primary selection and input. Secondary carets use the system insertion indicator and selection colors. The current-line highlight follows the primary selection.
+Use multiple carets or selections to edit a document in one operation. TextKit supplies the primary selection and input. Single and multiple carets use the same thin bars, aligned to the display’s pixels. Adjacent carets in the same column form a continuous line across their rows. All visible carets share one blink phase. Scrolling another caret into view preserves the phase. The system preference for a steady caret applies to the whole group. Selections use the system selection colors. The current-line highlight follows the primary selection.
 
 ## Commands
 

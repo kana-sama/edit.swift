@@ -105,10 +105,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     @objc private func windowFocusChanged(_ notification: Notification) {
-        if hasSecondarySelections {
-            hideSecondaryCarets()
-            requestLineRefresh()
-        }
+        hideCaretDecorations()
+        requestLineRefresh()
     }
 
     override func viewDidEndLiveResize() {
@@ -130,7 +128,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         guard super.resignFirstResponder() else { return false }
         multiCaret.pendingSkip = false
         if multiCaretComposition != nil { unmarkText() }
-        hideSecondaryCarets()
+        hideCaretDecorations()
         onBlur?()
         return true
     }
@@ -739,6 +737,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             multiCaret.navigation = [:]
         }
         resetSelectionHistory()
+        multiCaret.restartBlink = true
         requestLineRefresh()
         onTextChange?()
     }
@@ -770,7 +769,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func refreshCurrentLine() {
-        refreshSecondarySelections()
+        refreshCaretDecorations()
         let location = selectedRange().location
         var newLine = NSRect.zero
         if window != nil, caretIsNearViewport(location) {

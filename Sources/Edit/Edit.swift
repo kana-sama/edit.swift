@@ -117,6 +117,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try await HeaderCheck.run(in: self)
                     try await WorktreeCheck.run(in: self)
                     try await FilesCheck.checkFilePreview(in: self)
+                    try MultiCaretCheck.checkBlink()
                     print("Edit passed its native editing and file-session checks without activation.")
                     exit(EXIT_SUCCESS)
                 } catch {
