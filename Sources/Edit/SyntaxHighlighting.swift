@@ -5,6 +5,8 @@ final class SyntaxHighlighting {
     private weak var editor: EditorTextView?
     private var spans: [SyntaxSpan] = []
     private var hasRenderingColors = false
+    private var backedColorRange: NSRange?
+    private var backingRangeWasEdited = false
     private var task: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var activity: NSTitlebarAccessoryViewController?
@@ -19,8 +21,9 @@ final class SyntaxHighlighting {
         cancelPending()
         let request = generation
         if immediate {
-            display([], refreshVisibleLayout: true)
+            display([])
         } else {
+            backingRangeWasEdited = backedColorRange != nil
             spans = []
         }
         guard language != .plainText else { return }
@@ -43,7 +46,7 @@ final class SyntaxHighlighting {
             await withTaskCancellationHandler {
                 for await result in updates {
                     guard !Task.isCancelled, let self, self.generation == request else { break }
-                    self.display(result, refreshVisibleLayout: immediate)
+                    self.display(result)
                     self.stopProgress()
                 }
             } onCancel: {
@@ -64,6 +67,7 @@ final class SyntaxHighlighting {
         cancelPending()
         spans = []
         clearColors()
+        updateBackingColors(in: nil)
     }
 
     func install(_ result: [SyntaxSpan]) {
@@ -73,7 +77,7 @@ final class SyntaxHighlighting {
 
     func cancel(clearingColors: Bool = true) {
         cancelPending()
-        if clearingColors { display([], refreshVisibleLayout: true) }
+        if clearingColors { display([]) }
     }
 
     private func cancelPending() {
@@ -83,11 +87,64 @@ final class SyntaxHighlighting {
         stopProgress()
     }
 
-    private func display(_ result: [SyntaxSpan], refreshVisibleLayout: Bool = false) {
-        let needsRedraw = hasRenderingColors || !result.isEmpty
+    private func display(_ result: [SyntaxSpan]) {
+        let needsRedraw = hasRenderingColors || backedColorRange != nil || !result.isEmpty
         clearColors()
         spans = result
-        if needsRedraw { redrawSyntax(refreshVisibleLayout: refreshVisibleLayout) }
+        guard needsRedraw, let editor, let manager = editor.textLayoutManager else { return }
+        let viewport = manager.textViewportLayoutController
+        let scroll = editor.enclosingScrollView
+        let origin = scroll?.visibleContentOrigin
+
+        // Rendering attributes color newly drawn fragments. A native attribute edit also tells
+        // TextKit to redraw glyphs that are already on screen, even if the viewport is stationary.
+        if viewport.viewportRange == nil { viewport.layoutViewport() }
+        let prefix = NSRange(location: 0, length: min(editor.textStorage?.length ?? 0, 4_096))
+        updateBackingColors(in: visibleRange() ?? prefix)
+        viewport.layoutViewport()
+        if let scroll, let origin, scroll.scrollToVisibleContentOrigin(origin) {
+            viewport.layoutViewport()
+        }
+        editor.setNeedsDisplay(editor.visibleRect)
+    }
+
+    private func updateBackingColors(in visible: NSRange?) {
+        guard let editor, !editor.hasMarkedText(), let storage = editor.textStorage,
+              let content = editor.textLayoutManager?.textContentManager else { return }
+        let document = NSRange(location: 0, length: storage.length)
+        let previous = backedColorRange.map { NSIntersectionRange($0, document) }
+        let visible = visible.map { NSIntersectionRange($0, document) }
+        let colors = visible.map { spans(overlapping: $0) } ?? []
+        guard backingRangeWasEdited || (previous?.length ?? 0) > 0 || (visible?.length ?? 0) > 0 else {
+            backedColorRange = nil
+            backingRangeWasEdited = false
+            return
+        }
+        var typingAttributes = editor.typingAttributes
+        typingAttributes[.foregroundColor] = NSColor.textColor
+        content.performEditingTransaction {
+            storage.beginEditing()
+            if backingRangeWasEdited {
+                // Character edits may move or split the old runs. Reset only those now carrying color.
+                storage.enumerateAttribute(.foregroundColor, in: document) { value, range, _ in
+                    guard let color = value as? NSColor, color != .textColor else { return }
+                    storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: range)
+                }
+            } else if let previous, previous.length > 0, previous != visible {
+                storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: previous)
+            }
+            if let visible, visible.length > 0 {
+                storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: visible)
+                for span in colors {
+                    let range = NSIntersectionRange(visible, NSRange(location: span.start, length: span.end - span.start))
+                    storage.addAttribute(.foregroundColor, value: span.color.nativeColor, range: range)
+                }
+            }
+            storage.endEditing()
+        }
+        editor.typingAttributes = typingAttributes
+        backedColorRange = colors.isEmpty ? nil : visible
+        backingRangeWasEdited = false
     }
 
     private func visibleRange() -> NSRange? {
@@ -98,23 +155,6 @@ final class SyntaxHighlighting {
 
     func prepareForDrawing(_ fragment: NSTextLayoutFragment, using manager: NSTextLayoutManager) {
         paint(fragment.rangeInElement, using: manager)
-    }
-
-    private func redrawSyntax(refreshVisibleLayout: Bool) {
-        guard let editor, let manager = editor.textLayoutManager else { return }
-        let viewport = manager.textViewportLayoutController
-        let scroll = editor.enclosingScrollView
-        let origin = refreshVisibleLayout ? scroll?.visibleContentOrigin : nil
-        if let visible = viewport.viewportRange {
-            // A new mode must update existing rendering surfaces even if the viewport hasn't moved.
-            if refreshVisibleLayout { manager.invalidateLayout(for: visible) }
-            paint(visible, using: manager)
-        }
-        viewport.layoutViewport()
-        if let origin, let scroll, scroll.scrollToVisibleContentOrigin(origin) {
-            viewport.layoutViewport()
-        }
-        editor.setNeedsDisplay(editor.visibleRect)
     }
 
     private func clearColors() {
@@ -132,25 +172,28 @@ final class SyntaxHighlighting {
         let end = start + manager.offset(from: range.location, to: range.endLocation)
         guard start < end else { return }
 
-        var low = 0
-        var high = spans.count
-        while low < high {
-            let middle = low + (high - low) / 2
-            if spans[middle].end <= start {
-                low = middle + 1
-            } else {
-                high = middle
-            }
-        }
-        for index in low..<spans.count {
-            let span = spans[index]
-            if span.start >= end { break }
+        let visible = NSRange(location: start, length: end - start)
+        for span in spans(overlapping: visible) {
             guard let from = manager.location(range.location, offsetBy: max(0, span.start - start)),
                   let to = manager.location(from, offsetBy: min(end, span.end) - max(start, span.start)),
                   let target = NSTextRange(location: from, end: to) else { continue }
             manager.addRenderingAttribute(.foregroundColor, value: span.color.nativeColor, for: target)
             hasRenderingColors = true
         }
+    }
+
+    private func spans(overlapping range: NSRange) -> ArraySlice<SyntaxSpan> {
+        guard range.length > 0 else { return [] }
+        var low = 0
+        var high = spans.count
+        while low < high {
+            let middle = low + (high - low) / 2
+            if spans[middle].end <= range.location { low = middle + 1 }
+            else { high = middle }
+        }
+        var end = low
+        while end < spans.count && spans[end].start < NSMaxRange(range) { end += 1 }
+        return spans[low..<end]
     }
 
     private func showProgress() {

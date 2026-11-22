@@ -10,7 +10,8 @@ enum SyntaxCheck {
     static func run(in app: Edit) async throws {
         try await checkFirstDraw(in: app, appearance: .aqua)
         try await checkFirstDraw(in: app, appearance: .darkAqua)
-        try await checkSwiftFirstDraw(in: app)
+        try await checkSwiftDrawing(in: app, requiresFirstFrame: true)
+        try await checkSwiftDrawing(in: app, requiresFirstFrame: false)
         try await checkModeRepaint(in: app)
         try await Task.detached { try checkGrammars() }.value
         let document = app.makeDocument()
@@ -74,16 +75,17 @@ enum SyntaxCheck {
         print("Syntax in the first frame of a \(source.utf8.count)-byte file: open \(opened), scroll \(scrolled).")
     }
 
-    private static func checkSwiftFirstDraw(in app: Edit) async throws {
+    private static func checkSwiftDrawing(in app: Edit, requiresFirstFrame: Bool) async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let warmup = directory.appending(path: "Warmup.swift")
         let target = directory.appending(path: "Target.swift")
-        let source = (0..<360).map {
+        let functionCount = requiresFirstFrame ? 360 : 720
+        let source = (0..<functionCount).map {
             "func sample\($0)(value: Int) -> Int {\n    let doubled = value * 2\n    return doubled\n}\n"
         }.joined() + String(repeating: "// comment in a different viewport\n", count: 250)
-        try Data("let marker = 10\n".utf8).write(to: warmup)
+        try Data(String(repeating: "// warm up Swift\n", count: 35).utf8).write(to: warmup)
         try Data(source.utf8).write(to: target)
 
         let document = app.makeDocument()
@@ -102,15 +104,36 @@ enum SyntaxCheck {
         }
 
         let start = ContinuousClock.now
-        guard try await app.openFile(target, in: document) === document else {
-            throw Failure("Could not open the mid-size Swift fixture.")
+        for pass in 0..<(requiresFirstFrame ? 1 : 2) {
+            if pass > 0 {
+                guard try await app.openFile(warmup, in: document) === document else {
+                    throw Failure("Could not switch away from the Swift fixture.")
+                }
+            }
+            guard try await app.openFile(target, in: document) === document else {
+                throw Failure("Could not open the Swift drawing fixture.")
+            }
+            let editor = document.editor
+            let selection = editor.selectedRange()
+            if requiresFirstFrame {
+                window.layoutIfNeeded()
+                try expectDrawnColor(in: clip, primaryChannel: 2, after: "opening a mid-size Swift file")
+                try await waitForPaint(in: clip, language: .swift)
+            } else {
+                // Do not scroll, force layout, or sample the layer while the async update settles.
+                try await Task.sleep(for: .milliseconds(200))
+                guard try paintMatches(in: clip, language: .swift),
+                      let color = editor.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor,
+                      color != .textColor else {
+                    throw Failure("Deferred Swift highlighting did not repaint the stationary viewport.")
+                }
+            }
+            guard editor.string == source, editor.selectedRange() == selection,
+                  !window.isDocumentEdited, editor.undoManager?.canUndo == false else {
+                throw Failure("Highlighting changed the text, selection, dirty state, or undo history.")
+            }
         }
-        let opened = start.duration(to: .now)
-        window.layoutIfNeeded()
-        try expectDrawnColor(in: clip, primaryChannel: 2, after: "opening a mid-size Swift file")
-        try await waitForPaint(in: clip, language: .swift)
-        let painted = start.duration(to: .now)
-        print("Syntax in a \(source.utf8.count)-byte Swift file: open \(opened), live color \(painted), with first-frame colors.")
+        print("Checked color in a \(source.utf8.count)-byte Swift file at \(start.duration(to: .now)).")
         let scrollStart = ContinuousClock.now
         clip.scroll(to: NSPoint(x: 0, y: clip.documentRect.maxY - clip.bounds.height))
         scroll.reflectScrolledClipView(clip)
