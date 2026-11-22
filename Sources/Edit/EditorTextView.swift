@@ -80,6 +80,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         editor.smartInsertDeleteEnabled = false
         editor.backgroundColor = .textBackgroundColor
         editor.textColor = .textColor
+        // Keep AppKit’s selection background and leave syntax colors on the glyphs.
+        editor.selectedTextAttributes.removeValue(forKey: .foregroundColor)
         editor.insertionPointColor = .textColor
         editor.delegate = editor
         editor.setFontSize(defaultFontSize)

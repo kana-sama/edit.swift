@@ -72,6 +72,8 @@ enum SyntaxCheck {
         clip.scroll(to: .zero)
         scrollView.reflectScrolledClipView(clip)
         try expectDrawnColor(in: clip, primaryChannel: 0, after: "scrolling back to string literals")
+        document.editor.selectAll(nil)
+        try expectDrawnColor(in: clip, primaryChannel: 0, after: "selecting the Rust source")
         print("Syntax in the first frame of a \(source.utf8.count)-byte file: open \(opened), scroll \(scrolled).")
     }
 
