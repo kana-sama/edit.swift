@@ -777,7 +777,13 @@ enum FindCheck {
         let ellipsis = try sidebarMenu(in: window)
         let title = try sidebarMenu(in: window, showsTitle: true)
         let ellipsisButton = try require(ellipsis.view as? NSButton, "the menu uses a native icon button")
-        let titleButton = try require(title.view as? NSButton, "the title is a native menu button")
+        let titleButton = try require(title.modePicker, "the title is a native pop-up selector")
+        let titleCell = try require(titleButton.cell as? NSPopUpButtonCell, "a native pop-up cell tracks selection")
+        func titleLeadingEdge() -> CGFloat {
+            window.layoutIfNeeded()
+            let titleRect = titleCell.titleRect(forBounds: titleButton.bounds)
+            return titleButton.convert(titleRect, to: nil).minX
+        }
         let titlebarBottom = window.contentLayoutRect.maxY
         let split = try require(window.contentViewController as? NSSplitViewController, "sidebar split view")
         let sidebar = split.splitViewItems[0].viewController.view
@@ -787,8 +793,7 @@ enum FindCheck {
             let ellipsisFrame = ellipsisButton.convert(ellipsisButton.bounds, to: nil)
             let sidebarFrame = sidebar.convert(sidebar.bounds, to: nil)
             try expect(!ellipsis.isHidden && !title.isHidden && titleButton.window === window && ellipsisButton.window === window &&
-                       titleButton.imagePosition == .imageTrailing && titleButton.image != nil &&
-                       titleButton.target === title && titleButton.action != nil &&
+                       titleButton.menu === title.menu && !titleButton.pullsDown &&
                        titleFrame.maxX <= ellipsisFrame.minX && ellipsisFrame.maxX <= sidebarFrame.maxX + 0.5 &&
                        abs(titleFrame.midY - ellipsisFrame.midY) < 0.5 &&
                        abs(window.contentLayoutRect.maxY - titlebarBottom) < 0.5,
@@ -797,10 +802,10 @@ enum FindCheck {
         try checkHeader()
         document.windowDidEnterFullScreen(Notification(name: NSWindow.didEnterFullScreenNotification, object: window))
         try checkHeader()
-        try expect(titleButton.title == "Search" && title.popupOrigin(in: titleButton).x == titleButton.bounds.minX,
-                   "the mode menu aligns with the leading edge of its title")
-
         let menu = title.menu
+        let searchLeading = titleLeadingEdge()
+        try expect(titleButton.selectedItem === menu.item(withTitle: "Search"),
+                   "the native pop-up positions the selected Search row over its control")
         try expect(menu.item(withTitle: "Worktree")?.isEnabled == true, "opening a folder enables Worktree")
         menu.performActionForItem(at: menu.indexOfItem(withTitle: "Worktree"))
         try expect(document.findSettings.visible && document.sidebarMode == .worktree &&
@@ -812,17 +817,21 @@ enum FindCheck {
                    menu.item(withTitle: "Source Control")?.isHidden == false &&
                    menu.item(withTitle: "Search")?.isEnabled == true && menu.item(withTitle: "Worktree")?.state == .on,
                    "Worktree still offers Search alongside its own menu option")
+        let worktreeLeading = titleLeadingEdge()
+        try expect(abs(worktreeLeading - searchLeading) < 0.5,
+                   "Worktree and Search share a leading text edge (\(worktreeLeading) and \(searchLeading) pt)")
         let semibold = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
         func checkTitleWeight() throws {
-            for title in [titleButton.attributedTitle, titleButton.attributedAlternateTitle] {
-                try expect(title.string == "Worktree" &&
-                           title.attribute(.font, at: 0, effectiveRange: nil) as? NSFont == semibold,
-                           "Worktree stays semibold in the button's normal and pressed states")
-            }
+            let display = try require(titleCell.menuItem, "the pop-up cell has a header item")
+            try expect(display.title == "Worktree" && display.image != nil &&
+                       display.attributedTitle?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont == semibold,
+                       "Worktree stays semibold with its chevron")
         }
         try checkTitleWeight()
         titleButton.highlight(true)
         menu.update()
+        try expect(titleButton.selectedItem === menu.item(withTitle: "Worktree"),
+                   "AppKit tracks the current mode in the native pop-up")
         try checkTitleWeight()
         titleButton.highlight(false)
         try checkTitleWeight()
@@ -831,21 +840,30 @@ enum FindCheck {
         split.splitView.setPosition(split.splitViewItems[0].minimumThickness, ofDividerAt: 0)
         try checkHeader()
         let titleFont = try require(titleButton.font, "the sidebar title has a native font")
-        let titleCell = try require(titleButton.cell as? NSButtonCell, "the title has a native button cell")
         let titleRect = titleCell.titleRect(forBounds: titleButton.bounds)
-        let textWidth = (titleButton.title as NSString).size(withAttributes: [.font: titleFont]).width
-        try expect(titleButton.title == "Worktree" &&
+        let displayedTitle = titleCell.menuItem?.title ?? ""
+        let textWidth = (displayedTitle as NSString).size(withAttributes: [.font: titleFont]).width
+        try expect(displayedTitle == "Worktree" &&
                    titleRect.width >= floor(textWidth),
                    "the complete Worktree title fits after switching modes (text \(textWidth), title \(titleRect.width), button \(titleButton.bounds.width), intrinsic \(titleButton.intrinsicContentSize.width))")
         split.splitView.setPosition(sidebarWidth, ofDividerAt: 0)
         menu.performActionForItem(at: menu.indexOfItem(withTitle: "Search"))
         try expect(document.sidebarMode == .search && window.firstResponder is FindFieldTextView,
                    "choosing Search from Worktree opens the Find field")
+        try expect(abs(titleLeadingEdge() - searchLeading) < 0.5, "returning to Search keeps the same left inset")
         document.toggleSidebarFocus(.worktree)
 
         app.toggleSidebar(nil)
         try expect(!document.findSettings.visible && document.sidebarMode == .worktree && title.isHidden && ellipsis.isHidden,
                    "Command-B hides the open tree and remembers its mode")
+        window.layoutIfNeeded()
+        let folderStack = try require(window.toolbar?.items.first {
+            $0.itemIdentifier == DocumentTitleBar.folderItemIdentifier
+        }?.view as? NSStackView, "the collapsed sidebar leaves the folder title in the toolbar")
+        let folderLabel = try require(folderStack.arrangedSubviews.first, "the folder title label")
+        let folderLeading = folderLabel.convert(folderLabel.bounds, to: nil).minX
+        try expect(abs(folderLeading - worktreeLeading) < 0.5,
+                   "the folder and sidebar titles share a leading edge (\(folderLeading) and \(worktreeLeading) pt)")
         app.toggleSidebar(nil)
         try expect(document.findSettings.visible && document.sidebarMode == .worktree &&
                    window.firstResponder === document.editor,

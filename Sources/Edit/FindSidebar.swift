@@ -32,10 +32,16 @@ private final class FindSplitView: NSSplitView {
 
 @MainActor
 final class SidebarMenuItem: NSToolbarItem {
+    static let titleLeadingPadding: CGFloat = 3
     private static let titleFont = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
 
     let menu: NSMenu
     let showsTitle: Bool
+    private var pickerWidth: NSLayoutConstraint?
+
+    var modePicker: NSPopUpButton? {
+        (view as? NSStackView)?.arrangedSubviews.first as? NSPopUpButton
+    }
 
     init(itemIdentifier identifier: NSToolbarItem.Identifier, showsTitle: Bool, mode: SidebarMode) {
         self.showsTitle = showsTitle
@@ -48,26 +54,29 @@ final class SidebarMenuItem: NSToolbarItem {
         autovalidates = false
         menu.autoenablesItems = false
 
-        let button = NSButton()
-        button.target = self
-        button.action = #selector(showMenu(_:))
+        let button: NSButton = showsTitle ? NSPopUpButton(frame: .zero, pullsDown: false) : NSButton()
         button.controlSize = .small
         button.isBordered = false
         button.contentTintColor = .labelColor
         button.toolTip = label
         button.setAccessibilityLabel(label)
         button.heightAnchor.constraint(equalToConstant: 26).isActive = true
-        if showsTitle {
-            button.font = Self.titleFont
-            button.alignment = .natural
-            button.imagePosition = .imageTrailing
-            button.imageHugsTitle = true
+        if let picker = button as? NSPopUpButton, let cell = picker.cell as? NSPopUpButtonCell {
+            picker.menu = menu
+            picker.autoenablesItems = false
+            picker.usesItemFromMenu = false
+            picker.font = Self.titleFont
+            picker.alignment = .natural
+            picker.imagePosition = .imageTrailing
+            cell.arrowPosition = .noArrow
+            let display = NSMenuItem(title: mode.title, action: nil, keyEquivalent: "")
+            display.attributedTitle = Self.title(for: mode)
             if let glyph = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
                 .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold)) {
                 let gap: CGFloat = 3
-                let isRightToLeft = button.userInterfaceLayoutDirection == .rightToLeft
+                let isRightToLeft = picker.userInterfaceLayoutDirection == .rightToLeft
                 let size = NSSize(width: glyph.size.width + gap, height: glyph.size.height)
-                button.image = NSImage(size: size, flipped: false) { bounds in
+                display.image = NSImage(size: size, flipped: false) { bounds in
                     let rect = NSRect(origin: NSPoint(x: bounds.minX + (isRightToLeft ? 0 : gap), y: bounds.minY),
                                       size: glyph.size)
                     glyph.draw(in: rect)
@@ -76,17 +85,24 @@ final class SidebarMenuItem: NSToolbarItem {
                     return true
                 }
             }
-            // Reserve space for the longer title and the button cell’s horizontal insets.
-            let titleWidth = (SidebarMode.worktree.title as NSString).size(withAttributes: [.font: Self.titleFont]).width
-            let chevronWidth = button.image?.size.width ?? 0
-            button.widthAnchor.constraint(equalToConstant: ceil(titleWidth + chevronWidth) + 2).isActive = true
+            cell.menuItem = display
+            let width = picker.widthAnchor.constraint(equalToConstant: ceil(picker.intrinsicContentSize.width))
+            width.isActive = true
+            pickerWidth = width
+            let title = NSStackView(views: [picker])
+            title.alignment = .centerY
+            // Align with the folder label in the collapsed toolbar.
+            title.edgeInsets.left = Self.titleLeadingPadding
+            view = title
         } else {
+            button.target = self
+            button.action = #selector(showOptions(_:))
             button.imagePosition = .imageOnly
             button.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: nil)?
                 .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
             button.widthAnchor.constraint(equalToConstant: 20).isActive = true
+            view = button
         }
-        view = button
         updateTitle(for: mode)
 
         let overflow = NSMenuItem(title: label, action: nil, keyEquivalent: "")
@@ -94,33 +110,36 @@ final class SidebarMenuItem: NSToolbarItem {
         menuFormRepresentation = overflow
     }
 
+    private static func title(for mode: SidebarMode) -> NSAttributedString {
+        NSAttributedString(string: mode.title, attributes: [
+            .font: titleFont,
+            .foregroundColor: NSColor.labelColor,
+        ])
+    }
+
     func updateTitle(for mode: SidebarMode) {
-        guard let button = view as? NSButton else { return }
-        if showsTitle {
-            let title = NSAttributedString(string: mode.title, attributes: [
-                .font: Self.titleFont,
-                .foregroundColor: NSColor.labelColor,
-            ])
-            button.attributedTitle = title
-            button.attributedAlternateTitle = title
-            button.setAccessibilityLabel("\(mode.title), Switch Sidebar")
+        if let picker = modePicker {
+            if let display = (picker.cell as? NSPopUpButtonCell)?.menuItem {
+                display.title = mode.title
+                display.attributedTitle = Self.title(for: mode)
+            }
+            // Fit the native cell to keep the gap between the title and trailing chevron.
+            picker.invalidateIntrinsicContentSize()
+            pickerWidth?.constant = ceil(picker.intrinsicContentSize.width)
+            picker.setAccessibilityLabel("\(mode.title), Switch Sidebar")
+            picker.needsDisplay = true
         } else {
-            button.setAccessibilityLabel("\(mode.title) Options")
+            view?.setAccessibilityLabel("\(mode.title) Options")
         }
     }
 
     func popupOrigin(in button: NSView) -> NSPoint {
         let bounds = button.bounds
-        let x: CGFloat
-        if button.userInterfaceLayoutDirection == .rightToLeft {
-            x = bounds.maxX
-        } else {
-            x = showsTitle ? bounds.minX : bounds.maxX - menu.size.width
-        }
+        let x = button.userInterfaceLayoutDirection == .rightToLeft ? bounds.maxX : bounds.maxX - menu.size.width
         return NSPoint(x: x, y: button.isFlipped ? bounds.maxY : bounds.minY)
     }
 
-    @objc private func showMenu(_ button: NSButton) {
+    @objc private func showOptions(_ button: NSButton) {
         menu.popUp(positioning: nil, at: popupOrigin(in: button), in: button)
     }
 }
@@ -130,7 +149,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private static let sidebarMenuItem = NSToolbarItem.Identifier("Edit.SidebarMenu")
     private static let sidebarTitleItem = NSToolbarItem.Identifier("Edit.SidebarTitle")
     // The toolbar needs room for the window controls, Worktree title and options button.
-    private static let minimumSidebarWidth: CGFloat = 200
+    private static let minimumSidebarWidth: CGFloat = 208 + SidebarMenuItem.titleLeadingPadding
     private static let minimumEditorWidth: CGFloat = 128
     private static let contentInset: CGFloat = 10
     private unowned let document: DocumentWindow
@@ -628,7 +647,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         guard identifier == Self.sidebarMenuItem || identifier == Self.sidebarTitleItem else { return nil }
         let item = SidebarMenuItem(itemIdentifier: identifier, showsTitle: identifier == Self.sidebarTitleItem,
                                    mode: document.sidebarMode)
-        item.menu.delegate = self
+        if !item.showsTitle { item.menu.delegate = self }
         updateSidebarMenuItems(item)
         return item
     }
@@ -649,21 +668,20 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     private func updateSidebarMenuItems(_ item: SidebarMenuItem) {
         let menu = item.menu
-        menu.removeAllItems()
-        guard item.showsTitle else {
+        guard let picker = item.modePicker else {
+            menu.removeAllItems()
             updateSidebarOptions(menu)
             return
         }
-        let tree = menu.addItem(withTitle: SidebarMode.worktree.title, action: #selector(selectWorktreeSidebar(_:)),
-                                keyEquivalent: "")
-        tree.target = self
-        tree.state = document.sidebarMode == .worktree ? .on : .off
-        tree.isEnabled = document.folderURL != nil
-        menu.addItem(withTitle: "Source Control", action: nil, keyEquivalent: "").isEnabled = false
-        let search = menu.addItem(withTitle: SidebarMode.search.title, action: #selector(selectSearchSidebar(_:)),
-                                  keyEquivalent: "")
-        search.target = self
-        search.state = document.sidebarMode == .search ? .on : .off
+        if menu.items.isEmpty {
+            menu.addItem(withTitle: SidebarMode.worktree.title, action: #selector(selectWorktreeSidebar(_:)),
+                         keyEquivalent: "").target = self
+            menu.addItem(withTitle: "Source Control", action: nil, keyEquivalent: "").isEnabled = false
+            menu.addItem(withTitle: SidebarMode.search.title, action: #selector(selectSearchSidebar(_:)),
+                         keyEquivalent: "").target = self
+        }
+        menu.item(withTitle: SidebarMode.worktree.title)?.isEnabled = document.folderURL != nil
+        picker.selectItem(at: menu.indexOfItem(withTitle: document.sidebarMode.title))
     }
 
     private func updateSidebarOptions(_ menu: NSMenu) {
