@@ -20,10 +20,10 @@ enum WorktreeCheck {
 
         let document = app.makeDocument()
         defer { document.window.close() }
-        document.toggleWorktreeSidebar()
+        document.toggleSidebarFocus(.worktree)
         try expect(document.worktreeSidebar == nil, "Worktree is unavailable before opening a folder")
         _ = try await app.openFile(project, in: document)
-        document.toggleWorktreeSidebar()
+        document.toggleSidebarFocus(.worktree)
         guard let sidebar = document.worktreeSidebar else { throw Failure("open a native outline") }
         let tree = sidebar.outline
         try await waitFor("read the folder and reveal the README") {
@@ -55,6 +55,32 @@ enum WorktreeCheck {
         try await waitFor("open a file from a single click on an already selected row") {
             document.fileURL.map(WorktreeFileOperations.path) == WorktreeFileOperations.path(ignored)
         }
+        try expect(document.window.firstResponder === tree && tree.selectedRow == log,
+                   "opening a file keeps the selected row focused")
+        try click(log, in: tree)
+        try expect(document.window.firstResponder === tree, "clicking the active file keeps focus on the tree")
+
+        try press("\u{F701}", code: 125, in: tree)
+        try await waitFor("Down opens the next file and preserves tree focus") {
+            document.fileURL?.lastPathComponent == "README.md" &&
+                tree.selectedRow == row(named: "README.md", in: tree) && document.window.firstResponder === tree
+        }
+        try press("\u{F700}", code: 126, in: tree)
+        try await waitFor("Up opens the previous file and preserves tree focus") {
+            document.fileURL?.lastPathComponent == "Build.log" && tree.selectedRow == log &&
+                document.window.firstResponder === tree
+        }
+        try press("\r", code: 36, in: tree)
+        try expect(document.window.firstResponder === tree && document.fileURL?.lastPathComponent == "Build.log",
+                   "Return is reserved for renaming instead of focusing the active file")
+
+        try press("\u{F701}", code: 125, in: tree)
+        try press(" ", code: 49, in: tree)
+        try await waitFor("Space waits for the selected file and moves focus there without typing") {
+            document.fileURL?.lastPathComponent == "README.md" && document.window.firstResponder === document.editor &&
+                document.editor.string == "Sample\n"
+        }
+
         guard let sourceMenu = sidebar.menu(at: sources) else { throw Failure("a folder has a contextual menu") }
         for title in ["New File…", "New Folder…", "Copy Path", "Hide"] {
             try expect(sourceMenu.item(withTitle: title) != nil, "folder menu contains \(title)")
@@ -112,7 +138,7 @@ enum WorktreeCheck {
 
         document.performFind(.find)
         try expect(sidebar.view.isHiddenOrHasHiddenAncestor, "switch from Worktree to Search in the same sidebar")
-        document.toggleWorktreeSidebar()
+        document.toggleSidebarFocus(.worktree)
         try expect(!sidebar.view.isHiddenOrHasHiddenAncestor, "return from Search to Worktree")
 
         guard let root = document.folderURL else { throw Failure("the move has a worktree") }
@@ -152,6 +178,15 @@ enum WorktreeCheck {
             .first { $0.identifier == NSOutlineView.disclosureButtonIdentifier ||
                 $0.identifier == NSOutlineView.showHideButtonIdentifier }
         return try require(button, "native disclosure button")
+    }
+
+    private static func press(_ characters: String, code: UInt16, in outline: NSOutlineView) throws {
+        let window = try require(outline.window, "keyboard navigation window")
+        let event = try require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+            context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code
+        ), "outline key event")
+        outline.keyDown(with: event)
     }
 
     private static func click(

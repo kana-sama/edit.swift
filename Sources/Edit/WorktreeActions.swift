@@ -170,8 +170,9 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         }
     }
 
-    private func rename(_ item: URL, within root: URL) {
-        guard !app.isAgentCheck else { return }
+    func rename(_ item: URL, within root: URL) {
+        guard !app.isAgentCheck, WorktreeFileOperations.contains(item, in: root),
+              WorktreeFileOperations.path(item) != WorktreeFileOperations.path(root) else { return }
         run("Could Not Rename “\(item.lastPathComponent)”", within: root) { document in
             guard let name = await self.askForName("Rename “\(item.lastPathComponent)”", confirm: "Rename",
                                                    in: document, initial: item.lastPathComponent)

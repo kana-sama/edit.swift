@@ -572,9 +572,15 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         case ("b", .command):
             document.performFind(.toggleSidebar)
             return nil
-        case ("f", .command), ("f", [.command, .option]):
+        case ("f", .command), ("e", [.command, .shift]):
+            let mode: SidebarMode = key == "f" ? .search : .worktree
+            guard mode != .worktree || document.folderURL != nil else { return nil }
             dismiss(restoreFocus: true)
-            document.performFind(modifiers.contains(.option) ? .replace : .find)
+            document.toggleSidebarFocus(mode)
+            return nil
+        case ("f", [.command, .option]):
+            dismiss(restoreFocus: true)
+            document.performFind(.replace)
             return nil
         default:
             break

@@ -140,6 +140,9 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private var fullScreen: Bool
     private var sidebarTransition: UInt64 = 0
     private var sidebarAnimating = false
+    private weak var focusBeforeSidebar: NSView?
+    private weak var focusBeforeMode: NSView?
+    private var previousMode: SidebarMode?
     private var bufferSnapshot: String
     private var resultSnapshot = ""
     private var baseMatches: [FindHit] = []
@@ -191,12 +194,62 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
     }
 
-    func toggleWorktree() {
-        if worktreeVisible {
-            hide()
-        } else {
-            showWorktree()
+    func toggleFocus(of mode: SidebarMode) {
+        guard mode != .worktree || document.folderURL != nil else { return }
+        if settings.visible && document.sidebarMode == mode && focusIsInSidebar {
+            returnFocus(allowingModeChange: true)
+            return
         }
+        rememberFocus(entering: mode)
+        switch mode {
+        case .search: openField(replace: false)
+        case .worktree: showWorktree()
+        }
+    }
+
+    private func rememberFocus(entering mode: SidebarMode) {
+        let responder = document.window.firstResponder as? NSView
+        if focusIsInSidebar {
+            if document.sidebarMode != mode {
+                focusBeforeMode = responder
+                previousMode = document.sidebarMode
+            }
+        } else {
+            focusBeforeSidebar = responder
+            focusBeforeMode = nil
+            previousMode = nil
+        }
+    }
+
+    private func returnFocus(allowingModeChange: Bool) {
+        let window = document.window
+        let priorMode = previousMode
+        let priorView = focusBeforeMode
+        previousMode = nil
+        focusBeforeMode = nil
+        pendingResultFocus = nil
+        previewRequested = false
+
+        if allowingModeChange, let priorMode, let priorView,
+           priorMode != .worktree || document.folderURL != nil {
+            switch priorMode {
+            case .search: showSearch(focusing: nil)
+            case .worktree: showWorktree(focus: false)
+            }
+            if priorView.window === window && !priorView.isHiddenOrHasHiddenAncestor && window.makeFirstResponder(priorView) {
+                refreshDecorations()
+                return
+            }
+        }
+        let responder = focusBeforeSidebar
+        focusBeforeSidebar = nil
+        if let responder, responder.window === window, !responder.isHiddenOrHasHiddenAncestor,
+           window.makeFirstResponder(responder) {
+            refreshDecorations()
+            return
+        }
+        window.makeFirstResponder(document.editor)
+        refreshDecorations()
     }
 
     private func showWorktree(focus: Bool = true, animate: Bool = true) {
@@ -278,8 +331,9 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         guard canPerform(action) else { return }
         switch action {
         case .find:
-            openField(replace: false)
+            toggleFocus(of: .search)
         case .replace:
+            rememberFocus(entering: .search)
             openField(replace: true)
         case .next:
             moveResult(by: 1)
@@ -406,8 +460,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
         findInput.onReturn = { [weak self] in self?.advanceFindFocus() }
         replaceInput.onReturn = { [weak self] in self?.focusFirstResult() }
-        findInput.onEscape = { [weak self] in self?.hide() }
-        replaceInput.onEscape = { [weak self] in self?.hide() }
+        findInput.onEscape = { [weak self] in self?.returnFocus(allowingModeChange: false) }
+        replaceInput.onEscape = { [weak self] in self?.returnFocus(allowingModeChange: false) }
 
         configureFieldAction(replaceToggle, label: "Show or Hide Replace", action: #selector(toggleReplaceSection(_:)))
         configureFieldAction(replaceButton, label: "Replace All", action: #selector(replaceAllMatches(_:)))
@@ -663,7 +717,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         worktree?.setActive(worktreeVisible)
         if !settings.visible {
             previewRequested = false
-            if focusIsInSidebar { document.window.makeFirstResponder(document.editor) }
+            if focusIsInSidebar { returnFocus(allowingModeChange: false) }
         }
         refreshDecorations()
     }
@@ -699,7 +753,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         guard installed && settings.visible else { return }
         pendingResultFocus = nil
         let animation = beginSidebarTransition()
-        if focusIsInSidebar { document.window.makeFirstResponder(document.editor) }
+        if focusIsInSidebar { returnFocus(allowingModeChange: false) }
         settings.visible = false
         worktree?.setActive(false)
         updateSidebarToolbarVisibility()
@@ -848,11 +902,15 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     @objc private func refreshSearch(_ sender: Any?) { perform(.refresh) }
 
     @objc private func selectSearchSidebar(_ sender: Any?) {
+        rememberFocus(entering: .search)
         document.requestAutosave()
         showSearch(focusing: findInput.input)
     }
 
-    @objc private func selectWorktreeSidebar(_ sender: Any?) { showWorktree() }
+    @objc private func selectWorktreeSidebar(_ sender: Any?) {
+        rememberFocus(entering: .worktree)
+        showWorktree()
+    }
 
     @objc private func toggleHiddenFiles(_ sender: Any?) {
         guard worktreeVisible, let worktree else { return }

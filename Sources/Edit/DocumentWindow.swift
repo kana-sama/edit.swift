@@ -10,7 +10,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     enum CloseDestination {
         case window
-        case buffer(FileBuffer?, preparedSyntax: SyntaxSnapshot? = nil)
+        case buffer(FileBuffer?, preparedSyntax: SyntaxSnapshot? = nil, focusEditor: Bool = true)
     }
 
     private struct AutosaveRequest {
@@ -137,9 +137,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         searchPanel().perform(command)
     }
 
-    func toggleWorktreeSidebar() {
-        guard !app.isQuitting, window.attachedSheet == nil, folderURL != nil else { return }
-        searchPanel().toggleWorktree()
+    func toggleSidebarFocus(_ mode: SidebarMode) {
+        guard !app.isQuitting, window.attachedSheet == nil, mode != .worktree || folderURL != nil else { return }
+        searchPanel().toggleFocus(of: mode)
     }
 
     func restoreFindSettings(_ settings: FindSettings) {
@@ -573,10 +573,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     @discardableResult
-    func replaceBuffer(with file: FileBuffer?, preparedSyntax: SyntaxSnapshot? = nil) async -> Bool {
+    func replaceBuffer(
+        with file: FileBuffer?, preparedSyntax: SyntaxSnapshot? = nil, focusEditor: Bool = true
+    ) async -> Bool {
         guard canReplaceBuffer, !app.isQuitting else { return false }
         promptingToClose = true
-        return await closeBuffer(destination: .buffer(file, preparedSyntax: preparedSyntax))
+        return await closeBuffer(destination: .buffer(file, preparedSyntax: preparedSyntax, focusEditor: focusEditor))
     }
 
     @discardableResult
@@ -619,7 +621,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
 
         switch destination {
-        case .buffer(let file, let preparedSyntax):
+        case .buffer(let file, let preparedSyntax, let focusEditor):
             autosaveFailure = nil
             editor.breakUndoCoalescing()
             var position: EditorPosition?
@@ -640,7 +642,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 revision = nil
                 installText("")
             }
-            window.makeFirstResponder(editor)
+            if focusEditor { window.makeFirstResponder(editor) }
             restoreEditorPosition(position)
         case .window:
             window.close()

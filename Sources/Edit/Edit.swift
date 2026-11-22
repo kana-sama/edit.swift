@@ -265,8 +265,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     @objc func openFind(_ sender: Any?) {
-        controlPanel?.dismiss(restoreFocus: true)
-        activeDocument?.performFind(.find)
+        focusSidebar(.search)
     }
 
     @objc func openReplace(_ sender: Any?) {
@@ -279,9 +278,16 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     // Keep the selector used by existing Control pins and command history.
     @objc(toggleFindSidebar:) func toggleSidebar(_ sender: Any?) { activeDocument?.performFind(.toggleSidebar) }
 
+    // Keep the selector used by existing Control pins and command history.
     @objc func toggleWorktreeSidebar(_ sender: Any?) {
+        focusSidebar(.worktree)
+    }
+
+    private func focusSidebar(_ mode: SidebarMode) {
+        guard let document = activeDocument, document.window.attachedSheet == nil,
+              mode != .worktree || document.folderURL != nil else { return }
         controlPanel?.dismiss(restoreFocus: true)
-        activeDocument?.toggleWorktreeSidebar()
+        document.toggleSidebarFocus(mode)
     }
 
     @objc func performFindControlAction(_ sender: NSMenuItem) {
@@ -522,11 +528,13 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         }
     }
 
-    func openFiles(_ urls: [URL], allowMissing: Bool = false, in sourceDocument: DocumentWindow? = nil) async {
+    func openFiles(
+        _ urls: [URL], allowMissing: Bool = false, in sourceDocument: DocumentWindow? = nil, focusEditor: Bool = true
+    ) async {
         guard let document = sourceDocument ?? activeDocument else { return }
         for url in urls where !isQuitting {
             do {
-                guard try await openFile(url, allowMissing: allowMissing, in: document) != nil else { break }
+                guard try await openFile(url, allowMissing: allowMissing, in: document, focusEditor: focusEditor) != nil else { break }
             } catch {
                 await recentFiles.removeIfMissing(url)
                 if !isAgentCheck && !isQuitting && document.canReplaceBuffer && documents.contains(where: { $0 === document }) {
@@ -537,7 +545,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     @discardableResult
-    func openFile(_ url: URL, allowMissing: Bool = false, in sourceDocument: DocumentWindow? = nil) async throws -> DocumentWindow? {
+    func openFile(
+        _ url: URL, allowMissing: Bool = false, in sourceDocument: DocumentWindow? = nil, focusEditor: Bool = true
+    ) async throws -> DocumentWindow? {
         guard !isQuitting, let document = sourceDocument ?? activeDocument, document.canReplaceBuffer,
               documents.contains(where: { $0 === document }), !isWorktreeMutationPath(url) else { return nil }
         let mutationGeneration = worktreeMutationGeneration
@@ -553,7 +563,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
               mutationGeneration == worktreeMutationGeneration, !isWorktreeMutationPath(canonical) else { return nil }
         if isFolder {
             let folder = URL(filePath: canonical.path, directoryHint: .isDirectory)
-            return try await openFolder(url, canonical: folder, in: document)
+            return try await openFolder(url, canonical: folder, in: document, focusEditor: focusEditor)
         }
         if document.fileURL == canonical || (identity != nil && identity == document.fileIdentity) {
             await recentFiles.record(url, in: document.folderURL)
@@ -563,12 +573,14 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         let opened = try await readForOpening(canonical, allowMissing: allowMissing)
         guard documents.contains(where: { $0 === document }), mutationGeneration == worktreeMutationGeneration,
               !isWorktreeMutationPath(canonical),
-              await document.replaceBuffer(with: opened.file, preparedSyntax: opened.syntax) else { return nil }
+              await document.replaceBuffer(with: opened.file, preparedSyntax: opened.syntax, focusEditor: focusEditor) else { return nil }
         if opened.file.identity != nil { await recentFiles.record(url, in: document.folderURL) }
         return document
     }
 
-    private func openFolder(_ url: URL, canonical folder: URL, in document: DocumentWindow) async throws -> DocumentWindow? {
+    private func openFolder(
+        _ url: URL, canonical folder: URL, in document: DocumentWindow, focusEditor: Bool
+    ) async throws -> DocumentWindow? {
         let mutationGeneration = worktreeMutationGeneration
         var opened: (file: FileBuffer, syntax: SyntaxSnapshot?)?
         if let last = await recentFiles.lastFile(in: folder) {
@@ -587,7 +599,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
               mutationGeneration == worktreeMutationGeneration,
               opened.map({ !isWorktreeMutationPath($0.file.url) }) ?? true else { return nil }
         if opened == nil || opened?.file.url != document.fileURL {
-            guard await document.replaceBuffer(with: opened?.file, preparedSyntax: opened?.syntax) else { return nil }
+            guard await document.replaceBuffer(with: opened?.file, preparedSyntax: opened?.syntax, focusEditor: focusEditor) else { return nil }
         }
         if document.folderURL != folder {
             document.setFolder(folder)
@@ -725,7 +737,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
         let view = addMenu("View")
         view.addCommand("Toggle Sidebar", #selector(toggleSidebar(_:)), "b").target = self
-        view.addCommand("Toggle Worktree Sidebar", #selector(toggleWorktreeSidebar(_:)), "e", [.command, .shift]).target = self
+        view.addCommand("Focus Worktree", #selector(toggleWorktreeSidebar(_:)), "e", [.command, .shift]).target = self
         view.addCommand("Command Mode…", #selector(showCommandMode(_:)), "p", [.command, .shift]).target = self
         view.addCommand("Change Language Mode…", #selector(showLanguageModes(_:))).target = self
         view.addItem(.separator())

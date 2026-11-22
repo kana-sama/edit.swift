@@ -4,8 +4,8 @@ Search the current document, including unsaved text, in a native AppKit sidebar.
 
 ## Search
 
-- Command-F shows Search and focuses Find regardless of the current sidebar mode or visibility. A nonempty selection in the editor becomes the query. In regex mode, selected text is escaped so it matches literally. From within the sidebar, Command-F preserves the query.
-- Option-Command-F expands Replace and focuses its input. Command-B closes the current sidebar or reopens its last mode, keeping editor focus when opened from the editor. Escape from either input hides the panel and returns focus to the editor.
+- Command-F from outside Search shows the sidebar in Search mode and focuses Find. A nonempty selection in the editor becomes the query. In regex mode, selected text is escaped so it matches literally. From Worktree, Command-F switches to Search and preserves the query. From anywhere within Search, Command-F restores the previous focus or focuses the editor, with the sidebar still visible.
+- Option-Command-F expands Replace and focuses its input. Command-B closes the current sidebar or reopens its last mode, keeping editor focus when opened from the editor. Escape from either input returns focus outside the sidebar and keeps it visible.
 - Find and Replace use compact, aligned fields. The Find field includes Case, Whole Word, and Regex toggles. One focus outline surrounds the active field and any toggles it contains. The buttons beside the fields expand replacement and apply Replace All. Both fields accept multiline input using Shift-Return or paste, grow while space is available, and scroll for longer text. Field undo is independent of document undo.
 - Search lists one row per nonoverlapping match in document order, grouped under the filename and its icon. The fields and excerpts use the editor’s monospaced font at its default size. Excerpts highlight the matched text and truncate long lines on one row at the font’s regular character spacing. Hover and selection keep the excerpt width fixed. The reserved Dismiss button sits at the right edge, with a slot for Replace to its left when Replace is open. Case, Whole Word, and Regex options apply to the current buffer. Literal whole-word search treats Unicode letters, numbers, and underscore as part of a word. Regular expressions use Foundation's ICU matcher and accept Rust-style named groups.
 - Search runs in the background. Old rows remain visible while fresh results are pending. Pending rows cannot edit the buffer. Results from earlier queries or document revisions are discarded. Invalid regex disables navigation and replacement.
@@ -19,7 +19,7 @@ Search the current document, including unsaved text, in a native AppKit sidebar.
 - Regex replacements support numbered captures, named captures, and a doubled dollar for a literal dollar. Edits made with Find and Replace request the existing autosave.
 - Escape on a result clears its selection and preview and focuses Find. Returning to the editor, collapsing Replace, refreshing, or hiding the panel also clears the preview.
 
-Command Mode exposes refresh, option toggles, replacement, and result actions when the sidebar can perform them. Direct Command-B leaves an open Control palette available. Direct Command-F dismisses Control and focuses Find.
+Command Mode exposes refresh, option toggles, replacement, and result actions when the sidebar can perform them. Direct Command-B leaves an open Control palette available. Command-F and Shift-Command-E dismiss Control and apply the same panel focus shortcuts.
 
 ## Acceptance
 

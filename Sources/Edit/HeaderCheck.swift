@@ -107,7 +107,7 @@ enum HeaderCheck {
                    && fileLabel(in: document.window)?.stringValue == "Untitled" && fileIcon(in: document)?.image != nil,
                    "the folder, file and language icon remain in the toolbar alongside the sidebar")
 
-        document.toggleWorktreeSidebar()
+        document.toggleSidebarFocus(.worktree)
         document.window.layoutIfNeeded()
         guard let split = document.window.contentViewController as? NSSplitViewController,
               let sidebar = split.splitViewItems.first?.viewController.view,

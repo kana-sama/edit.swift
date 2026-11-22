@@ -176,7 +176,7 @@ enum FindCheck {
         document.performFind(.replace)
         let replace = try require(window.firstResponder as? FindFieldTextView, "Return check Replace field")
         replace.insertText("dog", replacementRange: NSRange(location: 0, length: 0))
-        document.performFind(.find)
+        window.makeFirstResponder(find)
         find.keyDown(with: pressReturn)
         try expect(window.firstResponder === replace, "Return in Find moves to Replace when it is open")
         replace.keyDown(with: pressReturn)
@@ -187,7 +187,7 @@ enum FindCheck {
                 table.selectedRow == 0
         }
 
-        document.performFind(.find)
+        window.makeFirstResponder(find)
         find.insertText("missing", replacementRange: NSRange(location: 0, length: find.string.utf16.count))
         find.keyDown(with: pressReturn)
         try expect(window.firstResponder === replace, "Return in Find moves to Replace with no results")
@@ -200,8 +200,8 @@ enum FindCheck {
         find.insertText("cat", replacementRange: NSRange(location: 0, length: find.string.utf16.count))
         find.keyDown(with: pressReturn)
         document.performFind(.find)
-        try await waitUntil("reopening Find cancels deferred focus of results") {
-            table.numberOfRows == 2 && window.firstResponder === find
+        try await waitUntil("toggling Find focus cancels deferred focus of results") {
+            table.numberOfRows == 2 && window.firstResponder === editor && document.findSettings.visible
         }
     }
 
@@ -600,8 +600,24 @@ enum FindCheck {
         let window = document.window
 
         app.openFind(nil)
-        try expect(document.findSettings.visible && document.sidebarMode == .search &&
-                   window.firstResponder is FindFieldTextView, "Command-F opens Search and focuses its field")
+        let findField = try require(window.firstResponder as? FindFieldTextView, "Command-F focuses Find")
+        try expect(document.findSettings.visible && document.sidebarMode == .search,
+                   "Command-F reveals a hidden sidebar in Search mode")
+        app.openFind(nil)
+        try expect(document.findSettings.visible && window.firstResponder === document.editor,
+                   "repeating Command-F returns to the editor with Search still visible")
+        app.openFind(nil)
+        app.toggleWorktreeSidebar(nil)
+        let outline = try require(document.worktreeSidebar?.outline, "Command-Shift-E focuses Worktree")
+        try expect(document.findSettings.visible && document.sidebarMode == .worktree && window.firstResponder === outline,
+                   "Command-Shift-E switches from Find to Worktree")
+        app.toggleWorktreeSidebar(nil)
+        try expect(document.findSettings.visible && document.sidebarMode == .search && window.firstResponder === findField,
+                   "repeating Command-Shift-E returns to the previously focused Search field")
+        app.openFind(nil)
+        try expect(document.findSettings.visible && window.firstResponder === document.editor,
+                   "repeating Command-F after returning from Worktree restores editor focus")
+        app.openFind(nil)
         window.layoutIfNeeded()
         let ellipsis = try sidebarMenu(in: window)
         let title = try require(window.toolbar?.items.compactMap { $0 as? SidebarMenuItem }.first(where: \.showsTitle),
@@ -644,7 +660,7 @@ enum FindCheck {
         menu.performActionForItem(at: menu.indexOfItem(withTitle: "Search"))
         try expect(document.sidebarMode == .search && window.firstResponder is FindFieldTextView,
                    "choosing Search from Worktree opens the Find field")
-        document.toggleWorktreeSidebar()
+        document.toggleSidebarFocus(.worktree)
 
         app.toggleSidebar(nil)
         try expect(!document.findSettings.visible && document.sidebarMode == .worktree && title.isHidden && ellipsis.isHidden,
@@ -657,11 +673,18 @@ enum FindCheck {
         try expect(document.findSettings.visible && document.sidebarMode == .search &&
                    window.firstResponder is FindFieldTextView, "Command-F switches an open tree directly to Search")
 
-        document.toggleWorktreeSidebar()
+        document.toggleSidebarFocus(.worktree)
         app.toggleSidebar(nil)
         app.openFind(nil)
         try expect(document.findSettings.visible && document.sidebarMode == .search &&
                    window.firstResponder is FindFieldTextView, "Command-F also switches a hidden tree directly to Search")
+        app.toggleSidebar(nil)
+        app.toggleWorktreeSidebar(nil)
+        try expect(document.findSettings.visible && document.sidebarMode == .worktree && window.firstResponder === outline,
+                   "Command-Shift-E reveals Worktree when Search was hidden")
+        app.toggleWorktreeSidebar(nil)
+        try expect(document.findSettings.visible && window.firstResponder === document.editor,
+                   "repeating Command-Shift-E keeps the sidebar open and returns editor focus")
         document.setFolder(nil)
         try expect(menu.item(withTitle: "Worktree")?.isEnabled == false &&
                    menu.item(withTitle: "Worktree")?.isHidden == false,

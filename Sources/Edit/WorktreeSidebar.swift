@@ -46,6 +46,8 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     private var isActive = false
     private var monitor: WorktreeMonitor?
     private var reloading = false
+    private var pendingOpen: URL?
+    private var openingFile: Task<Void, Never>?
 
     private lazy var actions = WorktreeActions(
         document: document, app: app,
@@ -113,6 +115,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     func setActive(_ active: Bool) {
         guard isActive != active else { return }
         isActive = active
+        if !active { pendingOpen = nil }
         startMonitoring()
         if active {
             needsReveal = currentPath != nil
@@ -141,7 +144,8 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         currentDirectories = []
         if !rootChanged, let outside { expanded.remove(outside.path) }
         outside = nil
-        needsReveal = file != nil
+        // Loading a previous selection must not move the highlight back during rapid navigation.
+        needsReveal = file != nil && openingFile == nil
         if let file, WorktreeFileOperations.contains(file, in: folder) {
             var ancestor = file.deletingLastPathComponent()
             while WorktreeFileOperations.contains(ancestor, in: folder) {
@@ -407,31 +411,40 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     private var selectedItems: [Item] { tree.selectedRowIndexes.compactMap { tree.item(atRow: $0) as? Item } }
 
-    func activateClickedFile(at row: Int) {
+    func openFile(at row: Int) {
         guard let item = tree.item(atRow: row) as? Item, !item.isDirectory else { return }
-        activate(item)
+        pendingOpen = item.url
+        guard openingFile == nil else { return }
+        openingFile = Task { [weak self, app, document] in
+            defer { self?.openingFile = nil }
+            while let self, let url = self.pendingOpen {
+                self.pendingOpen = nil
+                await app.openFiles([url], in: document, focusEditor: false)
+            }
+        }
     }
 
     @objc private func activateClickedDirectory(_ sender: NSOutlineView) {
         guard tree.isPlainPrimaryClick, sender.clickedRow >= 0,
-              let item = sender.item(atRow: sender.clickedRow) as? Item, item.isDirectory else { return }
-        activate(item)
+              let item = tree.item(atRow: sender.clickedRow) as? Item, item.isDirectory else { return }
+        if tree.isItemExpanded(item) { tree.collapseItem(item) }
+        else { tree.expandItem(item) }
     }
 
-    func activateSelection() -> Bool {
-        guard let item = selectedItems.first else { return false }
-        activate(item)
-        return true
+    func renameSelection() {
+        guard let root, tree.selectedRowIndexes.count == 1, let item = selectedItems.first else { return }
+        actions.rename(item.url, within: root.url)
     }
 
-    private func activate(_ item: Item) {
-        if item.isDirectory {
-            if tree.isItemExpanded(item) { tree.collapseItem(item) }
-            else { tree.expandItem(item) }
-        } else if item.path == currentPath {
+    func focusEditor() {
+        guard let openingFile else {
             document.window.makeFirstResponder(document.editor)
-        } else {
-            Task { [app, document] in await app.openFiles([item.url], in: document) }
+            return
+        }
+        Task { [weak self] in
+            await openingFile.value
+            guard let self, document.window.firstResponder === tree else { return }
+            document.window.makeFirstResponder(document.editor)
         }
     }
 
@@ -521,7 +534,7 @@ private final class WorktreeOutline: NSOutlineView {
               let release = NSApp.currentEvent, release.type == .leftMouseUp,
               release.window === window, release.timestamp >= event.timestamp,
               row(at: convert(release.locationInWindow, from: nil)) == clicked else { return }
-        owner?.activateClickedFile(at: clicked)
+        owner?.openFile(at: clicked)
     }
 
     override func frameOfOutlineCell(atRow row: Int) -> NSRect {
@@ -573,8 +586,24 @@ private final class WorktreeOutline: NSOutlineView {
     }
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 36 || event.keyCode == 76, owner?.activateSelection() == true { return }
-        super.keyDown(with: event)
+        guard event.modifierFlags.intersection([.command, .shift, .control, .option]).isEmpty else {
+            super.keyDown(with: event)
+            return
+        }
+        switch event.keyCode {
+        case 36, 76:
+            if !event.isARepeat { owner?.renameSelection() }
+        case 49:
+            owner?.focusEditor()
+        case 125, 126:
+            let before = selectedRowIndexes
+            super.keyDown(with: event)
+            if selectedRowIndexes != before && selectedRowIndexes.count == 1 {
+                owner?.openFile(at: selectedRow)
+            }
+        default:
+            super.keyDown(with: event)
+        }
     }
 
     @objc func copy(_ sender: Any?) { owner?.copySelection() }
