@@ -49,6 +49,20 @@ enum WorktreeCheck {
         try expect(abs(folderGlyphFrame.minX - fileGlyphFrame.minX) < 0.5 &&
                    abs(folderGlyphFrame.width - fileGlyphFrame.width) < 0.5,
                    "sibling folders and files use the same icon gutter (\(folderGlyphFrame) and \(fileGlyphFrame))")
+        let folder = try require(tree.item(atRow: sources), "Sources folder item")
+        tree.collapseItem(folder)
+        tree.selectRowIndexes(IndexSet(integer: sources), byExtendingSelection: false)
+        document.window.makeFirstResponder(tree)
+        try expect(tree.selectedRow == sources && document.window.firstResponder === tree,
+                   "start with the collapsed folder selected in the tree")
+        try press(" ", code: 49, in: tree)
+        try expect(tree.isItemExpanded(folder) && document.window.firstResponder === tree,
+                   "Space expands a selected folder and keeps tree focus")
+        try press(" ", code: 49, in: tree)
+        try expect(!tree.isItemExpanded(folder) && document.window.firstResponder === tree &&
+                   document.fileURL?.lastPathComponent == "README.md",
+                   "Space collapses the folder and preserves the open file")
+
         try click(log, in: tree, modifiers: [.command])
         try expect(tree.selectedRowIndexes.contains(log), "Command-click selects the file")
         try await Task.sleep(for: .milliseconds(40))

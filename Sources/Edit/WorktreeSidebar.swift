@@ -482,6 +482,19 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     @objc private func activateClickedDirectory(_ sender: NSOutlineView) {
         guard tree.isPlainPrimaryClick, sender.clickedRow >= 0,
               let item = tree.item(atRow: sender.clickedRow) as? Item, item.isDirectory else { return }
+        toggleFolder(item)
+    }
+
+    func activateSelection() {
+        if let item = tree.item(atRow: tree.selectedRow) as? Item, item.isDirectory {
+            toggleFolder(item)
+        } else {
+            focusEditor()
+        }
+    }
+
+    private func toggleFolder(_ item: Item) {
+        guard item !== provisionalEntry else { return }
         if tree.isItemExpanded(item) { tree.collapseItem(item) }
         else { tree.expandItem(item) }
     }
@@ -642,7 +655,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         reloadTree(keeping: selection ?? edit.selection)
     }
 
-    func focusEditor() {
+    private func focusEditor() {
         guard let openingFile else {
             document.window.makeFirstResponder(document.editor)
             return
@@ -806,7 +819,7 @@ private final class WorktreeOutline: NSOutlineView {
         case 36, 76:
             if !event.isARepeat { owner?.renameSelection() }
         case 49:
-            owner?.focusEditor()
+            if !event.isARepeat { owner?.activateSelection() }
         case 125, 126:
             let before = selectedRowIndexes
             super.keyDown(with: event)
