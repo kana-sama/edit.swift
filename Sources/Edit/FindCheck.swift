@@ -65,7 +65,7 @@ enum FindCheck {
         try await checkResumingResult(in: app)
         try await checkRenderedHighlights(in: app.makeDocument())
         try await checkSidebarLayout(in: app.makeDocument())
-        try await checkSidebarReversal(in: app.makeDocument())
+        try checkImmediateSidebarToggles(in: app.makeDocument())
         try await checkSidebarModes(in: app)
         try await checkWindowSession(in: app)
         try expect(NSApplication.shared.activationPolicy() == .prohibited &&
@@ -636,7 +636,8 @@ enum FindCheck {
 
         document.performFind(.toggleSidebar)
         await Task.yield()
-        try expect(picker.isHidden, "the menu is hidden with the sidebar")
+        try expect(window.toolbar?.items.contains { $0 is SidebarMenuItem } == false,
+                   "the collapsed sidebar has no toolbar menu")
         clip.scroll(to: NSPoint(x: 140, y: 40))
         document.scrollView.reflectScrolledClipView(clip)
         let scrolled = scroll.visibleContentOrigin
@@ -644,7 +645,9 @@ enum FindCheck {
         await Task.yield()
         try expect(abs(scroll.visibleContentOrigin.x - scrolled.x) < 1,
                    "reopening the sidebar preserves a nonzero horizontal scroll offset")
-        try expect(!picker.isHidden, "reopening the sidebar restores its menu")
+        let reopenedPicker = try sidebarMenu(in: window, showsTitle: true)
+        try expect(reopenedPicker !== picker && !reopenedPicker.isHidden && reopenedPicker.view?.window === window,
+                   "reopening the sidebar installs a visible menu")
     }
 
     private static func resultAction(in cell: FindResultCell, named name: String) throws -> NSButton {
@@ -702,93 +705,55 @@ enum FindCheck {
         scroll.reflectScrolledClipView(clip)
     }
 
-    private static func checkSidebarReversal(in document: DocumentWindow) async throws {
-        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+    private static func checkImmediateSidebarToggles(in document: DocumentWindow) throws {
         let window = document.window
-        window.alphaValue = 0
-        window.ignoresMouseEvents = true
-        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
-        // AppKit animates an ordered window. Keep this one invisible and non-interactive.
+        defer { window.close() }
+        window.setFrame(NSRect(x: -10_000, y: -10_000, width: 1024, height: 620), display: false)
         window.orderBack(nil)
-        defer { window.orderOut(nil) }
-        try expect(window.isVisible && !NSApp.isActive && window.alphaValue == 0,
-                   "live sidebar animation runs without interrupting the user")
+        try expect(window.isVisible && window.alphaValue == 0 && !NSApp.isActive,
+                   "exercise sidebar visibility in a transparent ordered window")
 
-        let folder = FileManager.default.temporaryDirectory.appending(path: "Sidebar reveal \(UUID())")
+        let folder = FileManager.default.temporaryDirectory.appending(path: "Sidebar toggle \(UUID())")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
         document.setFolder(folder)
-        let openPosition: CGFloat = 420
-        document.findSettings.width = openPosition
-        document.toggleSidebarFocus(.worktree)
-        let split = try require(window.contentViewController as? NSSplitViewController, "native animated split view")
-        let sidebar = split.splitViewItems[0]
-        let options = try sidebarMenu(in: window)
-        let title = try sidebarMenu(in: window, showsTitle: true)
-        let button = try require(options.view, "sidebar options button")
-        func checkToolbarAnimation(_ layer: CALayer?, message: String) throws {
-            try expect(layer?.animation(forKey: #keyPath(CALayer.transform)) == nil &&
-                       layer?.animation(forKey: #keyPath(CALayer.opacity)) == nil, message)
-        }
-        func checkPresentedHeader() async throws {
-            window.displayIfNeeded()
-            let layer = try require(title.view?.superview?.layer, "the toolbar header has a live container layer")
-            try checkToolbarAnimation(layer, message: "showing the sidebar header skips the toolbar's scale and fade")
-            try await Task.sleep(for: .milliseconds(25))
-            let presented = try require(layer.presentation(), "the sidebar header has a presentation layer")
-            try expect(CATransform3DEqualToTransform(presented.transform, layer.transform) &&
-                       abs(presented.opacity - layer.opacity) < 0.01,
-                       "the rendered header is full size and opacity on reveal")
-        }
-        func divider() -> CGFloat {
-            if sidebar.isCollapsed { return 0 }
-            let view = sidebar.viewController.view
-            return view.convert(view.bounds, to: split.splitView).maxX
-        }
-        func reverse(with command: FindCommand) throws {
-            let position = divider()
-            let origin = document.scrollView.visibleContentOrigin
-            document.performFind(command)
-            try expect(abs(divider() - position) < 1 && abs(document.scrollView.visibleContentOrigin.x - origin.x) < 1,
-                       "reversing preserves the divider position and the horizontal scroll offset")
-            try expect(document.findSettings.visible || options.isHidden,
-                       "reversing toward closed hides the options button immediately")
+        let width: CGFloat = 420
+        document.findSettings.width = width
+        let frame = window.frame
+
+        func checkOpened(_ mode: SidebarMode) throws {
+            let split = try require(window.contentViewController as? NSSplitViewController, "find the sidebar split")
+            let sidebar = try require(split.splitViewItems.first, "find the leading sidebar")
+            let title = try sidebarMenu(in: window, showsTitle: true)
+            try expect(document.findSettings.visible && document.sidebarMode == mode && !sidebar.isCollapsed &&
+                       abs(sidebar.viewController.view.frame.width - width) < 1 && window.frame == frame,
+                       "show the sidebar at its remembered width in the same call")
+            try expect(title.view?.window === window && title.view?.isHiddenOrHasHiddenAncestor == false &&
+                       title.view?.superview?.layer?.animation(forKey: #keyPath(CALayer.transform)) == nil &&
+                       title.view?.superview?.layer?.animation(forKey: #keyPath(CALayer.opacity)) == nil,
+                       "show the full-size native title immediately")
         }
 
-        try await waitUntil("Worktree controls are visible at the divider inset before it finishes opening") {
-            window.layoutIfNeeded()
-            let trailing = button.convert(button.bounds, to: nil).maxX
-            return divider() < openPosition - 1 && !title.isHidden && !options.isHidden &&
-                button.window === window && !button.isHiddenOrHasHiddenAncestor && abs(divider() - trailing - 10) <= 0.5
+        func closeSidebar() throws {
+            document.performFind(.toggleSidebar)
+            let split = try require(window.contentViewController as? NSSplitViewController, "find the sidebar split")
+            try expect(!document.findSettings.visible && split.splitViewItems.first?.isCollapsed == true &&
+                       window.toolbar?.items.contains(where: { $0 is SidebarMenuItem }) == false &&
+                       window.firstResponder === document.editor && window.frame == frame,
+                       "hide the sidebar and return to the editor in the same call")
         }
-        try await checkPresentedHeader()
-        func fullyOpen() -> Bool { abs(divider() - openPosition) < 1 && !options.isHidden }
-        try await waitUntil("sidebar fully opens", fullyOpen)
-        let previousHeaderLayer = title.view?.superview?.layer
-        document.performFind(.toggleSidebar)
-        try checkToolbarAnimation(previousHeaderLayer, message: "closing the sidebar skips the toolbar's scale and fade")
-        try await waitUntil("sidebar is partway closed") { divider() > 0 && divider() < openPosition * 0.8 }
-        try reverse(with: .find)
-        try expect(window.firstResponder is FindFieldTextView, "reopening with Command-F focuses Find")
-        try await waitUntil("reversed sidebar finishes opening", fullyOpen)
-        try await checkPresentedHeader()
-        try expect(abs(divider() - openPosition) < 1, "reopening preserves the sidebar width")
 
-        document.performFind(.toggleSidebar)
-        try await waitUntil("sidebar fully closes") { sidebar.isCollapsed }
-        document.performFind(.toggleSidebar)
-        try await waitUntil("sidebar is partway open") { divider() > openPosition * 0.2 && divider() < openPosition }
-        try reverse(with: .toggleSidebar)
-        try await waitUntil("reversed sidebar finishes closing") { sidebar.isCollapsed }
-        try expect(divider() < 1 && window.firstResponder === document.editor,
-                   "closing leaves the editor focused")
+        for _ in 0..<2 {
+            document.toggleSidebarFocus(.worktree)
+            try checkOpened(.worktree)
+            try expect(window.firstResponder === document.worktreeSidebar?.outline, "focus Worktree on opening")
+            try closeSidebar()
 
-        document.performFind(.toggleSidebar)
-        document.performFind(.toggleSidebar)
-        document.performFind(.find)
-        try await waitUntil("rapid toggles leave the sidebar open", fullyOpen)
-        try expect(abs(divider() - openPosition) < 1 && window.firstResponder is FindFieldTextView,
-                   "superseded animations leave the latest width and focus")
+            document.performFind(.find)
+            try checkOpened(.search)
+            try expect(window.firstResponder is FindFieldTextView, "focus Find on opening")
+            try closeSidebar()
+        }
     }
 
     private static func checkSidebarModes(in app: Edit) async throws {
@@ -837,7 +802,6 @@ enum FindCheck {
         window.layoutIfNeeded()
         let ellipsis = try sidebarMenu(in: window)
         let title = try sidebarMenu(in: window, showsTitle: true)
-        let ellipsisButton = try require(ellipsis.view as? NSButton, "the menu uses a native icon button")
         let titleButton = try require(title.modePicker, "the title is a native pop-up selector")
         let titleCell = try require(titleButton.cell as? NSPopUpButtonCell, "a native pop-up cell tracks selection")
         func titleLeadingEdge() -> CGFloat {
@@ -850,6 +814,10 @@ enum FindCheck {
         let sidebar = split.splitViewItems[0].viewController.view
         func checkHeader() throws {
             window.layoutIfNeeded()
+            let title = try sidebarMenu(in: window, showsTitle: true)
+            let ellipsis = try sidebarMenu(in: window)
+            let titleButton = try require(title.modePicker, "the current native sidebar title")
+            let ellipsisButton = try require(ellipsis.view as? NSButton, "the current native sidebar options use an icon button")
             let titleFrame = titleButton.convert(titleButton.bounds, to: nil)
             let ellipsisFrame = ellipsisButton.convert(ellipsisButton.bounds, to: nil)
             let sidebarFrame = sidebar.convert(sidebar.bounds, to: nil)
@@ -942,8 +910,9 @@ enum FindCheck {
         try checkHeader()
 
         app.toggleSidebar(nil)
-        try expect(!document.findSettings.visible && document.sidebarMode == .worktree && title.isHidden && ellipsis.isHidden,
-                   "Command-B hides the open tree and remembers its mode")
+        try expect(!document.findSettings.visible && document.sidebarMode == .worktree &&
+                   window.toolbar?.items.contains { $0 is SidebarMenuItem } == false,
+                   "Command-B removes the collapsed tree header and remembers its mode")
         window.layoutIfNeeded()
         let folderStack = try require(window.toolbar?.items.first {
             $0.itemIdentifier == DocumentTitleBar.folderItemIdentifier
@@ -996,8 +965,9 @@ enum FindCheck {
                    "restoring an open Worktree places its menu at the trailing edge (\(restoredInset) pt)")
 
         document.setFolder(nil)
-        try expect(menu.item(withTitle: "Worktree")?.isEnabled == false &&
-                   menu.item(withTitle: "Worktree")?.isHidden == false,
+        let currentMenu = try sidebarMenu(in: window, showsTitle: true).menu
+        try expect(currentMenu.item(withTitle: "Worktree")?.isEnabled == false &&
+                   currentMenu.item(withTitle: "Worktree")?.isHidden == false,
                    "losing the open folder leaves a disabled Worktree option")
         document.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: window))
         try checkHeader()

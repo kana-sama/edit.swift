@@ -9,7 +9,7 @@ Read this before building or launching for agent checks or changing the build an
 - `./script/check [screenshot-path]` checks that the native window renders without activating the app. Pass a path to capture the window.
 - `./script/install [directory]` installs the release app bundle and leaves bundles with unrelated identifiers untouched.
 
-The app build invokes `swiftc` directly for `Edit`. The pinned Tree-sitter runtime and grammars build into a native library cached per SDK, compiler and target. Keep `Package.swift` in sync for Swift tooling. The build reuses compiled SDK modules and the syntax library in `.local/swift-sdk` and reuses the signed bundle when its inputs match. Use the default debug build during development and an optimized build when measuring runtime or launch performance.
+The app build invokes `swiftc` directly for `Edit`. SwiftPM builds the pinned SwiftTerm module using `Package.resolved`, and the app links the compiled object into the executable. The pinned Tree-sitter runtime and grammars build into a native library cached per SDK, compiler and target. Keep `Package.swift` in sync for Swift tooling. The build reuses SwiftPM checkouts and build products, compiled SDK modules, and the syntax library in `.local/swift-sdk`, and reuses the signed bundle when its inputs match. Use the default debug build during development and an optimized build when measuring runtime or launch performance.
 
 Building or installing a replacement keeps the previous bundle on disk so macOS can validate any processes still using it. Subsequent builds or installs remove retained bundles whose executables are no longer running.
 

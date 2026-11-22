@@ -45,7 +45,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     lazy var syntaxOverrides = SyntaxLanguageOverrides(defaults: isAgentCheck ? nil : .standard)
     private weak var recentMenu: NSMenu?
     private var controlPanel: ControlPanel?
-    private var titleClickMonitor: Any?
+    private var windowEventMonitor: Any?
     private var openFilePanel: OpenFilePanel?
     private weak var openPanelDocument: DocumentWindow?
     private(set) lazy var recentFiles = RecentFiles(url: recentHistoryURL)
@@ -94,8 +94,16 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     func applicationDidFinishLaunching(_ notification: Notification) {
         let app = NSApplication.shared
         installMenus(in: app)
-        titleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+        windowEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .scrollWheel]) { [weak self] event in
             guard let self else { return event }
+            if event.type == .scrollWheel {
+                guard let window = event.window else { return event }
+                return TerminalScrollView.routeWheel(event, in: window, at: event.locationInWindow) ? nil : event
+            }
+            if event.type == .keyDown {
+                let document = documents.first { $0.window === event.window }
+                return document?.handleTerminalKey(event) == true ? nil : event
+            }
             return routeTitleClick(event)
         }
         let initial = makeDocument()
@@ -106,6 +114,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     // The text editor check uses its own undo grouping and sample text.
                     initial.window.close()
                     makeDocument()
+                    try await TerminalCheck.run(in: self)
+                    print("Edit passed its native terminal checks without activation.")
                     try await OpenFilePanelCheck.run()
                     let sample = try await FilesCheck.run(in: self)
                     try ControlPanel(app: self).checkHidden(in: sample)
@@ -185,7 +195,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if let titleClickMonitor { NSEvent.removeMonitor(titleClickMonitor) }
+        if let windowEventMonitor { NSEvent.removeMonitor(windowEventMonitor) }
+        documents.forEach { $0.closeTerminalSessions() }
     }
 
     private func routeTitleClick(_ event: NSEvent) -> NSEvent? {
@@ -359,6 +370,11 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     @objc func findNext(_ sender: Any?) { activeDocument?.performFind(.next) }
     @objc func findPrevious(_ sender: Any?) { activeDocument?.performFind(.previous) }
+
+    @objc func toggleTerminal(_ sender: Any?) {
+        controlPanel?.dismiss(restoreFocus: true)
+        activeDocument?.toggleTerminal()
+    }
     // Keep the selector used by existing Control pins and command history.
     @objc(toggleFindSidebar:) func toggleSidebar(_ sender: Any?) { activeDocument?.performFind(.toggleSidebar) }
 
@@ -404,7 +420,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             return activeDocument.map { $0.hasTextDocument && !$0.isBusy && $0.window.attachedSheet == nil } ?? false
         case #selector(openFind(_:)): return activeDocument?.canPerformFind(.find) ?? false
         case #selector(openReplace(_:)): return activeDocument?.canPerformFind(.replace) ?? false
-        case #selector(toggleSidebar(_:)), #selector(focusScratches(_:)):
+        case #selector(toggleSidebar(_:)), #selector(focusScratches(_:)), #selector(toggleTerminal(_:)):
             return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(toggleWorktreeSidebar(_:)):
             return activeDocument.map { $0.folderURL != nil && $0.window.attachedSheet == nil } ?? false
@@ -598,7 +614,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     )
                 } catch {
                     warnings.append("“\(scratch?.name ?? url.lastPathComponent)” — \(error.localizedDescription)")
-                    guard record.folderPath != nil else { continue }
+                    guard record.folderPath != nil || record.terminal != nil else { continue }
                     opened = nil
                 }
             } else {
@@ -628,6 +644,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 document.focusContent()
             }
             document.restoreSidebar(record)
+            document.restoreTerminal(record.terminal)
             document.restoreEditorPosition(record.editorPosition)
             if let scratch = document.scratchFile { await recordScratchOpen(scratch) }
             else if !isScratch, let url { await recentFiles.record(url) }
@@ -885,6 +902,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         view.addCommand("Toggle Sidebar", #selector(toggleSidebar(_:)), "b").target = self
         view.addCommand("Focus Worktree", #selector(toggleWorktreeSidebar(_:)), "e", [.command, .shift]).target = self
         view.addCommand("Focus Scratches", #selector(focusScratches(_:)), "w", [.command, .shift]).target = self
+        view.addCommand("Toggle Terminal", #selector(toggleTerminal(_:))).target = self
         view.addCommand("Command Mode…", #selector(showCommandMode(_:)), "p", [.command, .shift]).target = self
         view.addCommand("Change Language Mode…", #selector(showLanguageModes(_:))).target = self
         view.addItem(.separator())

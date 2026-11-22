@@ -460,14 +460,26 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             return entries
         }
         guard let menu = NSApplication.shared.mainMenu else { return [] }
+        let terminalSplits = ControlCommand.terminalCommands(for: document).filter {
+            $0.isAvailable(in: document, focus: originalFocus)
+        }
         let available = (ControlCommand.fromMenu(menu) + ControlCommand.editorCommands(for: document)
                          + ControlCommand.searchCommands(for: app)).filter {
             $0.isAvailable(in: document, focus: originalFocus)
         }
-        let arranged = history.arrange(available)
+        let arranged = terminalSplits + history.arrange(available)
         commands = Dictionary(arranged.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var ids: Set<String> = []
         return arranged.filter { ids.insert($0.id).inserted }.map(\.result)
+    }
+
+    func checkTerminalCommands(in document: DocumentWindow, expected: Bool) throws {
+        show(in: document, mode: .commands)
+        defer { dismiss(restoreFocus: false) }
+        let splitIDs = Set(["terminal.split-right", "terminal.split-down"])
+        let shown = Set(entries.prefix(2).map(\.entry.id))
+        let found = entries.contains { splitIDs.contains($0.entry.id) }
+        guard expected ? shown == splitIDs : !found else { throw CheckFailure.shortcutEscaped }
     }
 
     private var selectedID: String? {
@@ -608,6 +620,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
         guard event.type == .keyDown, let document, event.window === panel || panel.isKeyWindow else { return event }
 
+        if TerminalShortcuts.isToggle(event) {
+            if !event.isARepeat {
+                dismiss(restoreFocus: true)
+                document.showTerminal()
+            }
+            return nil
+        }
         let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
         switch (key, modifiers) {

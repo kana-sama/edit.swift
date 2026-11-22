@@ -31,7 +31,7 @@ build_fingerprint() {
     {
         printf '%s\n' "$configuration" "$bundle_name" "$target" "$compiler" "$sdk" &&
         /usr/bin/stat -L -f '%i:%m:%c:%z' "$compiler" "$sdk/SDKSettings.plist" &&
-        /usr/bin/shasum -a 256 "${sources[@]}" Package.swift resources/Info.plist resources/Edit.icns \
+        /usr/bin/shasum -a 256 "${sources[@]}" Package.swift Package.resolved resources/Info.plist resources/Edit.icns \
             script/build script/build-syntax script/app-bundle.sh script/publish-app.c Sources/Edit/Resources/Seti/* \
             Sources/EditSyntax/Highlight.m resources/syntax/sources.tar.gz \
             resources/syntax/queries/*.scm resources/syntax/licenses/* resources/syntax/README.md
@@ -53,16 +53,32 @@ mkdir -p "$sdk_cache/clang" "$sdk_cache/modules" "$output"
 stage="$(mktemp -d "$output/.edit-bundle.XXXXXX")"
 app="$stage/$bundle_name.app"
 trap 'finish_app_stage "$stage" "$app"' EXIT
+
+# Swift Build emits the pinned terminal module and its relocatable object
+# together. Link the object into the existing standalone app executable.
+swiftpm_scratch="$sdk_cache/swiftpm"
+terminal_build=(/usr/bin/env "SWIFTPM_MODULECACHE_OVERRIDE=$sdk_cache/clang" "$(xcrun --find swift)" build
+    --build-system swiftbuild
+    --scratch-path "$swiftpm_scratch"
+    --cache-path "$sdk_cache/swiftpm-cache"
+    --config-path "$sdk_cache/swiftpm-config"
+    --security-path "$sdk_cache/swiftpm-security"
+    --configuration "$configuration" --triple "$target" --sdk "$sdk" --force-resolved-versions)
+"${terminal_build[@]}" --target SwiftTerm >&2
+terminal_products="$("${terminal_build[@]}" --show-bin-path)"
+
 "$compiler" -sdk "$sdk" -target "$target" -swift-version 6 -module-name Edit \
     -parse-as-library -explicit-module-build -j "$(getconf _NPROCESSORS_ONLN)" \
     -module-cache-path "$sdk_cache/clang" -sdk-module-cache-path "$sdk_cache/modules" \
-    "${swift_flags[@]}" "${sources[@]}" -o "$stage/Edit"
+    -I "$terminal_products" "${swift_flags[@]}" "${sources[@]}" \
+    "$terminal_products/SwiftTerm.o" -o "$stage/Edit"
 
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/syntax" "$app/Contents/Frameworks"
 mv "$stage/Edit" "$app/Contents/MacOS/Edit"
 syntax_library="$(./script/build-syntax "$sdk_cache" "$sdk" "$target")"
 cp -p "$syntax_library" "$app/Contents/Frameworks/libEditSyntax.dylib"
 cp -R resources/syntax/queries resources/syntax/licenses resources/syntax/README.md "$app/Contents/Resources/syntax/"
+cp "$swiftpm_scratch/checkouts/SwiftTerm/LICENSE" "$app/Contents/Resources/SwiftTerm-LICENSE.txt"
 cp resources/Info.plist "$app/Contents/Info.plist"
 cp resources/Edit.icns "$app/Contents/Resources/"
 cp -R Sources/Edit/Resources/Seti "$app/Contents/Resources/"

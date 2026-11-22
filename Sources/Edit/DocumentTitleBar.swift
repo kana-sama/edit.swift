@@ -4,7 +4,9 @@ import AppKit
 final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     static let folderItemIdentifier = NSToolbarItem.Identifier("Edit.FolderTitle")
     static let fileItemIdentifier = NSToolbarItem.Identifier("Edit.FileTitle")
-    static let itemIdentifiers = [folderItemIdentifier, fileItemIdentifier]
+    static let terminalItemIdentifier = NSToolbarItem.Identifier("Edit.Terminal.Title")
+    static let terminalItemIdentifiers: [NSToolbarItem.Identifier] = [.inspectorTrackingSeparator, terminalItemIdentifier]
+    private static let itemIdentifiers = [folderItemIdentifier, fileItemIdentifier]
     private static let leadingInset: CGFloat = 8
 
     private unowned let document: DocumentWindow
@@ -17,6 +19,8 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     private weak var fileItem: NSToolbarItem?
     private weak var folderWidthLimit: NSLayoutConstraint?
     private weak var fileWidthLimit: NSLayoutConstraint?
+    private let fullScreenDividers = TitleBarDividers(frame: .zero)
+    private var isFullScreen = false
     private var availableWidth: CGFloat = 0
     private var siblingRequest: Task<Void, Never>?
     private(set) var agentContextMenu: NSMenu?
@@ -28,12 +32,56 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
 
     deinit { siblingRequest?.cancel() }
 
+    func makeToolbar(delegate: NSToolbarDelegate) -> NSToolbar {
+        // A right-docked terminal changes this window's items independently of other windows.
+        let toolbar = NSToolbar(identifier: .init("Edit.Document.\(UUID().uuidString)"))
+        toolbar.delegate = delegate
+        toolbar.displayMode = .iconOnly
+        toolbar.allowsDisplayModeCustomization = false
+        toolbar.autosavesConfiguration = false
+        return toolbar
+    }
+
+    var defaultItemIdentifiers: [NSToolbarItem.Identifier] {
+        Self.itemIdentifiers + (document.isTerminalDockedRight ? Self.terminalItemIdentifiers : [])
+    }
+
+    var allowedItemIdentifiers: [NSToolbarItem.Identifier] { Self.itemIdentifiers + Self.terminalItemIdentifiers }
+
+    // The title row can live in an AppKit companion window in full screen.
+    var toolbarWindow: NSWindow? { fileTitle?.window }
+
+    private var toolbarContentHost: NSView? {
+        guard var host = fileTitle as NSView?, let window = host.window else { return nil }
+        while host.bounds.width < window.frame.width - 1, let parent = host.superview { host = parent }
+        return host
+    }
+
+    func setTerminalTitleVisible(_ visible: Bool, in toolbar: NSToolbar) {
+        let identifier = Self.terminalItemIdentifier
+        let item = toolbar.items.first { $0.itemIdentifier == identifier }
+        let isVisible = item != nil
+        guard visible != isVisible else { return }
+        PanelLayout.withoutAnimation {
+            if visible {
+                // Insert at its final size. Unhiding a toolbar item animates it from its center.
+                toolbar.insertItem(withItemIdentifier: identifier, at: toolbar.items.count)
+            } else {
+                item?.view?.isHidden = true
+                toolbar.removeItem(identifier: identifier)
+            }
+            let window = document.window
+            window.layoutIfNeeded()
+            if let host = toolbarWindow, host !== window { host.layoutIfNeeded() }
+        }
+    }
+
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        Self.itemIdentifiers
+        defaultItemIdentifiers
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        toolbarDefaultItemIdentifiers(toolbar)
+        allowedItemIdentifiers
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
@@ -42,6 +90,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     }
 
     func makeItem(_ identifier: NSToolbarItem.Identifier) -> NSToolbarItem? {
+        if identifier == Self.terminalItemIdentifier { return document.makeTerminalTitleItem() }
         guard Self.itemIdentifiers.contains(identifier) else { return nil }
         let item = NSToolbarItem(itemIdentifier: identifier)
         item.isBordered = false
@@ -74,10 +123,16 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             fileItem = item
             languageIcon = icon
 
-            let title = NSStackView(views: [icon, label])
+            let title = FileTitleView()
+            title.addArrangedSubview(icon)
+            title.addArrangedSubview(label)
             title.alignment = .centerY
             title.spacing = 2
             title.setVisibilityPriority(.detachOnlyIfNecessary, for: label)
+            title.onLayout = { [weak self] in
+                guard let self, isFullScreen else { return }
+                updateFullScreenDividers()
+            }
             fileTitle = title
             item.view = title
         }
@@ -105,8 +160,61 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         let zoom = window.standardWindowButton(.zoomButton)
         let controls = zoom.map { $0.convert($0.bounds, to: nil).maxX + 8 } ?? 84
         let leading = sidebarWidth > 0 ? sidebarWidth : controls
-        availableWidth = max(0, floor(window.frame.width - leading))
+        availableWidth = max(0, floor(window.frame.width - leading - document.terminalSidebarThickness))
         fitLabels()
+        if isFullScreen { updateFullScreenDividers() }
+    }
+
+    func setFullScreen(_ enabled: Bool) {
+        isFullScreen = enabled
+        if enabled { updateFullScreenDividers() }
+        else { fullScreenDividers.removeFromSuperview() }
+    }
+
+    private func updateFullScreenDividers() {
+        let window = document.window
+        guard let fileTitle, let toolbarWindow = fileTitle.window, let toolbar = window.toolbar,
+              let split = window.contentViewController as? NSSplitViewController else {
+            fullScreenDividers.removeFromSuperview()
+            return
+        }
+
+        // AppKit can move the toolbar to a companion window in full screen.
+        // Host the lines with the toolbar items so they stay above its material.
+        let shared = toolbar.items.reduce(fileTitle as NSView) { commonAncestor, item in
+            guard let view = item.view, view.window === toolbarWindow, !item.isHidden else { return commonAncestor }
+            return commonAncestor.ancestorShared(with: view) ?? commonAncestor
+        }
+        let host = shared === fileTitle ? toolbarContentHost ?? shared : shared
+        let strokes: [NSRect] = split.splitViewItems.compactMap { item in
+            let pane = item.viewController.view
+            guard !item.isCollapsed, pane.window === window, pane.bounds.width > 0 else { return nil }
+            let bounds = pane.convert(pane.bounds, to: nil)
+            let edge: CGFloat
+            let pixelOffset: CGFloat
+            // Continue the visible glass edge on the sidebar's side of the gutter.
+            switch item.behavior {
+            case .sidebar: (edge, pixelOffset) = (bounds.maxX, -1)
+            case .inspector: (edge, pixelOffset) = (bounds.minX, 0)
+            default: return nil
+            }
+            let screen = window.convertToScreen(NSRect(x: edge, y: 0, width: 0, height: 0))
+            let backingEdge = toolbarWindow.convertToBacking(toolbarWindow.convertFromScreen(screen)).minX.rounded()
+            let pixel = NSRect(x: backingEdge + pixelOffset, y: 0, width: 1, height: 1)
+            let toolbarFrame = host.convert(toolbarWindow.convertFromBacking(pixel), from: nil)
+            return NSRect(x: toolbarFrame.minX - host.bounds.minX, y: 0,
+                          width: toolbarFrame.width, height: host.bounds.height)
+        }
+        guard host !== fileTitle, !strokes.isEmpty else {
+            fullScreenDividers.removeFromSuperview()
+            return
+        }
+        if fullScreenDividers.superview !== host {
+            fullScreenDividers.removeFromSuperview()
+            host.addSubview(fullScreenDividers, positioned: .above, relativeTo: nil)
+        }
+        if fullScreenDividers.frame != host.bounds { fullScreenDividers.frame = host.bounds }
+        fullScreenDividers.update(strokes, color: split.splitView.dividerColor)
     }
 
     private func fitLabels() {
@@ -260,6 +368,56 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         }
         let top = label.isFlipped ? label.bounds.minY : label.bounds.maxY
         menu.popUp(positioning: first, at: NSPoint(x: label.bounds.minX, y: top), in: label)
+    }
+}
+
+@MainActor
+private final class FileTitleView: NSStackView {
+    var onLayout: (() -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        Task { @MainActor [weak self] in self?.onLayout?() }
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        onLayout?()
+    }
+
+    override func layout() {
+        super.layout()
+        onLayout?()
+    }
+}
+
+@MainActor
+final class TitleBarDividers: NSView {
+    private(set) var strokes: [NSRect] = []
+    private var color = NSColor.separatorColor
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        identifier = .init("Edit.TitleBar.Dividers")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    func update(_ strokes: [NSRect], color: NSColor) {
+        guard self.strokes != strokes || self.color != color else { return }
+        self.strokes = strokes
+        self.color = color
+        needsDisplay = true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        color.setFill()
+        for stroke in strokes where stroke.intersects(dirtyRect) {
+            stroke.fill()
+        }
     }
 }
 

@@ -27,6 +27,9 @@ struct ControlCommand {
 
     func isAvailable(in document: DocumentWindow, focus: NSResponder?) -> Bool {
         guard let action = item.action, !item.isHidden else { return false }
+        if action == #selector(DocumentWindow.splitTerminalFromControl(_:)) {
+            return document.window.attachedSheet == nil && document.terminalHasFocus(focus)
+        }
         if action == #selector(Edit.focusSelection(_:)) { return document.canFocusSelection }
         if action == #selector(Edit.exitFocus(_:)) { return document.canExitFocus }
         if documentOnly {
@@ -52,6 +55,10 @@ struct ControlCommand {
 
     func run(in document: DocumentWindow) {
         guard let action = item.action else { return }
+        if action == #selector(DocumentWindow.splitTerminalFromControl(_:)) {
+            document.splitTerminalFromControl(item)
+            return
+        }
         if action == #selector(Edit.focusSelection(_:)) {
             document.focusSelection()
             return
@@ -130,6 +137,19 @@ struct ControlCommand {
             item.target = app
             item.representedObject = action
             return ControlCommand(id: "find.\(action)", title: title, item: item)
+        }
+    }
+
+    static func terminalCommands(for document: DocumentWindow) -> [ControlCommand] {
+        let splits: [(TerminalSplitDirection, String, String)] = [
+            (.right, "terminal.split-right", "Split Terminal Right"),
+            (.down, "terminal.split-down", "Split Terminal Down"),
+        ]
+        return splits.map { direction, id, title in
+            let item = NSMenuItem(title: title, action: #selector(DocumentWindow.splitTerminalFromControl(_:)), keyEquivalent: "")
+            item.target = document
+            item.representedObject = direction
+            return ControlCommand(id: id, title: title, item: item)
         }
     }
 

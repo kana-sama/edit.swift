@@ -542,23 +542,23 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             let selection = selectedRange()
             if selection != before {
                 let caret = selection.location == before.location ? NSMaxRange(selection) : selection.location
-                revealHorizontally(NSRange(location: caret, length: 0))
+                revealInExposedArea(NSRange(location: caret, length: 0))
             }
         }
     }
 
     override func scrollRangeToVisible(_ range: NSRange) {
         super.scrollRangeToVisible(range)
-        revealHorizontally(range)
+        revealInExposedArea(range)
     }
 
-    private func revealHorizontally(_ range: NSRange) {
+    private func revealInExposedArea(_ range: NSRange) {
         guard range.location != NSNotFound, let window, let scroll = enclosingScrollView else { return }
         let insets = scroll.contentInsets
         var origin = scroll.visibleContentOrigin
-        guard (insets.left > 0 && origin.x > 0) || insets.right > 0 else { return }
+        guard (insets.left > 0 && origin.x > 0) || insets.right > 0 || insets.bottom > 0 else { return }
 
-        // TextKit can consider a range visible while it is underneath the sidebar.
+        // TextKit can consider a range visible while it is under a glass panel.
         let screenRect = firstRect(forCharacterRange: range, actualRange: nil)
         guard screenRect.height > 0 else { return }
         let rect = convert(window.convertFromScreen(screenRect), from: nil)
@@ -571,8 +571,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             origin.x += rect.minX - left - textContainerInset.width
         } else if insets.right > 0 && rect.maxX > right, rect.width <= right - left {
             origin.x += rect.maxX - right + textContainerInset.width
-        } else {
-            return
+        }
+        let bottom = visible.maxY - insets.bottom
+        if insets.bottom > 0 && rect.maxY > bottom {
+            origin.y += rect.maxY - bottom + textContainerInset.height
         }
         scroll.scrollToVisibleContentOrigin(origin)
     }

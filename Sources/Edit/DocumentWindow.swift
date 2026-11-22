@@ -1,6 +1,37 @@
 import AppKit
 
 @MainActor
+enum PanelLayout {
+    static func finishHeaderLayout(_ item: NSToolbarItem, in window: NSWindow) {
+        let previousLayer = item.view?.superview?.layer
+        withoutAnimation {
+            window.layoutIfNeeded()
+            if let host = item.view?.window, host !== window { host.layoutIfNeeded() }
+        }
+        removeHeaderAnimations(from: previousLayer)
+        removeHeaderAnimations(from: item.view?.layer)
+        removeHeaderAnimations(from: item.view?.superview?.layer)
+    }
+
+    static func withoutAnimation(_ update: () -> Void) {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            update()
+            CATransaction.commit()
+        }
+    }
+
+    private static func removeHeaderAnimations(from layer: CALayer?) {
+        // AppKit can animate a toolbar item when it moves to another title-bar host.
+        layer?.removeAnimation(forKey: #keyPath(CALayer.transform))
+        layer?.removeAnimation(forKey: #keyPath(CALayer.opacity))
+    }
+}
+
+@MainActor
 private final class EditorDocumentWindow: NSWindow {
     // Focused controls get Escape before it reaches these window-level fallbacks.
     override func cancelOperation(_ sender: Any?) {
@@ -20,6 +51,8 @@ private final class EditorDocumentWindow: NSWindow {
 
 @MainActor
 final class DocumentWindow: NSObject, NSWindowDelegate {
+    static let minimumEditorWidth: CGFloat = 128
+    private static let minimumTerminalSidebarWidth: CGFloat = 160
     enum CloseChoice {
         case save(to: URL?)
         case discard
@@ -42,6 +75,17 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     let editor: EditorTextView
     let scrollView: NSScrollView
     let editorContentView: NSView
+    let documentSplitView = NSSplitView(frame: .zero)
+    private var documentSplit: NSSplitViewController?
+    private var terminalPanel: TerminalPanel?
+    private var terminalDockView: TerminalDockView?
+    private var terminalSidebar: NSSplitViewItem?
+    private var terminalSidebarPanelConstraints: [NSLayoutConstraint] = []
+    private var terminalTitleHost: NSView?
+    private weak var terminalTitleWidthLimit: NSLayoutConstraint?
+    private var terminalSidebarWidth = TerminalDockSizes().rightWidth
+    private(set) var isTerminalVisible = false
+    private var pendingTerminalRestore: DocumentTerminalState?
     private(set) lazy var titleBar = DocumentTitleBar(document: self, app: app)
 
     private unowned let app: Edit
@@ -136,7 +180,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     var isBusy: Bool { saving || promptingToClose || worktreeMutation }
     var canReplaceBuffer: Bool { !isBusy && window.attachedSheet == nil }
     var isReusable: Bool {
-        folderURL == nil && displayedFileURL == nil && findPanel == nil && !window.isDocumentEdited && canReplaceBuffer
+        folderURL == nil && displayedFileURL == nil && findPanel == nil && terminalPanel == nil && pendingTerminalRestore == nil &&
+            !window.isDocumentEdited && canReplaceBuffer
     }
 
     init(app: Edit, placement: WindowPlacement? = nil) {
@@ -166,12 +211,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
         window.contentView = editorContentView
         pinToEditorContent(scrollView)
-        let toolbar = NSToolbar(identifier: "Edit.Document")
-        toolbar.delegate = titleBar
-        toolbar.displayMode = .iconOnly
-        toolbar.allowsDisplayModeCustomization = false
         window.toolbarStyle = .unifiedCompact
-        window.toolbar = toolbar
+        window.toolbar = titleBar.makeToolbar(delegate: titleBar)
         window.initialFirstResponder = editor
         window.makeFirstResponder(editor)
         editor.onTextChange = { [weak self] in self?.textDidChange() }
@@ -190,6 +231,300 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         } else {
             window.center()
         }
+    }
+
+    func installDocumentSplit() -> NSSplitViewController {
+        if let documentSplit { return documentSplit }
+        let size = window.contentView?.bounds.size ?? window.contentLayoutRect.size
+        let frame = window.frame
+        let responder = window.firstResponder as? NSView
+        let editor = NSViewController()
+        editor.view = editorContentView
+        let editorItem = NSSplitViewItem(viewController: editor)
+        editorItem.automaticallyAdjustsSafeAreaInsets = true
+        editorItem.minimumThickness = Self.minimumEditorWidth
+        let split = NSSplitViewController()
+        documentSplitView.isVertical = true
+        documentSplitView.dividerStyle = .thin
+        split.splitView = documentSplitView
+        split.addSplitViewItem(editorItem)
+        split.view.setFrameSize(size)
+        window.contentViewController = split
+        if window.frame != frame { window.setFrame(frame, display: window.isVisible) }
+        window.initialFirstResponder = contentResponder
+        if let responder, responder.window === window { window.makeFirstResponder(responder) }
+        documentSplit = split
+        NotificationCenter.default.addObserver(self, selector: #selector(documentSplitDidResize(_:)),
+                                               name: NSSplitView.didResizeSubviewsNotification, object: documentSplitView)
+        return split
+    }
+
+    var isTerminalDockedRight: Bool { terminalSidebar != nil }
+
+    var terminalSidebarThickness: CGFloat {
+        guard let terminalSidebar else { return 0 }
+        let width = visibleTerminalSidebarWidth(terminalSidebar)
+        return width > 0 ? width + documentSplitView.dividerThickness : 0
+    }
+
+    func terminalHasFocus(_ responder: NSResponder?) -> Bool {
+        isTerminalVisible && terminalPanel?.containsTerminalResponder(responder) == true
+    }
+
+    func handleTerminalKey(_ event: NSEvent) -> Bool {
+        guard !app.isQuitting, window.attachedSheet == nil else { return false }
+        if TerminalShortcuts.isToggle(event) {
+            if !event.isARepeat {
+                if terminalHasFocus(window.firstResponder) { hideTerminal() }
+                else { showTerminal() }
+            }
+            return true
+        }
+        guard terminalHasFocus(window.firstResponder) else { return false }
+        if TerminalShortcuts.isClear(event) {
+            if !event.isARepeat { terminalPanel?.clear() }
+            return true
+        }
+        if TerminalShortcuts.isToggleContentWidth(event) {
+            if !event.isARepeat { terminalPanel?.toggleContentWidth() }
+            return true
+        }
+        guard let zoom = TerminalShortcuts.zoom(event) else { return false }
+        terminalPanel?.zoom(zoom)
+        return true
+    }
+
+    func toggleTerminal() {
+        guard !app.isQuitting, window.attachedSheet == nil else { return }
+        if isTerminalVisible { hideTerminal() }
+        else { showTerminal() }
+    }
+
+    func showTerminal() {
+        guard !app.isQuitting, window.attachedSheet == nil else { return }
+        _ = attachTerminal(focusing: true)
+    }
+
+    func restoreTerminal(_ state: DocumentTerminalState?) {
+        guard let state else { return }
+        pendingTerminalRestore = state
+        if pendingFullScreen, state.isVisible, state.panel.dock == .right {
+            _ = installDocumentSplit()
+        }
+        restoreVisibleTerminalIfReady()
+    }
+
+    private func restoreVisibleTerminalIfReady() {
+        // The normal frame can be smaller than the saved full-screen layout.
+        guard !pendingFullScreen, let state = pendingTerminalRestore, state.isVisible else { return }
+        let panel = attachTerminal()
+        if state.wasFocused { panel.focusLastTerminal() }
+    }
+
+    private func attachTerminal(focusing: Bool = false) -> TerminalPanel {
+        let panel: TerminalPanel
+        if let terminalPanel {
+            panel = terminalPanel
+        } else {
+            let saved = pendingTerminalRestore
+            panel = TerminalPanel(
+                directory: { [weak self] in
+                    self?.folderURL ?? self?.displayedFileURL?.deletingLastPathComponent()
+                        ?? FileManager.default.homeDirectoryForCurrentUser
+                },
+                onDockChange: { [weak self] dock in self?.moveTerminal(to: dock) },
+                onLastShellExit: { [weak self] panelHadFocus in
+                    guard let self, self.isTerminalVisible, !self.app.isQuitting else { return }
+                    self.hideTerminal(restoringContentFocus: panelHadFocus)
+                },
+                launchShell: !app.isAgentCheck,
+                restoredState: saved?.panel
+            )
+            terminalPanel = panel
+            let sizes = saved?.sizes ?? TerminalDockSizes()
+            terminalDockView = TerminalDockView(terminal: panel.view, height: sizes.belowHeight) { [weak self] height in
+                self?.setEditorBottomInset(height)
+            }
+            if sizes.rightWidth.isFinite && sizes.rightWidth > 0 { terminalSidebarWidth = sizes.rightWidth }
+            pendingTerminalRestore = nil
+        }
+        if focusing { panel.prepareSpace() }
+        if !isTerminalVisible {
+            isTerminalVisible = true
+            moveTerminal(to: panel.dock)
+            panel.setVisible(true)
+        }
+        if focusing { panel.focusLastTerminal() }
+        return panel
+    }
+
+    private func terminalSessionState() -> DocumentTerminalState? {
+        guard let terminalPanel, let terminalDockView else { return pendingTerminalRestore }
+        let rightWidth = currentTerminalSidebarWidth
+        let sizes = TerminalDockSizes(belowHeight: terminalDockView.savedHeight, rightWidth: rightWidth)
+        return DocumentTerminalState(panel: terminalPanel.snapshot(), sizes: sizes,
+                                     isVisible: isTerminalVisible, wasFocused: terminalHasFocus(window.firstResponder))
+    }
+
+    private func moveTerminal(to dock: TerminalDock) {
+        guard let terminalPanel, isTerminalVisible else { return }
+        let alreadyDocked = dock == .right ? terminalSidebar != nil : terminalDockView?.superview != nil
+        guard !alreadyDocked else { return }
+        updateTerminalLayout {
+            detachTerminalPanel()
+            if dock == .right {
+                showTerminalSidebar(terminalPanel)
+            } else {
+                terminalDockView?.show(in: editorContentView)
+            }
+        }
+    }
+
+    private func showTerminalSidebar(_ panel: TerminalPanel) {
+        let split = installDocumentSplit()
+        let controller = NSViewController()
+        let host = NSView()
+        host.clipsToBounds = true
+        controller.view = host
+        let item = NSSplitViewItem(inspectorWithViewController: controller)
+        item.allowsFullHeightLayout = true
+        item.canCollapse = false
+        item.minimumThickness = Self.minimumTerminalSidebarWidth
+        item.maximumThickness = NSSplitViewItem.unspecifiedDimension
+        item.preferredThicknessFraction = min(0.75, terminalSidebarWidth / max(documentSplitView.bounds.width, 1))
+
+        let titleHost = NSView()
+        let widthLimit = titleHost.widthAnchor.constraint(lessThanOrEqualToConstant: Self.minimumTerminalSidebarWidth)
+        NSLayoutConstraint.activate([widthLimit, titleHost.heightAnchor.constraint(equalToConstant: 26)])
+        terminalTitleHost = titleHost
+        terminalTitleWidthLimit = widthLimit
+        panel.fitDockedHeader(to: Self.minimumTerminalSidebarWidth)
+
+        terminalSidebar = item
+        split.addSplitViewItem(item)
+        host.addSubview(panel.view)
+        panel.view.translatesAutoresizingMaskIntoConstraints = false
+        terminalSidebarPanelConstraints = [
+            panel.view.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            panel.view.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            panel.view.topAnchor.constraint(equalTo: host.topAnchor),
+            panel.view.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+        ]
+        NSLayoutConstraint.activate(terminalSidebarPanelConstraints)
+        panel.placeHeader(in: titleHost, contentTop: documentSplitView.safeAreaLayoutGuide.topAnchor)
+
+        window.layoutIfNeeded()
+        documentSplitView.setPosition(documentSplitView.bounds.maxX - terminalSidebarWidth,
+                                      ofDividerAt: split.splitViewItems.count - 2)
+        // AppKit reapplies a preferred fraction when entering full screen.
+        item.preferredThicknessFraction = NSSplitViewItem.unspecifiedDimension
+        if let toolbar = window.toolbar {
+            if !toolbar.items.contains(where: { $0.itemIdentifier == .inspectorTrackingSeparator }) {
+                toolbar.insertItem(withItemIdentifier: .inspectorTrackingSeparator, at: toolbar.items.count)
+            }
+            resizeTitleBars()
+            titleBar.setTerminalTitleVisible(true, in: toolbar)
+        }
+    }
+
+    private var currentTerminalSidebarWidth: CGFloat {
+        terminalSidebar?.viewController.view.frame.width ?? terminalSidebarWidth
+    }
+
+    private func visibleTerminalSidebarWidth(_ item: NSSplitViewItem) -> CGFloat {
+        let view = item.viewController.view
+        guard view.window === window else { return 0 }
+        return view.frame.width
+    }
+
+    func makeTerminalTitleItem() -> NSToolbarItem? {
+        guard let host = terminalTitleHost else { return nil }
+        host.isHidden = false
+        let item = NSToolbarItem(itemIdentifier: DocumentTitleBar.terminalItemIdentifier)
+        item.label = "Terminal Spaces"
+        item.isBordered = false
+        item.autovalidates = false
+        item.visibilityPriority = .high
+        item.view = host
+        return item
+    }
+
+    private func resizeTitleBars() {
+        if let sidebar = terminalSidebar, let widthLimit = terminalTitleWidthLimit {
+            let width = visibleTerminalSidebarWidth(sidebar)
+            let limit = max(Self.minimumTerminalSidebarWidth, width)
+            if widthLimit.constant != limit {
+                widthLimit.constant = limit
+                terminalPanel?.fitDockedHeader(to: limit)
+            }
+        }
+        if let findPanel { findPanel.resizeTitleBar() }
+        else { titleBar.resize() }
+    }
+
+    @objc private func documentSplitDidResize(_ notification: Notification) {
+        guard terminalSidebar != nil else { return }
+        resizeTitleBars()
+    }
+
+    private func detachTerminalPanel() {
+        terminalDockView?.hide()
+        guard let terminalSidebar else { return }
+        let width = currentTerminalSidebarWidth
+        if width > 0 { terminalSidebarWidth = width }
+        if let toolbar = window.toolbar {
+            titleBar.setTerminalTitleVisible(false, in: toolbar)
+            toolbar.removeItem(identifier: .inspectorTrackingSeparator)
+        }
+        terminalPanel?.placeHeader(in: nil)
+        terminalTitleHost = nil
+        terminalTitleWidthLimit = nil
+        NSLayoutConstraint.deactivate(terminalSidebarPanelConstraints)
+        terminalSidebarPanelConstraints.removeAll()
+        terminalPanel?.view.removeFromSuperview()
+        self.terminalSidebar = nil
+        documentSplit?.removeSplitViewItem(terminalSidebar)
+        resizeTitleBars()
+    }
+
+    private func hideTerminal(restoringContentFocus: Bool = true) {
+        guard isTerminalVisible else { return }
+        isTerminalVisible = false
+        terminalPanel?.setVisible(false)
+        if restoringContentFocus { focusContent() }
+        let responder = window.firstResponder
+        updateTerminalLayout { detachTerminalPanel() }
+        if let responder = responder as? NSView, responder.window === window, window.firstResponder !== responder {
+            window.makeFirstResponder(responder)
+        }
+    }
+
+    private func updateTerminalLayout(_ change: () -> Void) {
+        let origin = scrollView.visibleContentOrigin
+        PanelLayout.withoutAnimation {
+            change()
+            window.layoutIfNeeded()
+            scrollView.scrollToVisibleContentOrigin(origin)
+        }
+    }
+
+    private func setEditorBottomInset(_ height: CGFloat) {
+        for case let view? in [scrollView as NSView?, filePreviewView, emptyFolderView] {
+            var insets = view.additionalSafeAreaInsets
+            guard insets.bottom != height else { continue }
+            insets.bottom = height
+            view.additionalSafeAreaInsets = insets
+        }
+    }
+
+    @objc func splitTerminalFromControl(_ item: NSMenuItem) {
+        guard isTerminalVisible, window.attachedSheet == nil, !app.isQuitting,
+              let direction = item.representedObject as? TerminalSplitDirection else { return }
+        terminalPanel?.split(direction)
+    }
+
+    func closeTerminalSessions() {
+        terminalPanel?.close()
     }
 
     func canPerformFind(_ command: FindCommand) -> Bool {
@@ -271,18 +606,33 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if normalFrame == nil { normalFrame = window.frame }
     }
 
+    func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions)
+        -> NSApplication.PresentationOptions {
+        proposedOptions.subtracting(.autoHideToolbar)
+    }
+
     func windowDidEnterFullScreen(_ notification: Notification) {
         pendingFullScreen = false
+        restoreVisibleTerminalIfReady()
+        resizeTitleBars()
+        titleBar.setFullScreen(true)
+        findPanel?.finishSidebarHeaderLayout()
         app.didFinishFullScreenRestore(for: self)
     }
 
     func windowDidFailToEnterFullScreen(_ window: NSWindow) {
         pendingFullScreen = false
+        restoreVisibleTerminalIfReady()
+        titleBar.setFullScreen(false)
+        findPanel?.finishSidebarHeaderLayout()
         app.didFinishFullScreenRestore(for: self)
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
         normalFrame = nil
+        titleBar.setFullScreen(false)
+        resizeTitleBars()
+        findPanel?.finishSidebarHeaderLayout()
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -392,13 +742,18 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func pinToEditorContent(_ view: NSView) {
         view.translatesAutoresizingMaskIntoConstraints = false
-        editorContentView.addSubview(view)
+        if let dock = terminalDockView, dock.superview === editorContentView {
+            editorContentView.addSubview(view, positioned: .below, relativeTo: dock)
+        } else {
+            editorContentView.addSubview(view)
+        }
         NSLayoutConstraint.activate([
             view.leadingAnchor.constraint(equalTo: editorContentView.leadingAnchor),
             view.trailingAnchor.constraint(equalTo: editorContentView.trailingAnchor),
             view.topAnchor.constraint(equalTo: editorContentView.topAnchor),
             view.bottomAnchor.constraint(equalTo: editorContentView.bottomAnchor),
         ])
+        setEditorBottomInset(terminalDockView?.coveredHeight ?? 0)
     }
 
     func restoreDraft(_ record: SessionDocument, text: String, identity: FileIdentity? = nil, scratch: ScratchFile? = nil) {
@@ -428,7 +783,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             sidebarMode: lastSidebarMode,
             worktreeShowsHidden: (worktreeSidebar?.showsHidden ?? worktreeShowsHidden) ? true : nil,
             isFilePreview: isShowingFilePreview ? true : nil,
-            showsEmptyFolder: folderURL != nil && displayedFileURL == nil ? showsEmptyFolder : nil
+            showsEmptyFolder: folderURL != nil && displayedFileURL == nil ? showsEmptyFolder : nil,
+            terminal: terminalSessionState()
         )
     }
 
@@ -1021,8 +1377,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func windowDidResize(_ notification: Notification) {
-        if let findPanel { findPanel.resizeTitleBar() }
-        else { titleBar.resize() }
+        resizeTitleBars()
     }
 
     func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
@@ -1045,6 +1400,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        closeTerminalSessions()
         rememberFilePosition()
         editor.exitFocus(notify: false)
         filePreviewView?.stop()
