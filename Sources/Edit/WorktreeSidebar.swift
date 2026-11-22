@@ -2,7 +2,7 @@ import AppKit
 import CoreServices
 
 @MainActor
-final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
+final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTextFieldDelegate {
     private final class Item: NSObject {
         let url: URL
         let isDirectory: Bool
@@ -28,6 +28,26 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         }
     }
 
+    @MainActor
+    private final class NameEdit {
+        let request: WorktreeActions.NameRequest
+        let root: URL
+        let entry: Item
+        let draftParent: Item?
+        let selection: [String]
+        let field = NSTextField()
+        var submitting = false
+        var error: NSPopover?
+
+        init(request: WorktreeActions.NameRequest, root: URL, entry: Item, draftParent: Item?, selection: [String]) {
+            self.request = request
+            self.root = root
+            self.entry = entry
+            self.draftParent = draftParent
+            self.selection = selection
+        }
+    }
+
     private static let hiddenItemsKey = "WorktreeHiddenItems"
     private static let hiddenItemsChanged = Notification.Name("Edit.WorktreeHiddenItemsChanged")
     private let container = NSView()
@@ -39,7 +59,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     private var outside: Item?
     private var currentPath: String?
     private var currentDirectories: Set<String> = []
-    private var needsReveal = false
+    private var pathToReveal: String?
     private var manualHidden: Set<String> = []
     private var expanded: Set<String> = []
     private var requests: [String: Task<Void, Never>] = [:]
@@ -48,12 +68,14 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     private var reloading = false
     private var pendingOpen: URL?
     private var openingFile: Task<Void, Never>?
+    private var nameEdit: NameEdit?
 
     private lazy var actions = WorktreeActions(
         document: document, app: app,
         refresh: { [weak self] in self?.refresh() },
         isHidden: { [weak self] in self?.manualHidden.contains(WorktreeFileOperations.path($0)) ?? false },
-        toggleHidden: { [weak self] in self?.toggleHidden($0) }
+        toggleHidden: { [weak self] in self?.toggleHidden($0) },
+        editName: { [weak self] in self?.beginNameEdit($0, in: $1) }
     )
 
     var view: NSView { container }
@@ -117,11 +139,14 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     func setActive(_ active: Bool) {
         guard isActive != active else { return }
         isActive = active
-        if !active { pendingOpen = nil }
+        if !active {
+            pendingOpen = nil
+            if let nameEdit { finishNameEdit(nameEdit) }
+        }
         startMonitoring()
         if active {
-            needsReveal = currentPath != nil
-            revealCurrent()
+            pathToReveal = currentPath
+            revealPendingItem()
             if root?.isLoaded == true { refresh() }
         }
     }
@@ -131,6 +156,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         let folderPath = WorktreeFileOperations.path(folder)
         let rootChanged = root?.path != folderPath
         if rootChanged {
+            if let nameEdit { finishNameEdit(nameEdit) }
             for request in requests.values { request.cancel() }
             requests.removeAll()
             root = Item(folder, directory: true)
@@ -147,15 +173,9 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         if !rootChanged, let outside { expanded.remove(outside.path) }
         outside = nil
         // Loading a previous selection must not move the highlight back during rapid navigation.
-        needsReveal = file != nil && openingFile == nil
+        pathToReveal = openingFile == nil ? filePath : nil
         if let file, WorktreeFileOperations.contains(file, in: folder) {
-            var ancestor = file.deletingLastPathComponent()
-            while WorktreeFileOperations.contains(ancestor, in: folder) {
-                let ancestorPath = WorktreeFileOperations.path(ancestor)
-                currentDirectories.insert(ancestorPath)
-                if ancestorPath == folderPath { break }
-                ancestor.deleteLastPathComponent()
-            }
+            currentDirectories = ancestors(of: file, in: folder)
             expanded.formUnion(currentDirectories.subtracting([folderPath]))
         } else if let file {
             let parent = Item(file.deletingLastPathComponent(), directory: true, outside: true)
@@ -164,6 +184,19 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             expanded.insert(parent.path)
         }
         reloadTree()
+    }
+
+    private func ancestors(of url: URL, in folder: URL) -> Set<String> {
+        let rootPath = WorktreeFileOperations.path(folder)
+        var paths: Set<String> = []
+        var ancestor = url.deletingLastPathComponent()
+        while WorktreeFileOperations.contains(ancestor, in: folder) {
+            let path = WorktreeFileOperations.path(ancestor)
+            paths.insert(path)
+            if path == rootPath { break }
+            ancestor.deleteLastPathComponent()
+        }
+        return paths
     }
 
     func setShowsHidden(_ enabled: Bool) {
@@ -204,7 +237,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     private func load(_ item: Item, force: Bool = false) {
-        guard let root, !item.outside, item.isDirectory else { return }
+        guard let root, !item.outside, item.isDirectory, item !== provisionalEntry else { return }
         let path = item.path
         if force { requests[path]?.cancel() }
         else if item.isLoaded || requests[path] != nil { return }
@@ -246,6 +279,8 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             child.isSystemHidden = entry.isHidden
             return child
         }
+        // Keep the AppKit field editor attached to its row while filesystem updates arrive.
+        guard nameEdit == nil else { return }
         if item === root {
             reloadTree()
             return
@@ -258,7 +293,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         restoreExpansion(from: item)
         reloading = false
         restoreSelection(selection)
-        revealCurrent()
+        revealPendingItem()
     }
 
     private func updateVisibleChildren(of item: Item) {
@@ -276,8 +311,9 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         }
     }
 
-    private func reloadTree() {
-        let selection = selectedItems.map(\.path)
+    private func reloadTree(keeping paths: [String]? = nil) {
+        guard nameEdit == nil else { return }
+        let selection = paths ?? selectedItems.map(\.path)
         if let root {
             var pending = [root]
             while let item = pending.popLast() {
@@ -295,7 +331,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         if let outside { restoreExpansion(from: outside) }
         reloading = false
         restoreSelection(selection)
-        revealCurrent()
+        revealPendingItem()
     }
 
     private func restoreExpansion(from item: Item) {
@@ -316,11 +352,11 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         tree.selectRowIndexes(rows, byExtendingSelection: false)
     }
 
-    private func revealCurrent() {
-        guard needsReveal, let currentPath, let item = item(at: currentPath) else { return }
+    private func revealPendingItem() {
+        guard nameEdit == nil, let pathToReveal, let item = item(at: pathToReveal) else { return }
         let row = tree.row(forItem: item)
         guard row >= 0 else { return }
-        needsReveal = false
+        self.pathToReveal = nil
         tree.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         tree.scrollRowToVisible(row)
     }
@@ -370,20 +406,32 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     private func isHidden(_ item: Item) -> Bool { item.isSystemHidden || manualHidden.contains(item.path) }
 
+    private var provisionalEntry: Item? { nameEdit?.draftParent == nil ? nil : nameEdit?.entry }
+
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        if let item = item as? Item { return item.visibleChildren.count }
-        return (root?.visibleChildren.count ?? 0) + (outside == nil ? 0 : 1)
+        let parent = (item as? Item) ?? root
+        let draftCount = parent != nil && nameEdit?.draftParent === parent ? 1 : 0
+        let outsideCount = item == nil && outside != nil ? 1 : 0
+        return (parent?.visibleChildren.count ?? 0) + draftCount + outsideCount
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        if let item = item as? Item { return item.visibleChildren[index] }
-        let entries = root?.visibleChildren ?? []
-        if let outside, index == entries.count { return outside }
+        let parent = (item as? Item) ?? root
+        let entries = parent?.visibleChildren ?? []
+        if index < entries.count { return entries[index] }
+        if let nameEdit, let draftParent = nameEdit.draftParent, draftParent === parent, index == entries.count {
+            return nameEdit.entry
+        }
+        if let outside, item == nil { return outside }
         return entries[index]
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
         (item as? Item)?.isDirectory == true
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, shouldExpandItem item: Any) -> Bool {
+        (item as? Item) !== provisionalEntry
     }
 
     func outlineViewItemDidExpand(_ notification: Notification) {
@@ -418,7 +466,8 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     private var selectedItems: [Item] { tree.selectedRowIndexes.compactMap { tree.item(atRow: $0) as? Item } }
 
     func openFile(at row: Int) {
-        guard let item = tree.item(atRow: row) as? Item, !item.isDirectory else { return }
+        guard let item = tree.item(atRow: row) as? Item, !item.isDirectory, item !== provisionalEntry else { return }
+        pathToReveal = nil
         pendingOpen = item.url
         guard openingFile == nil else { return }
         openingFile = Task { [weak self, app, document] in
@@ -439,7 +488,158 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     func renameSelection() {
         guard let root, tree.selectedRowIndexes.count == 1, let item = selectedItems.first else { return }
-        actions.rename(item.url, within: root.url)
+        beginNameEdit(.rename(item.url), in: root.url)
+    }
+
+    private func beginNameEdit(_ request: WorktreeActions.NameRequest, in openedFolder: URL) {
+        guard isActive, let root, actions.canEditName(in: openedFolder), nameEdit?.submitting != true else { return }
+        if let nameEdit { finishNameEdit(nameEdit) }
+        let entry: Item
+        let draftParent: Item?
+        switch request {
+        case .rename(let url):
+            guard let item = item(at: WorktreeFileOperations.path(url)), item !== root, !item.outside else { return }
+            entry = item
+            draftParent = nil
+        case .create(let directory, let isDirectory):
+            guard let parent = item(at: WorktreeFileOperations.path(directory)), !parent.outside else { return }
+            if parent !== root { tree.expandItem(parent) }
+            let base = isDirectory ? "untitled folder" : "untitled"
+            let occupied = Set(parent.children.map { $0.name.lowercased() })
+            var initial = base
+            var suffix = 2
+            while occupied.contains(initial) {
+                initial = "\(base) \(suffix)"
+                suffix += 1
+            }
+            entry = Item(parent.url.appending(path: initial), directory: isDirectory)
+            draftParent = parent
+        }
+
+        let edit = NameEdit(request: request, root: openedFolder, entry: entry, draftParent: draftParent,
+                            selection: selectedItems.map(\.path))
+        nameEdit = edit
+        pathToReveal = nil
+        if let draftParent {
+            tree.insertItems(at: IndexSet(integer: draftParent.visibleChildren.count),
+                             inParent: draftParent === root ? nil : draftParent, withAnimation: [])
+        }
+        let row = tree.row(forItem: entry)
+        guard row >= 0 else { finishNameEdit(edit); return }
+        tree.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        tree.scrollRowToVisible(row)
+        guard let cell = tree.view(atColumn: 0, row: row, makeIfNecessary: true) as? WorktreeCell else {
+            finishNameEdit(edit)
+            return
+        }
+        let field = edit.field
+        field.stringValue = entry.name
+        field.delegate = self
+        field.setAccessibilityLabel(entry.isDirectory ? "Folder Name" : "File Name")
+        cell.installNameField(field)
+        guard document.window.makeFirstResponder(field), let editor = field.currentEditor() else {
+            finishNameEdit(edit)
+            return
+        }
+        let name = entry.name as NSString
+        let stem = name.deletingPathExtension as NSString
+        let length = draftParent == nil && !entry.isDirectory && stem.length > 0 ? stem.length : name.length
+        editor.selectedRange = NSRange(location: 0, length: length)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard let edit = nameEdit, edit.field === control, !textView.hasMarkedText() else { return false }
+        switch commandSelector {
+        case #selector(NSResponder.insertNewline(_:)):
+            submitName(edit, from: textView)
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            if !edit.submitting { finishNameEdit(edit) }
+            return true
+        default:
+            return false
+        }
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard let edit = nameEdit, edit.field === notification.object as? NSTextField else { return }
+        // Let AppKit finish the focus change before removing the edited row.
+        Task { [weak self, weak edit] in
+            guard let self, let edit, !edit.submitting, edit.field.currentEditor() == nil else { return }
+            let selection = self.selectedItems.filter { $0 !== self.provisionalEntry }.map(\.path)
+            self.finishNameEdit(edit, keeping: selection.isEmpty ? edit.selection : selection)
+        }
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        nameEdit?.error?.close()
+        nameEdit?.error = nil
+        nameEdit?.field.toolTip = nil
+    }
+
+    private func submitName(_ edit: NameEdit, from editor: NSTextView) {
+        guard !edit.submitting else { return }
+        let name = editor.string
+        if edit.draftParent == nil && name == edit.entry.name {
+            finishNameEdit(edit)
+            return
+        }
+        edit.submitting = true
+        editor.isEditable = false
+        Task { [weak self, document] in
+            guard let self else { return }
+            do {
+                let url = try await actions.commitName(name, for: edit.request, in: edit.root)
+                guard nameEdit === edit else { return }
+                let path = WorktreeFileOperations.path(url)
+                expanded.formUnion(ancestors(of: url, in: edit.root).subtracting([WorktreeFileOperations.path(edit.root)]))
+                pathToReveal = path
+                let stillEditing = document.window.firstResponder === editor
+                finishNameEdit(edit)
+                if case .create(_, false) = edit.request, stillEditing {
+                    await app.openFiles([url], in: document)
+                }
+            } catch {
+                guard nameEdit === edit else { return }
+                edit.submitting = false
+                guard document.window.firstResponder === editor else { finishNameEdit(edit); return }
+                editor.isEditable = true
+                showNameError(error, in: edit)
+            }
+        }
+    }
+
+    private func showNameError(_ error: Error, in edit: NameEdit) {
+        let message = error.localizedDescription
+        edit.field.toolTip = message
+        guard document.window.isVisible, !app.isAgentCheck else { return }
+        let label = NSTextField(wrappingLabelWithString: message)
+        label.preferredMaxLayoutWidth = 240
+        let size = label.fittingSize
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: size.width + 20, height: size.height + 16))
+        label.frame = NSRect(origin: NSPoint(x: 10, y: 8), size: size)
+        view.addSubview(label)
+        let controller = NSViewController()
+        controller.view = view
+        let popover = NSPopover()
+        popover.contentViewController = controller
+        popover.behavior = .transient
+        edit.error?.close()
+        edit.error = popover
+        popover.show(relativeTo: edit.field.bounds, of: edit.field, preferredEdge: .maxY)
+    }
+
+    private func finishNameEdit(_ edit: NameEdit, keeping selection: [String]? = nil) {
+        guard nameEdit === edit else { return }
+        nameEdit = nil
+        edit.error?.close()
+        edit.field.delegate = nil
+        if let editor = edit.field.currentEditor(), document.window.firstResponder === editor {
+            editor.isEditable = true
+            document.window.makeFirstResponder(tree)
+        }
+        edit.field.removeFromSuperview()
+        reloadTree(keeping: selection ?? edit.selection)
     }
 
     func focusEditor() {
@@ -462,6 +662,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     func menu(at row: Int) -> NSMenu? {
         guard let root else { return nil }
         let item = (row >= 0 ? tree.item(atRow: row) as? Item : nil) ?? root
+        guard item !== provisionalEntry else { return nil }
         if row >= 0, !tree.selectedRowIndexes.contains(row) {
             tree.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
@@ -469,7 +670,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     func copySelection() {
-        let urls = selectedItems.filter { !$0.isDirectory || !$0.outside }.map(\.url)
+        let urls = selectedItems.filter { $0 !== provisionalEntry && (!$0.isDirectory || !$0.outside) }.map(\.url)
         if !urls.isEmpty { actions.copy(urls) }
     }
 
@@ -484,7 +685,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem object: Any) -> (any NSPasteboardWriting)? {
-        guard let item = object as? Item, !item.outside || !item.isDirectory else { return nil }
+        guard let item = object as? Item, item !== provisionalEntry, !item.outside || !item.isDirectory else { return nil }
         return item.url as NSURL
     }
 
@@ -520,7 +721,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     private func destination(for item: Item?) -> URL? {
         guard let item else { return root?.url }
-        guard !item.outside else { return nil }
+        guard !item.outside, item !== provisionalEntry else { return nil }
         return item.isDirectory ? item.url : item.url.deletingLastPathComponent()
     }
 
@@ -682,7 +883,22 @@ private final class WorktreeCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("Worktree cells are programmatically constructed") }
 
+    func installNameField(_ field: NSTextField) {
+        field.translatesAutoresizingMaskIntoConstraints = false
+        field.controlSize = .small
+        field.font = label.font
+        field.usesSingleLineMode = true
+        label.isHidden = true
+        addSubview(field)
+        NSLayoutConstraint.activate([
+            field.leadingAnchor.constraint(equalTo: label.leadingAnchor, constant: -4),
+            field.trailingAnchor.constraint(equalTo: label.trailingAnchor),
+            field.centerYAnchor.constraint(equalTo: label.centerYAnchor),
+        ])
+    }
+
     func configure(name: String, path: String, icon image: NSImage?, muted: Bool) {
+        label.isHidden = false
         label.stringValue = name
         labelLeading.constant = image == nil ? 6 : Self.iconSize + 6
         icon.isHidden = image == nil

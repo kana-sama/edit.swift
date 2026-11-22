@@ -3,19 +3,27 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class WorktreeActions: NSObject, NSMenuDelegate {
+    enum NameRequest {
+        case rename(URL)
+        case create(in: URL, directory: Bool)
+    }
+
     private weak var document: DocumentWindow?
     private unowned let app: Edit
     private let refresh: () -> Void
+    private let editName: (NameRequest, URL) -> Void
     private let isHidden: (URL) -> Bool
     private let toggleHidden: (URL) -> Void
     private var working = false
     private var canWork: Bool { !working && document?.canReplaceBuffer == true }
 
     init(document: DocumentWindow, app: Edit, refresh: @escaping () -> Void,
-         isHidden: @escaping (URL) -> Bool, toggleHidden: @escaping (URL) -> Void) {
+         isHidden: @escaping (URL) -> Bool, toggleHidden: @escaping (URL) -> Void,
+         editName: @escaping (NameRequest, URL) -> Void) {
         self.document = document
         self.app = app
         self.refresh = refresh
+        self.editName = editName
         self.isHidden = isHidden
         self.toggleHidden = toggleHidden
     }
@@ -55,7 +63,7 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         }
         if editable {
             menu.addItem(.separator())
-            menu.addItem(action("Rename…", enabled: canWork) { [weak self] in self?.rename(item, within: root) })
+            menu.addItem(action("Rename…", enabled: canWork) { [weak self] in self?.editName(.rename(item), root) })
             menu.addItem(action(isHidden(item) ? "Unhide" : "Hide") { [weak self] in self?.toggleHidden(item) })
             menu.addItem(action("Move to Trash", enabled: canWork) { [weak self] in self?.trash(item, within: root) })
         }
@@ -64,10 +72,10 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
 
     func addCreationItems(to menu: NSMenu, in directory: URL, root: URL) {
         menu.addItem(action("New File…", enabled: canWork) { [weak self] in
-            self?.create(in: directory, root: root, isDirectory: false)
+            self?.editName(.create(in: directory, directory: false), root)
         })
         menu.addItem(action("New Folder…", enabled: canWork) { [weak self] in
-            self?.create(in: directory, root: root, isDirectory: true)
+            self?.editName(.create(in: directory, directory: true), root)
         })
     }
 
@@ -158,35 +166,31 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         }
     }
 
-    private func create(in directory: URL, root: URL, isDirectory: Bool) {
-        guard !app.isAgentCheck else { return }
-        let title = isDirectory ? "New Folder" : "New File"
-        run("Could Not Create \(isDirectory ? "Folder" : "File")", within: root) { document in
-            guard let name = await self.askForName(title, confirm: "Create", in: document,
-                                                   hint: "Enter a name or a relative path. Use “/” to create subfolders.")
-            else { return }
-            let created = try await Task.detached(priority: .userInitiated) {
-                try WorktreeFileOperations.create(name, in: directory, root: root, isDirectory: isDirectory)
-            }.value
-            if !isDirectory, document.folderURL.map(WorktreeFileOperations.path) == WorktreeFileOperations.path(root) {
-                await self.app.openFiles([created], in: document)
-            }
-        }
-    }
+    func canEditName(in root: URL) -> Bool { operationDocument(in: root) != nil }
 
-    func rename(_ item: URL, within root: URL) {
-        guard !app.isAgentCheck, WorktreeFileOperations.contains(item, in: root),
-              WorktreeFileOperations.path(item) != WorktreeFileOperations.path(root) else { return }
-        run("Could Not Rename “\(item.lastPathComponent)”", within: root) { document in
-            guard let name = await self.askForName("Rename “\(item.lastPathComponent)”", confirm: "Rename",
-                                                   in: document, initial: item.lastPathComponent)
-            else { return }
+    func commitName(_ name: String, for request: NameRequest, in root: URL) async throws -> URL {
+        guard operationDocument(in: root) != nil else {
+            throw NameError.unavailable
+        }
+        working = true
+        defer {
+            working = false
+            refresh()
+        }
+
+        switch request {
+        case .create(let parent, let directory):
+            return try await Task.detached(priority: .userInitiated) {
+                try WorktreeFileOperations.create(name, in: parent, root: root, isDirectory: directory)
+            }.value
+        case .rename(let item):
             let destination = item.deletingLastPathComponent().appending(path: name)
-            try await self.app.performWorktreeMutation(affecting: [item, destination]) {
+            return try await app.performWorktreeMutation(affecting: [item, destination]) {
                 let move = try await Task.detached(priority: .userInitiated) {
                     try WorktreeFileOperations.rename(item, to: name, within: root)
                 }.value
-                if let move { self.retarget(move) }
+                if let move { retarget(move) }
+                return move?.destination ?? item
             }
         }
     }
@@ -214,10 +218,7 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
     @discardableResult
     private func run(_ title: String, within root: URL,
                      operation: @MainActor @escaping (DocumentWindow) async throws -> Void) -> Bool {
-        guard !working, !app.isQuitting, let document, document.folderURL.map(WorktreeFileOperations.path) == WorktreeFileOperations.path(root), document.canReplaceBuffer,
-              app.documents.contains(where: { $0 === document }) else {
-            return false
-        }
+        guard let document = operationDocument(in: root) else { return false }
         working = true
         Task {
             defer {
@@ -235,23 +236,16 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         return true
     }
 
-    private func askForName(_ title: String, confirm: String, in document: DocumentWindow,
-                            initial: String = "", hint: String = "") async -> String? {
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        input.stringValue = initial
-        input.placeholderString = "Name"
-        input.font = .systemFont(ofSize: NSFont.systemFontSize)
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = hint
-        alert.addButton(withTitle: confirm)
-        alert.addButton(withTitle: "Cancel")
-        alert.accessoryView = input
-        alert.window.initialFirstResponder = input
-        let result = await withCheckedContinuation { (continuation: CheckedContinuation<NSApplication.ModalResponse, Never>) in
-            alert.beginSheetModal(for: document.window) { continuation.resume(returning: $0) }
-        }
-        return result == .alertFirstButtonReturn ? input.stringValue : nil
+    private func operationDocument(in root: URL) -> DocumentWindow? {
+        guard canWork, !app.isQuitting, let document,
+              document.folderURL.map(WorktreeFileOperations.path) == WorktreeFileOperations.path(root),
+              app.documents.contains(where: { $0 === document }) else { return nil }
+        return document
+    }
+
+    private enum NameError: LocalizedError {
+        case unavailable
+        var errorDescription: String? { "Edit is busy or this folder is no longer open." }
     }
 
     private func action(_ title: String, enabled: Bool = true, body: @escaping () -> Void) -> NSMenuItem {

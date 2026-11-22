@@ -74,8 +74,12 @@ enum WorktreeCheck {
                 document.window.firstResponder === tree
         }
         try press("\r", code: 36, in: tree)
+        let rename = try fieldEditor(in: document.window)
+        try expect(rename.string == "Build.log" && rename.selectedRange() == NSRange(location: 0, length: 5),
+                   "Return edits the selected name in place and selects its stem")
+        try pressNameKey(53, characters: "\u{1B}", in: document.window)
         try expect(document.window.firstResponder === tree && document.fileURL?.lastPathComponent == "Build.log",
-                   "Return is reserved for renaming instead of focusing the active file")
+                   "Escape cancels rename and restores tree focus")
 
         try press("\u{F701}", code: 125, in: tree)
         try press(" ", code: 49, in: tree)
@@ -153,7 +157,7 @@ enum WorktreeCheck {
         let editor = document.editor
         editor.insertText("edited", replacementRange: NSRange(location: 0, length: 0))
         let actions = WorktreeActions(document: document, app: app, refresh: { sidebar.refresh() },
-                                      isHidden: { _ in false }, toggleHidden: { _ in })
+                                      isHidden: { _ in false }, toggleHidden: { _ in }, editName: { _, _ in })
         let source = FileBuffer.canonicalURL(ignored)
         let moved = target.appending(path: ignored.lastPathComponent)
         try expect(actions.transfer([source], into: target, move: true, within: root),
@@ -182,6 +186,90 @@ enum WorktreeCheck {
         restored.window.layoutIfNeeded()
         try expect(emptyTree.numberOfRows == 0, "an empty folder leaves the tree blank")
         try checkRootContextMenu(in: emptyTree)
+        try await checkInlineNames(in: restored, tree: emptyTree, directory: empty)
+
+    }
+
+    private static func checkInlineNames(in document: DocumentWindow, tree: NSOutlineView, directory: URL) async throws {
+        let window = document.window
+        let toolbarItem = try require(window.toolbar?.items.compactMap { $0 as? SidebarMenuItem }.first,
+                                      "find the Worktree toolbar menu")
+        toolbarItem.menu.update()
+        toolbarItem.menu.performActionForItem(at: toolbarItem.menu.indexOfItem(withTitle: "New Folder…"))
+        _ = try fieldEditor(in: window)
+        try expect(tree.numberOfRows == 1, "the empty tree displays a provisional folder row")
+        try pressNameKey(53, characters: "\u{1B}", in: window)
+        try expect(tree.numberOfRows == 0 && FileManager.default.fileExists(atPath: directory.appending(path: "untitled folder").path) == false,
+                   "Escape removes the provisional row without creating a folder")
+
+        toolbarItem.menu.update()
+        toolbarItem.menu.performActionForItem(at: toolbarItem.menu.indexOfItem(withTitle: "New Folder…"))
+        try replaceName(with: "Sources", in: window)
+        try pressNameKey(36, characters: "\r", in: window)
+        try await waitFor("create and select the folder named in the Worktree row") {
+            tree.selectedRow >= 0 && row(named: "Sources", in: tree) == tree.selectedRow
+        }
+        let folder = directory.appending(path: "Sources")
+        try expect(FileManager.default.fileExists(atPath: folder.path), "the inline folder is created in the root")
+        let folderRow = try require(row(named: "Sources", in: tree), "created folder row")
+        let worktree = try require(document.worktreeSidebar, "folder Worktree")
+        let menu = try require(worktree.menu(at: folderRow), "folder creation menu")
+        menu.performActionForItem(at: menu.indexOfItem(withTitle: "New File…"))
+        _ = try fieldEditor(in: window)
+
+        try replaceName(with: "Nested/File.swift", in: window)
+        try pressNameKey(36, characters: "\r", in: window)
+        try await waitFor("open a file created from a relative path in its folder row") {
+            document.fileURL?.lastPathComponent == "File.swift" && row(named: "File.swift", in: tree) == tree.selectedRow
+        }
+        let file = folder.appending(path: "Nested/File.swift")
+        let occupied = folder.appending(path: "Nested/Taken.swift")
+        let fileRow = try require(row(named: "File.swift", in: tree), "selected file created inline")
+        let fileMenu = try require(worktree.menu(at: fileRow), "file rename menu")
+        fileMenu.performActionForItem(at: fileMenu.indexOfItem(withTitle: "Rename…"))
+        try replaceName(with: "Taken.swift", in: window)
+        let field = try fieldEditor(in: window)
+        try Data("existing".utf8).write(to: occupied)
+        worktree.refresh()
+        try await Task.sleep(for: .milliseconds(300))
+        try expect(window.firstResponder === field && field.string == "Taken.swift",
+                   "a directory refresh preserves both the draft name and its focused field")
+        try pressNameKey(36, characters: "\r", in: window)
+        try await waitFor("a conflicting name keeps the native field available for correction") {
+            (window.firstResponder as? NSTextView)?.isFieldEditor == true &&
+                (window.firstResponder as? NSTextView)?.isEditable == true
+        }
+        try expect(FileManager.default.fileExists(atPath: file.path), "the conflicted rename keeps the original file")
+        let occupiedContents = try String(contentsOf: occupied, encoding: .utf8)
+        try expect(occupiedContents == "existing", "the conflicted rename keeps the destination")
+
+        worktree.refresh()
+        try replaceName(with: "Renamed.swift", in: window)
+        try pressNameKey(36, characters: "\r", in: window)
+        try await waitFor("commit the corrected name and retarget the existing editor") {
+            document.fileURL?.lastPathComponent == "Renamed.swift" && row(named: "Renamed.swift", in: tree) == tree.selectedRow
+        }
+        try expect(window.attachedSheet == nil && !NSApp.isActive, "inline edits stay in the quiet Worktree window")
+    }
+
+    private static func fieldEditor(in window: NSWindow) throws -> NSTextView {
+        let editor = try require(window.firstResponder as? NSTextView, "the Worktree name editor")
+        try expect(editor.isFieldEditor && window.attachedSheet == nil, "Worktree names use an inline AppKit field editor")
+        return editor
+    }
+
+    private static func replaceName(with value: String, in window: NSWindow) throws {
+        let editor = try fieldEditor(in: window)
+        editor.insertText(value, replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
+    }
+
+    private static func pressNameKey(_ code: UInt16, characters: String, in window: NSWindow) throws {
+        let editor = try fieldEditor(in: window)
+        let event = try require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+            context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code
+        ), "name editor key event")
+        editor.keyDown(with: event)
     }
 
     private static func checkRootContextMenu(in tree: NSOutlineView) throws {
