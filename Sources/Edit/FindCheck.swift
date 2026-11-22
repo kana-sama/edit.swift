@@ -401,17 +401,20 @@ enum FindCheck {
         try expect(sidebarToolbar.displayMode == .iconOnly && !sidebarToolbar.allowsDisplayModeCustomization &&
                    !sidebarToolbar.items.contains { $0.itemIdentifier.rawValue == "Search.Refresh" },
                    "the sidebar toolbar uses fixed icons without a separate Refresh button")
-        let picker = try sidebarMenu(in: window)
+        let picker = try sidebarMenu(in: window, showsTitle: true)
+        let options = try sidebarMenu(in: window)
         let items = picker.menu.items
-        try expect(!picker.isHidden && items.map(\.title) == ["Worktree", "Source Control", "Search", "", "Refresh Search"] &&
+        try expect(!picker.isHidden && items.map(\.title) == ["Worktree", "Source Control", "Search"] &&
                    !items[0].isEnabled && !items[0].isHidden && !items[1].isEnabled && !items[1].isHidden &&
-                   items[2].isEnabled && items[2].state == .on && items[3].isSeparatorItem,
-                   "the sidebar menu lists all choices in order and only Search is available without a folder")
-        let menuButton = try require(picker.view as? NSButton, "native ellipsis button")
-        try expect(menuButton.target === picker && menuButton.action != nil, "the ellipsis has a native menu action")
-        let menuOrigin = picker.popupOrigin(in: menuButton)
-        try expect(abs(menuOrigin.x + picker.menu.size.width - menuButton.bounds.maxX) < 0.5 &&
-                   menuOrigin.x < menuButton.bounds.minX, "the menu opens to the left of the ellipsis")
+                   items[2].isEnabled && items[2].state == .on,
+                   "the sidebar title is a mode switcher with unavailable modes listed")
+        let menuButton = try require(options.view as? NSButton, "native ellipsis button")
+        try expect(!options.isHidden && !menuButton.isBordered && options.menu.items.map(\.title) == ["Refresh Search"] &&
+                   menuButton.target === options && menuButton.action != nil,
+                   "the borderless ellipsis opens Search actions only")
+        let menuOrigin = options.popupOrigin(in: menuButton)
+        try expect(abs(menuOrigin.x + options.menu.size.width - menuButton.bounds.maxX) < 0.5 &&
+                   menuOrigin.x < menuButton.bounds.minX, "the options open to the left of the ellipsis")
         window.makeFirstResponder(editor)
         picker.menu.performActionForItem(at: picker.menu.indexOfItem(withTitle: "Search"))
         try expect(window.firstResponder === query && query.string == "checksum",
@@ -424,7 +427,7 @@ enum FindCheck {
         table.selectRowIndexes(IndexSet(integer: 4), byExtendingSelection: false)
         window.layoutIfNeeded()
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
-        for width in [280.0, 185.0] {
+        for width in [280.0, split.splitViewItems[0].minimumThickness] {
             split.splitView.setPosition(width, ofDividerAt: 0)
             window.layoutIfNeeded()
             let cell = try require(table.view(atColumn: 0, row: 4, makeIfNecessary: true) as? FindResultCell,
@@ -620,44 +623,54 @@ enum FindCheck {
         app.openFind(nil)
         window.layoutIfNeeded()
         let ellipsis = try sidebarMenu(in: window)
-        let title = try require(window.toolbar?.items.compactMap { $0 as? SidebarMenuItem }.first(where: \.showsTitle),
-                                "the fullscreen sidebar title is available")
+        let title = try sidebarMenu(in: window, showsTitle: true)
         let ellipsisButton = try require(ellipsis.view as? NSButton, "the menu uses a native icon button")
         let titleButton = try require(title.view as? NSButton, "the title is a native menu button")
-        let ellipsisFrame = ellipsisButton.convert(ellipsisButton.bounds, to: nil)
         let titlebarBottom = window.contentLayoutRect.maxY
-        try expect(!ellipsis.isHidden && title.isHidden, "a regular window shows the ellipsis")
-
+        let split = try require(window.contentViewController as? NSSplitViewController, "sidebar split view")
+        let sidebar = split.splitViewItems[0].viewController.view
+        func checkHeader() throws {
+            window.layoutIfNeeded()
+            let titleFrame = titleButton.convert(titleButton.bounds, to: nil)
+            let ellipsisFrame = ellipsisButton.convert(ellipsisButton.bounds, to: nil)
+            let sidebarFrame = sidebar.convert(sidebar.bounds, to: nil)
+            try expect(!ellipsis.isHidden && !title.isHidden && titleButton.window === window && ellipsisButton.window === window &&
+                       titleButton.imagePosition == .imageTrailing && titleButton.image != nil &&
+                       titleButton.target === title && titleButton.action != nil &&
+                       titleFrame.maxX <= ellipsisFrame.minX && ellipsisFrame.maxX <= sidebarFrame.maxX + 0.5 &&
+                       abs(titleFrame.midY - ellipsisFrame.midY) < 0.5 &&
+                       abs(window.contentLayoutRect.maxY - titlebarBottom) < 0.5,
+                       "the title and ellipsis share the sidebar header (title \(titleFrame), ellipsis \(ellipsisFrame), sidebar \(sidebarFrame))")
+        }
+        try checkHeader()
         document.windowDidEnterFullScreen(Notification(name: NSWindow.didEnterFullScreenNotification, object: window))
-        window.layoutIfNeeded()
-        let titleFrame = titleButton.convert(titleButton.bounds, to: nil)
-        try expect(ellipsis.isHidden && !title.isHidden && titleButton.title == "Search" &&
-                   titleButton.imagePosition == .imageTrailing && titleButton.image != nil &&
-                   titleButton.target === title && titleButton.action != nil &&
-                   titleFrame.minX < ellipsisFrame.minX && abs(titleFrame.height - ellipsisFrame.height) < 0.5 &&
-                   abs(window.contentLayoutRect.maxY - titlebarBottom) < 0.5,
-                   "fullscreen places the active sidebar title and chevron at the left without resizing the header")
-        try expect(title.popupOrigin(in: titleButton).x == titleButton.bounds.minX,
-                   "the fullscreen menu aligns with the leading edge of its title")
+        try checkHeader()
+        try expect(titleButton.title == "Search" && title.popupOrigin(in: titleButton).x == titleButton.bounds.minX,
+                   "the mode menu aligns with the leading edge of its title")
 
         let menu = title.menu
         try expect(menu.item(withTitle: "Worktree")?.isEnabled == true, "opening a folder enables Worktree")
         menu.performActionForItem(at: menu.indexOfItem(withTitle: "Worktree"))
         try expect(document.findSettings.visible && document.sidebarMode == .worktree &&
-                   menu.items.map(\.title) == ["Worktree", "Source Control", "Search", "", "New File…", "New Folder…", "", "Show Hidden Files"] &&
-                   menu.item(withTitle: "New File…")?.isEnabled == true && menu.item(withTitle: "New Folder…")?.isEnabled == true &&
+                   menu.items.map(\.title) == ["Worktree", "Source Control", "Search"] &&
+                   ellipsis.menu.items.map(\.title) == ["New File…", "New Folder…", "", "Show Hidden Files"] &&
+                   ellipsis.menu.item(withTitle: "New File…")?.isEnabled == true &&
+                   ellipsis.menu.item(withTitle: "New Folder…")?.isEnabled == true &&
                    menu.item(withTitle: "Source Control")?.isEnabled == false &&
                    menu.item(withTitle: "Source Control")?.isHidden == false &&
                    menu.item(withTitle: "Search")?.isEnabled == true && menu.item(withTitle: "Worktree")?.state == .on,
                    "Worktree still offers Search alongside its own menu option")
-        window.layoutIfNeeded()
-        let titleFont = try require(titleButton.font, "the fullscreen title has a native font")
+        let sidebarWidth = sidebar.frame.width
+        split.splitView.setPosition(split.splitViewItems[0].minimumThickness, ofDividerAt: 0)
+        try checkHeader()
+        let titleFont = try require(titleButton.font, "the sidebar title has a native font")
         let titleCell = try require(titleButton.cell as? NSButtonCell, "the title has a native button cell")
         let titleRect = titleCell.titleRect(forBounds: titleButton.bounds)
         let textWidth = (titleButton.title as NSString).size(withAttributes: [.font: titleFont]).width
         try expect(titleButton.title == "Worktree" &&
                    titleRect.width >= floor(textWidth),
                    "the complete Worktree title fits after switching modes (text \(textWidth), title \(titleRect.width), button \(titleButton.bounds.width), intrinsic \(titleButton.intrinsicContentSize.width))")
+        split.splitView.setPosition(sidebarWidth, ofDividerAt: 0)
         menu.performActionForItem(at: menu.indexOfItem(withTitle: "Search"))
         try expect(document.sidebarMode == .search && window.firstResponder is FindFieldTextView,
                    "choosing Search from Worktree opens the Find field")
@@ -676,9 +689,13 @@ enum FindCheck {
 
         document.toggleSidebarFocus(.worktree)
         app.toggleSidebar(nil)
+        document.findSettings.width = 185
         app.openFind(nil)
         try expect(document.findSettings.visible && document.sidebarMode == .search &&
                    window.firstResponder is FindFieldTextView, "Command-F also switches a hidden tree directly to Search")
+        try checkHeader()
+        try expect(sidebar.frame.width >= split.splitViewItems[0].minimumThickness,
+                   "a stored narrower sidebar width still fits the header")
         app.toggleSidebar(nil)
         app.toggleWorktreeSidebar(nil)
         try expect(document.findSettings.visible && document.sidebarMode == .worktree && window.firstResponder === outline,
@@ -691,11 +708,11 @@ enum FindCheck {
                    menu.item(withTitle: "Worktree")?.isHidden == false,
                    "losing the open folder leaves a disabled Worktree option")
         document.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: window))
-        try expect(!ellipsis.isHidden && title.isHidden, "leaving fullscreen restores the ellipsis")
+        try checkHeader()
     }
 
-    private static func sidebarMenu(in window: NSWindow) throws -> SidebarMenuItem {
-        try require(window.toolbar?.items.first { $0.itemIdentifier.rawValue == "Edit.SidebarMenu" } as? SidebarMenuItem,
+    private static func sidebarMenu(in window: NSWindow, showsTitle: Bool = false) throws -> SidebarMenuItem {
+        try require(window.toolbar?.items.compactMap { $0 as? SidebarMenuItem }.first { $0.showsTitle == showsTitle },
                     "the sidebar header contains a native menu")
     }
 

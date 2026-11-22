@@ -192,7 +192,6 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func windowDidEnterFullScreen(_ notification: Notification) {
-        findPanel?.setFullScreen(true)
         pendingFullScreen = false
         app.didFinishFullScreenRestore(for: self)
     }
@@ -203,7 +202,6 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
-        findPanel?.setFullScreen(false)
         normalFrame = nil
     }
 
