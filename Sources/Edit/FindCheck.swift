@@ -65,7 +65,7 @@ enum FindCheck {
         try await checkResumingResult(in: app)
         try await checkRenderedHighlights(in: app.makeDocument())
         try await checkSidebarLayout(in: app.makeDocument())
-        try await checkSidebarReversal(in: app.makeDocument())
+        try checkInstantSidebar(in: app.makeDocument())
         try await checkSidebarModes(in: app)
         try await checkWindowSession(in: app)
         try expect(NSApplication.shared.activationPolicy() == .prohibited &&
@@ -689,75 +689,61 @@ enum FindCheck {
         scroll.reflectScrolledClipView(clip)
     }
 
-    private static func checkSidebarReversal(in document: DocumentWindow) async throws {
-        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+    private static func checkInstantSidebar(in document: DocumentWindow) throws {
         let window = document.window
-        window.alphaValue = 0
-        window.ignoresMouseEvents = true
-        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
-        // AppKit animates an ordered window. Keep this one invisible and non-interactive.
-        window.orderBack(nil)
-        defer { window.orderOut(nil) }
-        try expect(window.isVisible && !NSApp.isActive && window.alphaValue == 0,
-                   "live sidebar animation runs without interrupting the user")
-
         let folder = FileManager.default.temporaryDirectory.appending(path: "Sidebar reveal \(UUID())")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
         document.setFolder(folder)
-        let openPosition: CGFloat = 420
-        document.findSettings.width = openPosition
+        let openWidth: CGFloat = 420
+        document.findSettings.width = openWidth
+
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
+        window.orderBack(nil)
+        defer { window.close() }
+        try expect(window.isVisible && !NSApp.isActive && window.alphaValue == 0,
+                   "the live sidebar check stays in the background")
+
         document.toggleSidebarFocus(.worktree)
-        let split = try require(window.contentViewController as? NSSplitViewController, "native animated split view")
+        let split = try require(window.contentViewController as? NSSplitViewController, "native sidebar split view")
         let sidebar = split.splitViewItems[0]
         let options = try sidebarMenu(in: window)
         let title = try sidebarMenu(in: window, showsTitle: true)
-        let button = try require(options.view, "animated sidebar options button")
-        func divider() -> CGFloat {
-            if sidebar.isCollapsed { return 0 }
+        let button = try require(options.view, "sidebar options button")
+        let picker = try require(title.modePicker, "sidebar selector")
+
+        func checkOpen(_ mode: SidebarMode, width: CGFloat) throws {
             let view = sidebar.viewController.view
-            return view.convert(view.bounds, to: split.splitView).maxX
-        }
-        func reverse(with command: FindCommand) throws {
-            let position = divider()
-            let origin = document.scrollView.visibleContentOrigin
-            document.performFind(command)
-            try expect(abs(divider() - position) < 1 && abs(document.scrollView.visibleContentOrigin.x - origin.x) < 1,
-                       "reversing preserves the divider position and the horizontal scroll offset")
-            try expect(document.findSettings.visible || options.isHidden,
-                       "reversing toward closed hides the options button immediately")
-        }
-
-        try await waitUntil("Worktree controls are visible at the divider inset before it finishes opening") {
-            window.layoutIfNeeded()
+            let sidebarFrame = view.convert(view.bounds, to: nil)
             let trailing = button.convert(button.bounds, to: nil).maxX
-            return divider() < openPosition - 1 && !title.isHidden && !options.isHidden &&
-                button.window === window && !button.isHiddenOrHasHiddenAncestor && abs(divider() - trailing - 10) <= 0.5
+            try expect(!sidebar.isCollapsed && document.sidebarMode == mode && abs(sidebarFrame.width - width) < 1 &&
+                       title.isVisible && !options.isHidden && button.window === window && picker.window === window &&
+                       button.visibleRect.contains(button.bounds) && picker.visibleRect.contains(picker.bounds) &&
+                       abs(sidebarFrame.maxX - trailing - 10) <= 0.5,
+                       "show \(mode.title) and both controls at the final width before returning (width \(sidebarFrame.width), inset \(sidebarFrame.maxX - trailing))")
         }
-        func fullyOpen() -> Bool { abs(divider() - openPosition) < 1 && !options.isHidden }
-        try await waitUntil("sidebar fully opens", fullyOpen)
-        document.performFind(.toggleSidebar)
-        try await waitUntil("sidebar is partway closed") { divider() > 0 && divider() < openPosition * 0.8 }
-        try reverse(with: .find)
-        try expect(window.firstResponder is FindFieldTextView, "reopening with Command-F focuses Find")
-        try await waitUntil("reversed sidebar finishes opening", fullyOpen)
-        try expect(abs(divider() - openPosition) < 1, "reopening preserves the sidebar width")
 
+        try checkOpen(.worktree, width: openWidth)
+        for _ in 0..<2 {
+            document.performFind(.toggleSidebar)
+            try expect(sidebar.isCollapsed && options.isHidden && title.isHidden && window.firstResponder === document.editor,
+                       "hide the sidebar immediately and return focus to the editor")
+            document.performFind(.toggleSidebar)
+            try checkOpen(.worktree, width: openWidth)
+        }
         document.performFind(.toggleSidebar)
-        try await waitUntil("sidebar fully closes") { sidebar.isCollapsed }
+        window.setContentSize(NSSize(width: 400, height: window.frame.height))
+        let minimumWidth = sidebar.minimumThickness
+        document.findSettings.width = minimumWidth
         document.performFind(.toggleSidebar)
-        try await waitUntil("sidebar is partway open") { divider() > openPosition * 0.2 && divider() < openPosition }
-        try reverse(with: .toggleSidebar)
-        try await waitUntil("reversed sidebar finishes closing") { sidebar.isCollapsed }
-        try expect(divider() < 1 && window.firstResponder === document.editor,
-                   "closing leaves the editor focused")
+        try checkOpen(.worktree, width: minimumWidth)
 
-        document.performFind(.toggleSidebar)
         document.performFind(.toggleSidebar)
         document.performFind(.find)
-        try await waitUntil("rapid toggles leave the sidebar open", fullyOpen)
-        try expect(abs(divider() - openPosition) < 1 && window.firstResponder is FindFieldTextView,
-                   "superseded animations leave the latest width and focus")
+        try checkOpen(.search, width: minimumWidth)
+        try expect(window.firstResponder is FindFieldTextView, "Command-F immediately focuses Search")
     }
 
     private static func checkSidebarModes(in app: Edit) async throws {

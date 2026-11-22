@@ -18,19 +18,6 @@ enum FindCommand {
 }
 
 @MainActor
-private final class FindSplitView: NSSplitView {
-    @objc dynamic var animatedDividerPosition: CGFloat {
-        get { arrangedSubviews.first?.frame.maxX ?? 0 }
-        set { setPosition(newValue, ofDividerAt: 0) }
-    }
-
-    override class func defaultAnimation(forKey key: NSAnimatablePropertyKey) -> Any? {
-        if key == #keyPath(FindSplitView.animatedDividerPosition) { return CABasicAnimation() }
-        return super.defaultAnimation(forKey: key)
-    }
-}
-
-@MainActor
 private final class SidebarHeaderView: NSView {
     private weak var sidebar: NSView?
     private let options: NSView
@@ -242,7 +229,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     // The toolbar needs room for the window controls, Worktree title and options button.
     private static let minimumSidebarWidth: CGFloat = 208 + SidebarMenuItem.titleLeadingPadding
     private static let minimumEditorWidth: CGFloat = 128
-    private static let sidebarAnimationDuration: TimeInterval = 0.12
     private static let contentInset: CGFloat = 10
     private unowned let document: DocumentWindow
     private unowned let app: Edit
@@ -264,20 +250,16 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private let resultScroll = FindResultsScrollView()
     private let replaceRow = NSStackView()
     private let split = NSSplitViewController()
-    private let splitView = FindSplitView(frame: .zero)
+    private let splitView = NSSplitView(frame: .zero)
     private let sidebarContent = NSView()
     private let searchContent = NSStackView()
     private(set) var worktree: WorktreeSidebar?
-    private var contentTrailing: NSLayoutConstraint?
-    private var contentWidth: NSLayoutConstraint?
     private let sidebar = NSViewController()
     private let editorController = NSViewController()
     private lazy var sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
     private lazy var decorations = FindDecorations(editor: document.editor)
     private var installed = false
     private weak var sidebarHeader: SidebarMenuItem?
-    private var sidebarTransition: UInt64 = 0
-    private var sidebarAnimating = false
     private weak var focusBeforeSidebar: NSView?
     private weak var focusBeforeMode: NSView?
     private var previousMode: SidebarMode?
@@ -325,9 +307,9 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     func restoreVisibility() {
         guard settings.visible else { return }
         if worktreeVisible {
-            showWorktree(focus: false, animate: false)
+            showWorktree(focus: false)
         } else {
-            present(focusing: nil, animate: false)
+            present(focusing: nil)
             requestSearch()
         }
     }
@@ -390,7 +372,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         refreshDecorations()
     }
 
-    private func showWorktree(focus: Bool = true, animate: Bool = true) {
+    private func showWorktree(focus: Bool = true) {
         guard let folder = document.folderURL else { return }
         document.requestAutosave()
         let browser: WorktreeSidebar
@@ -412,7 +394,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
         selectMode(.worktree)
         browser.update(folder: folder, currentFile: document.displayedFileURL)
-        present(focusing: focus ? browser.outline : nil, animate: animate)
+        present(focusing: focus ? browser.outline : nil)
         browser.setActive(true)
     }
 
@@ -667,12 +649,9 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         sidebarContent.addSubview(content)
         sidebar.view = view
         updateName()
-        let trailing = sidebarContent.trailingAnchor.constraint(equalTo: view.trailingAnchor)
-        contentTrailing = trailing
-        contentWidth = sidebarContent.widthAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             sidebarContent.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            trailing,
+            sidebarContent.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             sidebarContent.topAnchor.constraint(equalTo: view.topAnchor),
             sidebarContent.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             content.leadingAnchor.constraint(equalTo: sidebarContent.leadingAnchor),
@@ -871,10 +850,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     @objc private func splitResized(_ notification: Notification) {
         guard installed else { return }
         resizeTitleBar()
-        if sidebarAnimating {
-            updateSidebarToolbarVisibility()
-            return
-        }
         settings.visible = !sidebarItem.isCollapsed
         let width = sidebar.view.frame.width
         if settings.visible && width >= sidebarItem.minimumThickness {
@@ -894,18 +869,16 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         return view.isDescendant(of: sidebar.view)
     }
 
-    private func present(focusing input: NSView?, animate: Bool) {
+    private func present(focusing input: NSView?) {
         let window = document.window
         let responder = window.firstResponder
         let desiredWidth = max(settings.width, Self.minimumSidebarWidth)
-        let transition = !installed || !settings.visible || sidebarItem.isCollapsed ? beginSidebarTransition() : nil
+        let needsOpening = !installed || !settings.visible || sidebarItem.isCollapsed
         installIfNeeded()
         settings.visible = true
-        if let transition {
-            if !sidebarAnimating {
-                sidebarItem.preferredThicknessFraction = min(0.7, CGFloat(desiredWidth) / max(splitView.bounds.width, 1))
-            }
-            setSidebarCollapsed(false, animate: animate, transition: transition, desiredWidth: desiredWidth)
+        if needsOpening {
+            sidebarItem.preferredThicknessFraction = min(0.7, desiredWidth / max(splitView.bounds.width, 1))
+            setSidebarCollapsed(false, desiredWidth: desiredWidth)
         }
         if let input {
             pendingResultFocus = nil
@@ -919,21 +892,18 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private func hide() {
         guard installed && settings.visible else { return }
         pendingResultFocus = nil
-        let animation = beginSidebarTransition()
         if focusIsInSidebar { returnFocus(allowingModeChange: false) }
         settings.visible = false
         worktree?.setActive(false)
         updateSidebarToolbarVisibility()
         previewRequested = false
-        setSidebarCollapsed(true, animate: true, transition: animation)
+        setSidebarCollapsed(true)
         refreshDecorations()
     }
 
     private func updateSidebarToolbarVisibility() {
         guard let header = sidebarHeader, let options = header.options else { return }
-        let headerFits = !sidebarAnimating ||
-            (contentWidth?.isActive == true && sidebar.view.frame.width >= Self.minimumSidebarWidth)
-        let hidden = !settings.visible || sidebarItem.isCollapsed || !headerFits
+        let hidden = !settings.visible || sidebarItem.isCollapsed
         let optionsHidden = hidden || options.menu.items.isEmpty
         guard header.isHidden != hidden || options.isHidden != optionsHidden || options.view?.isHidden != optionsHidden else { return }
         NSAnimationContext.runAnimationGroup { context in
@@ -946,79 +916,20 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         header.alignOptions()
     }
 
-    private func beginSidebarTransition() -> UInt64 {
-        sidebarTransition &+= 1
-        return sidebarTransition
-    }
-
-    private func setSidebarCollapsed(
-        _ collapsed: Bool, animate: Bool, transition: UInt64, desiredWidth: CGFloat? = nil
-    ) {
-        let canAnimate = animate && document.window.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let availableWidth = splitView.bounds.width - Self.minimumEditorWidth - splitView.dividerThickness
-        let width = min(desiredWidth ?? settings.width, availableWidth)
-        let dividerIsAnimating = contentWidth?.isActive == true
-        if dividerIsAnimating || (canAnimate && !sidebarAnimating && width >= Self.minimumSidebarWidth) {
-            animateDivider(to: collapsed ? 0 : max(0, width), openWidth: width,
-                           animated: canAnimate, transition: transition)
-        } else if canAnimate {
-            // AppKit provides the overlay sidebar when the window cannot fit both panes.
-            sidebarAnimating = true
-            updateSidebarToolbarVisibility()
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = Self.sidebarAnimationDuration
-                sidebarItem.animator().isCollapsed = collapsed
-            } completionHandler: { [weak self] in
-                Task { @MainActor in self?.finishSidebarTransition(transition) }
-            }
-        } else {
+    private func setSidebarCollapsed(_ collapsed: Bool, desiredWidth: CGFloat? = nil) {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
             sidebarItem.isCollapsed = collapsed
             if let desiredWidth { splitView.setPosition(desiredWidth, ofDividerAt: 0) }
-            finishSidebarTransition(transition)
-        }
-    }
 
-    private func animateDivider(to position: CGFloat, openWidth: CGFloat, animated: Bool, transition: UInt64) {
-        sidebarAnimating = true
-        updateSidebarToolbarVisibility()
-        if contentWidth?.isActive != true {
-            // The sidebar clips its contents as the native divider moves.
-            contentTrailing?.isActive = false
-            contentWidth?.constant = max(0, openWidth)
-            contentWidth?.isActive = true
-            sidebarItem.minimumThickness = 0
-            sidebarItem.canCollapse = false
-            if sidebarItem.isCollapsed {
-                sidebarItem.isCollapsed = false
-                splitView.animatedDividerPosition = 0
-            }
-        }
-        let distance = abs(position - splitView.animatedDividerPosition)
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = animated ? Self.sidebarAnimationDuration * Double(min(1, distance / max(openWidth, 1))) : 0
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            splitView.animator().animatedDividerPosition = position
-        } completionHandler: { [weak self] in
-            Task { @MainActor in self?.finishSidebarTransition(transition) }
-        }
-    }
-
-    private func finishSidebarTransition(_ transition: UInt64) {
-        guard sidebarTransition == transition else { return }
-        if contentWidth?.isActive == true {
-            if !settings.visible { sidebarItem.isCollapsed = true }
-            sidebarItem.minimumThickness = Self.minimumSidebarWidth
-            sidebarItem.canCollapse = true
-            contentWidth?.isActive = false
-            contentTrailing?.isActive = true
-        }
-        sidebarAnimating = false
-        document.window.layoutIfNeeded()
-        resizeTitleBar()
-        updateSidebarToolbarVisibility()
-        if let header = sidebarHeader, !header.isHidden {
             document.window.layoutIfNeeded()
-            (header.view as? SidebarHeaderView)?.finishLayout()
+            resizeTitleBar()
+            updateSidebarToolbarVisibility()
+            if let header = sidebarHeader, !header.isHidden {
+                document.window.layoutIfNeeded()
+                (header.view as? SidebarHeaderView)?.finishLayout()
+            }
         }
     }
 
@@ -1056,7 +967,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
         selectMode(.search)
         if replace { setReplacementVisible(true) }
-        present(focusing: replace ? replaceInput.input : findInput.input, animate: true)
+        present(focusing: replace ? replaceInput.input : findInput.input)
         previewRequested = false
         if changedQuery || (!validResults && !pending) { requestSearch() }
         refreshDecorations()
@@ -1105,7 +1016,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     private func showSearch(focusing input: NSView?) {
         selectMode(.search)
-        present(focusing: input, animate: true)
+        present(focusing: input)
         if !validResults && !pending { requestSearch() }
     }
 
