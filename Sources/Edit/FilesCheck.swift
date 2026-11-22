@@ -205,12 +205,25 @@ enum FilesCheck {
         try resolve(bitmap.representation(using: .png, properties: [:])).write(to: image)
         let window = document.window
         window.setContentSize(NSSize(width: 720, height: 300))
-        _ = try await app.openFile(image, in: document)
-        let imageSurface = try resolve(document.contentResponder as? FilePreviewView)
-        try await waitFor("preview shows the decoded image and its dimensions") {
-            views(in: imageSurface, ofType: NSImageView.self).contains { $0.accessibilityLabel() == "Preview of Preview sample.png" }
-                && views(in: imageSurface, ofType: NSTextField.self).contains { $0.stringValue == "32 × 20" }
+        var oldPreviewRemained = true
+        var completeOnTitleChange = false
+        let titleObservation = window.observe(\.title, options: [.new]) { _, change in
+            guard change.newValue == image.lastPathComponent else { return }
+            MainActor.assumeIsolated {
+                let preview = document.contentResponder
+                completeOnTitleChange = views(in: preview, ofType: NSImageView.self).contains {
+                    $0.accessibilityLabel() == "Preview of Preview sample.png"
+                } && views(in: preview, ofType: NSTextField.self).contains { $0.stringValue == "32 × 20" }
+            }
         }
+        let switched = try await app.openFile(image, in: document) {
+            oldPreviewRemained = oldPreviewRemained && document.contentResponder === surface && window.title == "actions"
+            return true
+        }
+        titleObservation.invalidate()
+        try expect(switched === document && oldPreviewRemained && completeOnTitleChange,
+                   "the previous preview stays in place until the new image and dimensions can appear with its title")
+        let imageSurface = try resolve(document.contentResponder as? FilePreviewView)
         let scroll = try resolve(views(in: imageSurface, ofType: NSScrollView.self).first)
         let previewImage = try resolve(views(in: imageSurface, ofType: NSImageView.self).first)
         let path = try resolve(views(in: imageSurface, ofType: NSTextField.self).first {
@@ -232,6 +245,30 @@ enum FilesCheck {
             try expect(scrolled.maxY > toolbarBottom && scrolled.minY < toolbarBottom,
                        "the image remains in the visible scroll area beneath the toolbar")
         }
+
+        document.setFolder(directory)
+        document.toggleSidebarFocus(.worktree)
+        let worktree = try resolve(document.worktreeSidebar)
+        let outline = worktree.outline
+        func row(of file: URL) -> Int? {
+            (0..<outline.numberOfRows).first { row in
+                let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSTableCellView
+                return cell?.textField?.stringValue == file.lastPathComponent
+            }
+        }
+        try await waitFor("Worktree lists the files available to preview") { row(of: binary) != nil && row(of: image) != nil }
+        let firstRow = try resolve(row(of: image))
+        let lastRow = try resolve(row(of: binary))
+        outline.selectRowIndexes(IndexSet(integer: firstRow), byExtendingSelection: false)
+        worktree.openFile(at: firstRow)
+        outline.selectRowIndexes(IndexSet(integer: lastRow), byExtendingSelection: false)
+        worktree.openFile(at: lastRow)
+        try await waitFor("rapid requests in Worktree keep the last preview and its metadata") {
+            document.displayedFileURL == FileBuffer.canonicalURL(binary) &&
+                views(in: document.contentResponder, ofType: NSTextField.self).contains { $0.stringValue.contains("4 bytes") }
+        }
+        try expect(window.firstResponder === outline && outline.selectedRow == lastRow,
+                   "switching previews keeps Worktree focus and the final selection")
 
         _ = try await app.openFile(text, in: document)
         try expect(!document.isShowingFilePreview && document.editor.isEditable && !document.scrollView.isHidden

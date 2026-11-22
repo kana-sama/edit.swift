@@ -5,6 +5,7 @@ struct OpenFilePreview: Sendable {
     let url: URL
     let identity: FileIdentity?
     let reason: String
+    let details: FilePreviewDetails
 }
 
 private enum OpenedFile: Sendable {
@@ -529,7 +530,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             let opened: OpenedFile?
             if record.draft == nil, let path = record.path {
                 do {
-                    opened = try await readForOpening(
+                    opened = try await Self.readForOpening(
                         URL(fileURLWithPath: path),
                         allowsPreview: record.isFilePreview == true
                     )
@@ -583,12 +584,16 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     func openFiles(
-        _ urls: [URL], allowMissing: Bool = false, in sourceDocument: DocumentWindow? = nil, focusEditor: Bool = true
+        _ urls: [URL], allowMissing: Bool = false, in sourceDocument: DocumentWindow? = nil,
+        focusEditor: Bool = true, shouldOpen: () -> Bool = { true }
     ) async {
         guard let document = sourceDocument ?? activeDocument else { return }
         for url in urls where !isQuitting {
             do {
-                guard try await openFile(url, allowMissing: allowMissing, in: document, focusEditor: focusEditor) != nil else { break }
+                guard try await openFile(url, allowMissing: allowMissing, in: document, focusEditor: focusEditor,
+                                         shouldOpen: shouldOpen) != nil else { break }
+            } catch is CancellationError {
+                break
             } catch {
                 await recentFiles.removeIfMissing(url)
                 if !isAgentCheck && !isQuitting && document.canReplaceBuffer && documents.contains(where: { $0 === document }) {
@@ -600,11 +605,19 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     @discardableResult
     func openFile(
-        _ url: URL, allowMissing: Bool = false, in sourceDocument: DocumentWindow? = nil, focusEditor: Bool = true
+        _ url: URL, allowMissing: Bool = false, in sourceDocument: DocumentWindow? = nil,
+        focusEditor: Bool = true, shouldOpen: () -> Bool = { true }
     ) async throws -> DocumentWindow? {
-        guard !isQuitting, let document = sourceDocument ?? activeDocument, document.canReplaceBuffer,
-              documents.contains(where: { $0 === document }), !isWorktreeMutationPath(url) else { return nil }
+        guard !isQuitting, !Task.isCancelled, let document = sourceDocument ?? activeDocument, document.canReplaceBuffer,
+              documents.contains(where: { $0 === document }), !isWorktreeMutationPath(url), shouldOpen() else { return nil }
+        document.openRequestGeneration &+= 1
+        let openGeneration = document.openRequestGeneration
         let mutationGeneration = worktreeMutationGeneration
+        func isCurrentRequest(at target: URL) -> Bool {
+            !isQuitting && !Task.isCancelled && document.canReplaceBuffer &&
+            document.openRequestGeneration == openGeneration && mutationGeneration == worktreeMutationGeneration &&
+            documents.contains(where: { $0 === document }) && !isWorktreeMutationPath(target) && shouldOpen()
+        }
 
         let (canonical, identity, isFolder) = await Task.detached {
             let path = FileBuffer.canonicalURL(url)
@@ -613,11 +626,11 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             if identity == nil { _ = FileManager.default.fileExists(atPath: path.path, isDirectory: &isDirectory) }
             return (path, identity, isDirectory.boolValue)
         }.value
-        guard !isQuitting, document.canReplaceBuffer, documents.contains(where: { $0 === document }),
-              mutationGeneration == worktreeMutationGeneration, !isWorktreeMutationPath(canonical) else { return nil }
+        guard isCurrentRequest(at: canonical) else { return nil }
         if isFolder {
             let folder = URL(filePath: canonical.path, directoryHint: .isDirectory)
-            return try await openFolder(url, canonical: folder, in: document, focusEditor: focusEditor)
+            return try await openFolder(url, canonical: folder, in: document,
+                                        focusEditor: focusEditor, isCurrentRequest: isCurrentRequest)
         }
         if !document.isShowingFilePreview &&
             (document.fileURL == canonical || (identity != nil && identity == document.fileIdentity)) {
@@ -625,9 +638,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             return document
         }
 
-        let opened = try await readForOpening(canonical, allowMissing: allowMissing)
-        guard documents.contains(where: { $0 === document }), mutationGeneration == worktreeMutationGeneration,
-              !isWorktreeMutationPath(canonical),
+        let opened = try await Self.readForOpening(canonical, allowMissing: allowMissing)
+        guard isCurrentRequest(at: canonical),
               await opened.replaceBuffer(in: document, focusEditor: focusEditor) else { return nil }
         if opened.identity != nil {
             await recentFiles.record(url, in: document.folderURL)
@@ -638,26 +650,24 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     private func openFolder(
-        _ url: URL, canonical folder: URL, in document: DocumentWindow, focusEditor: Bool
+        _ url: URL, canonical folder: URL, in document: DocumentWindow,
+        focusEditor: Bool, isCurrentRequest: (URL) -> Bool
     ) async throws -> DocumentWindow? {
-        let mutationGeneration = worktreeMutationGeneration
         var opened: OpenedFile?
         if let last = await recentFiles.lastFile(in: folder),
-           let candidate = try? await readForOpening(last, within: folder), candidate.identity != nil {
+           let candidate = try? await Self.readForOpening(last, within: folder), candidate.identity != nil {
             opened = candidate
         }
         if opened == nil {
             let readmes = try await Task.detached { try Self.folderReadmes(folder) }.value
             for readme in readmes {
-                if let candidate = try? await readForOpening(readme, within: folder, allowsPreview: false) {
+                if let candidate = try? await Self.readForOpening(readme, within: folder, allowsPreview: false) {
                     opened = candidate
                     break
                 }
             }
         }
-        guard !isQuitting, document.canReplaceBuffer, documents.contains(where: { $0 === document }),
-              mutationGeneration == worktreeMutationGeneration,
-              opened.map({ !isWorktreeMutationPath($0.url) }) ?? true else { return nil }
+        guard isCurrentRequest(opened?.url ?? folder) else { return nil }
         if let opened {
             if opened.url != document.displayedFileURL {
                 guard await opened.replaceBuffer(in: document, focusEditor: focusEditor) else { return nil }
@@ -690,35 +700,42 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         }.map(\.url)
     }
 
-    private func readForOpening(
+    @concurrent
+    private nonisolated static func readForOpening(
         _ url: URL, allowMissing: Bool = false, within folder: URL? = nil, allowsPreview: Bool = true
     ) async throws -> OpenedFile {
-        try await Task.detached(priority: .userInitiated) {
-            let target: URL
-            if let folder {
-                target = FileBuffer.canonicalURL(url)
-                let prefix = folder.path.hasSuffix("/") ? folder.path : folder.path + "/"
-                guard target.path.hasPrefix(prefix) else { throw FileBufferError.invalidPath(url) }
-            } else {
-                target = url
-            }
-            // Media can be much larger than text. Let the system decoders read it on demand.
-            if allowsPreview, !target.pathExtension.isEmpty,
-               let type = UTType(filenameExtension: target.pathExtension),
-               type != .svg, !type.conforms(to: .text),
-               type.conforms(to: .image) || type.conforms(to: .movie) || type.conforms(to: .video),
-               let identity = FileIdentity.at(target) {
-                return .preview(OpenFilePreview(url: target, identity: identity, reason: ""))
-            }
+        try Task.checkCancellation()
+        let target: URL
+        if let folder {
+            target = FileBuffer.canonicalURL(url)
+            let prefix = folder.path.hasSuffix("/") ? folder.path : folder.path + "/"
+            guard target.path.hasPrefix(prefix) else { throw FileBufferError.invalidPath(url) }
+        } else {
+            target = url
+        }
 
+        let identity: FileIdentity?
+        let reason: String
+        // Media can be much larger than text. Let the system decoders read it on demand.
+        if allowsPreview, !target.pathExtension.isEmpty,
+           let type = UTType(filenameExtension: target.pathExtension),
+           type != .svg, !type.conforms(to: .text),
+           type.conforms(to: .image) || type.conforms(to: .movie) || type.conforms(to: .video),
+           let mediaIdentity = FileIdentity.at(target) {
+            identity = mediaIdentity
+            reason = ""
+        } else {
             do {
                 return try .text(FileBuffer.read(target, allowMissing: allowMissing))
             } catch {
                 guard allowsPreview else { throw error }
-                return .preview(OpenFilePreview(url: target, identity: FileIdentity.at(target),
-                                                reason: error.localizedDescription))
+                identity = FileIdentity.at(target)
+                reason = error.localizedDescription
             }
-        }.value
+        }
+        let details = await FilePreviewDetails.load(target)
+        try Task.checkCancellation()
+        return .preview(OpenFilePreview(url: target, identity: identity, reason: reason, details: details))
     }
 
     func manualIconLanguage(for recent: RecentFile) -> String? {

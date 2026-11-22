@@ -12,31 +12,21 @@ final class FilePreviewView: NSView {
     private let revealButton = NSButton(title: "Show in Finder", target: nil, action: nil)
     private lazy var contentWidth = content.widthAnchor.constraint(equalToConstant: 0)
     private var mediaHeightLimit: NSLayoutConstraint?
-    private var loadTask: Task<Void, Never>?
     private var video: FileVideoPreviewView?
 
-    init(url: URL, reason: String) {
-        self.url = url
+    init(preview: OpenFilePreview) {
+        url = preview.url
         super.init(frame: .zero)
-        configure(reason: reason)
-        loadTask = Task { [weak self] in
-            let details = await FilePreviewDetails.load(url)
-            guard !Task.isCancelled else { return }
-            self?.show(details)
-        }
+        configure(reason: preview.reason)
+        show(preview.details)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    deinit {
-        loadTask?.cancel()
-    }
-
     override var acceptsFirstResponder: Bool { true }
 
     func stop() {
-        loadTask?.cancel()
         video?.stop()
     }
 

@@ -52,6 +52,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private(set) var folderURL: URL?
     private var filePreview: OpenFilePreview?
     private var filePreviewView: FilePreviewView?
+    var openRequestGeneration: UInt64 = 0
     var isShowingFilePreview: Bool { filePreview != nil }
     var displayedFileURL: URL? { filePreview?.url ?? fileURL }
     var displayName: String { displayedFileURL?.lastPathComponent ?? "Untitled" }
@@ -278,6 +279,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func loadPreview(_ preview: OpenFilePreview, revealInWorktree: Bool = true) {
+        let view = FilePreviewView(preview: preview)
         removeFilePreview()
         filePreview = preview
         fileURL = nil
@@ -287,7 +289,6 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         format = FileFormat()
         revision = nil
         editor.isEditable = false
-        let view = FilePreviewView(url: preview.url, reason: preview.reason)
         filePreviewView = view
         pinToEditorContent(view)
         window.initialFirstResponder = view
@@ -540,7 +541,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         let movedURL = URL(filePath: movedFile.path, directoryHint: .notDirectory)
         if let filePreview {
             let wasFocused = contentHasFocus
-            loadPreview(OpenFilePreview(url: movedURL, identity: FileIdentity.at(movedURL), reason: filePreview.reason),
+            loadPreview(OpenFilePreview(url: movedURL, identity: FileIdentity.at(movedURL),
+                                        reason: filePreview.reason, details: filePreview.details),
                         revealInWorktree: revealInWorktree)
             if wasFocused { focusContent() }
             let folder = folderURL
@@ -676,6 +678,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func newBuffer() async {
+        guard canReplaceBuffer, !app.isQuitting else { return }
+        openRequestGeneration &+= 1
         await replaceBuffer(with: nil)
     }
 

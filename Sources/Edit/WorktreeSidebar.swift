@@ -542,7 +542,9 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             defer { self?.openingFile = nil }
             while let self, let url = self.pendingOpen {
                 self.pendingOpen = nil
-                await app.openFiles([url], in: document, focusEditor: false)
+                await app.openFiles([url], in: document, focusEditor: false) {
+                    self.pendingOpen == nil || self.pendingOpen == url
+                }
             }
         }
     }
