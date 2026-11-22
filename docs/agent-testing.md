@@ -20,6 +20,7 @@ Use separate fresh directories via `EDIT_BUILD_DIR` and `EDIT_SDK_CACHE_DIR` to 
 Prefer process or model checks when a window is unnecessary. Test the real implementation through its ordinary entry points where practical. When startup, layout, or drawing requires AppKit, use a dedicated test instance and disposable data with an identity separate from the owner's app.
 
 - Prevent activation before launch and window creation. Keep the test instance in the background throughout the check.
+- Create editor test windows fully transparent and non-interactive. Keep them unordered for bitmap captures and close each fixture when its check ends. Checks that require a live window backing layer can order a transparent window offscreen for that check.
 - Suppress Dock attention, interactive alerts, restoration, and other owner-facing effects for that test instance. Collect diagnostics through the runner.
 - Use synthetic files and a disposable profile. Identify the exact test instance before controlling it or closing it.
 - Verify quiet behavior without changing global macOS settings or interacting with the owner's running editor.

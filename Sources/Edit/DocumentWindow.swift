@@ -124,6 +124,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         (scrollView, editor) = EditorTextView.scrollingEditor(in: window.contentLayoutRect)
         editorContentView = NSView(frame: scrollView.frame)
         super.init()
+        // An ordered test window may need a live backing layer for AppKit drawing.
+        if app.isAgentCheck {
+            window.alphaValue = 0
+            window.ignoresMouseEvents = true
+        }
         window.title = "Untitled"
         window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false

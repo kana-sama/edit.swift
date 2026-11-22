@@ -48,6 +48,10 @@ enum SyntaxCheck {
 
     private static func checkFirstDraw(in app: Edit, appearance: NSAppearance.Name) async throws {
         let document = app.makeDocument()
+        defer { document.window.close() }
+        guard !document.window.isVisible, document.window.alphaValue == 0 else {
+            throw Failure("The Rust drawing fixture must start hidden and transparent (alpha: \(document.window.alphaValue)).")
+        }
         let scrollView = document.scrollView
         let clip = scrollView.contentView
         document.window.appearance = NSAppearance(named: appearance)
@@ -74,6 +78,7 @@ enum SyntaxCheck {
         try expectDrawnColor(in: clip, primaryChannel: 0, after: "scrolling back to string literals")
         document.editor.selectAll(nil)
         try expectDrawnColor(in: clip, primaryChannel: 0, after: "selecting the Rust source")
+        guard !document.window.isVisible else { throw Failure("Drawing the Rust fixture ordered its window onscreen.") }
         print("Syntax in the first frame of a \(source.utf8.count)-byte file: open \(opened), scroll \(scrolled).")
     }
 
