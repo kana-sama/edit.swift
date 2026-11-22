@@ -11,7 +11,8 @@ enum HeaderCheck {
     }
 
     private static func folderLabel(in document: DocumentWindow) -> NSTextField? {
-        document.window.toolbar?.items.first { $0.itemIdentifier == DocumentTitleBar.folderItemIdentifier }?.view as? NSTextField
+        let title = document.window.toolbar?.items.first { $0.itemIdentifier == DocumentTitleBar.folderItemIdentifier }?.view
+        return (title as? NSStackView)?.arrangedSubviews.compactMap { $0 as? NSTextField }.first
     }
 
     private static func fileLabel(in document: DocumentWindow) -> NSTextField? {
@@ -101,6 +102,15 @@ enum HeaderCheck {
         try expect(folderLabel(in: document)?.stringValue == "Another folder"
                    && fileLabel(in: document)?.stringValue == "Untitled" && fileIcon(in: document)?.image != nil,
                    "the folder, file and language icon remain in the toolbar alongside the sidebar")
+
+        document.toggleWorktreeSidebar()
+        document.window.layoutIfNeeded()
+        guard let split = document.window.contentViewController as? NSSplitViewController,
+              let sidebar = split.splitViewItems.first?.viewController.view,
+              let visibleFolder = folderLabel(in: document) else { throw Failure("the folder title sits next to the sidebar") }
+        let divider = sidebar.convert(sidebar.bounds, to: nil).maxX
+        let gutter = visibleFolder.convert(visibleFolder.bounds, to: nil).minX - divider
+        try expect((10...18).contains(gutter), "the folder title clears the sidebar divider (\(gutter) pt)")
 
         let longFolder = root.appending(path: String(repeating: "Long folder name ", count: 7) + "project")
         let longFile = longFolder.appending(path: String(repeating: "File name ", count: 8) + "example.txt")

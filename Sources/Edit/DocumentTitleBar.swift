@@ -9,6 +9,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     private unowned let document: DocumentWindow
     private unowned let app: Edit
     private weak var folderLabel: TitleBarLabel?
+    private weak var folderTitle: NSStackView?
     private weak var fileLabel: TitleBarLabel?
     private weak var fileTitle: NSStackView?
     private weak var languageIcon: TitleBarIcon?
@@ -51,7 +52,12 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             label.onRightClick = { [weak self] label in self?.showFolderMenu(from: label) }
             folderLabel = label
             folderItem = item
-            item.view = label
+            let title = NSStackView(views: [label])
+            title.alignment = .centerY
+            // AppKit measures the item even when the folder label is empty and hidden.
+            title.widthAnchor.constraint(greaterThanOrEqualToConstant: 1).isActive = true
+            folderTitle = title
+            item.view = title
         } else {
             item.label = "File"
             item.visibilityPriority = .high
@@ -99,6 +105,8 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         let zoom = window.standardWindowButton(.zoomButton)
         let controls = zoom.map { $0.convert($0.bounds, to: nil).maxX + 8 } ?? 84
         let leading = sidebarWidth > 0 ? sidebarWidth : controls
+        let folderInset: CGFloat = sidebarWidth > 0 ? 8 : 0
+        if folderTitle?.edgeInsets.left != folderInset { folderTitle?.edgeInsets.left = folderInset }
         availableWidth = max(0, floor(window.frame.width - leading))
         fitLabels()
     }
