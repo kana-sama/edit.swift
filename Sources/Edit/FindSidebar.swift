@@ -1071,9 +1071,18 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             let selection = editor.selectedRange()
             let text = editor.string as NSString
             if selection.length > 0 && NSMaxRange(selection) <= text.length {
-                let selectedText = text.substring(with: selection)
+                let selectedText: String
+                if let ranges = editor.focusRanges {
+                    selectedText = ranges
+                        .map { NSIntersectionRange($0, selection) }
+                        .filter { $0.length > 0 }
+                        .map { text.substring(with: $0) }
+                        .joined(separator: editor.preferredLineEnding)
+                } else {
+                    selectedText = text.substring(with: selection)
+                }
                 let query = settings.options.regularExpression ? NSRegularExpression.escapedPattern(for: selectedText) : selectedText
-                if query != settings.query {
+                if !query.isEmpty && query != settings.query {
                     changedQuery = true
                     settings.query = query
                     findInput.value = query
@@ -1199,8 +1208,9 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         let snapshot = bufferSnapshot
         let query = settings.query
         let options = settings.options
+        let ranges = document.editor.focusRanges
         let worker = Task.detached(priority: .userInitiated) {
-            FindSearch.match(query, in: snapshot, options: options)
+            FindSearch.match(query, in: snapshot, options: options, ranges: ranges)
         }
         work = worker
         activity = Task { [weak self] in
@@ -1210,7 +1220,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
         Task { [weak self] in
             let outcome = await worker.value
-            guard let self, generation == searchGeneration else { return }
+            guard let self, generation == searchGeneration, ranges == document.editor.focusRanges else { return }
             activity?.cancel()
             pending = false
             resultSnapshot = snapshot
@@ -1386,16 +1396,26 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             using: settings.replacement, in: source, isRegex: settings.options.regularExpression
         )) }
         let span = NSRange(location: first.range.location, length: NSMaxRange(last.range) - first.range.location)
-        var start = span.location
-        var output = ""
-        for edit in edits {
-            output += source.substring(with: NSRange(location: start, length: edit.range.location - start))
-            output += edit.replacement
-            start = NSMaxRange(edit.range)
+        let editor = document.editor
+        let scoped = editor.focusRanges != nil
+        var output: String?
+        if !scoped {
+            var start = span.location
+            var replacement = ""
+            for edit in edits {
+                replacement += source.substring(with: NSRange(location: start, length: edit.range.location - start))
+                replacement += edit.replacement
+                start = NSMaxRange(edit.range)
+            }
+            output = replacement
         }
 
         advanceFrom = advance ? first.range.location + edits[0].replacement.utf16.count : nil
-        if output == source.substring(with: span) {
+        let replacements = scoped ? edits.compactMap { edit -> MultiCaretEditing.Replacement? in
+            guard edit.replacement != source.substring(with: edit.range) else { return nil }
+            return MultiCaretEditing.Replacement(range: edit.range, text: edit.replacement)
+        } : []
+        if scoped ? replacements.isEmpty : output == source.substring(with: span) {
             publish(baseMatches)
             return
         }
@@ -1404,7 +1424,13 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         decorations.clearPreview()
         movingDismissalsForReplacement = true
         applyingEdits = true
-        let changed = document.editor.replaceFoundText(in: span, with: output)
+        let changed: Bool
+        if let output {
+            changed = editor.replaceFoundText(in: span, with: output)
+        } else {
+            let end = NSMaxRange(last.range) + replacements.reduce(0) { $0 + $1.text.utf16.count - $1.range.length }
+            changed = editor.applyMultiEdits(replacements, selections: [NSRange(location: end, length: 0)])
+        }
         movingDismissalsForReplacement = false
         applyingEdits = false
         if changed {
@@ -1450,7 +1476,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     private func configure(_ cell: FindResultCell, row: Int) {
         let range = matches[row].range
-        cell.configure(text: excerpt(of: range), replacementAvailable: settings.showsReplacement,
+        cell.configure(text: excerpt(of: matches[row]), replacementAvailable: settings.showsReplacement,
                        acceptsActions: validResults, selected: selected == row,
                        apply: { [weak self] in
                            guard let self, let match = matches.first(where: { $0.range == range }) else { return }
@@ -1475,17 +1501,23 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
     }
 
-    private func excerpt(of range: NSRange) -> NSAttributedString {
+    private func excerpt(of hit: FindHit) -> NSAttributedString {
+        let range = hit.range
         let source = resultSnapshot as NSString
         var start = 0
         var end = 0
         var contentEnd = 0
         source.getLineStart(&start, end: &end, contentsEnd: &contentEnd,
                             for: NSRange(location: range.location, length: 0))
+        if let scope = hit.scope {
+            start = max(start, scope.location)
+            contentEnd = min(contentEnd, NSMaxRange(scope))
+        }
         // Keep enough room for the match itself before the trailing row actions.
         let from = max(start, range.location - 9)
         let to = max(from, min(contentEnd, max(NSMaxRange(range), from + 100)))
-        let excerptRange = source.rangeOfComposedCharacterSequences(for: NSRange(location: from, length: to - from))
+        let composed = source.rangeOfComposedCharacterSequences(for: NSRange(location: from, length: to - from))
+        let excerptRange = hit.scope.map { NSIntersectionRange(composed, $0) } ?? composed
         let prefix = excerptRange.location > start ? "…" : ""
         let suffix = NSMaxRange(excerptRange) < contentEnd ? "…" : ""
         let text = source.substring(with: excerptRange).replacingOccurrences(of: "\t", with: " ")

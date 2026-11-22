@@ -27,6 +27,8 @@ struct ControlCommand {
 
     func isAvailable(in document: DocumentWindow, focus: NSResponder?) -> Bool {
         guard let action = item.action, !item.isHidden else { return false }
+        if action == #selector(Edit.focusSelection(_:)) { return document.canFocusSelection }
+        if action == #selector(Edit.exitFocus(_:)) { return document.canExitFocus }
         if documentOnly {
             return !document.isShowingFilePreview && document.window.attachedSheet == nil && document.editor.responds(to: action)
         }
@@ -48,6 +50,14 @@ struct ControlCommand {
 
     func run(in document: DocumentWindow) {
         guard let action = item.action else { return }
+        if action == #selector(Edit.focusSelection(_:)) {
+            document.focusSelection()
+            return
+        }
+        if action == #selector(Edit.exitFocus(_:)) {
+            document.exitFocus()
+            return
+        }
         if documentOnly {
             guard !document.isShowingFilePreview else { return }
             document.focusContent()

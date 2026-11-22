@@ -18,8 +18,9 @@ struct FindSettings: Codable, Equatable, Sendable {
 // Foundation produces immutable regular-expression results. Keeping the result preserves named captures.
 struct FindHit: @unchecked Sendable {
     fileprivate let result: NSTextCheckingResult
+    let scope: NSRange?
 
-    var range: NSRange { result.range }
+    var range: NSRange { sourceRange(result.range) }
 
     func replacement(using template: String, in text: NSString, isRegex: Bool) -> String {
         guard isRegex else { return template }
@@ -58,7 +59,11 @@ struct FindHit: @unchecked Sendable {
             capture = result.range(withName: name)
         }
         guard capture.location != NSNotFound else { return "" }
-        return text.substring(with: capture)
+        return text.substring(with: sourceRange(capture))
+    }
+
+    private func sourceRange(_ range: NSRange) -> NSRange {
+        NSRange(location: range.location + (scope?.location ?? 0), length: range.length)
     }
 }
 
@@ -72,7 +77,7 @@ enum FindSearch {
         case invalidExpression
     }
 
-    static func match(_ query: String, in text: String, options: FindOptions) -> Outcome {
+    static func match(_ query: String, in text: String, options: FindOptions, ranges: [NSRange]? = nil) -> Outcome {
         guard !query.isEmpty else { return .matches([]) }
         var pattern = options.regularExpression ? normalizeNamedGroups(query) : NSRegularExpression.escapedPattern(for: query)
         if options.wholeWord {
@@ -89,13 +94,27 @@ enum FindSearch {
         ) else { return .invalidExpression }
 
         var hits: [FindHit] = []
-        regex.enumerateMatches(in: text, options: [.reportProgress], range: NSRange(text.startIndex..., in: text)) {
-            match, _, stop in
-            if Task.isCancelled {
-                stop.pointee = true
-            } else if let match {
-                hits.append(FindHit(result: match))
+        func collect(in fragment: String, scope: NSRange?) {
+            regex.enumerateMatches(in: fragment, options: [.reportProgress],
+                                   range: NSRange(fragment.startIndex..., in: fragment)) { match, _, stop in
+                if Task.isCancelled {
+                    stop.pointee = true
+                } else if let match {
+                    hits.append(FindHit(result: match, scope: scope))
+                }
             }
+        }
+        if let ranges {
+            // A real substring gives anchors and boundary tests the same view as an isolated buffer.
+            let source = text as NSString
+            for range in ranges {
+                if Task.isCancelled { break }
+                guard range.location >= 0, range.location <= source.length,
+                      range.length >= 0, range.length <= source.length - range.location else { continue }
+                collect(in: source.substring(with: range), scope: range)
+            }
+        } else {
+            collect(in: text, scope: nil)
         }
         return .matches(hits)
     }

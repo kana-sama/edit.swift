@@ -4,6 +4,9 @@ private struct MultiCaretComposition {
     let selections: [NSRange]
     let original: NSAttributedString
     var preview: NSRange
+    var focusedRanges: EditorFocusSession.Snapshot? = nil
+    var focusedGroups: [[NSRange]]? = nil
+    var focusedPrimaryEnd: Int? = nil
 
     func contains(_ range: NSRange) -> Bool {
         range.location >= preview.location && range.location <= NSMaxRange(preview)
@@ -34,6 +37,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     private weak var multiCaretWindow: NSWindow?
     private var multiCaretComposition: MultiCaretComposition?
     private var updatingComposition = false
+    let editorUndoManager = EditorUndoManager()
+    var focusSession: EditorFocusSession?
+    var focusDecoration: FocusDecoration?
+    var focusEditsAllowed = false
+    var onFocusScopeChange: (() -> Void)?
     var onTextChange: (() -> Void)?
     var onBlur: (() -> Void)?
     var onFindEditorInteraction: (() -> Void)?
@@ -116,6 +124,22 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         } else {
             super.viewDidEndLiveResize()
         }
+    }
+
+    override var undoManager: UndoManager? { editorUndoManager }
+
+    override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
+        guard focusSession == nil || focusEditsAllowed || replacementString == nil else { return false }
+        return super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
+    }
+
+    override func shouldChangeText(inRanges affectedRanges: [NSValue], replacementStrings: [String]?) -> Bool {
+        guard focusSession == nil || focusEditsAllowed || replacementStrings == nil else { return false }
+        return super.shouldChangeText(inRanges: affectedRanges, replacementStrings: replacementStrings)
+    }
+
+    override func selectAll(_ sender: Any?) {
+        if !selectFocusedText() { super.selectAll(sender) }
     }
 
     override func becomeFirstResponder() -> Bool {
@@ -294,10 +318,14 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     override func mouseDown(with event: NSEvent) {
         onFindEditorInteraction?()
+        if let focusSession, event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty {
+            let offset = characterIndexForInsertion(at: convert(event.locationInWindow, from: nil))
+            if !focusSession.contains(NSRange(location: offset, length: 0)) { exitFocus() }
+        }
         if addCaret(at: event) { return }
         multiCaret.pendingSkip = false
         super.mouseDown(with: event)
-        if hasSecondarySelections { keepPrimarySelection(nil) }
+        if focusSession == nil && hasSecondarySelections { keepPrimarySelection(nil) }
     }
 
     override func insertText(_ string: Any, replacementRange: NSRange) {
@@ -319,10 +347,15 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             let restoredRange = composition.restoreRange(replacementRange)
             discardMultiCaretComposition()
             keepPrimarySelection(nil)
-            super.insertText(string, replacementRange: restoredRange)
+            if focusSession != nil {
+                _ = insertAtCarets(string, replacementRange: restoredRange)
+            } else {
+                super.insertText(string, replacementRange: restoredRange)
+            }
             return
         }
         if !insertAtCarets(string, replacementRange: replacementRange) {
+            if focusSession != nil { return }
             if hasSecondarySelections { keepPrimarySelection(nil) }
             super.insertText(string, replacementRange: replacementRange)
         }
@@ -344,31 +377,51 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             let restoredRange = composition.restoreRange(replacementRange)
             discardMultiCaretComposition()
             keepPrimarySelection(nil)
-            super.setMarkedText(string, selectedRange: selectedRange, replacementRange: restoredRange)
+            if focusSession != nil {
+                setMarkedText(string, selectedRange: selectedRange, replacementRange: restoredRange)
+            } else {
+                super.setMarkedText(string, selectedRange: selectedRange, replacementRange: restoredRange)
+            }
             return
         }
 
-        if multiCaretComposition == nil, hasSecondarySelections, let primary = caretSelections.last {
-            let selections = caretSelections
-            setCaretSelections([primary], record: false)
+        if multiCaretComposition == nil, hasSecondarySelections || focusSession != nil,
+           let primary = caretSelections.last {
+            let explicit = replacementRange.location != NSNotFound && replacementRange != primary
+            let target = explicit && focusSession != nil ? replacementRange : primary
+            guard focusAllowsEdits([target]) else { return }
+            let selections = explicit && focusSession != nil ? [target] : caretSelections
+            let groups = explicit ? nil : focusedSelectionGroups
+            let activeEnd = activeEnd(of: target)
+            setCaretSelections([target], record: false)
             if isEditable, preview?.isEmpty == false, let storage = textStorage,
-               replacementRange.location == NSNotFound || replacementRange == primary {
+               !explicit || focusSession != nil {
                 breakUndoCoalescing()
                 multiCaretComposition = MultiCaretComposition(
-                    selections: selections, original: storage.attributedSubstring(from: primary), preview: primary
+                    selections: selections, original: storage.attributedSubstring(from: target), preview: target,
+                    focusedRanges: captureFocusSnapshot(), focusedGroups: groups, focusedPrimaryEnd: activeEnd
                 )
             }
         }
 
-        guard multiCaretComposition != nil, let storage = textStorage else {
+        guard let composition = multiCaretComposition, let storage = textStorage else {
+            if focusSession != nil { return }
             super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
             return
         }
         let oldLength = storage.length
+        let target = replacementRange.location == NSNotFound ? composition.preview : replacementRange
+        if let snapshot = composition.focusedRanges, let preview {
+            updateMarkedFocus(snapshot, composition: composition,
+                              length: composition.preview.length - target.length + preview.utf16.count)
+        }
         withTransientComposition {
             super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
         }
         multiCaretComposition?.preview.length += storage.length - oldLength
+        if let snapshot = composition.focusedRanges, let marked = multiCaretComposition, marked.preview.length >= 0 {
+            updateMarkedFocus(snapshot, composition: marked, length: marked.preview.length)
+        }
         if !hasMarkedText() || (multiCaretComposition?.preview.length ?? 0) < 0 {
             discardMultiCaretComposition()
         }
@@ -393,7 +446,15 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             manager?.enableUndoRegistration()
             updatingComposition = false
         }
-        change()
+        withFocusEditsAllowed(change)
+    }
+
+    private func updateMarkedFocus(
+        _ snapshot: EditorFocusSession.Snapshot, composition: MultiCaretComposition, length: Int
+    ) {
+        focusSession?.restore(snapshot)
+        let original = NSRange(location: composition.preview.location, length: composition.original.length)
+        focusSession?.resizeMarkedRange(original, to: length)
     }
 
     func discardMultiCaretComposition() {
@@ -401,17 +462,35 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         multiCaretComposition = nil
         withTransientComposition {
             super.unmarkText()
+            if let snapshot = composition.focusedRanges { focusSession?.restore(snapshot) }
             if let storage = textStorage, composition.preview.length >= 0,
                NSMaxRange(composition.preview) <= storage.length {
                 storage.replaceCharacters(in: composition.preview, with: composition.original)
             }
-            setCaretSelections(composition.selections, record: false)
+            if let groups = composition.focusedGroups {
+                restoreFocusedSelectionGroups(groups, primary: composition.selections.last,
+                                              activeEnd: composition.focusedPrimaryEnd)
+            } else {
+                setCaretSelections(composition.selections, record: false)
+            }
         }
     }
 
     private func commitMultiCaretComposition(_ text: String) {
         discardMultiCaretComposition()
         _ = insertAtCarets(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+    }
+
+    override func uppercaseWord(_ sender: Any?) {
+        if !transformFocusedSelections({ $0.uppercased() }) { super.uppercaseWord(sender) }
+    }
+
+    override func lowercaseWord(_ sender: Any?) {
+        if !transformFocusedSelections({ $0.lowercased() }) { super.lowercaseWord(sender) }
+    }
+
+    override func capitalizeWord(_ sender: Any?) {
+        if !transformFocusedSelections({ $0.capitalized }) { super.capitalizeWord(sender) }
     }
 
     override func deleteBackward(_ sender: Any?) {
@@ -434,6 +513,12 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         if multiCaretComposition != nil {
             discardMultiCaretComposition()
             inputContext?.discardMarkedText()
+        } else if focusSession != nil && !hasMarkedText() {
+            if let primary = caretSelections.last, hasSecondarySelections || primary.length > 0 {
+                setCaretSelections([NSRange(location: activeEnd(of: primary), length: 0)])
+            } else {
+                exitFocus()
+            }
         } else if hasSecondarySelections && !hasMarkedText() {
             keepPrimarySelection(sender)
         } else {
@@ -733,6 +818,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             return
         }
         if !multiCaret.isApplying {
+            exitFocus()
             multiCaret.selections = [selectedRange()]
             multiCaret.navigation = [:]
         }
@@ -770,6 +856,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     func refreshCurrentLine() {
         refreshCaretDecorations()
+        refreshFocusDecoration()
         let location = selectedRange().location
         var newLine = NSRect.zero
         if window != nil, caretIsNearViewport(location) {

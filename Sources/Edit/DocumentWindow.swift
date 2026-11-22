@@ -149,6 +149,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         window.initialFirstResponder = editor
         window.makeFirstResponder(editor)
         editor.onTextChange = { [weak self] in self?.textDidChange() }
+        editor.onFocusScopeChange = { [weak self] in self?.findPanel?.bufferReplaced() }
         editor.onBlur = { [weak self] in self?.requestAutosave() }
         for name in [Notification.Name.NSUndoManagerDidUndoChange, .NSUndoManagerDidRedoChange] {
             NotificationCenter.default.addObserver(self, selector: #selector(undoOrRedo(_:)), name: name, object: nil)
@@ -807,8 +808,28 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         else { titleBar.resize() }
     }
 
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
+        editor.undoManager
+    }
+
+    var canFocusSelection: Bool { canReplaceBuffer && !isShowingFilePreview && editor.canFocusSelection }
+    var canExitFocus: Bool { canReplaceBuffer && editor.focusRanges != nil }
+
+    func focusSelection() {
+        guard canFocusSelection else { return }
+        editor.beginFocus()
+        focusContent()
+    }
+
+    func exitFocus() {
+        guard canExitFocus else { return }
+        editor.exitFocus()
+        focusContent()
+    }
+
     func windowWillClose(_ notification: Notification) {
         rememberFilePosition()
+        editor.exitFocus(notify: false)
         filePreviewView?.stop()
         syntaxHighlighting?.cancel(clearingColors: false)
         idleSave?.cancel()
@@ -855,6 +876,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private func installText(
         _ text: String, preparedSyntax: SyntaxSnapshot? = nil, revealInWorktree: Bool = true
     ) {
+        editor.exitFocus(notify: false)
         editor.preferredLineEnding = format.lineEnding
         editor.resetMultiCarets()
         syntaxHighlighting?.prepareForBufferReplacement()

@@ -107,6 +107,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try await ControlPanel(app: self).checkPins(in: sample)
                     try await SyntaxCheck.run(in: self)
                     try await FindCheck.run(in: self)
+                    try await FocusCheck.run(in: self)
                     try checkWindow(sample.window, screenshot: CommandLine.arguments.dropFirst(2).first)
                     try MultiCaretCheck.runComposition(in: sample.editor)
                     try await EditorCheck.checkViewportResize(in: makeDocument())
@@ -334,9 +335,14 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         if let command = sender.representedObject as? FindCommand { activeDocument?.performFind(command) }
     }
 
+    @objc func focusSelection(_ sender: Any?) { activeDocument?.focusSelection() }
+    @objc func exitFocus(_ sender: Any?) { activeDocument?.exitFocus() }
+
     func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
         guard !isQuitting else { return false }
         switch item.action {
+        case #selector(focusSelection(_:)): return activeDocument?.canFocusSelection ?? false
+        case #selector(exitFocus(_:)): return activeDocument?.canExitFocus ?? false
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
         case #selector(showGoToFile(_:)), #selector(showCommandMode(_:)):
             return activeDocument.map { $0.window.attachedSheet == nil } ?? false
@@ -798,6 +804,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         edit.addCommand("Copy", #selector(NSText.copy(_:)), "c")
         edit.addCommand("Paste", #selector(NSText.paste(_:)), "v")
         edit.addCommand("Select All", #selector(NSText.selectAll(_:)), "a")
+        edit.addItem(.separator())
+        edit.addCommand("Focus Selection", #selector(focusSelection(_:))).target = self
+        edit.addCommand("Exit Focus", #selector(exitFocus(_:))).target = self
         edit.addItem(.separator())
 
         edit.addCommand("Find…", #selector(openFind(_:)), "f").target = self

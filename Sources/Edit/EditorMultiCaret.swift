@@ -4,18 +4,24 @@ import AppKit
 @MainActor
 final class MultiCaretState {
     var selections: [NSRange] = []
-    var undo: [[NSRange]] = []
-    var redo: [[NSRange]] = []
+    struct Snapshot {
+        let ranges: [NSRange]
+        let focusNavigation: [FocusNavigationSelection]?
+    }
+
+    var undo: [Snapshot] = []
+    var redo: [Snapshot] = []
     var isApplying = false
     var pendingSkip = false
     var navigation: [NSRange: NSTextSelection] = [:]
+    var focusNavigation: [FocusNavigationSelection]?
     var indicatorGroup: CaretIndicatorGroup?
     var nativeCaretColor: NSColor?
     var restartBlink = true
     var highlights: [NSRect] = []
 
     func remember(_ selection: [NSRange]) {
-        undo.append(selection)
+        undo.append(Snapshot(ranges: selection, focusNavigation: focusNavigation))
         if undo.count > 100 { undo.removeFirst() }
         redo.removeAll()
     }
@@ -75,7 +81,8 @@ extension EditorTextView {
     var hasSecondarySelections: Bool { caretSelections.count > 1 }
 
     func setCaretSelections(
-        _ ranges: [NSRange], record: Bool = true, navigation: [NSRange: NSTextSelection] = [:]
+        _ ranges: [NSRange], record: Bool = true, navigation: [NSRange: NSTextSelection] = [:],
+        focusNavigation: [FocusNavigationSelection]? = nil
     ) {
         let selections = MultiCaretEditing.merged(ranges)
         guard let primary = selections.last else { return }
@@ -86,13 +93,14 @@ extension EditorTextView {
         multiCaret.isApplying = true
         multiCaret.selections = selections
         multiCaret.navigation = navigation
+        multiCaret.focusNavigation = focusNavigation
         setSelectedRange(primary)
         multiCaret.isApplying = false
         requestLineRefresh()
     }
 
     func nativeSelectionChanged() {
-        guard !multiCaret.isApplying else { return }
+        guard !multiCaret.isApplying, !constrainNativeFocusSelection() else { return }
         let previous = multiCaret.selections
         let native = [selectedRange()]
         if previous != native {
@@ -101,6 +109,7 @@ extension EditorTextView {
         }
         multiCaret.selections = native
         multiCaret.navigation = [:]
+        multiCaret.focusNavigation = nil
     }
 
     func resetSelectionHistory() {
@@ -114,6 +123,7 @@ extension EditorTextView {
         resetSelectionHistory()
         multiCaret.selections = []
         multiCaret.navigation = [:]
+        multiCaret.focusNavigation = nil
         requestLineRefresh()
     }
 
@@ -123,17 +133,28 @@ extension EditorTextView {
     private func addCaret(direction: NSTextSelectionNavigation.Direction) {
         let candidates = caretSelections
         let visualOrder = MultiCaretEditing.ordered(candidates)
-        guard let edge = direction == .up ? visualOrder.first : visualOrder.last,
-              let target = navigate(edge, direction: direction, destination: .character),
-              target.location != edge.location else { return }
-        let newCaret = NSRange(location: target.location, length: 0)
+        guard let edge = direction == .up ? visualOrder.first : visualOrder.last else { return }
+        let target: Int?
+        if let scope = focusRanges {
+            target = focusedPosition(from: edge.location, direction: direction, destination: .character, in: scope) {
+                navigate(NSRange(location: $0, length: 0), direction: direction, destination: .character)?.location
+            }
+        } else {
+            target = navigate(edge, direction: direction, destination: .character)?.location
+        }
+        guard let target, target != edge.location else { return }
+        let newCaret = NSRange(location: target, length: 0)
         setCaretSelections(candidates + [newCaret])
         scrollRangeToVisible(newCaret)
     }
 
     @objc func addCaretsAtLineEnds(_ sender: Any?) {
         guard let text = textStorage?.mutableString else { return }
-        let carets = caretSelections.flatMap { MultiCaretEditing.selectionEnds(in: $0, text: text) }
+        let carets = caretSelections.flatMap { selection in
+            let ends = MultiCaretEditing.selectionEnds(in: selection, text: text)
+            guard focusRanges != nil else { return ends }
+            return ends.map { NSRange(location: max(selection.location, $0.location), length: 0) }
+        }
         setCaretSelections(carets)
         if let last = carets.last { scrollRangeToVisible(last) }
     }
@@ -152,7 +173,12 @@ extension EditorTextView {
     private func addNextOccurrence(skipping: Bool) {
         guard let text = textStorage?.mutableString, let primary = caretSelections.last else { return }
         if primary.length == 0 {
-            let word = selectionRange(forProposedRange: primary, granularity: .selectByWord)
+            var word = selectionRange(forProposedRange: primary, granularity: .selectByWord)
+            if let scope = focusRanges {
+                guard let range = scope.first(where: { $0.location <= primary.location && primary.location <= $0.upperBound })
+                else { return }
+                word = NSIntersectionRange(word, range)
+            }
             if word.length > 0 { setCaretSelections(caretSelections.dropLast() + [word]) }
             return
         }
@@ -161,7 +187,11 @@ extension EditorTextView {
         let selections = caretSelections
         let after = NSRange(location: NSMaxRange(primary), length: text.length - NSMaxRange(primary))
         let before = NSRange(location: 0, length: primary.location)
-        for search in [after, before] {
+        let searches = [after, before].flatMap { position in
+            (focusRanges ?? [NSRange(location: 0, length: text.length)])
+                .map { NSIntersectionRange($0, position) }.filter { $0.length > 0 }
+        }
+        for search in searches {
             var start = search.location
             while start < NSMaxRange(search) {
                 let result = text.range(of: needle, options: .literal,
@@ -181,16 +211,19 @@ extension EditorTextView {
         guard let text = textStorage?.mutableString,
               let primary = caretSelections.last, primary.length > 0 else { return }
         let needle = text.substring(with: primary)
-        var start = 0
         var matches: [NSRange] = []
-        while start < text.length {
-            let range = text.range(of: needle, options: .literal, range: NSRange(location: start, length: text.length - start))
-            guard range.location != NSNotFound else { break }
-            if NSIntersectionRange(range, primary).length == 0 {
-                matches.append(range)
-                start = NSMaxRange(range)
-            } else {
-                start = NSMaxRange(primary)
+        for search in focusRanges ?? [NSRange(location: 0, length: text.length)] {
+            var start = search.location
+            while start < search.upperBound {
+                let range = text.range(of: needle, options: .literal,
+                                       range: NSRange(location: start, length: search.upperBound - start))
+                guard range.location != NSNotFound else { break }
+                if NSIntersectionRange(range, primary).length == 0 {
+                    matches.append(range)
+                    start = range.upperBound
+                } else {
+                    start = primary.upperBound
+                }
             }
         }
         setCaretSelections(matches + [primary])
@@ -198,15 +231,15 @@ extension EditorTextView {
 
     @objc func undoSelection(_ sender: Any?) {
         guard let previous = multiCaret.undo.popLast() else { return }
-        multiCaret.redo.append(caretSelections)
-        setCaretSelections(previous, record: false)
+        multiCaret.redo.append(.init(ranges: caretSelections, focusNavigation: multiCaret.focusNavigation))
+        setCaretSelections(previous.ranges, record: false, focusNavigation: previous.focusNavigation)
         if let primary = caretSelections.last { scrollRangeToVisible(primary) }
     }
 
     @objc func redoSelection(_ sender: Any?) {
         guard let next = multiCaret.redo.popLast() else { return }
-        multiCaret.undo.append(caretSelections)
-        setCaretSelections(next, record: false)
+        multiCaret.undo.append(.init(ranges: caretSelections, focusNavigation: multiCaret.focusNavigation))
+        setCaretSelections(next.ranges, record: false, focusNavigation: next.focusNavigation)
         if let primary = caretSelections.last { scrollRangeToVisible(primary) }
     }
 
@@ -226,7 +259,7 @@ extension EditorTextView {
             return true
         }
         multiCaret.pendingSkip = false
-        if modifiers.isEmpty && character == "\u{1b}" && hasSecondarySelections && !hasMarkedText() {
+        if focusRanges == nil && modifiers.isEmpty && character == "\u{1b}" && hasSecondarySelections && !hasMarkedText() {
             keepPrimarySelection(nil)
             return true
         }
@@ -238,7 +271,8 @@ extension EditorTextView {
               isSelectable, !hasMarkedText() else { return false }
         window?.makeFirstResponder(self)
         let location = characterIndexForInsertion(at: convert(event.locationInWindow, from: nil))
-        guard location != NSNotFound, location <= (textStorage?.length ?? 0) else { return true }
+        guard location != NSNotFound, location <= (textStorage?.length ?? 0),
+              focusRanges?.contains(where: { $0.location <= location && location <= $0.upperBound }) ?? true else { return true }
         setCaretSelections(caretSelections + [NSRange(location: location, length: 0)])
         return true
     }
@@ -301,7 +335,7 @@ extension EditorTextView {
     }
 
     func moveSecondarySelections(command: Selector) -> Bool {
-        guard hasSecondarySelections, !hasMarkedText() else { return false }
+        guard (hasSecondarySelections || focusRanges != nil), !hasMarkedText() else { return false }
         typealias Direction = NSTextSelectionNavigation.Direction
         typealias Destination = NSTextSelectionNavigation.Destination
         let movement: (Direction, Destination, Bool)
@@ -358,6 +392,12 @@ extension EditorTextView {
             steps = max(1, Int(visibleRect.height / max(1, lineHeight)) - 1)
         default:
             steps = 1
+        }
+        if focusRanges != nil {
+            moveFocusedSelections(direction: movement.0, destination: movement.1, extending: movement.2, steps: steps) {
+                navigate(NSRange(location: $0, length: 0), direction: movement.0, destination: movement.1)?.location
+            }
+            return true
         }
         var navigation: [NSRange: NSTextSelection] = [:]
         let ranges = caretSelections.map { range in

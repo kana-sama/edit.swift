@@ -1016,6 +1016,35 @@ enum FindCheck {
             throw Failure("whole-word search")
         }
         try expect(words.count == 2, "Unicode whole-word search is case insensitive")
+
+        let focused = "xID:24y\nprotected\nzID:51w"
+        let source = focused as NSString
+        let scope = [source.range(of: "ID:24"), source.range(of: "ID:51")]
+        guard case .matches(let scoped) = FindSearch.match(
+            "^(?P<key>[A-Z]+):(\\d+)$", in: focused, options: options, ranges: scope
+        ) else { throw Failure("match inside focused ranges") }
+        try expect(scoped.map(\.range) == scope, "focused anchors match independently and return source offsets")
+        try expect(scoped.last?.replacement(using: "$" + "{key}:$2", in: source, isRegex: true) == "ID:51",
+                   "focused named and numbered captures read the corresponding source substring")
+        guard case .matches(let outside) = FindSearch.match(
+            "(?<=x)ID", in: focused, options: options, ranges: scope
+        ) else { throw Failure("evaluate a scoped lookbehind") }
+        try expect(outside.isEmpty, "focused lookbehind cannot inspect protected text")
+        guard case .matches(let scopedWords) = FindSearch.match(
+            "ID", in: focused, options: FindOptions(wholeWord: true), ranges: scope
+        ) else { throw Failure("evaluate focused whole words") }
+        try expect(scopedWords.map(\.range.location) == scope.map(\.location),
+                   "focused whole-word matching uses the fragment boundaries")
+
+        let lines = "xfirst\nsecondx"
+        let lineRanges = [(lines as NSString).range(of: "first"), (lines as NSString).range(of: "second")]
+        let combined = NSUnionRange(lineRanges[0], lineRanges[1])
+        guard case .matches(let joined) = FindSearch.match("first\nsecond", in: lines, options: FindOptions(), ranges: [combined]),
+              case .matches(let separated) = FindSearch.match(
+                "first\nsecond", in: lines, options: FindOptions(), ranges: lineRanges
+              ) else { throw Failure("evaluate multiline literals in Focus") }
+        try expect(joined.map(\.range) == [combined] && separated.isEmpty,
+                   "a real line break is matchable only inside the same focused range")
     }
 
     private static func descendant<T: NSView>(of root: NSView?, type: T.Type) -> T? {
