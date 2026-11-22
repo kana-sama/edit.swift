@@ -41,6 +41,7 @@ build_fingerprint() {
 fingerprint="$(build_fingerprint)"
 output="$build_dir/app/$configuration"
 destination="$output/$bundle_name.app"
+prune_retired_apps "$output"
 stamp="$destination/Contents/Resources/build-fingerprint"
 if [[ -f "$stamp" && "$(<"$stamp")" == "$fingerprint" ]] && verify_app "$destination" 2>/dev/null; then
     printf '%s is up to date.\n' "$bundle_name.app"
@@ -50,13 +51,13 @@ fi
 # Keep SDK modules across a clean build of the project.
 mkdir -p "$sdk_cache/clang" "$sdk_cache/modules" "$output"
 stage="$(mktemp -d "$output/.edit-bundle.XXXXXX")"
-trap 'rm -rf -- "$stage"' EXIT
+app="$stage/$bundle_name.app"
+trap 'finish_app_stage "$stage" "$app"' EXIT
 "$compiler" -sdk "$sdk" -target "$target" -swift-version 6 -module-name Edit \
     -parse-as-library -explicit-module-build -j "$(getconf _NPROCESSORS_ONLN)" \
     -module-cache-path "$sdk_cache/clang" -sdk-module-cache-path "$sdk_cache/modules" \
     "${swift_flags[@]}" "${sources[@]}" -o "$stage/Edit"
 
-app="$stage/$bundle_name.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/syntax" "$app/Contents/Frameworks"
 mv "$stage/Edit" "$app/Contents/MacOS/Edit"
 syntax_library="$(./script/build-syntax "$sdk_cache" "$sdk" "$target")"
@@ -80,6 +81,6 @@ fi
 printf '%s\n' "$fingerprint" > "$app/Contents/Resources/build-fingerprint"
 sign_app "$app"
 if [[ -d "$stage/Edit.dSYM" ]]; then
-    publish_app "$stage/Edit.dSYM" "$output/$bundle_name.dSYM"
+    publish_path "$stage/Edit.dSYM" "$output/$bundle_name.dSYM"
 fi
 publish_app "$app" "$destination"

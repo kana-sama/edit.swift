@@ -11,6 +11,8 @@ Read this before building or launching for agent checks or changing the build an
 
 The app build invokes `swiftc` directly for `Edit`. The pinned Tree-sitter runtime and grammars build into a native library cached per SDK, compiler and target. Keep `Package.swift` in sync for Swift tooling. The build reuses compiled SDK modules and the syntax library in `.local/swift-sdk` and reuses the signed bundle when its inputs match. Use the default debug build during development and an optimized build when measuring runtime or launch performance.
 
+Building or installing a replacement keeps the previous bundle on disk so macOS can validate any processes still using it. Subsequent builds or installs remove retained bundles whose executables are no longer running.
+
 Use separate fresh directories via `EDIT_BUILD_DIR` and `EDIT_SDK_CACHE_DIR` to measure a fully cold build. Setting just `EDIT_BUILD_DIR` to a fresh directory measures rebuilding the project with the existing SDK cache. Report incremental build times separately. For cold launch, measure first launch to the first usable window and record the machine, OS, and cache conditions.
 
 ## Quiet agent checks

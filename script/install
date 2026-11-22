@@ -27,12 +27,13 @@ if [[ -L "$launcher" ]] ||
 fi
 
 ./script/build release
+prune_retired_apps "$application_directory"
 stage="$(mktemp -d "$application_directory/.edit-install.XXXXXX")"
-trap 'rm -rf -- "$stage"
+app="$stage/Edit.app"
+trap 'finish_app_stage "$stage" "$app"
 if [[ -n ${launcher_stage:-} ]]; then
     rm -f -- "$launcher_stage"
 fi' EXIT
-app="$stage/Edit.app"
 cp -cR "${EDIT_BUILD_DIR:-$PWD/.build}/app/release/Edit.app" "$app"
 verify_app "$app"
 publish_app "$app" "$destination"
