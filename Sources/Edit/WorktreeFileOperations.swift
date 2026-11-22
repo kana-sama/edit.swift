@@ -72,7 +72,50 @@ enum WorktreeFileOperations {
         let destination = parent.appending(path: name)
         guard source.path != destination.path else { return nil }
 
-        // RENAME_EXCL supports capitalization-only renames even on case-insensitive volumes.
+        try moveExclusively(from: source, to: destination)
+        return Transfer(source: source, destination: destination)
+    }
+
+    static func canTrash(_ item: URL, within root: URL) -> Bool {
+        contains(item, in: root) && path(item) != path(root)
+    }
+
+    static func trashTargets(_ items: [URL], within root: URL) throws -> [URL] {
+        var paths: Set<String> = []
+        let targets = try items.compactMap { item -> URL? in
+            guard canTrash(item, within: root) else { throw outside(item) }
+            let parent = try writableDirectory(item.deletingLastPathComponent(), within: root)
+            let target = parent.appending(path: item.lastPathComponent)
+            return paths.insert(target.path).inserted ? target : nil
+        }
+        let roots = targets.filter { !containsSelectedParent(of: $0, in: paths) }
+        for target in roots {
+            guard try itemStatus(at: target) != nil else {
+                throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: target.path])
+            }
+        }
+        return roots
+    }
+
+    static func restoreTrashed(_ transfers: [Transfer], within root: URL) -> TransferResult {
+        var completed: [Transfer] = []
+        var failure: String?
+        for transfer in transfers {
+            do {
+                guard canTrash(transfer.source, within: root) else { throw outside(transfer.source) }
+                let parent = try writableDirectory(transfer.source.deletingLastPathComponent(), within: root)
+                let original = parent.appending(path: transfer.source.lastPathComponent)
+                try moveExclusively(from: transfer.destination, to: original)
+                completed.append(transfer)
+            } catch {
+                if failure == nil { failure = error.localizedDescription }
+            }
+        }
+        return TransferResult(completed: completed, failure: failure)
+    }
+
+    private static func moveExclusively(from source: URL, to destination: URL) throws {
+        // RENAME_EXCL also handles capitalization-only renames on case-insensitive volumes.
         let result = source.withUnsafeFileSystemRepresentation { sourcePath in
             destination.withUnsafeFileSystemRepresentation { destinationPath in
                 guard let sourcePath, let destinationPath else { return EINVAL }
@@ -83,17 +126,6 @@ enum WorktreeFileOperations {
             if result == EEXIST { throw conflict(at: destination) }
             throw pathError(result, path: source.path)
         }
-        return Transfer(source: source, destination: destination)
-    }
-
-    static func trashTarget(_ item: URL, within root: URL) throws -> URL {
-        guard contains(item, in: root), item.standardizedFileURL.path != root.standardizedFileURL.path else {
-            throw outside(item)
-        }
-        let parent = try writableDirectory(item.deletingLastPathComponent(), within: root)
-        let target = parent.appending(path: item.lastPathComponent)
-        guard try itemStatus(at: target) != nil else { throw CocoaError(.fileNoSuchFile) }
-        return target
     }
 
     static func transfer(_ sources: [URL], into destination: URL, move: Bool, within root: URL) throws -> TransferResult {

@@ -8,6 +8,30 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         case create(in: URL, directory: Bool)
     }
 
+    private enum FileChange {
+        case rename(WorktreeFileOperations.Transfer)
+        case trash([URL])
+        case restore([WorktreeFileOperations.Transfer])
+
+        var name: String {
+            switch self {
+            case .rename: "Rename"
+            case .trash, .restore: "Move to Trash"
+            }
+        }
+    }
+
+    private struct History {
+        var undo: [FileChange] = []
+        var redo: [FileChange] = []
+    }
+
+    private struct ChangeResult {
+        let inverse: FileChange?
+        var remaining: FileChange? = nil
+        var failure: String? = nil
+    }
+
     private weak var document: DocumentWindow?
     private unowned let app: Edit
     private let refresh: () -> Void
@@ -15,6 +39,8 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
     private let isHidden: (URL) -> Bool
     private let toggleHidden: (URL) -> Void
     private var working = false
+    private var historyByFolder: [String: History] = [:]
+    var recycleForCheck: (([URL]) async throws -> WorktreeFileOperations.TransferResult)?
     private var canWork: Bool { !working && document?.canReplaceBuffer == true }
 
     init(document: DocumentWindow, app: Edit, refresh: @escaping () -> Void,
@@ -28,11 +54,11 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         self.toggleHidden = toggleHidden
     }
 
-    func menu(for item: URL, isDirectory: Bool, root: URL) -> NSMenu {
+    func menu(for item: URL, isDirectory: Bool, selection: [URL], root: URL, trashSelection: @escaping () -> Void) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
         let inside = WorktreeFileOperations.contains(item, in: root)
-        let editable = inside && WorktreeFileOperations.path(item) != WorktreeFileOperations.path(root)
+        let editable = WorktreeFileOperations.canTrash(item, within: root)
         menu.addItem(action("Show in Finder") { [weak self] in
             guard let self, !app.isAgentCheck else { return }
             NSWorkspace.shared.activateFileViewerSelecting([item])
@@ -65,7 +91,10 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
             menu.addItem(.separator())
             menu.addItem(action("Rename…", enabled: canWork) { [weak self] in self?.editName(.rename(item), root) })
             menu.addItem(action(isHidden(item) ? "Unhide" : "Hide") { [weak self] in self?.toggleHidden(item) })
-            menu.addItem(action("Move to Trash", enabled: canWork) { [weak self] in self?.trash(item, within: root) })
+            let trash = action("Move to Trash", enabled: canTrash(selection, in: root), body: trashSelection)
+            trash.keyEquivalent = "\u{7f}"
+            trash.keyEquivalentModifierMask = .command
+            menu.addItem(trash)
         }
         return menu
     }
@@ -184,27 +213,119 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
                 try WorktreeFileOperations.create(name, in: parent, root: root, isDirectory: directory)
             }.value
         case .rename(let item):
-            let destination = item.deletingLastPathComponent().appending(path: name)
-            return try await app.performWorktreeMutation(affecting: [item, destination]) {
-                let move = try await Task.detached(priority: .userInitiated) {
-                    try WorktreeFileOperations.rename(item, to: name, within: root)
-                }.value
-                if let move { retarget(move) }
-                return move?.destination ?? item
+            guard let move = try await rename(item, to: name, within: root) else {
+                return item
             }
+            recordUndo(.rename(.init(source: move.destination, destination: move.source)), in: root)
+            return move.destination
         }
     }
 
-    private func trash(_ item: URL, within root: URL) {
-        guard !app.isAgentCheck else { return }
-        run("Could Not Move “\(item.lastPathComponent)” to Trash", within: root) { _ in
-            try await self.app.performWorktreeMutation(affecting: [item]) {
-                let target = try await Task.detached(priority: .userInitiated) {
-                    try WorktreeFileOperations.trashTarget(item, within: root)
+    func canTrash(_ items: [URL], in root: URL) -> Bool {
+        operationDocument(in: root) != nil && !items.isEmpty &&
+            items.allSatisfy { WorktreeFileOperations.canTrash($0, within: root) }
+    }
+
+    func trash(_ items: [URL], within root: URL) {
+        guard canTrash(items, in: root) else { return }
+        run("Could Not Move Items to Trash", within: root) { _ in
+            let result = try await self.execute(.trash(items), within: root)
+            if let inverse = result.inverse { self.recordUndo(inverse, in: root) }
+            if let failure = result.failure { throw TransferError(detail: failure) }
+        }
+    }
+
+    func undoActionName(in root: URL, redo: Bool) -> String? {
+        guard operationDocument(in: root) != nil, let history = historyByFolder[WorktreeFileOperations.path(root)] else {
+            return nil
+        }
+        return (redo ? history.redo.last : history.undo.last)?.name
+    }
+
+    func undo(in root: URL, redo: Bool) {
+        let key = WorktreeFileOperations.path(root)
+        guard var history = historyByFolder[key], let change = redo ? history.redo.last : history.undo.last else {
+            return
+        }
+        let title = redo ? "Could Not Redo \(change.name)" : "Could Not Undo \(change.name)"
+        run(title, within: root) { _ in
+            let result = try await self.execute(change, within: root)
+            if redo {
+                history.redo.removeLast()
+                if let remaining = result.remaining { history.redo.append(remaining) }
+                if let inverse = result.inverse { history.undo.append(inverse) }
+            } else {
+                history.undo.removeLast()
+                if let remaining = result.remaining { history.undo.append(remaining) }
+                if let inverse = result.inverse { history.redo.append(inverse) }
+            }
+            self.historyByFolder[key] = history
+            if let failure = result.failure { throw TransferError(detail: failure) }
+        }
+    }
+
+    private func recordUndo(_ change: FileChange, in root: URL) {
+        let key = WorktreeFileOperations.path(root)
+        historyByFolder[key, default: History()].undo.append(change)
+        historyByFolder[key]?.redo.removeAll()
+    }
+
+    private func rename(_ item: URL, to name: String, within root: URL) async throws -> WorktreeFileOperations.Transfer? {
+        let destination = item.deletingLastPathComponent().appending(path: name)
+        return try await app.performWorktreeMutation(affecting: [item, destination]) {
+            let result = try await Task.detached(priority: .userInitiated) {
+                try WorktreeFileOperations.rename(item, to: name, within: root)
+            }.value
+            if let result { retarget(result) }
+            return result
+        }
+    }
+
+    private func execute(_ change: FileChange, within root: URL) async throws -> ChangeResult {
+        switch change {
+        case .rename(let move):
+            let completed = try await rename(move.source, to: move.destination.lastPathComponent, within: root)
+            return ChangeResult(inverse: completed.map { .rename(.init(source: $0.destination, destination: $0.source)) })
+        case .trash(let items):
+            let targets = try await Task.detached(priority: .userInitiated) {
+                try WorktreeFileOperations.trashTargets(items, within: root)
+            }.value
+            let result = try await app.performWorktreeMutation(affecting: targets) {
+                let result = try await recycle(targets)
+                for move in result.completed {
+                    for document in app.documents { document.detachTrashedFile(at: move.source) }
+                }
+                return result
+            }
+            let completed = Set(result.completed.map { WorktreeFileOperations.path($0.source) })
+            let remaining = targets.filter { !completed.contains(WorktreeFileOperations.path($0)) }
+            return ChangeResult(inverse: result.completed.isEmpty ? nil : .restore(result.completed),
+                                remaining: remaining.isEmpty ? nil : .trash(remaining), failure: result.failure)
+        case .restore(let moves):
+            let result = try await app.performWorktreeMutation(affecting: moves.map(\.source)) {
+                await Task.detached(priority: .userInitiated) {
+                    WorktreeFileOperations.restoreTrashed(moves, within: root)
                 }.value
-                let relocated = try await NSWorkspace.shared.recycle([target])
-                guard !relocated.isEmpty else { throw CocoaError(.fileWriteUnknown) }
-                for document in self.app.documents { document.detachTrashedFile(at: target) }
+            }
+            let completed = Set(result.completed.map(\.source))
+            let remaining = moves.filter { !completed.contains($0.source) }
+            return ChangeResult(inverse: result.completed.isEmpty ? nil : .trash(result.completed.map(\.source)),
+                                remaining: remaining.isEmpty ? nil : .restore(remaining), failure: result.failure)
+        }
+    }
+
+    private func recycle(_ targets: [URL]) async throws -> WorktreeFileOperations.TransferResult {
+        if let recycleForCheck { return try await recycleForCheck(targets) }
+        guard !app.isAgentCheck else { throw NameError.unavailable }
+        // The throwing overload discards successful moves when Finder reports a partial failure.
+        return await withCheckedContinuation { continuation in
+            NSWorkspace.shared.recycle(targets) { relocated, error in
+                let completed = targets.compactMap { source in
+                    relocated[source].map { WorktreeFileOperations.Transfer(source: source, destination: $0) }
+                }
+                let failure = error?.localizedDescription ??
+                    (completed.count == targets.count ? nil : "Some selected items could not be moved to the Trash.")
+                continuation.resume(returning: .init(completed: completed, failure: failure))
             }
         }
     }

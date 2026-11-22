@@ -34,14 +34,14 @@ struct ControlCommand {
             return target.validateUserInterfaceItem(item)
         }
         if action == #selector(NSWindow.performClose(_:)) { return document.canReplaceBuffer }
+        if let focus = focus as? NSUserInterfaceValidations, (focus as? NSObject)?.responds(to: action) == true {
+            return focus.validateUserInterfaceItem(item)
+        }
         if action == Selector(("undo:")) {
             return (focus ?? document.editor).undoManager?.canUndo == true
         }
         if action == Selector(("redo:")) {
             return (focus ?? document.editor).undoManager?.canRedo == true
-        }
-        if let focus = focus as? NSUserInterfaceValidations, (focus as? NSObject)?.responds(to: action) == true {
-            return focus.validateUserInterfaceItem(item)
         }
         return true
     }

@@ -716,7 +716,32 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         if row >= 0, !tree.selectedRowIndexes.contains(row) {
             tree.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
-        return actions.menu(for: item.url, isDirectory: item.isDirectory, root: root.url)
+        let urls = row >= 0 ? selectedItems.filter { $0 !== provisionalEntry }.map(\.url) : []
+        let folder = root.url
+        return actions.menu(for: item.url, isDirectory: item.isDirectory, selection: urls, root: folder) { [weak self] in
+            guard let self, actions.canTrash(urls, in: folder) else { return }
+            document.window.makeFirstResponder(tree)
+            actions.trash(urls, within: folder)
+        }
+    }
+
+    func trashSelection() {
+        guard let root, nameEdit == nil else { return }
+        actions.trash(selectedItems.map(\.url), within: root.url)
+    }
+
+    func undoActionName(redo: Bool) -> String? {
+        guard let root else { return nil }
+        return actions.undoActionName(in: root.url, redo: redo)
+    }
+
+    func undoFileChange(redo: Bool) {
+        guard let root, nameEdit == nil else { return }
+        actions.undo(in: root.url, redo: redo)
+    }
+
+    func setRecycleForCheck(_ recycle: @escaping ([URL]) async throws -> WorktreeFileOperations.TransferResult) {
+        actions.recycleForCheck = recycle
     }
 
     func copySelection() {
@@ -779,7 +804,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 }
 
 @MainActor
-private final class WorktreeOutline: NSOutlineView {
+private final class WorktreeOutline: NSOutlineView, NSMenuItemValidation {
     private static let contentInset: CGFloat = 10
 
     private var disclosureActions: [NSUserInterfaceItemIdentifier: Selector] = [:]
@@ -861,7 +886,12 @@ private final class WorktreeOutline: NSOutlineView {
     }
 
     override func keyDown(with event: NSEvent) {
-        let unmodified = event.modifierFlags.intersection([.command, .shift, .control, .option]).isEmpty
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .control, .option])
+        if event.keyCode == 51 && modifiers == .command {
+            if !event.isARepeat { owner?.trashSelection() }
+            return
+        }
+        let unmodified = modifiers.isEmpty
         if event.keyCode == 123 || event.keyCode == 124 {
             let expanding = (event.keyCode == 124) != (userInterfaceLayoutDirection == .rightToLeft)
             if unmodified && owner?.navigateFolder(expanding: expanding) == true { return }
@@ -891,6 +921,28 @@ private final class WorktreeOutline: NSOutlineView {
         default:
             super.keyDown(with: event)
         }
+    }
+
+    @objc func undo(_ sender: Any?) { owner?.undoFileChange(redo: false) }
+    @objc func redo(_ sender: Any?) { owner?.undoFileChange(redo: true) }
+
+    override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        switch item.action {
+        case #selector(undo(_:)): return owner?.undoActionName(redo: false) != nil
+        case #selector(redo(_:)): return owner?.undoActionName(redo: true) != nil
+        default: return super.validateUserInterfaceItem(item)
+        }
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(undo(_:)):
+            item.title = owner?.undoActionName(redo: false).map { "Undo \($0)" } ?? "Undo"
+        case #selector(redo(_:)):
+            item.title = owner?.undoActionName(redo: true).map { "Redo \($0)" } ?? "Redo"
+        default: break
+        }
+        return validateUserInterfaceItem(item)
     }
 
     @objc func copy(_ sender: Any?) { owner?.copySelection() }

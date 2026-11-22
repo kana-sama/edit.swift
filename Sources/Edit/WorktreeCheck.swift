@@ -18,6 +18,7 @@ enum WorktreeCheck {
         for file in [readme, ignored, nested, external] { try Data("Sample\n".utf8).write(to: file) }
         try Data("*.log\n".utf8).write(to: project.appending(path: ".gitignore"))
         try await checkFolderAnimation(in: app, under: temporary)
+        try await checkTrash(in: app, under: temporary)
 
         let document = app.makeDocument()
         defer { document.window.close() }
@@ -268,6 +269,101 @@ enum WorktreeCheck {
             document.fileURL?.lastPathComponent == "Renamed.swift" && row(named: "Renamed.swift", in: tree) == tree.selectedRow
         }
         try expect(window.attachedSheet == nil && !NSApp.isActive, "inline edits stay in the quiet Worktree window")
+
+        document.editor.insertText("unsaved", replacementRange: NSRange(location: 0, length: 0))
+        try performHistoryAction(in: tree, redo: false, title: "Undo Rename")
+        try await waitFor("undo rename retargets the open buffer") {
+            document.fileURL?.lastPathComponent == "File.swift" && row(named: "File.swift", in: tree) != nil
+        }
+        try expect(document.editor.string == "unsaved" && FileManager.default.fileExists(atPath: file.path),
+                   "undo rename preserves text and restores the original name")
+        try performHistoryAction(in: tree, redo: true, title: "Redo Rename")
+        try await waitFor("redo rename retargets the same open buffer") {
+            document.fileURL?.lastPathComponent == "Renamed.swift" && row(named: "Renamed.swift", in: tree) != nil
+        }
+        try expect(document.editor.string == "unsaved" && !FileManager.default.fileExists(atPath: file.path),
+                   "redo rename preserves text and reapplies the new name")
+    }
+
+    private static func checkTrash(in app: Edit, under temporary: URL) async throws {
+        let root = temporary.appending(path: "Trash project", directoryHint: .isDirectory)
+        let trash = temporary.appending(path: "Test Trash", directoryHint: .isDirectory)
+        let files = FileManager.default
+        for folder in [root, trash] { try files.createDirectory(at: folder, withIntermediateDirectories: true) }
+        let readme = root.appending(path: "README.md")
+        let first = root.appending(path: "One.txt")
+        let second = root.appending(path: "Two.txt")
+        for file in [readme, first, second] { try Data(file.lastPathComponent.utf8).write(to: file) }
+
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        _ = try await app.openFile(root, in: document)
+        document.toggleSidebarFocus(.worktree)
+        let worktree = try require(document.worktreeSidebar, "Trash Worktree")
+        let tree = worktree.outline
+        worktree.setRecycleForCheck { targets in
+            let moved = try targets.map { source in
+                // Finder can use a different name in the Trash when the basename is occupied.
+                let destination = trash.appending(path: UUID().uuidString)
+                try files.moveItem(at: source, to: destination)
+                return WorktreeFileOperations.Transfer(source: source, destination: destination)
+            }
+            return .init(completed: moved, failure: nil)
+        }
+        try await waitFor("show both disposable files") { tree.numberOfRows == 3 }
+
+        func selectFiles() throws -> Int {
+            let firstRow = try require(row(named: "One.txt", in: tree), "first Trash file")
+            let secondRow = try require(row(named: "Two.txt", in: tree), "second Trash file")
+            tree.selectRowIndexes(IndexSet([firstRow, secondRow]), byExtendingSelection: false)
+            return firstRow
+        }
+
+        document.window.makeFirstResponder(document.editor)
+        let clicked = try selectFiles()
+        let menu = try require(worktree.menu(at: clicked), "the selected files' menu")
+        let item = try require(menu.item(withTitle: "Move to Trash"), "the contextual Trash command")
+        try expect(item.isEnabled && item.keyEquivalent == "\u{7f}" && item.keyEquivalentModifierMask == .command,
+                   "the context menu shows the active Command-Delete command")
+        menu.performActionForItem(at: menu.index(of: item))
+        try await waitFor("context menu recycles both selected files") { tree.numberOfRows == 1 }
+        try expect(!files.fileExists(atPath: first.path) && !files.fileExists(atPath: second.path) &&
+                   document.window.firstResponder === tree, "the entire selection moves and retains Worktree focus")
+
+        try performHistoryAction(in: tree, redo: false, title: "Undo Move to Trash")
+        try await waitFor("one undo restores both contextual Trash entries") { tree.numberOfRows == 3 }
+        let restored = try [first, second].map { try String(contentsOf: $0, encoding: .utf8) }
+        try expect(restored == ["One.txt", "Two.txt"], "undo restores each exact file to its original path")
+        try performHistoryAction(in: tree, redo: true, title: "Redo Move to Trash")
+        try await waitFor("one redo recycles both entries again") { tree.numberOfRows == 1 }
+        try performHistoryAction(in: tree, redo: false, title: "Undo Move to Trash")
+        try await waitFor("files are back before checking the keyboard shortcut") { tree.numberOfRows == 3 }
+
+        _ = try selectFiles()
+        try press("\u{7f}", code: 51, in: tree, modifiers: .command)
+        try await waitFor("Command-Delete recycles the selection") { tree.numberOfRows == 1 }
+
+        try Data("new occupant".utf8).write(to: first)
+        try performHistoryAction(in: tree, redo: false, title: "Undo Move to Trash")
+        try await waitFor("undo restores the other file when one name now conflicts") {
+            files.fileExists(atPath: second.path) && tree.numberOfRows == 3
+        }
+        let occupant = try String(contentsOf: first, encoding: .utf8)
+        try expect(occupant == "new occupant", "undo never replaces a file at the original path")
+        try files.removeItem(at: first)
+        try performHistoryAction(in: tree, redo: false, title: "Undo Move to Trash")
+        try await waitFor("undo can retry the conflicted entry") { files.fileExists(atPath: first.path) }
+        let retried = try String(contentsOf: first, encoding: .utf8)
+        try expect(retried == "One.txt", "the conflicted item remains available to restore")
+    }
+
+    private static func performHistoryAction(in tree: NSOutlineView, redo: Bool, title: String) throws {
+        try expect(tree.window?.firstResponder === tree, "file undo is routed through the focused outline")
+        let action = redo ? Selector(("redo:")) : Selector(("undo:"))
+        let item = NSMenuItem(title: redo ? "Redo" : "Undo", action: action, keyEquivalent: "z")
+        let validator = try require(tree as? NSMenuItemValidation, "Worktree participates in Edit menu validation")
+        try expect(validator.validateMenuItem(item) && item.title == title, "the Edit menu exposes \(title)")
+        try expect(tree.tryToPerform(action, with: item), "dispatch the Edit menu's undo or redo selector")
     }
 
     private static func fieldEditor(in window: NSWindow) throws -> NSTextView {
@@ -442,10 +538,11 @@ enum WorktreeCheck {
         return try require(button, "native disclosure button")
     }
 
-    private static func press(_ characters: String, code: UInt16, in outline: NSOutlineView) throws {
+    private static func press(_ characters: String, code: UInt16, in outline: NSOutlineView,
+                              modifiers: NSEvent.ModifierFlags = []) throws {
         let window = try require(outline.window, "keyboard navigation window")
         let event = try require(NSEvent.keyEvent(
-            with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+            with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0, windowNumber: window.windowNumber,
             context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code
         ), "outline key event")
         outline.keyDown(with: event)
