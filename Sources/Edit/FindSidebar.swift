@@ -552,15 +552,16 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         item.updateTitle(for: document.sidebarMode)
         let menu = item.menu
         menu.removeAllItems()
-        let search = menu.addItem(withTitle: SidebarMode.search.title, action: #selector(selectSearchSidebar(_:)),
-                                  keyEquivalent: "")
-        search.target = self
-        search.state = document.sidebarMode == .search ? .on : .off
         let tree = menu.addItem(withTitle: SidebarMode.worktree.title, action: #selector(selectWorktreeSidebar(_:)),
                                 keyEquivalent: "")
         tree.target = self
         tree.state = document.sidebarMode == .worktree ? .on : .off
         tree.isEnabled = document.folderURL != nil
+        menu.addItem(withTitle: "Source Control", action: nil, keyEquivalent: "").isEnabled = false
+        let search = menu.addItem(withTitle: SidebarMode.search.title, action: #selector(selectSearchSidebar(_:)),
+                                  keyEquivalent: "")
+        search.target = self
+        search.state = document.sidebarMode == .search ? .on : .off
         menu.addItem(.separator())
         if document.sidebarMode == .worktree, let worktree {
             let hidden = menu.addItem(withTitle: "Show Hidden Files", action: #selector(toggleHiddenFiles(_:)), keyEquivalent: "")

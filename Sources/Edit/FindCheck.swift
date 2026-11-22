@@ -403,17 +403,17 @@ enum FindCheck {
                    "the sidebar toolbar uses fixed icons without a separate Refresh button")
         let picker = try sidebarMenu(in: window)
         let items = picker.menu.items
-        try expect(!picker.isHidden && items.count == 4 && items[0].title == "Search" && items[0].state == .on &&
-                   items[1].title == "Worktree" && !items[1].isEnabled && !items[1].isHidden &&
-                   items[2].isSeparatorItem && items[3].title == "Refresh Search",
-                   "the sidebar menu shows both modes and keeps Worktree disabled without a folder")
+        try expect(!picker.isHidden && items.map(\.title) == ["Worktree", "Source Control", "Search", "", "Refresh Search"] &&
+                   !items[0].isEnabled && !items[0].isHidden && !items[1].isEnabled && !items[1].isHidden &&
+                   items[2].isEnabled && items[2].state == .on && items[3].isSeparatorItem,
+                   "the sidebar menu lists all choices in order and only Search is available without a folder")
         let menuButton = try require(picker.view as? NSButton, "native ellipsis button")
         try expect(menuButton.target === picker && menuButton.action != nil, "the ellipsis has a native menu action")
         let menuOrigin = picker.popupOrigin(in: menuButton)
         try expect(abs(menuOrigin.x + picker.menu.size.width - menuButton.bounds.maxX) < 0.5 &&
                    menuOrigin.x < menuButton.bounds.minX, "the menu opens to the left of the ellipsis")
         window.makeFirstResponder(editor)
-        picker.menu.performActionForItem(at: 0)
+        picker.menu.performActionForItem(at: picker.menu.indexOfItem(withTitle: "Search"))
         try expect(window.firstResponder === query && query.string == "checksum",
                    "selecting Search focuses Find and preserves the query")
         document.performFind(.replace)
@@ -628,7 +628,9 @@ enum FindCheck {
         try expect(menu.item(withTitle: "Worktree")?.isEnabled == true, "opening a folder enables Worktree")
         menu.performActionForItem(at: menu.indexOfItem(withTitle: "Worktree"))
         try expect(document.findSettings.visible && document.sidebarMode == .worktree &&
-                   menu.items.map(\.title) == ["Search", "Worktree", "", "Show Hidden Files"] &&
+                   menu.items.map(\.title) == ["Worktree", "Source Control", "Search", "", "Show Hidden Files"] &&
+                   menu.item(withTitle: "Source Control")?.isEnabled == false &&
+                   menu.item(withTitle: "Source Control")?.isHidden == false &&
                    menu.item(withTitle: "Search")?.isEnabled == true && menu.item(withTitle: "Worktree")?.state == .on,
                    "Worktree still offers Search alongside its own menu option")
         window.layoutIfNeeded()
