@@ -2,7 +2,7 @@
 
 A new untitled Edit window opens with a focused, empty plain-text buffer and one caret. [Files](../files/spec.md) defines how to open, save, and restore documents. The system supplies the window title bar, traffic lights, menus, scrollbars, caret, and selection appearance. AppKit and TextKit 2 handle text input and layout.
 
-Use the system monospaced font at 13 points initially and highlight the caret's current line across the viewport. Use a single text surface that follows macOS appearance. Lines can extend beyond the viewport and scroll horizontally without wrapping. Both axes use native macOS scrollbar preferences. Resizing the window or a split pane preserves the viewport relative to the exposed edge, within the available scroll range.
+Use Menlo Regular at 12 points with an 18-point line height, matching the default editor typography in VS Code on macOS. Highlight the caret's current line across the viewport. Use a single text surface that follows macOS appearance. Lines can extend beyond the viewport and scroll horizontally without wrapping. Both axes use native macOS scrollbar preferences. Resizing the window or a split pane preserves the viewport relative to the exposed edge, within the available scroll range.
 
 ## Editing
 
@@ -12,7 +12,7 @@ Use the system monospaced font at 13 points initially and highlight the caret's 
 - Option-Up and Option-Down move the current line or selected block up or down and keep the selection with the moved text. At the document boundary the block stays in place.
 - Command-Return inserts below and Shift-Command-Return inserts above with matching indentation. Command-] and Command-[ indent or outdent each affected line. Outdent removes one leading tab or up to four leading spaces.
 - Command-Delete deletes the prefix of a line, and Command-Forward Delete deletes the suffix. At the relevant line boundary these commands join adjacent lines.
-- Command-= and Command-- change the text size by one point, from 6 to 72. Command-0 and a fresh launch restore 13 points. Zoom keeps the same line at the top of the viewport. If the active line was visible and moves outside the viewport, scroll just enough to show it again. Keep the selection and leave offscreen carets in place.
+- Command-= and Command-- change the text size by one point, from 6 to 72. Line height is 1.5 times the font size, rounded to a whole point. Command-0 and a fresh launch restore 12 points. Zoom keeps the same line at the top of the viewport. If the active line was visible and moves outside the viewport, scroll just enough to show it again. Keep the selection and leave offscreen carets in place.
 
 The Edit menu has a Lines submenu with the six line commands. The View menu offers text sizing and native full screen. The Window menu offers Minimize, Zoom, and Close Window. The Help menu uses macOS command search.
 

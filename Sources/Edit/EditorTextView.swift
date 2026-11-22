@@ -25,8 +25,8 @@ private struct MultiCaretComposition {
 
 final class EditorTextView: NSTextView, NSTextViewDelegate {
     static let linePasteType = NSPasteboard.PasteboardType("dev.edit-swift.whole-line")
-    private static let defaultFontSize: CGFloat = 13
-    static let defaultFont = NSFont.monospacedSystemFont(ofSize: defaultFontSize, weight: .regular)
+    private static let defaultFontSize: CGFloat = 12
+    static let defaultFont = codeFont(ofSize: defaultFontSize)
     private var fontSize = EditorTextView.defaultFontSize
     private var currentLine = NSRect.zero
     private var lineRefreshPending = false
@@ -41,6 +41,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var onDrawFindHighlights: ((NSRect) -> Void)?
     weak var syntaxHighlighting: SyntaxHighlighting?
     var preferredLineEnding = "\n"
+
+
+    private static func codeFont(ofSize size: CGFloat) -> NSFont {
+        NSFont(name: "Menlo-Regular", size: size) ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+    }
 
     static func scrollingEditor(in frame: NSRect) -> (NSScrollView, EditorTextView) {
         let scrollView = EditorScrollView(frame: frame)
@@ -607,11 +612,13 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         let newSize = min(max(size, 6), 72)
         let anchor = newSize == fontSize ? nil : zoomAnchor()
         fontSize = newSize
-        let font = fontSize == Self.defaultFontSize ? Self.defaultFont
-            : NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let font = fontSize == Self.defaultFontSize ? Self.defaultFont : Self.codeFont(ofSize: fontSize)
         self.font = font
 
         let paragraph = NSMutableParagraphStyle()
+        let lineHeight = (fontSize * 1.5).rounded()
+        paragraph.minimumLineHeight = lineHeight
+        paragraph.maximumLineHeight = lineHeight
         paragraph.tabStops = []
         paragraph.defaultTabInterval = ("    " as NSString).size(withAttributes: [.font: font]).width
         defaultParagraphStyle = paragraph
@@ -767,9 +774,9 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         if window != nil, caretIsNearViewport(location) {
             if let line = lineBounds(at: location) {
                 newLine = NSRect(x: bounds.minX, y: line.minY, width: bounds.width, height: line.height)
-            } else if textStorage?.length == 0, let font {
+            } else if textStorage?.length == 0, let paragraph = defaultParagraphStyle {
                 newLine = NSRect(x: bounds.minX, y: textContainerOrigin.y, width: bounds.width,
-                                 height: ceil(font.ascender - font.descender + font.leading))
+                                 height: paragraph.minimumLineHeight)
             }
         }
         if newLine != currentLine {

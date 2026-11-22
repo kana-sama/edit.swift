@@ -85,12 +85,25 @@ enum EditorCheck {
         let sample = "let greeting = \"Hello, Edit!\"\n\nprint(greeting)"
         let selection = (sample as NSString).range(of: "Hello, Edit!")
         setBuffer(sample, at: selection.location, length: selection.length)
-        let size = editor.font?.pointSize
+        let secondLine = (sample as NSString).range(of: "\n").location + 1
+        func checkTypography(size: CGFloat, lineHeight: CGFloat) throws {
+            try expect(editor.font?.fontName == "Menlo-Regular" && editor.font?.pointSize == size,
+                       "use Menlo Regular at \(size) points")
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            let lineOrigins = [0, secondLine, secondLine + 1].map { location in
+                editor.firstRect(forCharacterRange: NSRange(location: location, length: 0), actualRange: nil).minY
+            }
+            for index in 1..<lineOrigins.count {
+                let step = abs(lineOrigins[index] - lineOrigins[index - 1])
+                try expect(abs(step - lineHeight) < 0.5, "line step \(step) should be \(lineHeight) points")
+            }
+        }
+        try checkTypography(size: 12, lineHeight: 18)
         editor.increaseTextSize(nil)
-        try expect(size.map { $0 + 1 } == editor.font?.pointSize, "increase text size")
+        try checkTypography(size: 13, lineHeight: 20)
         try expect(editor.selectedRange() == selection, "text size preserves selection")
         editor.resetTextSize(nil)
-        try expect(editor.font?.pointSize == size, "restore default text size")
+        try checkTypography(size: 12, lineHeight: 18)
         scrollView.contentView.scroll(to: .zero)
         scrollView.reflectScrolledClipView(scrollView.contentView)
         window.layoutIfNeeded()
