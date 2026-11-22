@@ -118,7 +118,7 @@ final class FilePreviewView: NSView {
             addMedia(player, width: details.width ?? 16, height: details.height ?? 9)
         } else if let image = details.image {
             let preview = NSImageView(image: NSImage(cgImage: image, size: .zero))
-            preview.imageScaling = .scaleProportionallyUpOrDown
+            preview.imageScaling = .scaleProportionallyDown
             preview.setAccessibilityElement(true)
             preview.setAccessibilityLabel("Preview of \(url.lastPathComponent)")
             addMedia(preview, width: image.width, height: image.height)

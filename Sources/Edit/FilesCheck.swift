@@ -226,6 +226,8 @@ enum FilesCheck {
         let imageSurface = try resolve(document.contentResponder as? FilePreviewView)
         let scroll = try resolve(views(in: imageSurface, ofType: NSScrollView.self).first)
         let previewImage = try resolve(views(in: imageSurface, ofType: NSImageView.self).first)
+        try expect(previewImage.imageScaling == .scaleProportionallyDown,
+                   "preview images only scale down to fit")
         let path = try resolve(views(in: imageSurface, ofType: NSTextField.self).first {
             $0.stringValue == FileBuffer.canonicalURL(image).path
         })
