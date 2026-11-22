@@ -6,7 +6,7 @@ Match the corresponding interaction in the current macOS system app by default. 
 
 - For a single item rename, follow Finder. Return edits the name in its row and selects the basename of a file. Return confirms and Escape cancels. In a tree, creating an item starts with an editable row in the destination folder. [Finder rename](https://support.apple.com/guide/mac-help/rename-files-folders-and-disks-on-mac-mchlp1144/27/mac/27)
 - For opening files and confirming unsaved changes, use the system file panel and document sheet conventions. Reserve modal confirmation for actions that require a separate decision.
-- For sidebars and menus, follow native placement, keyboard navigation, glass materials, and active and inactive selection states.
+- For sidebars and menus, follow native placement, keyboard navigation, glass materials, and active and inactive selection states. Search and Worktree leave 10 points of space below the last row at the bottom of their scroll areas.
 
 Document windows use the compact unified AppKit toolbar with a fixed icon-only display. Let editor content scroll beneath the filename and system window buttons to receive the native scroll-edge material. Let the editor’s scroll view extend behind the native sidebar. Use AppKit’s safe area and automatic scroll insets so text begins in the exposed area and can pass under the titlebar and sidebar during scrolling.
 

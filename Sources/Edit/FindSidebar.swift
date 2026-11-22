@@ -707,6 +707,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         results.onEscape = { [weak self] in self?.clearResultFocus() }
         resultScroll.drawsBackground = false
         resultScroll.automaticallyAdjustsContentInsets = false
+        resultScroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 10, right: 0)
         resultScroll.contentView.clipsToBounds = true
         resultScroll.hasVerticalScroller = true
         resultScroll.autohidesScrollers = true

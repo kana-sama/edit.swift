@@ -52,7 +52,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     private static let hiddenItemsKey = "WorktreeHiddenItems"
     private static let hiddenItemsChanged = Notification.Name("Edit.WorktreeHiddenItemsChanged")
     private let container = NSView()
-    private let scroll = NSScrollView()
+    private let scroll = WorktreeScrollView()
     private let tree = WorktreeOutline()
     private unowned let document: DocumentWindow
     private unowned let app: Edit
@@ -122,6 +122,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.automaticallyAdjustsContentInsets = false
+        scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 10, right: 0)
         scroll.contentView.clipsToBounds = true
         scroll.documentView = tree
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -936,6 +937,17 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     private func itemAtParent(of item: Item) -> Item? { self.item(at: item.url.deletingLastPathComponent().path) }
+}
+
+private final class WorktreeScrollView: NSScrollView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        guard hit === self || hit === contentView, let documentView else { return hit }
+        let clipPoint = contentView.convert(point, from: superview)
+        guard contentView.bounds.contains(clipPoint), clipPoint.y >= documentView.frame.maxY else { return hit }
+        // Treat the bottom inset as blank outline space for the root context menu.
+        return documentView
+    }
 }
 
 @MainActor
