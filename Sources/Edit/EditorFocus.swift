@@ -11,7 +11,7 @@ final class EditorFocusSession {
     private(set) var ranges: [NSRange]
 
     init(_ ranges: [NSRange]) {
-        self.ranges = MultiCaretEditing.merged(ranges)
+        self.ranges = ranges
     }
 
     var snapshot: Snapshot { Snapshot(session: id, ranges: ranges) }
@@ -100,13 +100,20 @@ extension EditorTextView {
     var focusRanges: [NSRange]? { focusSession?.ranges }
 
     var canFocusSelection: Bool {
-        isEditable && focusSession == nil && !hasMarkedText() && caretSelections.contains { $0.length > 0 }
+        isEditable && focusSession == nil && !hasMarkedText()
     }
 
     func beginFocus() {
-        guard canFocusSelection else { return }
-        let ranges = caretSelections.filter { $0.length > 0 }
-        let carets = ranges.map { NSRange(location: activeEnd(of: $0), length: 0) }
+        guard canFocusSelection, let text = textStorage?.mutableString else { return }
+        let selections = caretSelections
+        // Each block owns its internal line breaks. The break leading into
+        // protected text stays outside, so Return at the end can add a line.
+        let ranges = MultiCaretEditing.lineBlocks(in: text, for: selections).map(\.line.contentRange)
+        guard !ranges.isEmpty else { return }
+        let carets = selections.compactMap { selection -> NSRange? in
+            guard let lines = LineEditing.affectedLines(in: text, selection: selection) else { return nil }
+            return NSRange(location: min(activeEnd(of: selection), lines.contentEnd), length: 0)
+        }
         let origin = enclosingScrollView?.visibleContentOrigin
         breakUndoCoalescing()
         editorUndoManager.beginFocus()
@@ -162,24 +169,39 @@ extension EditorTextView {
     }
 
     func refreshFocusDecoration() {
-        guard let focusRanges, let layout = textLayoutManager,
-              let viewport = layout.textViewportLayoutController.viewportRange else { return }
+        guard let focusRanges, let layout = textLayoutManager, let storage = textStorage else { return }
         let visible = visibleRect
         guard !visible.isEmpty else { return }
-        let viewportCharacters = charRange(viewport, in: layout)
-        let origin = textContainerOrigin
-        let active = CGMutablePath()
-        for range in focusRanges where range.location <= NSMaxRange(viewportCharacters)
-            && NSMaxRange(range) >= viewportCharacters.location {
-            let footprint = range.length == 0 ? range : NSIntersectionRange(range, viewportCharacters)
-            guard (range.length == 0 || footprint.length > 0), let text = textRange(footprint, in: layout) else { continue }
-            layout.enumerateTextSegments(in: text, type: .selection, options: .rangeNotRequired) { _, rect, _, _ in
-                let area = rect.offsetBy(dx: origin.x - visible.minX, dy: origin.y - visible.minY)
-                let clipped = area.insetBy(dx: -1, dy: 0)
-                    .intersection(NSRect(origin: .zero, size: visible.size).insetBy(dx: -2, dy: -2))
-                if !clipped.isEmpty { active.addRect(clipped) }
-                return true
+        let viewport = layout.textViewportLayoutController.viewportRange.map { charRange($0, in: layout) }
+        guard let viewportCharacters = viewport ?? (storage.length == 0 ? NSRange(location: 0, length: 0) : nil)
+        else { return }
+        var activeBands: [CGRect] = []
+        for range in focusRanges where range.location <= viewportCharacters.upperBound
+            && range.upperBound >= viewportCharacters.location {
+            let top: CGFloat
+            if range.location < viewportCharacters.location {
+                top = visible.minY - 1
+            } else if let first = lineBounds(at: range.location) {
+                top = first.minY
+            } else if storage.length == 0 {
+                top = textContainerOrigin.y
+            } else {
+                continue
             }
+
+            let bottom: CGFloat
+            if range.upperBound > viewportCharacters.upperBound {
+                bottom = visible.maxY + 1
+            } else if let last = lineBounds(at: range.upperBound) {
+                bottom = last.maxY
+            } else if storage.length == 0, let paragraph = defaultParagraphStyle {
+                bottom = top + paragraph.minimumLineHeight
+            } else {
+                continue
+            }
+
+            guard top <= visible.maxY, bottom >= visible.minY, bottom > top else { continue }
+            activeBands.append(CGRect(x: 0, y: top - visible.minY, width: visible.width, height: bottom - top))
         }
 
         let decoration: FocusDecoration
@@ -194,14 +216,14 @@ extension EditorTextView {
             focusDecoration = decoration
         }
         if decoration.frame != visible { decoration.frame = visible }
-        decoration.active = active.normalized()
+        decoration.activeBands = activeBands
     }
 }
 
 @MainActor
 final class FocusDecoration: NSView {
-    var active = CGPath(rect: .zero, transform: nil) {
-        didSet { if active != oldValue { needsDisplay = true } }
+    var activeBands: [CGRect] = [] {
+        didSet { if activeBands != oldValue { needsDisplay = true } }
     }
 
     override var isFlipped: Bool { true }
@@ -215,11 +237,18 @@ final class FocusDecoration: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
         let contrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
-        let outside = CGPath(rect: bounds, transform: nil).subtracting(active)
-        context.addPath(outside)
+        context.addRect(bounds)
+        for band in activeBands {
+            context.addRect(band.intersection(bounds))
+        }
         NSColor.textBackgroundColor.withAlphaComponent(contrast ? 0.48 : 0.72).setFill()
-        context.fillPath()
-        context.addPath(active)
+        context.fillPath(using: .evenOdd)
+        for band in activeBands {
+            for y in [band.minY, band.maxY] where bounds.minY <= y && y <= bounds.maxY {
+                context.move(to: CGPoint(x: bounds.minX, y: y))
+                context.addLine(to: CGPoint(x: bounds.maxX, y: y))
+            }
+        }
         NSColor.controlAccentColor.setStroke()
         context.setLineWidth(1)
         context.strokePath()

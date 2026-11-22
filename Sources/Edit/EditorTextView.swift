@@ -777,7 +777,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         return top...max(top, rect.maxY - scroll.contentInsets.bottom)
     }
 
-    private func lineBounds(at offset: Int) -> NSRect? {
+    func lineBounds(at offset: Int) -> NSRect? {
         guard let window else { return nil }
         let caret = firstRect(forCharacterRange: NSRange(location: offset, length: 0), actualRange: nil)
         return caret.height > 0 ? convert(window.convertFromScreen(caret), from: nil) : nil

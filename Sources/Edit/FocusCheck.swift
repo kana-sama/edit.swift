@@ -16,17 +16,20 @@ enum FocusCheck {
         editor.insertText("!", replacementRange: NSRange(location: NSNotFound, length: 0))
         history.endUndoGrouping()
         let source = editor.string as NSString
-        let first = source.range(of: "LOCAL")
-        let last = source.range(of: "LOCAL", options: .backwards)
-        editor.setCaretSelections([first, last])
+        let firstWord = source.range(of: "LOCAL")
+        let lastWord = source.range(of: "LOCAL", options: .backwards)
+        let first = source.range(of: "!prefix LOCAL suffix")
+        let last = source.range(of: "end LOCAL tail")
+        editor.setCaretSelections([firstWord, lastWord])
         let menu = try require(NSApp.mainMenu)
         let commands = ControlCommand.fromMenu(menu)
         let enter = try require(commands.first { $0.item.action == #selector(Edit.focusSelection(_:)) })
         let leave = try require(commands.first { $0.item.action == #selector(Edit.exitFocus(_:)) })
         try expect(enter.isAvailable(in: document, focus: nil), "Control offers Focus Selection")
+        let activeColumns = editor.caretSelections.map { NSRange(location: editor.activeEnd(of: $0), length: 0) }
         enter.run(in: document)
-        try expect(editor.focusRanges == [first, last] && editor.caretSelections.count == 2 &&
-                   editor.caretSelections.allSatisfy { $0.length == 0 }, "enter Focus with two scope ranges and two empty carets")
+        try expect(editor.focusRanges == [first, last] && editor.caretSelections == activeColumns,
+                   "focus the complete lines from two partial words and keep both active columns")
         try expect(leave.isAvailable(in: document, focus: nil) && !history.canUndo && !history.canRedo,
                    "Focus presents its exit command and closes off older undo history")
 
@@ -42,7 +45,8 @@ enum FocusCheck {
         let clipboard = NSPasteboard(name: .init("edit.focus.check.\(UUID())"))
         defer { clipboard.releaseGlobally() }
         _ = editor.copySelections(to: clipboard, cutting: false)
-        try expect(clipboard.string(forType: .string) == "LOCAL\nLOCAL", "clipboard excludes protected text")
+        try expect(clipboard.string(forType: .string) == "!prefix LOCAL suffix\nend LOCAL tail",
+                   "clipboard includes complete focused lines and skips the protected gap")
 
         editor.lowercaseWord(nil)
         let lowercased = "!prefix local suffix\nmiddle LOCAL gap\nend local tail\n"
@@ -58,11 +62,13 @@ enum FocusCheck {
 
         editor.selectAll(nil)
         editor.insertText("new", replacementRange: NSRange(location: NSNotFound, length: 0))
-        try expect(editor.string == "!prefix new suffix\nmiddle LOCAL gap\nend  tail\n" &&
+        try expect(editor.string == "new\nmiddle LOCAL gap\n\n" &&
                    editor.focusRanges?.last?.length == 0, "replacing a logical selection inserts once and preserves the gap")
         history.undo()
 
-        editor.setCaretSelections([NSRange(location: first.location, length: 0), NSRange(location: last.location, length: 0)])
+        editor.setCaretSelections([
+            NSRange(location: firstWord.location, length: 0), NSRange(location: lastWord.location, length: 0),
+        ])
         editor.setMarkedText("é", selectedRange: NSRange(location: 1, length: 0),
                              replacementRange: NSRange(location: NSNotFound, length: 0))
         try expect(editor.hasMarkedText(), "IME uses native marked input within Focus")
@@ -76,7 +82,9 @@ enum FocusCheck {
         window.layoutIfNeeded()
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         editor.refreshCurrentLine()
-        try expect(editor.focusDecoration?.active.isEmpty == false, "native rendering includes the Focus outline")
+        let bands = try require(editor.focusDecoration?.activeBands)
+        try expect(bands.count == 2 && bands.allSatisfy { $0.width >= editor.visibleRect.width - 2 },
+                   "each focused row fills the editor width in native rendering")
 
         document.findSettings.query = "LOCAL"
         document.findSettings.replacement = "local"
@@ -105,8 +113,28 @@ enum FocusCheck {
         let current = editor.string as NSString
         editor.setCaretSelections([current.range(of: "LOCAL")])
         document.focusSelection()
+        let suffix = current.range(of: "suffix").location
+        try clickCharacter(at: suffix, editor: editor, window: window)
+        try expect(editor.focusRanges != nil && editor.selectedRange() == NSRange(location: suffix, length: 0),
+                   "a click in the focused line beyond the original selected word stays in Focus")
+        let changed = current.replacingCharacters(in: NSRange(location: suffix, length: 0), with: "X")
+        editor.insertText("X", replacementRange: NSRange(location: NSNotFound, length: 0))
+        try expect(editor.string == changed,
+                   "typing anywhere on the focused line edits that line")
+        editor.deleteBackward(nil)
+        try expect(editor.string == original && editor.focusRanges != nil,
+                   "backspace inside the focused line removes the inserted character")
         let outside = current.range(of: "gap").location
-        let rect = editor.firstRect(forCharacterRange: NSRange(location: outside, length: 1), actualRange: nil)
+        try clickCharacter(at: outside, editor: editor, window: window)
+        try expect(editor.focusRanges == nil && editor.selectedRange() == NSRange(location: outside, length: 0),
+                   "an outside click exits and places the native caret at the click")
+
+        try verifyLineScope(in: app)
+        try await verifyFileLifecycle(in: app)
+    }
+
+    private static func clickCharacter(at offset: Int, editor: EditorTextView, window: NSWindow) throws {
+        let rect = editor.firstRect(forCharacterRange: NSRange(location: offset, length: 1), actualRange: nil)
         let location = window.convertPoint(fromScreen: NSPoint(x: rect.minX + 1, y: rect.midY))
         let stamp = ProcessInfo.processInfo.systemUptime
         let down = try require(NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [],
@@ -117,10 +145,74 @@ enum FocusCheck {
                                                 context: nil, eventNumber: 2, clickCount: 1, pressure: 0))
         NSApp.postEvent(up, atStart: true)
         editor.mouseDown(with: down)
-        try expect(editor.focusRanges == nil && editor.selectedRange() == NSRange(location: outside, length: 0),
-                   "an outside click exits and places the native caret at the click")
+    }
 
-        try await verifyFileLifecycle(in: app)
+    private static func verifyLineScope(in app: Edit) throws {
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        let editor = document.editor
+        let original = "before\r\n  alpha suffix\r\n  bravo end\r\n  charlie tail\r\n  delta last\r\nprotected\r\nend of file"
+        editor.string = original
+        editor.preferredLineEnding = "\r\n"
+        let text = original as NSString
+        let alpha = text.range(of: "  alpha suffix")
+        let adjacent = text.range(of: "  alpha suffix\r\n  bravo end\r\n  charlie tail\r\n  delta last")
+        let bravo = text.range(of: "  bravo end")
+        let last = text.range(of: "end of file")
+        let words = ["bravo end", "alpha suffix", "delta last", "charlie tail"].map { text.range(of: $0) }
+        editor.setCaretSelections(words)
+        document.focusSelection()
+        try expect(editor.focusRanges == [adjacent], "partial selections on four adjacent rows focus one block")
+        editor.exitFocus()
+
+        let carets = words.map { NSRange(location: $0.location + 2, length: 0) } +
+            [NSRange(location: last.location + 2, length: 0)]
+        editor.setCaretSelections(carets)
+        document.focusSelection()
+        try expect(editor.focusRanges == [adjacent, last] && editor.caretSelections == carets,
+                   "carets focus complete lines, coalesce adjacent rows and retain their original columns")
+
+        editor.setCaretSelections([NSRange(location: adjacent.location, length: 0)])
+        editor.deleteBackward(nil)
+        editor.setCaretSelections([NSRange(location: NSMaxRange(adjacent), length: 0)])
+        editor.deleteForward(nil)
+        try expect(editor.string == original, "deletion at either edge preserves the outside CRLF")
+
+        editor.insertNewline(nil)
+        let inserted = text.replacingCharacters(in: NSRange(location: NSMaxRange(adjacent), length: 0), with: "\r\n  ")
+        let expanded = NSRange(location: adjacent.location, length: adjacent.length + 4)
+        try expect(editor.string == inserted && editor.focusRanges?.first == expanded &&
+                   editor.selectedRange() == NSRange(location: NSMaxRange(expanded), length: 0),
+                   "Return on the final focused line adds an indented CRLF line within Focus")
+        editor.deleteForward(nil)
+        try expect(editor.string == inserted, "the external CRLF after the new focused line remains protected")
+        editor.editorUndoManager.undo()
+        try expect(editor.string == original && editor.focusRanges == [adjacent, last],
+                   "Undo restores the original focused line boundary")
+
+        editor.setCaretSelections([NSRange(location: NSMaxRange(last), length: 0)])
+        document.window.layoutIfNeeded()
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        editor.refreshCurrentLine()
+        let lastBand = try require(editor.focusDecoration?.activeBands.last)
+        editor.insertNewline(nil)
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        editor.refreshCurrentLine()
+        let expandedBand = try require(editor.focusDecoration?.activeBands.last)
+        try expect(expandedBand.minY == lastBand.minY && expandedBand.height > lastBand.height,
+                   "the bottom boundary moves below the new blank line at EOF")
+        editor.insertText("new", replacementRange: NSRange(location: NSNotFound, length: 0))
+        try expect(editor.string == original + "\r\nnew" &&
+                   editor.focusRanges?.last == NSRange(location: last.location, length: last.length + 5),
+                   "Return at EOF adds another focused line that accepts text")
+
+        editor.exitFocus()
+        editor.setSelectedRange(NSRange(location: alpha.location + 3, length: bravo.location - alpha.location - 3),
+                                affinity: .downstream, stillSelecting: false)
+        document.focusSelection()
+        try expect(editor.focusRanges == [alpha] &&
+                   editor.selectedRange() == NSRange(location: NSMaxRange(alpha), length: 0),
+                   "a selection ending at the next line start excludes that row and keeps its caret in Focus")
     }
 
     private static func verifyFileLifecycle(in app: Edit) async throws {
@@ -153,7 +245,7 @@ enum FocusCheck {
         editor.setCaretSelections([NSRange(location: 6, length: 5)])
         document.focusSelection()
         await document.newBuffer()
-        try expect(editor.focusRanges == [NSRange(location: 6, length: 5)] && editor.string == "plain draft",
+        try expect(editor.focusRanges == [NSRange(location: 0, length: 11)] && editor.string == "plain draft",
                    "cancelling replacement of a dirty draft preserves Focus")
     }
 
