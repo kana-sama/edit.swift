@@ -4,11 +4,17 @@ import UniformTypeIdentifiers
 // AppKit owns the close sheet. Edit remains responsible for writing the buffer.
 @MainActor
 final class UntitledCloseSheet: NSDocument {
+    enum Decision {
+        case close
+        case cancel
+        case scratch(name: String, encoding: FileTextEncoding)
+    }
+
     private let parent: NSWindow
     private let folder: URL?
     private let saveDraft: (URL, FileTextEncoding) async -> Bool
-    private lazy var encodingAccessory = SaveEncodingAccessory(selected: .utf8)
-    private var closeReply: CheckedContinuation<Bool, Never>?
+    private var accessory: SavePanelAccessory?
+    private var closeReply: CheckedContinuation<Decision, Never>?
 
     init(window: NSWindow, folder: URL?, saveDraft: @escaping (URL, FileTextEncoding) async -> Bool) {
         parent = window
@@ -30,7 +36,7 @@ final class UntitledCloseSheet: NSDocument {
 
     override func scheduleAutosaving() {}
 
-    func confirmClose() async -> Bool {
+    func confirmClose() async -> Decision {
         await withCheckedContinuation { reply in
             closeReply = reply
             canClose(withDelegate: self, shouldClose: #selector(didDecideClose(_:shouldClose:contextInfo:)),
@@ -41,7 +47,11 @@ final class UntitledCloseSheet: NSDocument {
     @objc private func didDecideClose(_ document: NSDocument, shouldClose: Bool, contextInfo: UnsafeMutableRawPointer?) {
         let reply = closeReply
         closeReply = nil
-        reply?.resume(returning: shouldClose)
+        if let accessory, let name = accessory.scratchName {
+            reply?.resume(returning: .scratch(name: name, encoding: accessory.selection))
+        } else {
+            reply?.resume(returning: shouldClose ? .close : .cancel)
+        }
     }
 
     override func prepareSavePanel(_ panel: NSSavePanel) -> Bool {
@@ -52,14 +62,16 @@ final class UntitledCloseSheet: NSDocument {
         panel.canSelectHiddenExtension = false
         panel.isExtensionHidden = false
 
-        panel.accessoryView = encodingAccessory
+        let accessory = SavePanelAccessory(selected: .utf8, scratchPanel: panel)
+        panel.accessoryView = accessory
+        self.accessory = accessory
         return true
     }
 
     override func save(to url: URL, ofType typeName: String, for saveOperation: SaveOperationType,
                        completionHandler: @escaping ((any Error)?) -> Void) {
         Task {
-            let didSave = await saveDraft(url, encodingAccessory.selection)
+            let didSave = await saveDraft(url, accessory?.selection ?? .utf8)
             completionHandler(didSave ? nil : CocoaError(.userCancelled))
         }
     }

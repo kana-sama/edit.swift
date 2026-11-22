@@ -41,7 +41,8 @@ enum FolderFileSearch {
         fileprivate let files: [ControlEntry]
         fileprivate let recentScope: RecentScope
 
-        func rank(_ recent: [ControlEntry], query: String, pinnedFiles: [ControlEntry] = []) -> [ControlMatch] {
+        func rank(_ recent: [ControlEntry], query: String, pinnedFiles: [ControlEntry] = [],
+                  scratches: [ControlEntry] = []) -> [ControlMatch] {
             let eligible: [ControlEntry]
             switch recentScope {
             case .project(var exclusions):
@@ -49,7 +50,8 @@ enum FolderFileSearch {
             case .listedFiles(let paths):
                 eligible = recent.filter { $0.recent.map { paths.contains($0.canonicalURL.path) } == true }
             }
-            return FolderFileSearch.rank(eligible, folderFiles: files, pinnedFiles: pinnedFiles, query: query)
+            return FolderFileSearch.rank(eligible, folderFiles: files, pinnedFiles: pinnedFiles,
+                                         scratches: scratches, query: query)
         }
     }
 
@@ -109,9 +111,9 @@ enum FolderFileSearch {
         return files.sorted { $0.id < $1.id }
     }
 
-    static func recentMatches(_ recent: [ControlEntry], in folder: URL) -> [ControlMatch] {
+    static func recentMatches(_ recent: [ControlEntry], scratches: [ControlEntry], in folder: URL) -> [ControlMatch] {
         var exclusions = FolderSearchExclusions(root: folder)
-        return ControlMatching.rank(exclusions.filter(recent), query: "")
+        return ControlMatching.rankFiles(exclusions.filter(recent) + scratches, query: "")
     }
 
     private static func fileEntries(_ urls: [URL], relativeTo folder: URL) -> [ControlEntry] {
@@ -134,8 +136,9 @@ enum FolderFileSearch {
     }
 
     private static func rank(_ recent: [ControlEntry], folderFiles: [ControlEntry], pinnedFiles: [ControlEntry],
-                             query: String) -> [ControlMatch] {
-        let matches = ControlMatching.rank(recent + folderFiles + pinnedFiles, query: query)
+                             scratches: [ControlEntry], query: String) -> [ControlMatch] {
+        let matches = ControlMatching.rank(recent + scratches + folderFiles + pinnedFiles, query: query,
+                                           preferRecentFiles: true)
 
         // Rank both paths before merging. A recent may use an alias while the query matches the real name.
         let matchingRecents = matches.compactMap { $0.entry.recent }

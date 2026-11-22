@@ -28,7 +28,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     enum CloseDestination {
         case window
-        case buffer(FileBuffer?, focusEditor: Bool = true)
+        case buffer(FileBuffer?, focusEditor: Bool = true, scratch: ScratchFile? = nil)
         case preview(OpenFilePreview, focusEditor: Bool)
     }
 
@@ -46,16 +46,21 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private unowned let app: Edit
     private(set) var fileURL: URL? {
         didSet {
-            if oldValue != fileURL { detectedSyntaxLanguage = SyntaxLanguage.detected(at: fileURL) }
+            if oldValue != fileURL {
+                scratchFile = nil
+                detectedSyntaxLanguage = SyntaxLanguage.detected(at: fileURL)
+            }
         }
     }
+    private(set) var scratchFile: ScratchFile?
     private(set) var folderURL: URL?
     private var filePreview: OpenFilePreview?
     private var filePreviewView: FilePreviewView?
     var openRequestGeneration: UInt64 = 0
     var isShowingFilePreview: Bool { filePreview != nil }
     var displayedFileURL: URL? { filePreview?.url ?? fileURL }
-    var displayName: String { displayedFileURL?.lastPathComponent ?? "Untitled" }
+    var fileIconURL: URL? { scratchFile?.filenameURL ?? displayedFileURL }
+    var displayName: String { scratchFile?.name ?? displayedFileURL?.lastPathComponent ?? "Untitled" }
     var contentResponder: NSView { (filePreviewView as NSView?) ?? editor }
 
     func focusContent() {
@@ -89,9 +94,14 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var syntaxHighlighting: SyntaxHighlighting?
     private var findPanel: FindSidebar?
     var findSettings = FindSettings()
-    var sidebarMode: SidebarMode = .search
+    private var lastSidebarMode: SidebarMode?
+    var sidebarMode: SidebarMode {
+        get { lastSidebarMode ?? (folderURL == nil ? .scratches : .search) }
+        set { lastSidebarMode = newValue }
+    }
     var worktreeShowsHidden = false
     var worktreeSidebar: WorktreeSidebar? { findPanel?.worktree }
+    var scratchOutline: NSOutlineView? { findPanel?.scratchOutline }
     private var appearanceObservation: NSKeyValueObservation?
     private(set) var manualSyntaxLanguage: SyntaxLanguage?
 
@@ -190,7 +200,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func restoreSidebar(_ record: SessionDocument) {
-        sidebarMode = folderURL == nil ? .search : record.sidebarMode ?? .search
+        // Older sessions omitted the mode for Search even when they saved its sidebar state.
+        lastSidebarMode = record.sidebarMode ?? (record.findSettings == nil ? nil : .search)
+        if lastSidebarMode == .worktree && folderURL == nil { lastSidebarMode = .search }
         worktreeShowsHidden = record.worktreeShowsHidden ?? false
         if let settings = record.findSettings { restoreFindSettings(settings) }
     }
@@ -261,19 +273,23 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         Task { @MainActor [weak self] in self?.reportAutosaveFailure() }
     }
 
-    func load(_ file: FileBuffer, storedSyntaxLanguage: String? = nil, preparedSyntax: SyntaxSnapshot? = nil) {
+    func load(
+        _ file: FileBuffer, storedSyntaxLanguage: String? = nil, preparedSyntax: SyntaxSnapshot? = nil, scratch: ScratchFile? = nil
+    ) {
         removeFilePreview()
         updateIdentity(from: file)
+        scratchFile = scratch
+        if let scratch { detectedSyntaxLanguage = SyntaxLanguage.detected(at: scratch.filenameURL) }
         manualSyntaxLanguage = storedSyntaxLanguage.flatMap(SyntaxLanguage.init(rawValue:))
             ?? app.syntaxOverrides.language(for: fileURL)
         installText(file.text, preparedSyntax: preparedSyntax)
     }
 
     func prepareOpeningSyntax(
-        _ file: FileBuffer, position: EditorPosition?, storedSyntaxLanguage: String? = nil
+        _ file: FileBuffer, position: EditorPosition?, storedSyntaxLanguage: String? = nil, scratch: ScratchFile? = nil
     ) async -> SyntaxSnapshot? {
         let language = storedSyntaxLanguage.flatMap(SyntaxLanguage.init(rawValue:))
-            ?? app.syntaxOverrides.language(for: file.url) ?? SyntaxLanguage.detected(at: file.url)
+            ?? app.syntaxOverrides.language(for: file.url) ?? SyntaxLanguage.detected(at: scratch?.filenameURL ?? file.url)
         guard language != .plainText, position?.topLine != nil || (position?.verticalOffset ?? 0) <= 0 else { return nil }
         let topOffset = position?.topLine?.textOffset ?? 0
         let lineHeight = max(1, editor.defaultParagraphStyle?.maximumLineHeight ?? 18)
@@ -323,8 +339,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         ])
     }
 
-    func restoreDraft(_ record: SessionDocument, text: String, identity: FileIdentity? = nil) {
+    func restoreDraft(_ record: SessionDocument, text: String, identity: FileIdentity? = nil, scratch: ScratchFile? = nil) {
         fileURL = record.path.map { URL(fileURLWithPath: $0) }
+        scratchFile = scratch
+        if let scratch { detectedSyntaxLanguage = SyntaxLanguage.detected(at: scratch.filenameURL) }
         fileIdentity = identity
         savedText = fileURL == nil ? "" as NSString : nil
         format = record.format ?? FileFormat()
@@ -345,7 +363,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             folderPath: folderURL?.path,
             findSettings: findSettings == FindSettings() ? nil : findSettings,
             editorPosition: isShowingFilePreview ? nil : editor.capturePosition(),
-            sidebarMode: sidebarMode == .search ? nil : sidebarMode,
+            sidebarMode: lastSidebarMode,
             worktreeShowsHidden: (worktreeSidebar?.showsHidden ?? worktreeShowsHidden) ? true : nil,
             isFilePreview: isShowingFilePreview ? true : nil
         )
@@ -383,9 +401,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if selectedURL == nil, destination == nil || asNew {
             guard !app.isAgentCheck else { return false }
             let panel = makeSavePanel()
-            let accessory = SaveEncodingAccessory(selected: saveFormat.encoding)
+            let accessory = SavePanelAccessory(selected: saveFormat.encoding, scratchPanel: fileURL == nil ? panel : nil)
             panel.accessoryView = accessory
-            guard await response(to: panel) == .OK else { return false }
+            let result = await response(to: panel)
+            if let name = accessory.scratchName {
+                return await saveScratchFromPanel(name: name, encoding: accessory.selection)
+            }
+            guard result == .OK else { return false }
             destination = panel.url
             saveFormat = saveFormat.using(accessory.selection)
         }
@@ -421,9 +443,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 guard await response(to: alert) == .alertSecondButtonReturn else { return false }
                 try await write(text, to: target, format: saveFormat, expected: nil)
             }
-            if let queuedAutosave, queuedAutosave.generation <= writtenGeneration { self.queuedAutosave = nil }
-            if window.isDocumentEdited { scheduleIdleAutosave() }
-            if promote { await app.recentFiles.record(destination, in: folderURL) }
+            resumeAutosave(afterSaving: writtenGeneration)
+            if promote && !app.scratchStore.identifiesScratch(at: target) {
+                await app.recentFiles.record(destination, in: folderURL)
+            }
             return true
         } catch {
             await showError("Could Not Save “\(target.lastPathComponent)”", detail: error.localizedDescription)
@@ -431,14 +454,72 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
     }
 
+    func saveAsScratch() async {
+        guard canReplaceBuffer, !isShowingFilePreview, !app.isQuitting else { return }
+        saving = true
+        defer {
+            saving = false
+            startRequestedAutosave()
+            reportAutosaveFailure()
+        }
+        if editor.hasMarkedText() { editor.unmarkText() }
+        await autosaveTask?.value
+        let known = (try? await app.scratchStore.files()) ?? []
+        let folders = app.recentFiles.folders.map(\.canonicalURL) + known.compactMap { file in
+            file.folderPath.map { URL(filePath: $0, directoryHint: .isDirectory) }
+        }
+        let sheet = ScratchSaveSheet(
+            window: window, name: fileURL == nil ? "Untitled.txt" : displayName,
+            folders: folders, selectedFolder: folderURL
+        ) { [self] name, folder in
+            _ = try await saveScratch(name: name, folder: folder)
+        }
+        await sheet.run()
+    }
+
+    private func saveScratchFromPanel(name: String, encoding: FileTextEncoding) async -> Bool {
+        do {
+            _ = try await saveScratch(name: name, folder: folderURL, encoding: encoding)
+            return true
+        } catch {
+            await showError("Could Not Save Scratch", detail: error.localizedDescription)
+            return false
+        }
+    }
+
+    func saveScratch(name: String, folder: URL?, encoding: FileTextEncoding? = nil) async throws -> ScratchFile {
+        let text = editor.string
+        let writtenGeneration = editGeneration
+        let saveFormat = format.using(encoding ?? format.encoding)
+        let (scratch, buffer) = try await app.scratchStore.create(name: name, text: text, format: saveFormat,
+                                                                  in: folder, openedAt: Date())
+        adoptSavedFile(buffer, scratch: scratch)
+        resumeAutosave(afterSaving: writtenGeneration)
+        app.scratchesDidChange()
+        return scratch
+    }
+
+    private func resumeAutosave(afterSaving generation: UInt) {
+        if let queuedAutosave, queuedAutosave.generation <= generation { self.queuedAutosave = nil }
+        if window.isDocumentEdited { scheduleIdleAutosave() }
+    }
+
     private func write(_ text: String, to target: URL, format: FileFormat, expected: FileRevision?) async throws {
         let file = try await Task.detached {
             try FileBuffer.save(text, to: target, format: format, expected: expected)
         }.value
+        adoptSavedFile(file)
+    }
+
+    private func adoptSavedFile(_ file: FileBuffer, scratch: ScratchFile? = nil) {
         let changedPath = fileURL != file.url
         if changedPath { rememberFilePosition() }
         let previousLanguage = resolvedSyntaxLanguage
         updateIdentity(from: file)
+        if let scratch {
+            scratchFile = scratch
+            detectedSyntaxLanguage = SyntaxLanguage.detected(at: scratch.filenameURL)
+        }
         if changedPath {
             app.syntaxOverrides.set(manualSyntaxLanguage, for: fileURL)
         }
@@ -690,11 +771,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     @discardableResult
     func replaceBuffer(
-        with file: FileBuffer?, focusEditor: Bool = true
+        with file: FileBuffer?, focusEditor: Bool = true, scratch: ScratchFile? = nil
     ) async -> Bool {
         guard canReplaceBuffer, !app.isQuitting else { return false }
         promptingToClose = true
-        return await closeBuffer(destination: .buffer(file, focusEditor: focusEditor))
+        return await closeBuffer(destination: .buffer(file, focusEditor: focusEditor, scratch: scratch))
     }
 
     func replaceBuffer(withPreview preview: OpenFilePreview, focusEditor: Bool) async -> Bool {
@@ -724,7 +805,14 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             let sheet = UntitledCloseSheet(window: window, folder: folderURL) { [self] destination, encoding in
                 await save(to: destination, encoding: encoding)
             }
-            choice = await sheet.confirmClose() ? .discard : .cancel
+            switch await sheet.confirmClose() {
+            case .close:
+                choice = .discard
+            case .cancel:
+                choice = .cancel
+            case .scratch(let name, let encoding):
+                choice = await saveScratchFromPanel(name: name, encoding: encoding) ? .discard : .cancel
+            }
         } else {
             choice = await confirmNamedClose()
         }
@@ -743,7 +831,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
 
         switch destination {
-        case .buffer(let file, let focusEditor):
+        case .buffer(let file, let focusEditor, let scratch):
             autosaveFailure = nil
             let restoreFocus = focusEditor || contentHasFocus
             editor.breakUndoCoalescing()
@@ -753,9 +841,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 if file.url != fileURL {
                     rememberFilePosition()
                     position = await app.recentFiles.position(for: file.url, identity: file.identity)
-                    let preparedSyntax = await prepareOpeningSyntax(file, position: position)
+                    let preparedSyntax = await prepareOpeningSyntax(file, position: position, scratch: scratch)
                     guard !Task.isCancelled else { return false }
-                    load(file, preparedSyntax: preparedSyntax)
+                    load(file, preparedSyntax: preparedSyntax, scratch: scratch)
                 }
             } else {
                 rememberFilePosition()
@@ -781,6 +869,49 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
         return true
     }
+
+    func openScratch(_ file: ScratchFile, focusEditor: Bool = true, shouldOpen: () -> Bool = { true }) async -> Bool {
+        do {
+            guard try await app.openFile(app.scratchStore.url(for: file), in: self, focusEditor: focusEditor,
+                                         shouldOpen: shouldOpen) != nil else { return false }
+            if focusEditor {
+                focusContent()
+                findPanel?.revealCurrentScratch()
+            }
+            return true
+        } catch {
+            if !Task.isCancelled, !app.isQuitting, canReplaceBuffer, app.documents.contains(where: { $0 === self }) {
+                await showError("Could Not Open “\(file.name)”", detail: error.localizedDescription)
+            }
+            return false
+        }
+    }
+
+    func chooseScratchFolder() async -> String? {
+        guard canReplaceBuffer, !app.isQuitting else { return nil }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Move"
+        panel.directoryURL = folderURL
+        requestAutosave()
+        guard await response(to: panel) == .OK, let folder = panel.url, !app.isQuitting else { return nil }
+        return await Task.detached { ScratchStore.folderPath(for: folder) }.value
+    }
+
+    func updateScratch(_ file: ScratchFile) {
+        guard let previous = scratchFile, previous.id == file.id, previous != file else { return }
+        scratchFile = file
+        guard previous.name != file.name else { return }
+        let previousLanguage = resolvedSyntaxLanguage
+        detectedSyntaxLanguage = SyntaxLanguage.detected(at: file.filenameURL)
+        updateTitle(revealInWorktree: false)
+        if resolvedSyntaxLanguage != previousLanguage { refreshSyntax(immediate: true) }
+    }
+
+    func reloadScratches() { findPanel?.reloadScratches() }
 
     private func confirmNamedClose() async -> CloseChoice {
         let alert = NSAlert()
@@ -852,8 +983,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private func makeSavePanel() -> NSSavePanel {
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
-        panel.nameFieldStringValue = fileURL?.lastPathComponent ?? "Untitled.txt"
-        panel.directoryURL = fileURL?.deletingLastPathComponent() ?? folderURL
+        if fileURL == nil { panel.showsTagField = false }
+        panel.nameFieldStringValue = fileURL == nil ? "Untitled.txt" : displayName
+        panel.directoryURL = scratchFile == nil ? fileURL?.deletingLastPathComponent() ?? folderURL : folderURL
         return panel
     }
 

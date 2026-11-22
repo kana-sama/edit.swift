@@ -27,10 +27,10 @@ private enum OpenedFile: Sendable {
     }
 
     @MainActor
-    func replaceBuffer(in document: DocumentWindow, focusEditor: Bool) async -> Bool {
+    func replaceBuffer(in document: DocumentWindow, focusEditor: Bool, scratch: ScratchFile? = nil) async -> Bool {
         switch self {
         case .text(let file):
-            await document.replaceBuffer(with: file, focusEditor: focusEditor)
+            await document.replaceBuffer(with: file, focusEditor: focusEditor, scratch: scratch)
         case .preview(let preview):
             await document.replaceBuffer(withPreview: preview, focusEditor: focusEditor)
         }
@@ -49,19 +49,24 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     private var openFilePanel: OpenFilePanel?
     private weak var openPanelDocument: DocumentWindow?
     private(set) lazy var recentFiles = RecentFiles(url: recentHistoryURL)
+    lazy var scratchStore = ScratchStore(
+        root: storageFolder.appending(path: "Scratches", directoryHint: .isDirectory),
+        trashDirectoryForChecks: isAgentCheck ? storageFolder.appending(path: "ScratchTrash", directoryHint: .isDirectory) : nil
+    )
 
-    private var recentHistoryURL: URL {
-        let folder = isAgentCheck
+    private var storageFolder: URL {
+        isAgentCheck
             ? URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory())
             : sessionStore.url.deletingLastPathComponent()
-        return folder.appendingPathComponent("recent-files.json")
     }
+    private var recentHistoryURL: URL { storageFolder.appendingPathComponent("recent-files.json") }
     private var startup: Task<Void, Never>?
     private var receivedInitialSession = false
     private var pendingFiles: [(urls: [URL], allowMissing: Bool, document: DocumentWindow?)] = []
     private var saveTargets: [URL: FileIdentity?] = [:]
     private var worktreeMutationPaths: [URL] = []
     private var worktreeMutationGeneration: UInt64 = 0
+    private(set) var isPerformingScratchOperation = false
     private var lastPlacement: WindowPlacement?
     private var sessionReadFailed = false
     private var pendingFullScreen: [DocumentWindow] = []
@@ -118,6 +123,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try await HeaderCheck.run(in: self)
                     try await WorktreeCheck.run(in: self)
                     try await FilesCheck.checkFilePreview(in: self)
+                    try await ScratchCheck.run(in: self)
+                    try await ScratchTreeCheck.run(in: self)
                     try MultiCaretCheck.checkBlink()
                     print("Edit passed its native editing and file-session checks without activation.")
                     exit(EXIT_SUCCESS)
@@ -258,6 +265,35 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         panel.toggle(in: document, mode: mode)
     }
 
+    func scratchesDidChange(updated: [ScratchFile] = []) {
+        let byID = Dictionary(uniqueKeysWithValues: updated.map { ($0.id, $0) })
+        for document in documents {
+            if let id = document.scratchFile?.id, let file = byID[id] { document.updateScratch(file) }
+            document.reloadScratches()
+        }
+        controlPanel?.scratchesDidChange()
+    }
+
+    @discardableResult
+    private func recordScratchOpen(_ file: ScratchFile) async -> ScratchFile? {
+        do {
+            let current = try await scratchStore.recordOpen(file.id, at: Date())
+            controlPanel?.scratchesDidChange(recencyOnly: true)
+            return current
+        } catch {
+            NSLog("Could not save scratch recency: %@", error.localizedDescription)
+            return nil
+        }
+    }
+
+    func beginScratchOperation() -> Bool {
+        guard !isQuitting, !isPerformingScratchOperation else { return false }
+        isPerformingScratchOperation = true
+        return true
+    }
+
+    func endScratchOperation() { isPerformingScratchOperation = false }
+
     @objc func newDocument(_ sender: Any?) {
         guard let document = activeDocument, !isQuitting else { return }
         Task { await document.newBuffer() }
@@ -305,6 +341,11 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         Task { await document.save(asNew: true) }
     }
 
+    @objc func saveDocumentAsScratch(_ sender: Any?) {
+        guard let document = activeDocument else { return }
+        Task { await document.saveAsScratch() }
+    }
+
     @objc func openFind(_ sender: Any?) {
         focusSidebar(.search)
     }
@@ -322,6 +363,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     // Keep the selector used by existing Control pins and command history.
     @objc func toggleWorktreeSidebar(_ sender: Any?) {
         focusSidebar(.worktree)
+    }
+
+    @objc func focusScratches(_ sender: Any?) {
+        focusSidebar(.scratches)
     }
 
     private func focusSidebar(_ mode: SidebarMode) {
@@ -353,11 +398,11 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             return openFilePanel?.isOpening == true || activeDocument?.canReplaceBuffer == true
         case #selector(openRecentDocument(_:)):
             return activeDocument?.canReplaceBuffer ?? false
-        case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)):
+        case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)), #selector(saveDocumentAsScratch(_:)):
             return activeDocument.map { !$0.isShowingFilePreview && !$0.isBusy && $0.window.attachedSheet == nil } ?? false
         case #selector(openFind(_:)): return activeDocument?.canPerformFind(.find) ?? false
         case #selector(openReplace(_:)): return activeDocument?.canPerformFind(.replace) ?? false
-        case #selector(toggleSidebar(_:)):
+        case #selector(toggleSidebar(_:)), #selector(focusScratches(_:)):
             return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(toggleWorktreeSidebar(_:)):
             return activeDocument.map { $0.folderURL != nil && $0.window.attachedSheet == nil } ?? false
@@ -377,7 +422,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if isAgentCheck { return .terminateNow }
         if isQuitting { return .terminateLater }
-        guard worktreeMutationPaths.isEmpty,
+        guard worktreeMutationPaths.isEmpty, !isPerformingScratchOperation,
               !documents.contains(where: { $0.isBusy || $0.window.attachedSheet != nil }) else {
             return .terminateCancel
         }
@@ -534,15 +579,23 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         var restored: [(index: Int, document: DocumentWindow)] = []
         var warnings: [String] = []
         for (index, record) in previous.documents.enumerated() {
+            let url = record.path.map { URL(fileURLWithPath: $0) }
+            let isScratch = url.map(scratchStore.identifiesScratch(at:)) ?? false
+            let scratch: ScratchFile?
+            if isScratch, let url {
+                scratch = try? await scratchStore.file(at: url)
+            } else {
+                scratch = nil
+            }
             let opened: OpenedFile?
-            if record.draft == nil, let path = record.path {
+            if record.draft == nil, let url {
                 do {
                     opened = try await Self.readForOpening(
-                        URL(fileURLWithPath: path),
-                        allowsPreview: record.isFilePreview == true
+                        url,
+                        allowsPreview: !isScratch && record.isFilePreview == true
                     )
                 } catch {
-                    warnings.append("“\(URL(fileURLWithPath: path).lastPathComponent)” — \(error.localizedDescription)")
+                    warnings.append("“\(scratch?.name ?? url.lastPathComponent)” — \(error.localizedDescription)")
                     guard record.folderPath != nil else { continue }
                     opened = nil
                 }
@@ -557,13 +610,13 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 let identity = await Task.detached {
                     record.path.flatMap { FileIdentity.at(URL(fileURLWithPath: $0)) }
                 }.value
-                document.restoreDraft(record, text: draft, identity: identity)
+                document.restoreDraft(record, text: draft, identity: identity, scratch: scratch)
             } else if let opened {
                 switch opened {
                 case .text(let file):
                     let syntax = await document.prepareOpeningSyntax(file, position: record.editorPosition,
-                                                                     storedSyntaxLanguage: record.syntaxLanguage)
-                    document.load(file, storedSyntaxLanguage: record.syntaxLanguage, preparedSyntax: syntax)
+                                                                     storedSyntaxLanguage: record.syntaxLanguage, scratch: scratch)
+                    document.load(file, storedSyntaxLanguage: record.syntaxLanguage, preparedSyntax: syntax, scratch: scratch)
                 case .preview(let preview):
                     document.loadPreview(preview)
                     document.focusContent()
@@ -571,7 +624,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             }
             document.restoreSidebar(record)
             document.restoreEditorPosition(record.editorPosition)
-            if let path = record.path { await recentFiles.record(URL(fileURLWithPath: path)) }
+            if let scratch = document.scratchFile { await recordScratchOpen(scratch) }
+            else if !isScratch, let url { await recentFiles.record(url) }
             if isQuitting { document.editor.isEditable = false }
             restored.append((index, document))
         }
@@ -639,16 +693,21 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             return try await openFolder(url, canonical: folder, in: document,
                                         focusEditor: focusEditor, isCurrentRequest: isCurrentRequest)
         }
+        let isScratch = scratchStore.identifiesScratch(at: canonical)
         if !document.isShowingFilePreview &&
             (document.fileURL == canonical || (identity != nil && identity == document.fileIdentity)) {
-            await recentFiles.record(url, in: document.folderURL)
+            if let scratch = document.scratchFile { await recordScratchOpen(scratch) }
+            else if !isScratch { await recentFiles.record(url, in: document.folderURL) }
             return document
         }
 
-        let opened = try await Self.readForOpening(canonical, allowMissing: allowMissing)
+        let scratch = isScratch ? try await scratchStore.file(at: canonical) : nil
+        let opened = try await Self.readForOpening(canonical, allowMissing: allowMissing && !isScratch, allowsPreview: !isScratch)
         guard isCurrentRequest(at: canonical),
-              await opened.replaceBuffer(in: document, focusEditor: focusEditor) else { return nil }
-        if opened.identity != nil {
+              await opened.replaceBuffer(in: document, focusEditor: focusEditor, scratch: scratch) else { return nil }
+        if let scratch {
+            if let current = await recordScratchOpen(scratch) { document.updateScratch(current) }
+        } else if !isScratch, opened.identity != nil {
             await recentFiles.record(url, in: document.folderURL)
         } else if case .preview = opened {
             await recentFiles.removeIfMissing(url)
@@ -794,6 +853,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         file.addItem(.separator())
         file.addCommand("Save", #selector(saveDocument(_:)), "s").target = self
         file.addCommand("Save As…", #selector(saveDocumentAs(_:)), "s", [.command, .shift]).target = self
+        file.addCommand("Save as Scratch…", #selector(saveDocumentAsScratch(_:))).target = self
         file.addCommand("Close", #selector(NSWindow.performClose(_:)), "w")
 
         let edit = addMenu("Edit")
@@ -841,6 +901,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         let view = addMenu("View")
         view.addCommand("Toggle Sidebar", #selector(toggleSidebar(_:)), "b").target = self
         view.addCommand("Focus Worktree", #selector(toggleWorktreeSidebar(_:)), "e", [.command, .shift]).target = self
+        view.addCommand("Focus Scratches", #selector(focusScratches(_:)), "w", [.command, .shift]).target = self
         view.addCommand("Command Mode…", #selector(showCommandMode(_:)), "p", [.command, .shift]).target = self
         view.addCommand("Change Language Mode…", #selector(showLanguageModes(_:))).target = self
         view.addItem(.separator())

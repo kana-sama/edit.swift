@@ -111,12 +111,15 @@ enum FindCheck {
         let snapshot = EditorSession(documents: Array(all.documents.suffix(3)), activeIndex: 0, lastWindow: nil)
         let store = SessionStore(url: directory.appending(path: "session.json"))
         try store.write(snapshot)
-        let saved = try require(try store.read(), "read back window search sessions")
+        var saved = try require(try store.read(), "read back window search sessions")
         let firstSettings = try require(saved.documents[0].findSettings, "snapshot of first window's search")
         let secondSettings = try require(saved.documents[1].findSettings, "snapshot of second window's search")
         try expect(firstSettings.query == "alpha" && secondSettings.query == "B.ta" && saved.documents[2].findSettings == nil,
                    "search state is saved per window even for two views of the same file")
         try expect(firstSettings.width != secondSettings.width, "the windows keep independent sidebar widths")
+        try expect(saved.documents.map(\.sidebarMode) == [.search, .search, nil],
+                   "persist Search as a chosen mode and omit the mode for an unused sidebar")
+        saved.documents[1].sidebarMode = nil // A legacy session saved Search settings without its mode.
 
         [first, second, untouched].forEach { $0.window.close() }
         let placeholder = app.makeDocument()
@@ -133,6 +136,9 @@ enum FindCheck {
         try await waitUntil("the first window reruns its case-insensitive query") { firstTable.numberOfRows == 2 }
         try expect(restored[1].window.contentViewController as? NSSplitViewController == nil && restored[1].canPerformFind(.next),
                    "the second sidebar stays hidden and still has its own query")
+        restored[1].performFind(.toggleSidebar)
+        try expect(restored[1].findSettings.visible && restored[1].sidebarMode == .search,
+                   "Command-B restores a legacy Search sidebar")
         restored[1].performFind(.find)
         let secondField = try require(restored[1].window.firstResponder as? FindFieldTextView, "the restored second query field")
         let secondTable = try require(descendant(of: restored[1].window.contentView, type: FindResultsTable.self),
@@ -143,6 +149,13 @@ enum FindCheck {
         let fresh = app.makeDocument()
         defer { fresh.window.close() }
         for document in [restored[2], fresh] {
+            try expect(!document.findSettings.visible && document.sessionDocument().sidebarMode == nil,
+                       "an unused sidebar stays hidden and has no remembered mode")
+            document.performFind(.toggleSidebar)
+            let picker = try sidebarMenu(in: document.window, showsTitle: true)
+            try expect(document.findSettings.visible && document.scratchOutline != nil &&
+                       picker.modePicker?.selectedItem?.title == "Scratches",
+                       "Command-B shows Scratches when a folderless window has no saved sidebar mode")
             document.performFind(.find)
             let field = try require(document.window.firstResponder as? FindFieldTextView, "empty search field")
             try expect(field.string.isEmpty, "windows without saved search state start with an empty query")
@@ -493,9 +506,9 @@ enum FindCheck {
         let picker = try sidebarMenu(in: window, showsTitle: true)
         let options = try sidebarMenu(in: window)
         let items = picker.menu.items
-        try expect(!picker.isHidden && items.map(\.title) == ["Worktree", "Source Control", "Search"] &&
-                   !items[0].isEnabled && !items[0].isHidden && !items[1].isEnabled && !items[1].isHidden &&
-                   items[2].isEnabled && items[2].state == .on,
+        try expect(!picker.isHidden && items.map(\.title) == ["Worktree", "Scratches", "Source Control", "Search"] &&
+                   !items[0].isEnabled && !items[0].isHidden && items[1].isEnabled &&
+                   !items[2].isEnabled && !items[2].isHidden && items[3].isEnabled && items[3].state == .on,
                    "the sidebar title is a mode switcher with unavailable modes listed")
         let menuButton = try require(options.view as? NSButton, "native ellipsis button")
         try expect(!options.isHidden && !menuButton.isBordered && options.menu.items.map(\.title) == ["Refresh Search"] &&
@@ -786,6 +799,8 @@ enum FindCheck {
         defer { try? FileManager.default.removeItem(at: root) }
         document.setFolder(root)
         let window = document.window
+        try expect(document.sidebarMode == .search && document.sessionDocument().sidebarMode == nil,
+                   "a new folder window defaults to Search and has no remembered mode")
 
         app.openFind(nil)
         let findField = try require(window.firstResponder as? FindFieldTextView, "Command-F focuses Find")
@@ -795,6 +810,19 @@ enum FindCheck {
         try expect(document.findSettings.visible && window.firstResponder === document.editor,
                    "repeating Command-F returns to the editor with Search still visible")
         app.openFind(nil)
+        let viewMenu = try require(NSApplication.shared.mainMenu?.item(withTitle: "View")?.submenu,
+                                   "the View menu handles sidebar shortcuts")
+        let focusScratches = try require(
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .shift],
+                             timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "W",
+                             charactersIgnoringModifiers: "w", isARepeat: false, keyCode: 13),
+            "Shift-Command-W key event"
+        )
+        try expect(viewMenu.performKeyEquivalent(with: focusScratches) && document.sidebarMode == .scratches &&
+                   document.findSettings.visible && window.firstResponder === document.scratchOutline,
+                   "Shift-Command-W focuses Scratches through the View menu")
+        try expect(viewMenu.performKeyEquivalent(with: focusScratches) && document.sidebarMode == .search &&
+                   window.firstResponder === findField, "repeating Shift-Command-W restores the previous sidebar focus")
         app.toggleWorktreeSidebar(nil)
         let outline = try require(document.worktreeSidebar?.outline, "Command-Shift-E focuses Worktree")
         try expect(document.findSettings.visible && document.sidebarMode == .worktree && window.firstResponder === outline,
@@ -844,7 +872,7 @@ enum FindCheck {
         try expect(menu.item(withTitle: "Worktree")?.isEnabled == true, "opening a folder enables Worktree")
         menu.performActionForItem(at: menu.indexOfItem(withTitle: "Worktree"))
         try expect(document.findSettings.visible && document.sidebarMode == .worktree &&
-                   menu.items.map(\.title) == ["Worktree", "Source Control", "Search"] &&
+                   menu.items.map(\.title) == ["Worktree", "Scratches", "Source Control", "Search"] &&
                    ellipsis.menu.items.map(\.title) == ["New File…", "New Folder…", "", "Show Hidden Files"] &&
                    ellipsis.menu.item(withTitle: "New File…")?.isEnabled == true &&
                    ellipsis.menu.item(withTitle: "New Folder…")?.isEnabled == true &&

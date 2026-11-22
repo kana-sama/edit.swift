@@ -133,7 +133,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         if document.displayedFileURL == nil && document.manualSyntaxLanguage == nil {
             languageIcon?.image = NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
         } else {
-            languageIcon?.image = FileIcons.image(for: document.displayedFileURL, appearance: document.window.effectiveAppearance,
+            languageIcon?.image = FileIcons.image(for: document.fileIconURL, appearance: document.window.effectiveAppearance,
                                                   language: document.manualSyntaxLanguage?.iconIdentifier)
         }
     }

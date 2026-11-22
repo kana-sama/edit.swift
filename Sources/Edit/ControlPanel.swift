@@ -19,6 +19,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     private static let pinDragType = NSPasteboard.PasteboardType("dev.edit-swift.control-pin")
     private static let pinImage = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: nil)?
         .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+    private static let scratchImage = NSImage(systemSymbolName: "note.text", accessibilityDescription: nil)?
+        .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
     private lazy var history = ControlCommandHistory(persist: !app.isAgentCheck)
     private lazy var pins = ControlPins(defaults: app.isAgentCheck ? nil : .standard)
     private var pinsChangedInPlace = false
@@ -37,6 +39,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     private var entries: [ControlMatch] = []
     private var request: Task<Void, Never>?
     private var folderScan: (scope: FolderFileSearch.Scope, task: Task<FolderFileSearch.Index, Never>)?
+    private var scratchLoad: Task<[ScratchFile], Error>?
     private var resultsFolder: URL?
     private var generation = 0
     private var opening = 0
@@ -65,8 +68,15 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         search()
     }
 
+    func scratchesDidChange(recencyOnly: Bool = false) {
+        scratchLoad?.cancel()
+        scratchLoad = nil
+        guard document != nil, mode == .files, !recencyOnly || !isHovering else { return }
+        search(preserving: selectedID)
+    }
+
     private func show(in document: DocumentWindow, mode: Mode = .files,
-                      failure: (query: String, id: String, message: String)? = nil) {
+                      retry: (query: String, id: String, message: String?)? = nil) {
         dismiss(restoreFocus: false)
         guard document.window.attachedSheet == nil else { return }
         document.requestAutosave()
@@ -79,18 +89,19 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
 
         configure(mode)
-        let query = failure?.query ?? ""
+        let query = retry?.query ?? ""
         input.stringValue = query
         clearButton.isHidden = query.isEmpty
         let searchesFolder = mode == .files && document.folderURL != nil
         let source = searchesFolder ? [] : sourceEntries()
         let pinnedFiles = mode == .files && !searchesFolder ? pinnedFileEntries(reusing: source) : []
-        let rows = searchesFolder ? [] : ControlMatching.rank(includingPins(pinnedFiles, in: source), query: query)
+        let rows = searchesFolder ? [] : ControlMatching.rank(includingPins(pinnedFiles, in: source), query: query,
+                                                               preferShorterTitles: mode == .commands)
         apply(searchesFolder ? [] : orderedRows(rows, pinnedFiles: pinnedFiles, query: query),
-              selected: failure?.id ?? initialID, error: failure?.message)
-        if searchesFolder {
-            if failure == nil { feedback.isHidden = true }
-            search(preserving: failure?.id ?? initialID, error: failure?.message)
+              selected: retry?.id ?? initialID, error: retry?.message)
+        if mode == .files {
+            if searchesFolder, retry?.message == nil { feedback.isHidden = true }
+            search(preserving: retry?.id ?? initialID, error: retry?.message)
         }
         if !app.isAgentCheck {
             document.window.addChildWindow(panel, ordered: .above)
@@ -104,7 +115,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             NotificationCenter.default.addObserver(self, selector: #selector(parentResized),
                                                    name: NSWindow.didResizeNotification, object: document.window)
         }
-        if failure == nil { refreshFiles(for: document) }
+        if retry == nil { refreshFiles(for: document) }
     }
 
     private func configure(_ mode: Mode) {
@@ -154,6 +165,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         request = nil
         folderScan?.task.cancel()
         folderScan = nil
+        scratchLoad?.cancel()
+        scratchLoad = nil
         resultsFolder = nil
         pending = false
         deferredRefresh = false
@@ -388,10 +401,17 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
                             folderFileURL: recent == nil ? url : nil, folderFileIdentity: identity)
     }
 
-    private func pinnedFileEntries(reusing recent: [ControlEntry]) -> [ControlEntry] {
-        pins.entries.compactMap { pin in
-            guard case .file(let url, let canonical, let identity) = pin else { return nil }
-            return recent.first(where: pin.matches) ?? fileEntry(url, canonical: canonical, identity: identity)
+    private func pinnedFileEntries(reusing recent: [ControlEntry], scratches: [ControlEntry] = []) -> [ControlEntry] {
+        let scratchesByID = Dictionary(uniqueKeysWithValues: scratches.compactMap { entry in
+            entry.scratch.map { ($0.id, entry) }
+        })
+        return pins.entries.compactMap { pin in
+            switch pin {
+            case let .file(url, canonical, identity):
+                recent.first(where: pin.matches) ?? fileEntry(url, canonical: canonical, identity: identity)
+            case let .scratch(id): scratchesByID[id]
+            case .command: nil
+            }
         }
     }
 
@@ -463,6 +483,14 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         return folderScan?.task
     }
 
+    private func loadScratches() -> Task<[ScratchFile], Error> {
+        if let scratchLoad { return scratchLoad }
+        let store = app.scratchStore
+        let load = Task { try await store.files() }
+        scratchLoad = load
+        return load
+    }
+
     private func search(preserving id: String? = nil, error: String? = nil) {
         request?.cancel()
         generation &+= 1
@@ -475,30 +503,48 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let path = folder == nil ? nil : FolderFileSearch.DirectoryQuery(query)
         let scope = folder.map { FolderFileSearch.Scope(folder: $0, components: path?.components) }
         let scan = scanFolder(query.allSatisfy(\.isWhitespace) ? nil : scope)
+        let load = mode == .files && path == nil ? loadScratches() : nil
         let filter = path?.filter ?? query
         let searchablePins = path == nil ? pinnedFiles : []
         let rowsWithPins = folder == nil ? includingPins(pinnedFiles, in: rows) : rows
+        let isFileSearch = mode == .files
+        let isCommandSearch = mode == .commands
         clearButton.isHidden = query.isEmpty
         if error == nil { feedback.stringValue = "" }
         pending = true
         request = Task { [weak self] in
             let worker = Task.detached(priority: .userInitiated) {
+                var scratches: [ControlEntry] = []
+                var scratchError: String?
+                if let load {
+                    do {
+                        let folderPath = ScratchStore.folderPath(for: folder)
+                        scratches = try await load.value.filter { $0.folderPath == folderPath }
+                            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                            .map(ControlEntry.init(scratch:))
+                    } catch {
+                        scratchError = "Couldn’t load scratches. \(error.localizedDescription)"
+                    }
+                }
+                let results: [ControlMatch]
                 if let scan {
                     let index = await scan.value
-                    guard !Task.isCancelled else { return [ControlMatch]() }
-                    return index.rank(rows, query: filter, pinnedFiles: searchablePins)
+                    results = index.rank(rows, query: filter, pinnedFiles: searchablePins, scratches: scratches)
+                } else if let folder {
+                    results = FolderFileSearch.recentMatches(rows, scratches: scratches, in: folder)
+                } else if isFileSearch {
+                    results = ControlMatching.rankFiles(rowsWithPins + scratches, query: query)
+                } else {
+                    results = ControlMatching.rank(rowsWithPins, query: query, preferShorterTitles: isCommandSearch)
                 }
-                if let folder {
-                    return FolderFileSearch.recentMatches(rows, in: folder)
-                }
-                return ControlMatching.rank(rowsWithPins, query: query)
+                return (results, scratches, scratchError)
             }
             Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(150))
                 guard let self, current == generation, pending else { return }
                 setSearching(true)
             }
-            let results = await withTaskCancellationHandler {
+            let (results, scratches, scratchError) = await withTaskCancellationHandler {
                 await worker.value
             } onCancel: {
                 worker.cancel()
@@ -511,8 +557,10 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             }
             pending = false
             resultsFolder = folder
+            if scratchError != nil { scratchLoad = nil }
             setSearching(false)
-            apply(orderedRows(results, pinnedFiles: pinnedFiles, query: query), selected: id, error: error)
+            let orderedPins = scratches.isEmpty ? pinnedFiles : pinnedFileEntries(reusing: rows, scratches: scratches)
+            apply(orderedRows(results, pinnedFiles: orderedPins, query: query), selected: id, error: error ?? scratchError)
         }
     }
 
@@ -577,8 +625,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         case ("b", .command):
             document.performFind(.toggleSidebar)
             return nil
-        case ("f", .command), ("e", [.command, .shift]):
-            let mode: SidebarMode = key == "f" ? .search : .worktree
+        case ("f", .command), ("e", [.command, .shift]), ("w", [.command, .shift]):
+            let mode: SidebarMode = switch key {
+            case "f": .search
+            case "e": .worktree
+            default: .scratches
+            }
             guard mode != .worktree || document.folderURL != nil else { return nil }
             dismiss(restoreFocus: true)
             document.toggleSidebarFocus(mode)
@@ -669,7 +721,9 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         guard !pending, mode != .languages, entries.indices.contains(row) else { return }
         let entry = entries[row].entry
         let pin: ControlPin
-        if let url = entry.fileURL {
+        if let scratch = entry.scratch {
+            pin = .scratch(scratch.id)
+        } else if let url = entry.fileURL {
             pin = .file(url, canonicalURL: entry.recent?.canonicalURL ?? url,
                         identity: entry.recent?.identity ?? entry.folderFileIdentity)
         } else {
@@ -811,8 +865,9 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         configure(.commands)
         let commands = sourceEntries()
         guard leadingIcon.image === Self.commandImage, !input.isBezeled, !input.drawsBackground,
-              ControlMatching.rank(commands, query: "save").first?.entry.title == "File: Save",
-              ControlMatching.rank(commands, query: "sva").first?.entry.title == "File: Save As…",
+              ControlMatching.rank(commands, query: "save", preferShorterTitles: true).first?.entry.title == "File: Save",
+              ControlMatching.rank(commands, query: "sva", preferShorterTitles: true).first?.entry.title == "File: Save As…",
+              ControlMatching.rank(commands, query: "save as scratch").first?.entry.title == "File: Save as Scratch…",
               commands.contains(where: { $0.title == "Move Caret Left" && $0.shortcut == "←" }) else {
             throw CheckFailure.invalidPanel
         }
@@ -944,6 +999,111 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         activate(row: row)
         guard document.manualSyntaxLanguage == .rust && self.document == nil else {
             throw CheckFailure.invalidPanel
+        }
+    }
+
+    func checkScratches(in document: DocumentWindow, scratch: ScratchFile, global: ScratchFile) async throws {
+        guard app.isAgentCheck, let folder = document.folderURL else { return }
+        let folderless = app.makeDocument()
+        defer {
+            dismiss(restoreFocus: false)
+            folderless.window.close()
+        }
+        show(in: document)
+        input.stringValue = scratch.name
+        search()
+        while pending { await request?.value }
+        guard let scratchRow = entries.firstIndex(where: { $0.entry.scratch?.id == scratch.id }),
+              entries.filter({ $0.entry.scratch?.id == scratch.id }).count == 1,
+              !entries.contains(where: { $0.entry.scratch?.id == global.id }) else {
+            throw CheckFailure.invalidScratches("find the current folder’s scratch even without recent history")
+        }
+        togglePin(at: scratchRow)
+        input.stringValue = ""
+        search()
+        while pending { await request?.value }
+        guard pin(at: 0) == .scratch(scratch.id),
+              let cell = tableView(table, viewFor: table.tableColumns.first, row: 0) as? NSStackView,
+              let accessory = cell.arrangedSubviews.last as? ControlFileAccessory,
+              accessory.dismissButton == nil,
+              accessory.subviews.compactMap({ ($0 as? NSImageView)?.accessibilityLabel() }) == ["Pinned", "Scratch"],
+              accessory.subviews.compactMap({ ($0 as? NSImageView)?.image }).count == 2 else {
+            throw CheckFailure.invalidScratches("show both status icons without a recent-file action")
+        }
+
+        input.stringValue = "scratch-scope-check/"
+        search()
+        while pending { await request?.value }
+        guard !entries.contains(where: { $0.entry.scratch != nil }) else {
+            throw CheckFailure.invalidScratches("respect an explicit directory query")
+        }
+        show(in: folderless)
+        input.stringValue = global.name
+        search()
+        while pending { await request?.value }
+        guard entries.contains(where: { $0.entry.scratch?.id == global.id }),
+              !entries.contains(where: { $0.entry.scratch?.id == scratch.id }) else {
+            throw CheckFailure.invalidScratches("limit a folderless window to global scratches even with a folder pin")
+        }
+
+        show(in: document)
+        input.stringValue = scratch.name
+        search()
+        while pending { await request?.value }
+        guard let row = entries.firstIndex(where: { $0.entry.scratch?.id == scratch.id }),
+              pin(at: row) == .scratch(scratch.id), let open = activate(row: row) else {
+            throw CheckFailure.invalidScratches("find and activate a pinned scratch with fuzzy search")
+        }
+        await open.value
+        guard document.folderURL == folder, document.fileURL == FileBuffer.canonicalURL(app.scratchStore.url(for: scratch)) else {
+            throw CheckFailure.invalidScratches("open the scratch without changing the window’s folder")
+        }
+    }
+
+    func checkScratchRecency(in document: DocumentWindow, scratch: ScratchFile, older: URL, newer: URL) async throws {
+        guard app.isAgentCheck else { return }
+        defer { dismiss(restoreFocus: false) }
+        let (unopened, _) = try await app.scratchStore.create(name: "Unopened Recency Check.txt", text: "",
+                                                               format: FileFormat(), in: document.folderURL)
+        let olderPath = FileBuffer.canonicalURL(older).path
+        let newerPath = FileBuffer.canonicalURL(newer).path
+        let scratchID = scratch.id.uuidString
+        let recentOrder = [newerPath, scratchID, olderPath]
+        func firstThree() -> [String] {
+            entries.prefix(3).compactMap { $0.entry.scratch?.id.uuidString ?? $0.entry.recent?.canonicalURL.path }
+        }
+        show(in: document)
+        while pending { await request?.value }
+        guard firstThree() == recentOrder, !entries.contains(where: { $0.entry.scratch?.id == unopened.id }) else {
+            throw CheckFailure.invalidScratches("mix an unpinned scratch with older and newer ordinary files")
+        }
+
+        togglePin(at: 1)
+        search()
+        while pending { await request?.value }
+        guard entries.first?.entry.scratch?.id == scratch.id && pin(at: 0) == .scratch(scratch.id) else {
+            throw CheckFailure.invalidScratches("move the scratch to the top after pinning")
+        }
+        togglePin(at: 0)
+        search()
+        while pending { await request?.value }
+        guard firstThree() == recentOrder else {
+            throw CheckFailure.invalidScratches("return an unpinned scratch to its recent position")
+        }
+
+        input.stringValue = unopened.name
+        search()
+        while pending { await request?.value }
+        guard entries.contains(where: { $0.entry.scratch?.id == unopened.id }) else {
+            throw CheckFailure.invalidScratches("find an unopened scratch when filtering by name")
+        }
+
+        dismiss(restoreFocus: false)
+        guard await document.openScratch(scratch) else { throw CheckFailure.invalidScratches("reopen a scratch") }
+        show(in: document)
+        while pending { await request?.value }
+        guard firstThree() == [scratchID, newerPath, olderPath], pin(at: 0) == nil else {
+            throw CheckFailure.invalidScratches("promote a reopened scratch through recency alone")
         }
     }
 
@@ -1161,6 +1321,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
 
         show(in: probe, mode: .commands)
+        guard intercept(key("W", 13, [.command, .shift])) == nil, document == nil,
+              let outline = probe.scratchOutline, probe.sidebarMode == .scratches && probe.findSettings.visible,
+              probe.window.firstResponder === outline else {
+            throw CheckFailure.shortcutEscaped
+        }
+
+        show(in: probe, mode: .commands)
         focusQuery()
         let results = ControlMatching.rank(sourceEntries(), query: "Insert Line Break")
         guard results.first?.entry.id == "insertNewline:" else { throw CheckFailure.shortcutEscaped }
@@ -1175,6 +1342,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         case invalidSearchField
         case invalidFolderResults(String)
         case invalidPins(String)
+        case invalidScratches(String)
         case shortcutEscaped
 
         var errorDescription: String? {
@@ -1184,6 +1352,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             case .shortcutEscaped: "Control did not keep document shortcuts separate from palette commands."
             case .invalidFolderResults(let stage): "Control failed the folder search check for \(stage)."
             case .invalidPins(let stage): "Control pins could not \(stage)."
+            case .invalidScratches(let stage): "Control could not \(stage)."
             }
         }
     }
@@ -1202,13 +1371,22 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             dismiss(restoreFocus: true)
             return nil
         }
-        guard let url = entry.fileURL else { return nil }
-        if entry.folderFileURL != nil && document.folderURL != resultsFolder {
+        if (entry.folderFileURL != nil || entry.scratch != nil) && document.folderURL != resultsFolder {
             configure(mode)
             search()
             return nil
         }
         let query = input.stringValue
+        if let scratch = entry.scratch {
+            dismiss(restoreFocus: true)
+            let dismissedOpening = opening
+            return Task {
+                guard !(await document.openScratch(scratch)), opening == dismissedOpening, self.document == nil,
+                      app.isAgentCheck || document.window.isKeyWindow else { return }
+                show(in: document, retry: (query, entry.id, nil))
+            }
+        }
+        guard let url = entry.fileURL else { return nil }
         dismiss(restoreFocus: true)
         let dismissedOpening = opening
         return Task {
@@ -1217,7 +1395,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             } catch {
                 if entry.recent != nil { await app.recentFiles.removeIfMissing(url) }
                 guard opening == dismissedOpening, self.document == nil, document.window.isKeyWindow else { return }
-                show(in: document, failure: (query, entry.id, error.localizedDescription))
+                show(in: document, retry: (query, entry.id, error.localizedDescription))
             }
         }
     }
@@ -1270,10 +1448,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let match = entries[row]
         let title = makeLabel(match.entry.title, highlights: match.titleCharacters, secondary: false)
         var views: [NSView] = []
-        let fileURL = match.entry.fileURL
+        let scratchURL = match.entry.scratch.map { app.scratchStore.url(for: $0) }
+        let fileURL = match.entry.fileURL ?? match.entry.scratch?.filenameURL
         let language = match.entry.iconLanguage
             ?? match.entry.recent.flatMap { app.manualIconLanguage(for: $0) }
             ?? match.entry.folderFileURL.flatMap { app.syntaxOverrides.language(for: $0)?.iconIdentifier }
+            ?? scratchURL.flatMap { app.syntaxOverrides.language(for: $0)?.iconIdentifier }
         if fileURL != nil || language != nil,
            let image = FileIcons.image(for: fileURL, appearance: tableView.effectiveAppearance, language: language) {
             let icon = NSImageView(image: image)
@@ -1311,16 +1491,33 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     }
 
     private func fileAccessory(for entry: ControlEntry, row: Int) -> NSView {
+        let hasScratch = entry.scratch != nil
         let accessory = ControlFileAccessory()
-        accessory.widthAnchor.constraint(equalToConstant: 20).isActive = true
+        accessory.widthAnchor.constraint(equalToConstant: hasScratch ? 40 : 20).isActive = true
         accessory.heightAnchor.constraint(equalToConstant: 19).isActive = true
         let marker = pinMarker(for: row)
         marker.translatesAutoresizingMaskIntoConstraints = false
         accessory.addSubview(marker)
         NSLayoutConstraint.activate([
-            marker.centerXAnchor.constraint(equalTo: accessory.centerXAnchor),
+            marker.centerXAnchor.constraint(equalTo: accessory.leadingAnchor, constant: 10),
             marker.centerYAnchor.constraint(equalTo: accessory.centerYAnchor),
         ])
+        if hasScratch {
+            let scratch = NSImageView()
+            scratch.image = Self.scratchImage
+            scratch.imageScaling = .scaleNone
+            scratch.contentTintColor = .secondaryLabelColor
+            scratch.setAccessibilityElement(true)
+            scratch.setAccessibilityLabel("Scratch")
+            scratch.translatesAutoresizingMaskIntoConstraints = false
+            accessory.addSubview(scratch)
+            NSLayoutConstraint.activate([
+                scratch.widthAnchor.constraint(equalTo: marker.widthAnchor),
+                scratch.heightAnchor.constraint(equalTo: marker.heightAnchor),
+                scratch.centerXAnchor.constraint(equalTo: accessory.trailingAnchor, constant: -10),
+                scratch.centerYAnchor.constraint(equalTo: accessory.centerYAnchor),
+            ])
+        }
         if entry.recent != nil && pin(at: row) == nil {
             let image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: "Remove from recent files")!
             let button = NSButton(image: image, target: self, action: #selector(dismissRecent(_:)))

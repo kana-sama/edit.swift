@@ -66,6 +66,25 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         menu.autoenablesItems = false
         let inside = WorktreeFileOperations.contains(item, in: root)
         let editable = WorktreeFileOperations.canTrash(item, within: root)
+        addFileItems(to: menu, for: item, isDirectory: isDirectory, copySelection: [item])
+        if inside && isDirectory {
+            let canPaste = NSPasteboard.general.canReadObject(forClasses: [NSURL.self], options: Self.fileURLReadingOptions)
+            menu.addItem(action("Paste", enabled: canWork && canPaste) { [weak self] in
+                _ = self?.paste(into: item, within: root)
+            })
+            menu.addItem(.separator())
+            addCreationItems(to: menu, in: item, root: root)
+        }
+        if editable {
+            menu.addItem(.separator())
+            menu.addItem(action("Rename…", enabled: canWork) { [weak self] in self?.editName(.rename(item), root) })
+            menu.addItem(action(isHidden(item) ? "Unhide" : "Hide") { [weak self] in self?.toggleHidden(item) })
+            addTrashItem(to: menu, enabled: canTrash(selection, in: root), perform: trashSelection)
+        }
+        return menu
+    }
+
+    func addFileItems(to menu: NSMenu, for item: URL, isDirectory: Bool, copySelection: [URL]) {
         menu.addItem(action("Show in Finder") { [weak self] in
             guard let self, !app.isAgentCheck else { return }
             NSWorkspace.shared.activateFileViewerSelecting([item])
@@ -80,30 +99,19 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
-        menu.addItem(action("Copy") { [weak self] in self?.copy([item]) })
+        menu.addItem(action("Copy") { [weak self] in self?.copy(copySelection) })
         menu.addItem(action("Copy Path") {
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()
             pasteboard.setString(item.path, forType: .string)
         })
-        if inside && isDirectory {
-            let canPaste = NSPasteboard.general.canReadObject(forClasses: [NSURL.self], options: Self.fileURLReadingOptions)
-            menu.addItem(action("Paste", enabled: canWork && canPaste) { [weak self] in
-                _ = self?.paste(into: item, within: root)
-            })
-            menu.addItem(.separator())
-            addCreationItems(to: menu, in: item, root: root)
-        }
-        if editable {
-            menu.addItem(.separator())
-            menu.addItem(action("Rename…", enabled: canWork) { [weak self] in self?.editName(.rename(item), root) })
-            menu.addItem(action(isHidden(item) ? "Unhide" : "Hide") { [weak self] in self?.toggleHidden(item) })
-            let trash = action("Move to Trash", enabled: canTrash(selection, in: root), body: trashSelection)
-            trash.keyEquivalent = "\u{7f}"
-            trash.keyEquivalentModifierMask = .command
-            menu.addItem(trash)
-        }
-        return menu
+    }
+
+    func addTrashItem(to menu: NSMenu, enabled: Bool, perform: @escaping () -> Void) {
+        let trash = action("Move to Trash", enabled: enabled, body: perform)
+        trash.keyEquivalent = "\u{7f}"
+        trash.keyEquivalentModifierMask = .command
+        menu.addItem(trash)
     }
 
     func addCreationItems(to menu: NSMenu, in directory: URL, root: URL) {
@@ -409,7 +417,7 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         var errorDescription: String? { "Edit is busy or this folder is no longer open." }
     }
 
-    private func action(_ title: String, enabled: Bool = true, body: @escaping () -> Void) -> NSMenuItem {
+    func action(_ title: String, enabled: Bool = true, body: @escaping () -> Void) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: #selector(performAction(_:)), keyEquivalent: "")
         item.target = self
         item.isEnabled = enabled

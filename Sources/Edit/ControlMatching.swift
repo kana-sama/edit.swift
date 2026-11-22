@@ -9,8 +9,16 @@ struct ControlEntry: Sendable {
     var folderFileURL: URL? = nil
     var folderFileIdentity: FileIdentity? = nil
     var iconLanguage: String? = nil
+    var scratch: ScratchFile? = nil
 
     var fileURL: URL? { recent?.url ?? folderFileURL }
+    var openedAt: Date? { recent?.opened ?? scratch?.openedAt }
+}
+
+extension ControlEntry {
+    init(scratch: ScratchFile) {
+        self.init(id: "scratch:\(scratch.id.uuidString)", title: scratch.name, detail: scratch.folderLabel, scratch: scratch)
+    }
 }
 
 struct ControlMatch: Sendable {
@@ -20,7 +28,23 @@ struct ControlMatch: Sendable {
 }
 
 enum ControlMatching {
-    static func rank(_ entries: [ControlEntry], query: String) -> [ControlMatch] {
+    static func rankFiles(_ entries: [ControlEntry], query: String) -> [ControlMatch] {
+        if query.allSatisfy(\.isWhitespace) {
+            let recent = entries.filter { $0.openedAt != nil }.sorted { fileOrder($0, $1) == .orderedAscending }
+            return rank(recent, query: query)
+        }
+        return rank(entries, query: query, preferRecentFiles: true)
+    }
+
+    private static func fileOrder(_ lhs: ControlEntry, _ rhs: ControlEntry) -> ComparisonResult {
+        let left = lhs.openedAt ?? .distantPast
+        let right = rhs.openedAt ?? .distantPast
+        if left != right { return left > right ? .orderedAscending : .orderedDescending }
+        return lhs.title.localizedStandardCompare(rhs.title)
+    }
+
+    static func rank(_ entries: [ControlEntry], query: String, preferShorterTitles: Bool = false,
+                     preferRecentFiles: Bool = false) -> [ControlMatch] {
         let parts = terms(in: query)
         let queryName = parts.joined(separator: " ")
         let terms = parts.map {
@@ -29,7 +53,7 @@ enum ControlMatching {
         if terms.isEmpty {
             return entries.map { ControlMatch(entry: $0, titleCharacters: [], detailCharacters: []) }
         }
-        var matches: [(score: Int, index: Int, match: ControlMatch)] = []
+        var matches: [(score: Int, titleLength: Int, index: Int, match: ControlMatch)] = []
         for (index, entry) in entries.enumerated() {
             if Task.isCancelled { return [] }
             let title = Array(entry.title)
@@ -63,11 +87,17 @@ enum ControlMatching {
             let label = entry.title.split(separator: ":", maxSplits: 1).last?.trimmingCharacters(in: .whitespaces)
             if entry.title.compare(queryName, options: .caseInsensitive) == .orderedSame ||
                 label?.compare(queryName, options: .caseInsensitive) == .orderedSame { score += 150 }
-            matches.append((score, index, ControlMatch(entry: entry, titleCharacters: titleCharacters,
-                                                       detailCharacters: detailCharacters)))
+            matches.append((score, title.count, index, ControlMatch(entry: entry, titleCharacters: titleCharacters,
+                                                                    detailCharacters: detailCharacters)))
         }
         return matches.sorted {
-            $0.score == $1.score ? $0.index < $1.index : $0.score > $1.score
+            if $0.score != $1.score { return $0.score > $1.score }
+            if preferRecentFiles {
+                let order = fileOrder($0.match.entry, $1.match.entry)
+                if order != .orderedSame { return order == .orderedAscending }
+            }
+            if preferShorterTitles, $0.titleLength != $1.titleLength { return $0.titleLength < $1.titleLength }
+            return $0.index < $1.index
         }.map(\.match)
     }
 

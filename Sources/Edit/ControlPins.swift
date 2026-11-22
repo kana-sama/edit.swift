@@ -2,17 +2,20 @@ import Foundation
 
 enum ControlPin: Codable, Hashable, Sendable {
     case file(URL, canonicalURL: URL, identity: FileIdentity?)
+    case scratch(UUID)
     case command(String)
 
-    var fileURL: URL? {
-        if case let .file(url, _, _) = self { return url }
-        return nil
+    var isFile: Bool {
+        if case .command = self { return false }
+        return true
     }
 
     func matches(_ entry: ControlEntry) -> Bool {
         switch self {
         case let .command(id):
-            return entry.fileURL == nil && entry.id == id
+            return entry.fileURL == nil && entry.scratch == nil && entry.id == id
+        case let .scratch(id):
+            return entry.scratch?.id == id
         case let .file(url, canonicalURL, identity):
             guard let candidate = entry.fileURL else { return false }
             let candidateCanonicalURL = entry.recent?.canonicalURL ?? candidate
@@ -48,7 +51,7 @@ final class ControlPins {
     func toggle(_ pin: ControlPin, for entry: ControlEntry) {
         if let index = entries.firstIndex(where: { $0.matches(entry) }) {
             entries.remove(at: index)
-        } else if pin.fileURL != nil, let firstCommand = entries.firstIndex(where: { $0.fileURL == nil }) {
+        } else if pin.isFile, let firstCommand = entries.firstIndex(where: { !$0.isFile }) {
             entries.insert(pin, at: firstCommand)
         } else {
             entries.append(pin)
@@ -60,8 +63,7 @@ final class ControlPins {
     func reorder(_ pins: [ControlPin]) -> Bool {
         guard let first = pins.first, pins.count > 1 else { return false }
         let reordered = Set(pins)
-        let areFiles = first.fileURL != nil
-        guard reordered.count == pins.count, pins.allSatisfy({ ($0.fileURL != nil) == areFiles }) else {
+        guard reordered.count == pins.count, pins.allSatisfy({ $0.isFile == first.isFile }) else {
             return false
         }
 

@@ -1,12 +1,13 @@
 import AppKit
 
 enum SidebarMode: String, Codable, Sendable {
-    case search, worktree
+    case search, worktree, scratches
 
     var title: String {
         switch self {
         case .search: "Search"
         case .worktree: "Worktree"
+        case .scratches: "Scratches"
         }
     }
 }
@@ -278,6 +279,9 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private let sidebarContent = NSView()
     private let searchContent = NSStackView()
     private(set) var worktree: WorktreeSidebar?
+    private var scratches: WorktreeSidebar?
+    var scratchOutline: NSOutlineView? { scratches?.outline }
+    private var scratchReload: Task<Void, Never>?
     private var contentTrailing: NSLayoutConstraint?
     private var contentWidth: NSLayoutConstraint?
     private let sidebar = NSViewController()
@@ -328,16 +332,22 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     deinit {
         work?.cancel()
         activity?.cancel()
+        scratchReload?.cancel()
     }
 
     private var searchVisible: Bool { settings.visible && document.sidebarMode == .search }
     private var worktreeVisible: Bool { settings.visible && document.sidebarMode == .worktree }
+    private var scratchesVisible: Bool { settings.visible && document.sidebarMode == .scratches }
+    private var worktreeFile: URL? { document.scratchFile == nil ? document.displayedFileURL : nil }
 
     func restoreVisibility() {
         guard settings.visible else { return }
-        if worktreeVisible {
+        switch document.sidebarMode {
+        case .worktree:
             showWorktree(focus: false, animate: false)
-        } else {
+        case .scratches:
+            showScratches(focus: false, animate: false)
+        case .search:
             present(focusing: nil, animate: false)
             requestSearch()
         }
@@ -353,6 +363,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         switch mode {
         case .search: focusSearch()
         case .worktree: showWorktree()
+        case .scratches: showScratches()
         }
     }
 
@@ -384,6 +395,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             switch priorMode {
             case .search: showSearch(focusing: nil)
             case .worktree: showWorktree(focus: false)
+            case .scratches: showScratches(focus: false)
             }
             if priorView.window === window && !priorView.isHiddenOrHasHiddenAncestor && window.makeFirstResponder(priorView) {
                 refreshDecorations()
@@ -411,20 +423,56 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             browser = WorktreeSidebar(document: document, app: app)
             worktree = browser
             if document.worktreeShowsHidden { browser.setShowsHidden(true) }
-            let view = browser.view
-            view.translatesAutoresizingMaskIntoConstraints = false
-            sidebarContent.addSubview(view)
-            NSLayoutConstraint.activate([
-                view.leadingAnchor.constraint(equalTo: sidebarContent.leadingAnchor),
-                view.trailingAnchor.constraint(equalTo: sidebarContent.trailingAnchor),
-                view.topAnchor.constraint(equalTo: sidebarContent.topAnchor),
-                view.bottomAnchor.constraint(equalTo: sidebarContent.bottomAnchor),
-            ])
+            installSidebar(browser.view)
         }
         selectMode(.worktree)
-        browser.update(folder: folder, currentFile: document.displayedFileURL)
+        browser.update(folder: folder, currentFile: worktreeFile)
         present(focusing: focus ? browser.outline : nil, animate: animate)
         browser.setActive(true)
+    }
+
+    private func showScratches(focus: Bool = true, animate: Bool = true) {
+        document.requestAutosave()
+        let list: WorktreeSidebar
+        if let scratches {
+            list = scratches
+        } else {
+            list = WorktreeSidebar(document: document, app: app, mode: .scratches)
+            scratches = list
+            installSidebar(list.view)
+        }
+        selectMode(.scratches)
+        list.updateScratchCurrent(document.scratchFile?.id, reveal: true)
+        present(focusing: focus ? list.outline : nil, animate: animate)
+        list.setActive(true)
+        reloadScratches()
+    }
+
+    private func installSidebar(_ view: NSView) {
+        view.translatesAutoresizingMaskIntoConstraints = false
+        sidebarContent.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: sidebarContent.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: sidebarContent.trailingAnchor),
+            view.topAnchor.constraint(equalTo: sidebarContent.topAnchor),
+            view.bottomAnchor.constraint(equalTo: sidebarContent.bottomAnchor),
+        ])
+    }
+
+    func reloadScratches() {
+        guard scratchesVisible, let scratches else { return }
+        scratchReload?.cancel()
+        let store = app.scratchStore
+        scratchReload = Task { [weak self, weak scratches] in
+            do {
+                let files = try await store.files()
+                guard !Task.isCancelled, let self, scratchesVisible else { return }
+                scratches?.updateScratches(files, current: document.scratchFile?.id)
+            } catch {
+                guard !Task.isCancelled, let self, settings.visible, document.sidebarMode == .scratches else { return }
+                await document.showError("Could Not Load Scratches", detail: error.localizedDescription)
+            }
+        }
     }
 
     private func selectMode(_ mode: SidebarMode) {
@@ -432,8 +480,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         document.sidebarMode = mode
         searchContent.isHidden = mode != .search
         worktree?.view.isHidden = mode != .worktree
+        scratches?.view.isHidden = mode != .scratches
         if mode != .worktree { worktree?.setActive(false) }
-        if changed && mode == .worktree {
+        if mode != .scratches { scratches?.setActive(false) }
+        if changed && mode != .search {
             previewRequested = false
             pendingResultFocus = nil
             queuedDirection = nil
@@ -444,7 +494,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     func folderChanged() {
         if let folder = document.folderURL {
-            if worktreeVisible { worktree?.update(folder: folder, currentFile: document.displayedFileURL) }
+            if worktreeVisible { worktree?.update(folder: folder, currentFile: worktreeFile) }
         } else if document.sidebarMode == .worktree {
             let wasFocused = focusIsInSidebar
             selectMode(.search)
@@ -454,6 +504,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             }
         }
         updateSidebarMenu()
+        reloadScratches()
     }
 
     func canPerform(_ action: FindCommand) -> Bool {
@@ -491,10 +542,12 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         case .toggleSidebar:
             if settings.visible {
                 hide()
-            } else if document.sidebarMode == .worktree && document.folderURL != nil {
-                showWorktree(focus: false)
             } else {
-                showSearch(focusing: nil)
+                switch document.sidebarMode {
+                case .worktree: showWorktree(focus: false)
+                case .scratches: showScratches(focus: false)
+                case .search: showSearch(focusing: nil)
+                }
             }
         case .refresh:
             resetMatches()
@@ -528,9 +581,12 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     func updateCurrentFile(reveal: Bool) {
         if worktreeVisible, let folder = document.folderURL {
-            worktree?.update(folder: folder, currentFile: document.displayedFileURL, revealCurrentFile: reveal)
+            worktree?.update(folder: folder, currentFile: worktreeFile, revealCurrentFile: reveal)
         }
+        scratches?.updateScratchCurrent(document.scratchFile?.id, reveal: reveal)
     }
+
+    func revealCurrentScratch() { scratches?.revealCurrentScratch() }
 
     func bufferReplaced() {
         dismissed.removeAll()
@@ -783,6 +839,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         if menu.items.isEmpty {
             menu.addItem(withTitle: SidebarMode.worktree.title, action: #selector(selectWorktreeSidebar(_:)),
                          keyEquivalent: "").target = self
+            menu.addItem(withTitle: SidebarMode.scratches.title, action: #selector(selectScratchSidebar(_:)),
+                         keyEquivalent: "").target = self
             menu.addItem(withTitle: "Source Control", action: nil, keyEquivalent: "").isEnabled = false
             menu.addItem(withTitle: SidebarMode.search.title, action: #selector(selectSearchSidebar(_:)),
                          keyEquivalent: "").target = self
@@ -802,6 +860,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             let hidden = menu.addItem(withTitle: "Show Hidden Files", action: #selector(toggleHiddenFiles(_:)), keyEquivalent: "")
             hidden.target = self
             hidden.state = worktree.showsHidden ? .on : .off
+        case .scratches:
+            scratches?.addRootCreationItems(to: menu)
         }
     }
 
@@ -898,6 +958,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
         updateSidebarToolbarVisibility()
         worktree?.setActive(worktreeVisible)
+        scratches?.setActive(scratchesVisible)
         if !settings.visible {
             previewRequested = false
             if focusIsInSidebar { returnFocus(allowingModeChange: false) }
@@ -939,6 +1000,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         if focusIsInSidebar { returnFocus(allowingModeChange: false) }
         settings.visible = false
         worktree?.setActive(false)
+        scratches?.setActive(false)
         updateSidebarToolbarVisibility()
         previewRequested = false
         setSidebarCollapsed(true, animate: true, transition: animation)
@@ -1132,6 +1194,11 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     @objc private func selectWorktreeSidebar(_ sender: Any?) {
         rememberFocus(entering: .worktree)
         showWorktree()
+    }
+
+    @objc private func selectScratchSidebar(_ sender: Any?) {
+        rememberFocus(entering: .scratches)
+        showScratches()
     }
 
     @objc private func toggleHiddenFiles(_ sender: Any?) {

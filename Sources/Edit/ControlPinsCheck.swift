@@ -60,6 +60,17 @@ enum ControlPinsCheck {
         restored.toggle(aliasPin, for: hardLinkEntry)
         try expect(restored.pin(matching: firstEntry) == nil, "unpin through a different spelling of the path")
         try expect(ControlPins(defaults: defaults).entries == [thirdPin, secondPin, savePin, copyPin], "persist removal")
+
+        let scratch = ScratchFile(name: "Notes.txt", folderPath: nil)
+        let scratchPin = ControlPin.scratch(scratch.id)
+        restored.toggle(scratchPin, for: ControlEntry(scratch: scratch))
+        try expect(restored.reorder([scratchPin, thirdPin]), "reorder a scratch alongside regular files")
+        var moved = scratch
+        moved.name = "Notes 2.txt"
+        moved.folderPath = base.path
+        let reloaded = ControlPins(defaults: defaults)
+        try expect(reloaded.entries == [scratchPin, secondPin, thirdPin, savePin, copyPin], "persist scratch pin order")
+        try expect(reloaded.pin(matching: ControlEntry(scratch: moved)) == scratchPin, "recognize a moved scratch")
     }
 
     private static func expect(_ condition: Bool, _ message: String) throws {
