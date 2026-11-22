@@ -49,6 +49,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var onDrawFindHighlights: ((NSRect) -> Void)?
     weak var syntaxHighlighting: SyntaxHighlighting?
     lazy var bracketNavigation = BracketNavigation(editor: self)
+    lazy var occurrenceHighlighting = OccurrenceHighlighting(editor: self)
     var preferredLineEnding = "\n"
 
 
@@ -115,6 +116,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     @objc private func windowFocusChanged(_ notification: Notification) {
         hideCaretDecorations()
+        occurrenceHighlighting.focusChanged(window?.isKeyWindow == true && window?.firstResponder === self)
         requestLineRefresh()
     }
 
@@ -145,6 +147,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     override func becomeFirstResponder() -> Bool {
         guard super.becomeFirstResponder() else { return false }
+        occurrenceHighlighting.focusChanged(true)
         requestLineRefresh()
         return true
     }
@@ -155,6 +158,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         if multiCaretComposition != nil { unmarkText() }
         hideCaretDecorations()
         bracketNavigation.clearHighlights()
+        occurrenceHighlighting.focusChanged(false)
         onBlur?()
         return true
     }
@@ -815,12 +819,16 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
-        if !updatingComposition { nativeSelectionChanged() }
+        if !updatingComposition, !multiCaret.isApplying {
+            nativeSelectionChanged()
+            occurrenceHighlighting.selectionChanged()
+        }
         requestLineRefresh()
     }
 
     func textDidChange(_ notification: Notification) {
         guard !updatingComposition else {
+            occurrenceHighlighting.reset()
             requestLineRefresh()
             return
         }
@@ -832,6 +840,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         resetSelectionHistory()
         multiCaret.restartBlink = true
         bracketNavigation.reset()
+        occurrenceHighlighting.contentChanged()
         requestLineRefresh()
         onTextChange?()
     }
@@ -858,6 +867,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             guard let self else { return }
             self.refreshCurrentLine()
             self.bracketNavigation.refresh()
+            self.occurrenceHighlighting.layout()
             self.lineRefreshPending = false
             self.onFindViewportChange?()
         }
@@ -897,6 +907,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             NSColor.labelColor.withAlphaComponent(0.06).setFill()
             stripe.fill()
         }
+        occurrenceHighlighting.draw(in: dirtyRect)
         bracketNavigation.draw(in: dirtyRect)
         onDrawFindHighlights?(dirtyRect)
         drawSecondarySelections(in: dirtyRect)

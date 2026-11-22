@@ -97,13 +97,13 @@ extension EditorTextView {
                     matches.append(match)
                 } else {
                     let kept = command == .skip ? Array(selections.dropLast()) : selections
-                    setFocusedSelections(kept + [match], in: scope)
+                        setFocusedSelections(kept + [match], in: scope, occurrenceSession: .init(query: needle))
                     scrollRangeToVisible(NSRange(location: match.head, length: 0))
                     return true
                 }
             }
         }
-        if selectingAll { setFocusedSelections(matches + [primary], in: scope) }
+        if selectingAll { setFocusedSelections(matches + [primary], in: scope, occurrenceSession: .init(query: needle)) }
         return true
     }
 
@@ -290,7 +290,10 @@ extension EditorTextView {
         }
     }
 
-    func setFocusedSelections(_ ranges: [FocusNavigationSelection], in scope: [NSRange], record: Bool = true) {
+    func setFocusedSelections(
+        _ ranges: [FocusNavigationSelection], in scope: [NSRange], record: Bool = true,
+        occurrenceSession: OccurrenceHighlighting.Session? = nil
+    ) {
         // Merge selections and carets in logical space, preserving the active end of the newest one.
         let merged = MultiCaretEditing.merged(ranges.map(\.extent))
         let groups = merged.count == ranges.count ? ranges : merged.compactMap { extent -> FocusNavigationSelection? in
@@ -311,7 +314,7 @@ extension EditorTextView {
             }
             return regions
         }
-        setCaretSelections(parts, record: record, focusNavigation: groups)
+        setCaretSelections(parts, record: record, focusNavigation: groups, occurrenceSession: occurrenceSession)
     }
 
     private func nearestFocusPosition(_ position: Int, in scope: [NSRange]) -> Int {

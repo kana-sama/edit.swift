@@ -82,7 +82,8 @@ extension EditorTextView {
 
     func setCaretSelections(
         _ ranges: [NSRange], record: Bool = true, navigation: [NSRange: NSTextSelection] = [:],
-        focusNavigation: [FocusNavigationSelection]? = nil, primaryAffinity: NSSelectionAffinity? = nil
+        focusNavigation: [FocusNavigationSelection]? = nil, primaryAffinity: NSSelectionAffinity? = nil,
+        occurrenceSession: OccurrenceHighlighting.Session? = nil
     ) {
         let selections = MultiCaretEditing.merged(ranges)
         guard let primary = selections.last else { return }
@@ -100,6 +101,7 @@ extension EditorTextView {
             setSelectedRange(primary)
         }
         multiCaret.isApplying = false
+        occurrenceHighlighting.selectionChanged(occurrenceSession: occurrenceSession)
         requestLineRefresh()
     }
 
@@ -184,7 +186,10 @@ extension EditorTextView {
                 else { return }
                 word = NSIntersectionRange(word, range)
             }
-            if word.length > 0 { setCaretSelections(caretSelections.dropLast() + [word]) }
+            if word.length > 0 {
+                setCaretSelections(caretSelections.dropLast() + [word],
+                                   occurrenceSession: .init(query: text.substring(with: word)))
+            }
             return
         }
 
@@ -199,7 +204,8 @@ extension EditorTextView {
                                         range: NSRange(location: start, length: NSMaxRange(search) - start))
                 guard result.location != NSNotFound else { break }
                 if !selections.contains(where: { NSIntersectionRange($0, result).length > 0 }) {
-                    setCaretSelections((skipping ? Array(selections.dropLast()) : selections) + [result])
+                    setCaretSelections((skipping ? Array(selections.dropLast()) : selections) + [result],
+                                       occurrenceSession: .init(query: needle))
                     scrollRangeToVisible(result)
                     return
                 }
@@ -226,7 +232,7 @@ extension EditorTextView {
                 start = primary.upperBound
             }
         }
-        setCaretSelections(matches + [primary])
+        setCaretSelections(matches + [primary], occurrenceSession: .init(query: needle))
     }
 
     @objc func undoSelection(_ sender: Any?) {

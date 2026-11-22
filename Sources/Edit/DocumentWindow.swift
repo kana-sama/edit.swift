@@ -93,11 +93,16 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var autosaveFailure: (generation: UInt, detail: String, reported: Bool)?
     private var syntaxHighlighting: SyntaxHighlighting?
     private var findPanel: FindSidebar?
-    var findSettings = FindSettings()
+    var findSettings = FindSettings() {
+        didSet { updateOccurrenceFindSettings() }
+    }
     private var lastSidebarMode: SidebarMode?
     var sidebarMode: SidebarMode {
         get { lastSidebarMode ?? (folderURL == nil ? .scratches : .search) }
-        set { lastSidebarMode = newValue }
+        set {
+            lastSidebarMode = newValue
+            updateOccurrenceFindSettings()
+        }
     }
     var worktreeShowsHidden = false
     var worktreeSidebar: WorktreeSidebar? { findPanel?.worktree }
@@ -159,7 +164,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         window.initialFirstResponder = editor
         window.makeFirstResponder(editor)
         editor.onTextChange = { [weak self] in self?.textDidChange() }
-        editor.onFocusScopeChange = { [weak self] in self?.findPanel?.bufferReplaced() }
+        editor.onFocusScopeChange = { [weak self] in
+            guard let self else { return }
+            self.findPanel?.bufferReplaced()
+            self.editor.occurrenceHighlighting.reset()
+            self.editor.occurrenceHighlighting.selectionChanged()
+        }
         editor.onBlur = { [weak self] in self?.requestAutosave() }
         for name in [Notification.Name.NSUndoManagerDidUndoChange, .NSUndoManagerDidRedoChange] {
             NotificationCenter.default.addObserver(self, selector: #selector(undoOrRedo(_:)), name: name, object: nil)
@@ -197,6 +207,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if settings.visible {
             searchPanel().restoreVisibility()
         }
+    }
+
+    private func updateOccurrenceFindSettings() {
+        var settings = findSettings
+        settings.visible = settings.visible && sidebarMode == .search
+        editor.occurrenceHighlighting.update(findSettings: settings)
     }
 
     func restoreSidebar(_ record: SessionDocument) {
@@ -730,6 +746,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     @objc private func undoOrRedo(_ notification: Notification) {
         guard let manager = notification.object as? UndoManager, manager === editor.undoManager else { return }
         editor.bracketNavigation.reset()
+        editor.occurrenceHighlighting.contentChanged()
         editor.requestLineRefresh()
         textDidChange()
     }
@@ -744,6 +761,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private func refreshSyntax(immediate: Bool, preparedSyntax: SyntaxSnapshot? = nil) {
         let language = resolvedSyntaxLanguage
         editor.bracketNavigation.setLanguage(language)
+        editor.occurrenceHighlighting.update(language: language)
         if language == .plainText {
             syntaxHighlighting?.cancel()
             return
@@ -1015,6 +1033,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.resetMultiCarets()
         syntaxHighlighting?.prepareForBufferReplacement()
         editor.bracketNavigation.reset()
+        editor.occurrenceHighlighting.reset()
         editor.string = text
         refreshSyntax(immediate: true, preparedSyntax: preparedSyntax)
         editor.setSelectedRange(NSRange(location: 0, length: 0))

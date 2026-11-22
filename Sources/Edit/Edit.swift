@@ -112,6 +112,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try await ControlPanel(app: self).checkPins(in: sample)
                     try await SyntaxCheck.run(in: self)
                     try await BracketCheck.run(in: self)
+                    try await OccurrenceCheck.run(in: self)
                     try await FindCheck.run(in: self)
                     try await FocusCheck.run(in: self)
                     try checkWindow(sample.window, screenshot: CommandLine.arguments.dropFirst(2).first)
