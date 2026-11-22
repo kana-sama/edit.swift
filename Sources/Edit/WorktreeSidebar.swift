@@ -70,7 +70,9 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         tree.addTableColumn(column)
         tree.outlineTableColumn = column
         tree.headerView = nil
-        tree.style = .sourceList
+        // The source-list style makes selected labels heavier even with a regular font.
+        tree.style = .inset
+        tree.indentationPerLevel = 12
         column.minWidth = 0
         tree.backgroundColor = .clear
         tree.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
@@ -132,7 +134,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             for request in requests.values { request.cancel() }
             requests.removeAll()
             root = Item(folder, directory: true)
-            expanded = [folderPath]
+            expanded.removeAll()
             readHiddenItems()
             startMonitoring()
         }
@@ -154,7 +156,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
                 if ancestorPath == folderPath { break }
                 ancestor.deleteLastPathComponent()
             }
-            expanded.formUnion(currentDirectories)
+            expanded.formUnion(currentDirectories.subtracting([folderPath]))
         } else if let file {
             let parent = Item(file.deletingLastPathComponent(), directory: true, outside: true)
             parent.visibleChildren = [Item(file, directory: false, outside: true)]
@@ -194,10 +196,9 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         var pending = [item]
         var directories: [Item] = []
         while let next = pending.popLast() {
-            let isExpanded = tree.isItemExpanded(next)
-            guard next === root || isExpanded else { continue }
+            guard next === root || tree.isItemExpanded(next) else { continue }
             directories.append(next)
-            if isExpanded { pending.append(contentsOf: next.visibleChildren.filter(\.isDirectory)) }
+            pending.append(contentsOf: next.visibleChildren.filter(\.isDirectory))
         }
         return directories
     }
@@ -245,6 +246,10 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             child.isSystemHidden = entry.isHidden
             return child
         }
+        if item === root {
+            reloadTree()
+            return
+        }
         updateVisibleChildren(of: item)
         guard tree.row(forItem: item) >= 0 else { return }
         let selection = selectedItems.map(\.path)
@@ -283,7 +288,10 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
         reloading = true
         tree.reloadData()
-        if let root { restoreExpansion(from: root) }
+        if let root {
+            load(root)
+            for item in root.visibleChildren { restoreExpansion(from: item) }
+        }
         if let outside { restoreExpansion(from: outside) }
         reloading = false
         restoreSelection(selection)
@@ -362,17 +370,16 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     private func isHidden(_ item: Item) -> Bool { item.isSystemHidden || manualHidden.contains(item.path) }
 
-    private func children(of item: Any?) -> [Item] {
-        if let item = item as? Item { return item.visibleChildren }
-        return [root, outside].compactMap { $0 }
-    }
-
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        children(of: item).count
+        if let item = item as? Item { return item.visibleChildren.count }
+        return (root?.visibleChildren.count ?? 0) + (outside == nil ? 0 : 1)
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        children(of: item)[index]
+        if let item = item as? Item { return item.visibleChildren[index] }
+        let entries = root?.visibleChildren ?? []
+        if let outside, index == entries.count { return outside }
+        return entries[index]
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
@@ -391,16 +398,15 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
-        guard (item as? Item)?.isDirectory == true else { return nil }
-        return outlineView.makeView(withIdentifier: WorktreeDirectoryRow.reuseIdentifier, owner: nil) as? NSTableRowView
-            ?? WorktreeDirectoryRow()
+        outlineView.makeView(withIdentifier: WorktreeRow.reuseIdentifier, owner: nil) as? WorktreeRow
+            ?? WorktreeRow()
     }
 
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item object: Any) -> NSView? {
         guard let item = object as? Item else { return nil }
         let cell = outlineView.makeView(withIdentifier: WorktreeCell.identifier, owner: self) as? WorktreeCell
             ?? WorktreeCell()
-        let muted = item.isIgnored || (item !== root && isHidden(item))
+        let muted = item.isIgnored || isHidden(item)
         let icon = item.isDirectory
             ? nil
             : FileIcons.image(for: item.url, appearance: outlineView.effectiveAppearance,
@@ -448,6 +454,11 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         }
     }
 
+    func addRootCreationItems(to menu: NSMenu) {
+        guard let folder = document.folderURL else { return }
+        actions.addCreationItems(to: menu, in: folder, root: folder)
+    }
+
     func menu(at row: Int) -> NSMenu? {
         guard let root else { return nil }
         let item = (row >= 0 ? tree.item(atRow: row) as? Item : nil) ?? root
@@ -473,7 +484,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem object: Any) -> (any NSPasteboardWriting)? {
-        guard let item = object as? Item, item !== root, !item.outside || !item.isDirectory else { return nil }
+        guard let item = object as? Item, !item.outside || !item.isDirectory else { return nil }
         return item.url as NSURL
     }
 
@@ -483,7 +494,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         let operation = dropOperation(info, onto: target)
         guard !operation.isEmpty else { return [] }
         let directory = target.flatMap { $0.isDirectory ? $0 : itemAtParent(of: $0) }
-        outlineView.setDropItem(directory ?? root, dropChildIndex: NSOutlineViewDropOnItemIndex)
+        outlineView.setDropItem(directory === root ? nil : directory, dropChildIndex: NSOutlineViewDropOnItemIndex)
         return operation
     }
 
@@ -611,8 +622,8 @@ private final class WorktreeOutline: NSOutlineView {
 }
 
 @MainActor
-private final class WorktreeDirectoryRow: NSTableRowView {
-    static let reuseIdentifier = NSUserInterfaceItemIdentifier("WorktreeDirectoryRow")
+private final class WorktreeRow: NSTableRowView {
+    static let reuseIdentifier = NSUserInterfaceItemIdentifier("WorktreeRow")
 
     init() {
         super.init(frame: .zero)
@@ -620,6 +631,13 @@ private final class WorktreeDirectoryRow: NSTableRowView {
     }
 
     required init?(coder: NSCoder) { fatalError("Worktree rows are programmatically constructed") }
+
+    override func drawSelection(in dirtyRect: NSRect) {
+        let color: NSColor = isEmphasized ? .selectedContentBackgroundColor : .unemphasizedSelectedContentBackgroundColor
+        color.setFill()
+        let highlight = bounds.insetBy(dx: 6, dy: 0)
+        NSBezierPath(roundedRect: highlight, xRadius: 8, yRadius: 8).fill()
+    }
 
     override func didAddSubview(_ subview: NSView) {
         super.didAddSubview(subview)

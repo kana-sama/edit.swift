@@ -9,6 +9,7 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
     private let isHidden: (URL) -> Bool
     private let toggleHidden: (URL) -> Void
     private var working = false
+    private var canWork: Bool { !working && document?.canReplaceBuffer == true }
 
     init(document: DocumentWindow, app: Edit, refresh: @escaping () -> Void,
          isHidden: @escaping (URL) -> Bool, toggleHidden: @escaping (URL) -> Void) {
@@ -24,7 +25,6 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         menu.autoenablesItems = false
         let inside = WorktreeFileOperations.contains(item, in: root)
         let editable = inside && WorktreeFileOperations.path(item) != WorktreeFileOperations.path(root)
-        let canWork = !working && document?.canReplaceBuffer == true
         menu.addItem(action("Show in Finder") { [weak self] in
             guard let self, !app.isAgentCheck else { return }
             NSWorkspace.shared.activateFileViewerSelecting([item])
@@ -51,12 +51,7 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
                 _ = self?.paste(into: item, within: root)
             })
             menu.addItem(.separator())
-            menu.addItem(action("New File…", enabled: canWork) { [weak self] in
-                self?.create(in: item, root: root, isDirectory: false)
-            })
-            menu.addItem(action("New Folder…", enabled: canWork) { [weak self] in
-                self?.create(in: item, root: root, isDirectory: true)
-            })
+            addCreationItems(to: menu, in: item, root: root)
         }
         if editable {
             menu.addItem(.separator())
@@ -65,6 +60,15 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
             menu.addItem(action("Move to Trash", enabled: canWork) { [weak self] in self?.trash(item, within: root) })
         }
         return menu
+    }
+
+    func addCreationItems(to menu: NSMenu, in directory: URL, root: URL) {
+        menu.addItem(action("New File…", enabled: canWork) { [weak self] in
+            self?.create(in: directory, root: root, isDirectory: false)
+        })
+        menu.addItem(action("New Folder…", enabled: canWork) { [weak self] in
+            self?.create(in: directory, root: root, isDirectory: true)
+        })
     }
 
     private static let fileURLReadingOptions: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]

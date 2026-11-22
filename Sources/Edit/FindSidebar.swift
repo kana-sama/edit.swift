@@ -100,7 +100,7 @@ final class SidebarMenuItem: NSToolbarItem {
 }
 
 @MainActor
-final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
+final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate, NSMenuDelegate {
     private static let sidebarMenuItem = NSToolbarItem.Identifier("Edit.SidebarMenu")
     private static let sidebarTitleItem = NSToolbarItem.Identifier("Edit.SidebarTitle")
     private static let minimumSidebarWidth: CGFloat = 185
@@ -592,8 +592,15 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         guard identifier == Self.sidebarMenuItem || identifier == Self.sidebarTitleItem else { return nil }
         let item = SidebarMenuItem(itemIdentifier: identifier, showsTitle: identifier == Self.sidebarTitleItem,
                                    mode: document.sidebarMode)
+        item.menu.delegate = self
         updateSidebarMenu(item)
         return item
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        for case let item as SidebarMenuItem in document.window.toolbar?.items ?? [] where item.menu === menu {
+            updateSidebarMenu(item)
+        }
     }
 
     private func updateSidebarMenu() {
@@ -618,6 +625,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         search.state = document.sidebarMode == .search ? .on : .off
         menu.addItem(.separator())
         if document.sidebarMode == .worktree, let worktree {
+            worktree.addRootCreationItems(to: menu)
+            menu.addItem(.separator())
             let hidden = menu.addItem(withTitle: "Show Hidden Files", action: #selector(toggleHiddenFiles(_:)), keyEquivalent: "")
             hidden.target = self
             hidden.state = worktree.showsHidden ? .on : .off

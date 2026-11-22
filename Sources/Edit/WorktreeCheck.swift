@@ -34,6 +34,9 @@ enum WorktreeCheck {
         let sources = try require(row(named: "Sources", in: tree), "show the first level")
         try expect(row(named: "Active.swift", in: tree) == nil, "do not expand unrelated directories")
         document.window.layoutIfNeeded()
+        try expect(sources == 0 && tree.level(forRow: sources) == 0 && row(named: "Project", in: tree) == nil,
+                   "the folder's contents start the tree at level zero")
+        try checkRootContextMenu(in: tree)
         let disclose = try disclosure(at: sources, in: tree)
         try expect(disclose.contentTintColor == .secondaryLabelColor,
                    "a folder disclosure uses the system secondary label tint")
@@ -108,22 +111,23 @@ enum WorktreeCheck {
         try expect(exported == [nested.standardizedFileURL.path],
                    "dragging exports a native file URL, received \(exported)")
 
-        let rootItem = try require(tree.item(atRow: 0), "retrieve Worktree root")
-        let rootButton = try disclosure(at: 0, in: tree)
-        rootButton.performClick(nil)
-        try expect(tree.numberOfRows == 1 && !tree.isItemExpanded(rootItem),
-                   "manually collapse the tree containing the current file")
+        let sourceRow = try require(row(named: "Sources", in: tree), "retrieve the expanded folder")
+        let sourceItem = try require(tree.item(atRow: sourceRow), "retrieve Sources")
+        let sourceButton = try disclosure(at: sourceRow, in: tree)
+        sourceButton.performClick(nil)
+        try expect(!tree.isItemExpanded(sourceItem) && row(named: "Active.swift", in: tree) == nil &&
+                   row(named: "README.md", in: tree) != nil, "collapsing a folder leaves its sibling rows visible")
         sidebar.setShowsHidden(true)
         sidebar.refresh()
-        try expect(tree.numberOfRows == 1 && !tree.isItemExpanded(rootItem),
-                   "refreshing the tree keeps the root collapsed")
-        let refreshedRootButton = try disclosure(at: 0, in: tree)
-        try expect(refreshedRootButton.contentTintColor == .secondaryLabelColor,
+        try expect(!tree.isItemExpanded(sourceItem) && row(named: "Active.swift", in: tree) == nil,
+                   "refreshing the tree keeps the folder collapsed")
+        let refreshedSourceButton = try disclosure(at: sourceRow, in: tree)
+        try expect(refreshedSourceButton.contentTintColor == .secondaryLabelColor,
                    "a refreshed folder disclosure keeps its tint")
         sidebar.setShowsHidden(false)
         _ = try await app.openFile(readme, in: document)
-        try await waitFor("reveal a new file after manually collapsing the root") {
-            tree.isItemExpanded(rootItem) && row(named: "README.md", in: tree) == tree.selectedRow
+        try await waitFor("select a file at the top level") {
+            row(named: "README.md", in: tree) == tree.selectedRow
         }
 
         _ = try await app.openFile(external, in: document)
@@ -170,6 +174,32 @@ enum WorktreeCheck {
         restored.restoreSidebar(document.sessionDocument())
         try expect(restored.worktreeSidebar?.showsHidden == true && restored.findSettings.visible,
                    "restore Worktree and its Show Hidden Files setting in that window's session")
+
+        let empty = temporary.appending(path: "Empty", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: false)
+        _ = try await app.openFile(empty, in: restored)
+        let emptyTree = try require(restored.worktreeSidebar?.outline, "the outline still exists for an empty folder")
+        restored.window.layoutIfNeeded()
+        try expect(emptyTree.numberOfRows == 0, "an empty folder leaves the tree blank")
+        try checkRootContextMenu(in: emptyTree)
+    }
+
+    private static func checkRootContextMenu(in tree: NSOutlineView) throws {
+        let window = try require(tree.window, "Worktree context menu window")
+        let rect = tree.visibleRect
+        let blank = NSPoint(x: rect.midX, y: rect.maxY - 6)
+        try expect(tree.row(at: blank) == -1, "the context click is in a blank area")
+        let content = try require(window.contentView, "Worktree window content")
+        let hit = content.hitTest(tree.convert(blank, to: content.superview))
+        try expect(hit?.isDescendant(of: tree) == true, "the blank area belongs to the outline")
+        let click = try require(NSEvent.mouseEvent(
+            with: .rightMouseDown, location: tree.convert(blank, to: nil), modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1
+        ), "Worktree context click")
+        let menu = try require(tree.menu(for: click), "a blank area offers the root context menu")
+        try expect(menu.item(withTitle: "New File…")?.isEnabled == true &&
+                   menu.item(withTitle: "New Folder…")?.isEnabled == true && menu.item(withTitle: "Rename…") == nil,
+                   "the root menu offers creation without a root row")
     }
 
     private static func disclosure(at row: Int, in outline: NSOutlineView) throws -> NSButton {

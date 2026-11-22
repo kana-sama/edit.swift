@@ -644,7 +644,8 @@ enum FindCheck {
         try expect(menu.item(withTitle: "Worktree")?.isEnabled == true, "opening a folder enables Worktree")
         menu.performActionForItem(at: menu.indexOfItem(withTitle: "Worktree"))
         try expect(document.findSettings.visible && document.sidebarMode == .worktree &&
-                   menu.items.map(\.title) == ["Worktree", "Source Control", "Search", "", "Show Hidden Files"] &&
+                   menu.items.map(\.title) == ["Worktree", "Source Control", "Search", "", "New File…", "New Folder…", "", "Show Hidden Files"] &&
+                   menu.item(withTitle: "New File…")?.isEnabled == true && menu.item(withTitle: "New Folder…")?.isEnabled == true &&
                    menu.item(withTitle: "Source Control")?.isEnabled == false &&
                    menu.item(withTitle: "Source Control")?.isHidden == false &&
                    menu.item(withTitle: "Search")?.isEnabled == true && menu.item(withTitle: "Worktree")?.state == .on,
