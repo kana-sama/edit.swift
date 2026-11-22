@@ -64,16 +64,23 @@ enum HeaderCheck {
             try expect(hit === view || hit?.isDescendant(of: view) == true,
                        "AppKit routes pointer events to the visible part of the title")
         }
-        let recentFolders = document.titleBar.recentFoldersMenu()
+        try secondaryClick(folderTitle, in: document.window)
+        guard let recentFolders = document.titleBar.agentContextMenu else {
+            throw Failure("a secondary click on the folder title opens recent folders")
+        }
         let folderPaths = recentFolders.items.compactMap { ($0.representedObject as? URL)?.lastPathComponent }
         try expect(Array(folderPaths.prefix(2)) == ["Project", "Another folder"], "folder menu shows recent folders")
         try expect(recentFolders.items.first?.state == .on, "the folder menu marks the current project")
         try expect(recentFolders.items.allSatisfy { $0.image != nil && $0.preferredImageVisibility == .visible },
                    "all recent folders show icons on macOS 27")
-        guard let current = document.fileURL else { throw Failure("a named document is open") }
-        let files = await DocumentTitleBar.loadSiblingFiles(of: current)
-        let siblings = document.titleBar.siblingFilesMenu(files, current: current)
-        try expect(siblings.items.map(\.title) == ["Main.swift", "Notes.txt"], "file menu shows files next to the current file")
+        try secondaryClick(fileTitle, in: document.window)
+        try await waitFor("a secondary click on the file title opens sibling files") {
+            document.titleBar.agentContextMenu?.title == "Files in This Folder"
+        }
+        guard let siblings = document.titleBar.agentContextMenu else { throw Failure("the file menu is available") }
+        let siblingTitles = siblings.items.map(\.title)
+        try expect(siblingTitles == ["Main.swift", "Notes.txt"],
+                   "file menu shows files next to the current file (\(siblingTitles))")
         try expect(siblings.items[0].state == .on, "the file menu marks the current file")
         try expect(siblings.items.allSatisfy { $0.image != nil && $0.preferredImageVisibility == .visible },
                    "all sibling files show icons on macOS 27")
@@ -88,13 +95,8 @@ enum HeaderCheck {
             document.folderURL?.lastPathComponent == "Another folder" && app.documents.count == count
         }
 
-        guard let icon = fileIcon(in: document),
-              let click = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [],
-                                            timestamp: 0, windowNumber: document.window.windowNumber,
-                                            context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else {
-            throw Failure("the language icon can receive a right click")
-        }
-        icon.rightMouseDown(with: click)
+        guard let icon = fileIcon(in: document) else { throw Failure("the file shows a language icon") }
+        try secondaryClick(icon, in: document.window)
         try app.checkHeaderLanguagePicker(in: document)
 
         document.performFind(.toggleSidebar)
@@ -111,6 +113,9 @@ enum HeaderCheck {
         let divider = sidebar.convert(sidebar.bounds, to: nil).maxX
         let gutter = visibleFolder.convert(visibleFolder.bounds, to: nil).minX - divider
         try expect((10...18).contains(gutter), "the folder title clears the sidebar divider (\(gutter) pt)")
+        try secondaryClick(visibleFolder, in: document.window, controlClick: true)
+        try expect(document.titleBar.agentContextMenu?.title == "Recent Folders",
+                   "Control-click opens recent folders beside Worktree")
 
         let longFolder = root.appending(path: String(repeating: "Long folder name ", count: 7) + "project")
         let longFile = longFolder.appending(path: String(repeating: "File name ", count: 8) + "example.txt")
@@ -127,6 +132,17 @@ enum HeaderCheck {
         try expect(compactIcon.window === document.window && rect.width > 0 && rect.minX >= 0 &&
                    rect.maxX <= document.window.frame.width,
                    "the file icon stays visible with long names in a narrow window (\(rect), window width \(document.window.frame.width), attached \(compactIcon.window === document.window))")
+    }
+
+    private static func secondaryClick(_ view: NSView, in window: NSWindow, controlClick: Bool = false) throws {
+        let location = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
+        guard let click = NSEvent.mouseEvent(with: controlClick ? .leftMouseDown : .rightMouseDown,
+                                             location: location, modifierFlags: controlClick ? .control : [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                             context: nil, eventNumber: 1, clickCount: 1, pressure: 1) else {
+            throw Failure("create a secondary click in the window")
+        }
+        NSApp.sendEvent(click)
     }
 
     private static func waitFor(_ detail: String, condition: () -> Bool) async throws {

@@ -85,7 +85,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     init(app: Edit, placement: WindowPlacement? = nil) {
         self.app = app
-        window = NSWindow(
+        window = EditorWindow(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 480),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
@@ -755,5 +755,18 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if isEdited != window.isDocumentEdited {
             window.isDocumentEdited = isEdited
         }
+    }
+}
+
+@MainActor
+private final class EditorWindow: NSWindow {
+    override func sendEvent(_ event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([.control, .command, .option, .shift])
+        let secondaryClick = event.type == .rightMouseDown || (event.type == .leftMouseDown && modifiers == .control)
+        // The toolbar can consume secondary clicks before the title item's view receives them.
+        if secondaryClick, let document = delegate as? DocumentWindow, document.titleBar.handleSecondaryClick(event) {
+            return
+        }
+        super.sendEvent(event)
     }
 }

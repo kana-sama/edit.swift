@@ -18,6 +18,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     private weak var fileWidthLimit: NSLayoutConstraint?
     private var availableWidth: CGFloat = 0
     private var siblingRequest: Task<Void, Never>?
+    private(set) var agentContextMenu: NSMenu?
 
     init(document: DocumentWindow, app: Edit) {
         self.document = document
@@ -49,7 +50,6 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             item.label = "Folder"
             let label = makeLabel()
             folderWidthLimit = constrainWidth(of: label, to: 160)
-            label.onRightClick = { [weak self] label in self?.showFolderMenu(from: label) }
             folderLabel = label
             folderItem = item
             let title = NSStackView(views: [label])
@@ -63,12 +63,10 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             item.visibilityPriority = .high
             let label = makeLabel()
             fileWidthLimit = constrainWidth(of: label, to: 240)
-            label.onRightClick = { [weak self] label in self?.showSiblingMenu(from: label) }
             let icon = TitleBarIcon()
             icon.imageScaling = .scaleProportionallyDown
             icon.setAccessibilityLabel("Change Language Mode")
             icon.toolTip = "Change Language Mode"
-            icon.onRightClick = { [weak self] in self?.showLanguagePicker() }
             icon.widthAnchor.constraint(equalToConstant: 17).isActive = true
             icon.heightAnchor.constraint(equalTo: icon.widthAnchor).isActive = true
             fileLabel = label
@@ -206,6 +204,27 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         Task { [app, document] in await app.openFiles([url], in: document) }
     }
 
+    func handleSecondaryClick(_ event: NSEvent) -> Bool {
+        guard document.window.attachedSheet == nil else { return false }
+
+        func hits(_ view: NSView) -> Bool {
+            let point = view.convert(event.locationInWindow, from: nil)
+            return view.window === document.window && !view.isHiddenOrHasHiddenAncestor &&
+                view.bounds.contains(point) && view.visibleRect.contains(point)
+        }
+
+        if let folderLabel, document.folderURL != nil, hits(folderLabel) {
+            showFolderMenu(from: folderLabel)
+        } else if let languageIcon, hits(languageIcon) {
+            showLanguagePicker()
+        } else if let fileLabel, document.fileURL != nil, hits(fileLabel) {
+            showSiblingMenu(from: fileLabel)
+        } else {
+            return false
+        }
+        return true
+    }
+
     private func showFolderMenu(from label: TitleBarLabel) {
         siblingRequest?.cancel()
         guard document.canReplaceBuffer else { return }
@@ -231,6 +250,10 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
 
     private func popUp(_ menu: NSMenu, from label: TitleBarLabel) {
         guard let first = menu.items.first, label.window === document.window else { return }
+        if app.isAgentCheck {
+            agentContextMenu = menu
+            return
+        }
         let top = label.isFlipped ? label.bounds.minY : label.bounds.maxY
         menu.popUp(positioning: first, at: NSPoint(x: label.bounds.minX, y: top), in: label)
     }
@@ -238,22 +261,10 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
 
 @MainActor
 private final class TitleBarLabel: NSTextField {
-    var onRightClick: ((TitleBarLabel) -> Void)?
-
     override var mouseDownCanMoveWindow: Bool { true }
-
-    override func rightMouseDown(with event: NSEvent) {
-        onRightClick?(self)
-    }
 }
 
 @MainActor
 private final class TitleBarIcon: NSImageView {
-    var onRightClick: (() -> Void)?
-
     override var mouseDownCanMoveWindow: Bool { true }
-
-    override func rightMouseDown(with event: NSEvent) {
-        onRightClick?()
-    }
 }
