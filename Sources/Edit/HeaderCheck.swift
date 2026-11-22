@@ -111,6 +111,11 @@ enum HeaderCheck {
         try await waitFor("a recent folder opens in the same window") {
             document.folderURL?.lastPathComponent == "Another folder" && app.documents.count == count
         }
+        let fileItem = document.window.toolbar?.items.first { $0.itemIdentifier == DocumentTitleBar.fileItemIdentifier }
+        try expect(document.showsEmptyFolder && fileItem?.isHidden == true,
+                   "an empty project shows only its folder title")
+        await document.newBuffer()
+        document.window.layoutIfNeeded()
 
         guard let icon = fileIcon(in: document) else { throw Failure("the file shows a language icon") }
         try secondaryClick(icon, in: document.window)

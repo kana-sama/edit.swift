@@ -99,6 +99,28 @@ enum ScratchCheck {
         } catch where !(error is Failure) {
             try expect(folderless.scratchFile?.id == global.id, "a failed save keeps the open scratch")
         }
+
+        folderless.setFolder(project)
+        let scratchPath = try resolve(folderless.fileURL)
+        let rememberedFile = await app.recentFiles.lastFile(in: project)
+        folderless.editor.insertText("Saved on close. ", replacementRange: NSRange(location: 0, length: 0))
+        let textAtClose = folderless.editor.string
+        folderless.window.performClose(nil)
+        let deadline = ContinuousClock.now + .seconds(4)
+        while (!folderless.showsEmptyFolder || folderless.isBusy) && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try expect(folderless.showsEmptyFolder && !folderless.isBusy && folderless.scratchFile == nil
+                   && folderless.window.representedURL == nil && folderless.sidebarMode == .scratches
+                   && folderless.findSettings.visible && app.documents.contains { $0 === folderless },
+                   "closing a scratch leaves its folder and Scratches sidebar open")
+        try expect(try FileBuffer.read(scratchPath).text == textAtClose, "closing a scratch flushes its edits")
+        try expect(await app.recentFiles.lastFile(in: project) == rememberedFile,
+                   "closing a scratch preserves the remembered project file")
+        _ = try await app.openFile(scratchPath, in: folderless)
+        try expect(folderless.scratchFile?.id == global.id && folderless.editor.string == textAtClose
+                   && ScratchStore.folderPath(for: folderless.folderURL) == projectPath,
+                   "reopening a scratch replaces the empty screen in the same folder")
     }
 
     private static func waitForAutosave(_ document: DocumentWindow, at url: URL) async throws {

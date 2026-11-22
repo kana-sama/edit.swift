@@ -14,6 +14,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     private weak var fileTitle: NSStackView?
     private weak var languageIcon: TitleBarIcon?
     private weak var folderItem: NSToolbarItem?
+    private weak var fileItem: NSToolbarItem?
     private weak var folderWidthLimit: NSLayoutConstraint?
     private weak var fileWidthLimit: NSLayoutConstraint?
     private var availableWidth: CGFloat = 0
@@ -70,6 +71,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             icon.widthAnchor.constraint(equalToConstant: 17).isActive = true
             icon.heightAnchor.constraint(equalTo: icon.widthAnchor).isActive = true
             fileLabel = label
+            fileItem = item
             languageIcon = icon
 
             let title = NSStackView(views: [icon, label])
@@ -127,6 +129,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             folderItem?.isHidden = true
         }
         fileTitle?.edgeInsets.left = document.folderURL == nil ? Self.leadingInset : 7
+        fileItem?.isHidden = document.showsEmptyFolder
         fileLabel?.stringValue = document.displayName
         fileLabel?.toolTip = document.displayedFileURL?.path ?? document.displayName
         if availableWidth == 0 { resize() } else { fitLabels() }
@@ -214,7 +217,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         let show: () -> Void
         if let folderLabel, document.folderURL != nil, hits(folderLabel) {
             show = { self.showFolderMenu(from: folderLabel) }
-        } else if let languageIcon, !document.isShowingFilePreview, hits(languageIcon) {
+        } else if let languageIcon, document.hasTextDocument, hits(languageIcon) {
             show = { self.showLanguagePicker() }
         } else if let fileLabel, document.displayedFileURL != nil, hits(fileLabel) {
             show = { self.showSiblingMenu(from: fileLabel) }

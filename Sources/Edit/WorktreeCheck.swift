@@ -26,6 +26,7 @@ enum WorktreeCheck {
         document.toggleSidebarFocus(.worktree)
         try expect(document.worktreeSidebar == nil, "Worktree is unavailable before opening a folder")
         _ = try await app.openFile(project, in: document)
+        _ = try await app.openFile(readme, in: document)
         document.toggleSidebarFocus(.worktree)
         guard let sidebar = document.worktreeSidebar else { throw Failure("open a native outline") }
         let tree = sidebar.outline
@@ -334,6 +335,7 @@ enum WorktreeCheck {
         let document = app.makeDocument()
         defer { document.window.close() }
         _ = try await app.openFile(root, in: document)
+        _ = try await app.openFile(readme, in: document)
         document.toggleSidebarFocus(.worktree)
         let worktree = try require(document.worktreeSidebar, "Trash Worktree")
         let tree = worktree.outline

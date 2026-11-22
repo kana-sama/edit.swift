@@ -261,7 +261,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     private func showControl(_ mode: ControlPanel.Mode, in source: DocumentWindow? = nil) {
         guard let document = source ?? activeDocument, !isQuitting,
-              mode != .languages || !document.isShowingFilePreview else { return }
+              mode != .languages || document.hasTextDocument else { return }
         let panel = controlPanel ?? ControlPanel(app: self)
         controlPanel = panel
         panel.toggle(in: document, mode: mode)
@@ -394,14 +394,14 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case #selector(showGoToFile(_:)), #selector(showCommandMode(_:)):
             return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(showLanguageModes(_:)):
-            return activeDocument.map { !$0.isShowingFilePreview && $0.window.attachedSheet == nil } ?? false
+            return activeDocument.map { $0.hasTextDocument && $0.window.attachedSheet == nil } ?? false
         case #selector(newWindow(_:)): return true
         case #selector(openDocument(_:)):
             return openFilePanel?.isOpening == true || activeDocument?.canReplaceBuffer == true
         case #selector(openRecentDocument(_:)):
             return activeDocument?.canReplaceBuffer ?? false
         case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)), #selector(saveDocumentAsScratch(_:)):
-            return activeDocument.map { !$0.isShowingFilePreview && !$0.isBusy && $0.window.attachedSheet == nil } ?? false
+            return activeDocument.map { $0.hasTextDocument && !$0.isBusy && $0.window.attachedSheet == nil } ?? false
         case #selector(openFind(_:)): return activeDocument?.canPerformFind(.find) ?? false
         case #selector(openReplace(_:)): return activeDocument?.canPerformFind(.replace) ?? false
         case #selector(toggleSidebar(_:)), #selector(focusScratches(_:)):
@@ -476,7 +476,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             } catch {
                 isQuitting = false
                 for document in documents {
-                    document.editor.isEditable = !document.isShowingFilePreview
+                    document.editor.isEditable = document.hasTextDocument
                     if !document.window.isVisible { document.window.orderFront(nil) }
                 }
                 let document = activeDocument ?? makeDocument(placement: lastPlacement)
@@ -613,7 +613,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     record.path.flatMap { FileIdentity.at(URL(fileURLWithPath: $0)) }
                 }.value
                 document.restoreDraft(record, text: draft, identity: identity, scratch: scratch)
-            } else if let opened {
+            } else if let opened, document.folderURL == nil || opened.identity != nil {
                 switch opened {
                 case .text(let file):
                     let syntax = await document.prepareOpeningSyntax(file, position: record.editorPosition,
@@ -623,6 +623,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     document.loadPreview(preview)
                     document.focusContent()
                 }
+            } else if document.folderURL != nil && (record.path != nil || record.showsEmptyFolder != false) {
+                document.loadEmptyFolder()
+                document.focusContent()
             }
             document.restoreSidebar(record)
             document.restoreEditorPosition(record.editorPosition)
@@ -692,11 +695,11 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         guard isCurrentRequest(at: canonical) else { return nil }
         if isFolder {
             let folder = URL(filePath: canonical.path, directoryHint: .isDirectory)
-            return try await openFolder(url, canonical: folder, in: document,
-                                        focusEditor: focusEditor, isCurrentRequest: isCurrentRequest)
+            return await openFolder(url, canonical: folder, in: document,
+                                    focusEditor: focusEditor, isCurrentRequest: isCurrentRequest)
         }
         let isScratch = scratchStore.identifiesScratch(at: canonical)
-        if !document.isShowingFilePreview &&
+        if document.hasTextDocument &&
             (document.fileURL == canonical || (identity != nil && identity == document.fileIdentity)) {
             if let scratch = document.scratchFile { await recordScratchOpen(scratch) }
             else if !isScratch { await recentFiles.record(url, in: document.folderURL) }
@@ -720,52 +723,27 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     private func openFolder(
         _ url: URL, canonical folder: URL, in document: DocumentWindow,
         focusEditor: Bool, isCurrentRequest: (URL) -> Bool
-    ) async throws -> DocumentWindow? {
+    ) async -> DocumentWindow? {
         var opened: OpenedFile?
         if let last = await recentFiles.lastFile(in: folder),
            let candidate = try? await Self.readForOpening(last, within: folder), candidate.identity != nil {
             opened = candidate
         }
-        if opened == nil {
-            let readmes = try await Task.detached { try Self.folderReadmes(folder) }.value
-            for readme in readmes {
-                if let candidate = try? await Self.readForOpening(readme, within: folder, allowsPreview: false) {
-                    opened = candidate
-                    break
-                }
-            }
-        }
         guard isCurrentRequest(opened?.url ?? folder) else { return nil }
+        let previousFolder = document.folderURL
         if let opened {
             if opened.url != document.displayedFileURL {
                 guard await opened.replaceBuffer(in: document, focusEditor: focusEditor) else { return nil }
             }
-        } else {
-            guard await document.replaceBuffer(with: nil, focusEditor: focusEditor) else { return nil }
-        }
-        if document.folderURL != folder {
             document.setFolder(folder)
+        } else {
+            guard await document.replaceBuffer(withEmptyFolder: folder, focusContent: focusEditor) else { return nil }
+        }
+        if previousFolder != folder {
             controlPanel?.folderDidChange(in: document)
         }
         await recentFiles.recordFolder(url, opening: opened?.url)
         return document
-    }
-
-    private nonisolated static func folderReadmes(_ folder: URL) throws -> [URL] {
-        let children = try FileManager.default.contentsOfDirectory(
-            at: folder, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]
-        )
-        let preferredNames = ["readme.md", "readme", "readme.txt"]
-        let readmes = children.compactMap { url -> (priority: Int, url: URL)? in
-            let name = url.lastPathComponent.lowercased()
-            guard name == "readme" || name.hasPrefix("readme."),
-                  (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { return nil }
-            return (preferredNames.firstIndex(of: name) ?? preferredNames.count, url)
-        }
-        return readmes.sorted {
-            if $0.priority != $1.priority { return $0.priority < $1.priority }
-            return $0.url.lastPathComponent < $1.url.lastPathComponent
-        }.map(\.url)
     }
 
     @concurrent

@@ -30,7 +30,7 @@ struct ControlCommand {
         if action == #selector(Edit.focusSelection(_:)) { return document.canFocusSelection }
         if action == #selector(Edit.exitFocus(_:)) { return document.canExitFocus }
         if documentOnly {
-            guard !document.isShowingFilePreview, document.window.attachedSheet == nil,
+            guard document.hasTextDocument, document.window.attachedSheet == nil,
                   document.editor.responds(to: action) else { return false }
             return !Self.isBracketCommand(action) || document.editor.canNavigateBrackets
         }
@@ -61,7 +61,7 @@ struct ControlCommand {
             return
         }
         if documentOnly {
-            guard !document.isShowingFilePreview else { return }
+            guard document.hasTextDocument else { return }
             document.focusContent()
             document.editor.doCommand(by: action)
             return

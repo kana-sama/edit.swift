@@ -9,11 +9,9 @@ enum FolderCheck {
         let empty = root.appending(path: "Empty Project")
         try makeDirectory(project.appending(path: "Sources"))
         try makeDirectory(other)
-        try makeDirectory(empty.appending(path: "README.md"))
-        let readme = try write("Preferred README", to: project.appending(path: "README.MD"))
-        _ = try write("Second choice", to: project.appending(path: "readme"))
-        _ = try write("Third choice", to: project.appending(path: "readme.txt"))
-        let fallback = try write("Other README format", to: other.appending(path: "ReadMe.rst"))
+        try makeDirectory(empty)
+        _ = try write("Project README", to: project.appending(path: "README.md"))
+        let readme = try write("Only file in this project", to: other.appending(path: "README.md"))
         let nested = try write("func folderCheck() {}\n", to: project.appending(path: "Sources/FolderCheckUnique.swift"))
         let outside = try write("Outside the project", to: root.appending(path: "Notes.txt"))
         let canonicalProject = FileBuffer.canonicalURL(project).path
@@ -27,15 +25,28 @@ enum FolderCheck {
         launcher.queryItems = [URLQueryItem(name: "path", value: project.path)]
         guard let launcherURL = launcher.url else { throw Failure("folder launch URL") }
         app.application(NSApplication.shared, open: [launcherURL])
-        try await waitFor("launcher opens the preferred README in the current window") {
-            document.folderURL?.path == canonicalProject && document.fileURL == FileBuffer.canonicalURL(readme)
+        try await waitFor("launcher opens the project without a document in the current window") {
+            document.folderURL?.path == canonicalProject && document.showsEmptyFolder
         }
-        try expect(document.editor.string == "Preferred README" && app.documents.count == count
-                   && document.window.frame == frame && document.window.title == "Project One — README.MD",
-                   "opening a folder preserves the window and updates its native title")
-        try expect(document.window.representedURL == document.fileURL, "folder title keeps the file's represented URL")
+        try expect(document.fileURL == nil && !document.editor.isEditable && app.documents.count == count
+                   && document.window.frame == frame && document.window.title == "Project One",
+                   "opening an unvisited folder preserves the window and shows only the folder title")
+        try expect(document.window.representedURL == nil, "the empty screen represents no file")
+        try expect(!document.canPerformFind(.find) && document.canPerformFind(.toggleSidebar),
+                   "the empty screen keeps sidebar navigation available")
+        if let menu = NSApp.mainMenu,
+           let goToBracket = ControlCommand.fromMenu(menu).first(where: {
+               $0.item.action == #selector(EditorTextView.goToBracket(_:))
+           }) {
+            try expect(!goToBracket.isAvailable(in: document, focus: document.window.firstResponder),
+                       "document-only Control commands are unavailable on the empty screen")
+        } else {
+            throw Failure("find Go to Bracket in Control")
+        }
+        await app.recentFiles.record(outside)
         try await ControlPanel(app: app).checkFolder(in: document, file: FileBuffer.canonicalURL(nested))
-        try expect(document.folderURL?.path == canonicalProject && document.fileURL == FileBuffer.canonicalURL(nested),
+        try expect(document.folderURL?.path == canonicalProject && document.fileURL == FileBuffer.canonicalURL(nested)
+                   && !document.showsEmptyFolder && document.window.representedURL == document.fileURL,
                    "a file chosen in Control keeps its folder")
 
         _ = try await app.openFile(outside, in: document)
@@ -50,44 +61,78 @@ enum FolderCheck {
         _ = try await app.openFile(project, in: document)
         try expect(document.editor.selectedRange() == selection, "opening the current folder preserves selection")
 
+        let closing = app.makeDocument()
+        _ = try await app.openFile(project, in: closing)
+        try expect(closing.fileURL == remembered, "opening the project in another window opens its remembered file")
+        closing.editor.insertText("// autosaved while closing\n", replacementRange: NSRange(location: 0, length: 0))
+        let savedText = closing.editor.string
+        try expect(closing.window.isDocumentEdited, "the active document needs an autosave before closing")
+        closing.window.performClose(nil)
+        try await waitFor("the first native close shows the empty folder") { closing.showsEmptyFolder && !closing.isBusy }
+        try expect(app.documents.contains { $0 === closing } && closing.folderURL?.path == canonicalProject,
+                   "closing an edited file keeps the project window open")
+        let saved = try String(contentsOf: nested, encoding: .utf8)
+        try expect(saved == savedText, "the first close writes the edited named document")
+        let emptySession = closing.sessionDocument()
+        closing.window.performClose(nil)
+        try await waitFor("the second native close closes the folder window") { !app.documents.contains { $0 === closing } }
+
         let scratch = app.makeDocument()
         _ = try await app.openFile(empty, in: scratch)
-        try expect(scratch.fileURL == nil && scratch.editor.string.isEmpty
-                   && scratch.window.title == "Empty Project — Untitled", "a folder with no README opens empty")
+        try expect(scratch.showsEmptyFolder && scratch.window.title == "Empty Project", "a folder with no files opens empty")
+        await scratch.newBuffer()
+        try expect(!scratch.showsEmptyFolder && scratch.editor.isEditable && scratch.window.title == "Empty Project — Untitled",
+                   "New creates an editable untitled document in the project")
         scratch.editor.insertText("Recover this scratch buffer", replacementRange: scratch.editor.selectedRange())
+        scratch.window.performClose(nil)
+        try expect(scratch.isBusy, "closing a dirty untitled document runs draft protection")
+        try await waitFor("Cancel ends the pending close") { !scratch.isBusy }
+        try expect(!scratch.showsEmptyFolder && scratch.editor.string == "Recover this scratch buffer"
+                   && app.documents.contains { $0 === scratch }, "Cancel preserves the open untitled draft")
         let cancelled = try await app.openFile(other, in: scratch)
         try expect(cancelled == nil && scratch.window.title == "Empty Project — Untitled"
                    && scratch.editor.string == "Recover this scratch buffer", "Cancel keeps the folder and draft")
 
         let missing = app.makeDocument()
         _ = try await app.openFile(other, in: missing)
-        try expect(missing.fileURL == FileBuffer.canonicalURL(fallback), "other README extensions are accepted")
-        try FileManager.default.removeItem(at: fallback)
+        try expect(missing.fileURL == nil && missing.showsEmptyFolder, "a README by itself does not open automatically")
+        _ = try await app.openFile(readme, in: missing)
+        try FileManager.default.removeItem(at: readme)
+
+        let cleanUntitled = app.makeDocument()
+        _ = try await app.openFile(empty, in: cleanUntitled)
+        await cleanUntitled.newBuffer()
+        let windows = [document, scratch, missing, cleanUntitled]
+        let records = windows.map { $0.sessionDocument() } + [emptySession]
         let store = SessionStore(url: root.appending(path: "session.json"))
-        try store.write(EditorSession(documents: [document, scratch, missing].map { $0.sessionDocument() },
-                                      activeIndex: 0, lastWindow: nil))
+        try store.write(EditorSession(documents: records, activeIndex: 0, lastWindow: nil))
         guard let session = try store.read() else { throw Failure("read back folder session") }
-        [document, scratch, missing].forEach { $0.window.close() }
+        windows.forEach { $0.window.close() }
         let placeholder = app.makeDocument()
         await app.restore(session, reusing: placeholder)
-        let recovered = Array(app.documents.suffix(3))
+        let recovered = Array(app.documents.suffix(records.count))
         try expect(recovered.first === placeholder && recovered.map { $0.folderURL?.lastPathComponent }
-                   == ["Project One", "Empty Project", "Project Two"], "restore independent folder contexts")
+                   == ["Project One", "Empty Project", "Project Two", "Empty Project", "Project One"],
+                   "restore independent folder contexts")
         try expect(placeholder.fileURL == FileBuffer.canonicalURL(nested) && placeholder.window.frame == frame,
                    "restore the original file and frame in a folder")
         try expect(recovered[1].editor.string == "Recover this scratch buffer" && recovered[1].window.isDocumentEdited,
                    "restore the unsaved draft within its folder")
-        try expect(recovered[2].fileURL == nil && recovered[2].window.title == "Project Two — Untitled",
-                   "restore a folder window after its named file is deleted")
+        try expect(recovered[2].fileURL == nil && recovered[2].showsEmptyFolder && recovered[2].window.title == "Project Two",
+                   "restore the empty folder screen after its named file is deleted")
+        try expect(!recovered[3].showsEmptyFolder && recovered[3].editor.isEditable && recovered[3].fileURL == nil,
+                   "restore an explicitly opened clean untitled document separately from the empty folder screen")
+        try expect(recovered[4].showsEmptyFolder && recovered[4].fileURL == nil,
+                   "restore the empty folder screen even when the folder has a remembered file")
 
-        let newReadme = try write("New fallback", to: other.appending(path: "README.txt"))
+        _ = try write("New fallback", to: other.appending(path: "README.txt"))
         _ = try await app.openFile(other, in: recovered[2])
-        try expect(recovered[2].fileURL == FileBuffer.canonicalURL(newReadme),
-                   "a folder with a missing remembered file falls back to its README")
+        try expect(recovered[2].showsEmptyFolder && recovered[2].fileURL == nil,
+                   "a folder with a missing remembered file opens without selecting a substitute")
 
         try await checkControlExclusions(in: app, root: root)
         try await checkRecentMenu(in: app, root: root)
-        return placeholder.window
+        return recovered[4].window
     }
 
     private static func checkControlExclusions(in app: Edit, root: URL) async throws {

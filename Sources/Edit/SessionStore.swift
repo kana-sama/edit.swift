@@ -60,6 +60,7 @@ struct SessionDocument: Codable, Sendable {
     var sidebarMode: SidebarMode? = nil
     var worktreeShowsHidden: Bool? = nil
     var isFilePreview: Bool? = nil
+    var showsEmptyFolder: Bool? = nil
 }
 
 struct EditorSession: Codable, Sendable {
