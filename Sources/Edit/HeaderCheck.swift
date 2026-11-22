@@ -10,9 +10,12 @@ enum HeaderCheck {
         window.toolbar?.items.first { $0.itemIdentifier == DocumentTitleBar.fileItemIdentifier }?.view as? NSStackView
     }
 
+    private static func folderStack(in window: NSWindow) -> NSStackView? {
+        window.toolbar?.items.first { $0.itemIdentifier == DocumentTitleBar.folderItemIdentifier }?.view as? NSStackView
+    }
+
     private static func folderLabel(in window: NSWindow) -> NSTextField? {
-        let title = window.toolbar?.items.first { $0.itemIdentifier == DocumentTitleBar.folderItemIdentifier }?.view
-        return (title as? NSStackView)?.arrangedSubviews.compactMap { $0 as? NSTextField }.first
+        folderStack(in: window)?.arrangedSubviews.compactMap { $0 as? NSTextField }.first
     }
 
     private static func fileLabel(in window: NSWindow) -> NSTextField? {
@@ -39,6 +42,16 @@ enum HeaderCheck {
         defer { document.window.close() }
         document.window.layoutIfNeeded()
         try expect(fileIcon(in: document)?.image != nil, "an untitled buffer has a visible language icon")
+        for sidebarVisible in [false, true, false] {
+            if document.findSettings.visible != sidebarVisible { document.performFind(.toggleSidebar) }
+            document.window.layoutIfNeeded()
+            guard let icon = fileIcon(in: document), let title = fileTitle(in: document.window) else {
+                throw Failure("an untitled window has a document title")
+            }
+            let inset = icon.convert(icon.bounds, to: title).minX - title.bounds.minX
+            try expect(abs(inset - 8) < 0.5,
+                       "an untitled title has an 8-point inset with the sidebar visible: \(sidebarVisible) (\(inset) pt)")
+        }
         _ = try await app.openFile(another, in: document)
         _ = try await app.openFile(folder, in: document)
         _ = try await app.openFile(source, in: document)
@@ -48,6 +61,8 @@ enum HeaderCheck {
               let icon = fileIcon(in: document) else { throw Failure("title has two text labels and a file icon") }
         try expect(folderTitle.stringValue == "Project" && fileTitle.stringValue == "Main.swift",
                    "the folder appears before the file name")
+        try expect(folderStack(in: document.window)?.edgeInsets.left == 8,
+                   "the folder title starts with an 8-point inset")
         let folderFrame = folderTitle.convert(folderTitle.bounds, to: nil)
         let iconFrame = icon.convert(icon.bounds, to: nil)
         let nameFrame = fileTitle.convert(fileTitle.bounds, to: nil)
@@ -114,10 +129,18 @@ enum HeaderCheck {
               let visibleFolder = folderLabel(in: document.window) else { throw Failure("the folder title sits next to the sidebar") }
         let divider = sidebar.convert(sidebar.bounds, to: nil).maxX
         let gutter = visibleFolder.convert(visibleFolder.bounds, to: nil).minX - divider
+        try expect(folderStack(in: document.window)?.edgeInsets.left == 8,
+                   "the open sidebar keeps the folder title inset")
         try expect((10...18).contains(gutter), "the folder title clears the sidebar divider (\(gutter) pt)")
         try secondaryClick(visibleFolder, in: document.window, controlClick: true)
         try expect(document.titleBar.agentContextMenu?.title == "Recent Folders",
                    "Control-click opens recent folders beside Worktree")
+
+        document.performFind(.toggleSidebar)
+        document.window.layoutIfNeeded()
+        try expect(!document.findSettings.visible && folderStack(in: document.window)?.edgeInsets.left == 8,
+                   "closing the sidebar keeps the folder title inset")
+        document.performFind(.toggleSidebar)
 
         let longFolder = root.appending(path: String(repeating: "Long folder name ", count: 7) + "project")
         let longFile = longFolder.appending(path: String(repeating: "File name ", count: 8) + "example.txt")

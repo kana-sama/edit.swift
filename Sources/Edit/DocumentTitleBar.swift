@@ -5,11 +5,11 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     static let folderItemIdentifier = NSToolbarItem.Identifier("Edit.FolderTitle")
     static let fileItemIdentifier = NSToolbarItem.Identifier("Edit.FileTitle")
     static let itemIdentifiers = [folderItemIdentifier, fileItemIdentifier]
+    private static let leadingInset: CGFloat = 8
 
     private unowned let document: DocumentWindow
     private unowned let app: Edit
     private weak var folderLabel: TitleBarLabel?
-    private weak var folderTitle: NSStackView?
     private weak var fileLabel: TitleBarLabel?
     private weak var fileTitle: NSStackView?
     private weak var languageIcon: TitleBarIcon?
@@ -56,7 +56,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             title.alignment = .centerY
             // AppKit measures the item even when the folder label is empty and hidden.
             title.widthAnchor.constraint(greaterThanOrEqualToConstant: 1).isActive = true
-            folderTitle = title
+            title.edgeInsets.left = Self.leadingInset
             item.view = title
         } else {
             item.label = "File"
@@ -103,8 +103,6 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         let zoom = window.standardWindowButton(.zoomButton)
         let controls = zoom.map { $0.convert($0.bounds, to: nil).maxX + 8 } ?? 84
         let leading = sidebarWidth > 0 ? sidebarWidth : controls
-        let folderInset: CGFloat = sidebarWidth > 0 ? 8 : 0
-        if folderTitle?.edgeInsets.left != folderInset { folderTitle?.edgeInsets.left = folderInset }
         availableWidth = max(0, floor(window.frame.width - leading))
         fitLabels()
     }
@@ -128,7 +126,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         } else {
             folderItem?.isHidden = true
         }
-        fileTitle?.edgeInsets.left = document.folderURL == nil ? 0 : 7
+        fileTitle?.edgeInsets.left = document.folderURL == nil ? Self.leadingInset : 7
         fileLabel?.stringValue = document.displayName
         fileLabel?.toolTip = document.fileURL?.path ?? document.displayName
         if availableWidth == 0 { resize() } else { fitLabels() }
