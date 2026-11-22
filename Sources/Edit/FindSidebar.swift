@@ -33,12 +33,15 @@ private final class FindSplitView: NSSplitView {
 @MainActor
 private final class SidebarHeaderView: NSView {
     private weak var sidebar: NSView?
+    private let options: NSView
     private let trailingInset: CGFloat
     private var leadingInset: CGFloat?
     private lazy var headerWidth = widthAnchor.constraint(equalToConstant: 0)
+    private lazy var optionsTrailing = options.trailingAnchor.constraint(equalTo: trailingAnchor)
 
     init(title: NSView, options: NSView, sidebar: NSView, trailingInset: CGFloat) {
         self.sidebar = sidebar
+        self.options = options
         self.trailingInset = trailingInset
         super.init(frame: .zero)
         title.translatesAutoresizingMaskIntoConstraints = false
@@ -51,7 +54,7 @@ private final class SidebarHeaderView: NSView {
             title.topAnchor.constraint(equalTo: topAnchor),
             title.bottomAnchor.constraint(equalTo: bottomAnchor),
             options.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 4),
-            options.trailingAnchor.constraint(equalTo: trailingAnchor),
+            optionsTrailing,
             options.centerYAnchor.constraint(equalTo: centerYAnchor),
             headerWidth,
         ])
@@ -73,14 +76,21 @@ private final class SidebarHeaderView: NSView {
     func alignOptions() {
         guard let sidebar, let sidebarWindow = sidebar.window else { return }
         let sidebarFrame = sidebarWindow.convertToScreen(sidebar.convert(sidebar.bounds, to: nil))
-        if let window, !isHiddenOrHasHiddenAncestor {
-            let leadingEdge = window.convertToScreen(convert(bounds, to: nil)).minX
+        if let window, let superview, !isHiddenOrHasHiddenAncestor {
+            let leadingEdge = window.convertToScreen(superview.convert(superview.bounds, to: nil)).minX
             leadingInset = leadingEdge - sidebarFrame.minX
         }
         // A toolbar item can be detached when AppKit moves it into overflow.
         // Keep its fitting width current so it can fit again at the new divider position.
         guard let leadingInset else { return }
-        let width = max(0, sidebarFrame.width - leadingInset - trailingInset)
+        let availableWidth = max(0, sidebarFrame.width - leadingInset - trailingInset)
+        // The toolbar rounds its slot to whole points and centers the custom view in it.
+        // Fill the slot so its leading edge stays fixed and keep the ellipsis on the divider inset.
+        let width = ceil(availableWidth)
+        let offset = availableWidth - width
+        if optionsTrailing.constant != offset {
+            optionsTrailing.constant = offset
+        }
         if headerWidth.constant != width {
             headerWidth.constant = width
             invalidateIntrinsicContentSize()

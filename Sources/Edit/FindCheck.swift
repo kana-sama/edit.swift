@@ -840,9 +840,12 @@ enum FindCheck {
 
         let sidebarWidth = sidebar.frame.width
         let minimumWidth = split.splitViewItems[0].minimumThickness
-        for width in [minimumWidth + 10, minimumWidth + 4, minimumWidth, sidebarWidth] {
+        for width in [minimumWidth + 10, minimumWidth + 4, minimumWidth, 278.5, 279, 279.5, 310.5, 311, sidebarWidth] {
             split.splitView.setPosition(width, ofDividerAt: 0)
             try checkHeader()
+            let leading = titleLeadingEdge()
+            try expect(abs(leading - worktreeLeading) < 0.1,
+                       "resizing a Worktree sidebar keeps its title at \(worktreeLeading) pt (got \(leading) pt at width \(width))")
         }
         split.splitView.setPosition(minimumWidth, ofDividerAt: 0)
         try checkHeader()
