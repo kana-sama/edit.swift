@@ -205,15 +205,90 @@ final class FindFieldTextView: NSTextView {
     }
 }
 
+final class FindResultsScrollView: NSScrollView {
+    override func reflectScrolledClipView(_ clipView: NSClipView) {
+        super.reflectScrolledClipView(clipView)
+        (documentView as? FindResultsTable)?.refreshHover()
+    }
+}
+
 final class FindResultsTable: NSTableView {
     var onReturn: (() -> Void)?
+    var onSpace: (() -> Void)?
     var onEscape: (() -> Void)?
+    private var pointerTracking: NSTrackingArea?
+    private var hoveredRow = -1
+    private weak var hoveredCell: FindResultCell?
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        updateHover(at: nil)
+        let center = NotificationCenter.default
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            if let window { center.removeObserver(self, name: name, object: window) }
+            if let newWindow {
+                center.addObserver(self, selector: #selector(refreshHover), name: name, object: newWindow)
+            }
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if pointerTracking == nil {
+            let tracking = NSTrackingArea(rect: .zero,
+                                          options: [.inVisibleRect, .activeInKeyWindow, .mouseEnteredAndExited, .mouseMoved],
+                                          owner: self, userInfo: nil)
+            addTrackingArea(tracking)
+            pointerTracking = tracking
+        }
+        refreshHover()
+    }
+
+    override func mouseEntered(with event: NSEvent) { updateHover(at: event.locationInWindow) }
+    override func mouseMoved(with event: NSEvent) { updateHover(at: event.locationInWindow) }
+    override func mouseExited(with event: NSEvent) { updateHover(at: nil) }
+
+    @objc func refreshHover() {
+        guard let window, window.isKeyWindow else {
+            updateHover(at: nil)
+            return
+        }
+        updateHover(at: window.mouseLocationOutsideOfEventStream)
+    }
+
+    func configureHover(for cell: FindResultCell, row: Int) {
+        let hovered = hoveredRow == row
+        if hovered, hoveredCell !== cell {
+            hoveredCell?.updateHover(false)
+            hoveredCell = cell
+        }
+        cell.updateHover(hovered)
+    }
+
+    private func updateHover(at location: NSPoint?) {
+        let row = location.flatMap { location -> Int? in
+            let local = convert(location, from: nil)
+            return !isHiddenOrHasHiddenAncestor && visibleRect.contains(local) ? self.row(at: local) : nil
+        } ?? -1
+        if hoveredRow != row {
+            hoveredCell?.updateHover(false)
+            hoveredCell = nil
+            hoveredRow = row
+        }
+        if row >= 0, let cell = view(atColumn: 0, row: row, makeIfNecessary: false) as? FindResultCell {
+            configureHover(for: cell, row: row)
+        }
+    }
 
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
         if modifiers.isEmpty {
             if event.keyCode == 36 || event.keyCode == 76 {
                 if !event.isARepeat { onReturn?() }
+                return
+            }
+            if event.keyCode == 49 {
+                if !event.isARepeat { onSpace?() }
                 return
             }
             if event.keyCode == 53 {
@@ -225,10 +300,20 @@ final class FindResultsTable: NSTableView {
     }
 }
 
+final class FindResultRow: NSTableRowView {
+    override func drawSelection(in dirtyRect: NSRect) {
+        let color: NSColor = isEmphasized ? .selectedContentBackgroundColor : .unemphasizedSelectedContentBackgroundColor
+        color.setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 0), xRadius: 8, yRadius: 8).fill()
+    }
+}
+
 final class FindResultCell: NSTableCellView {
     private let excerpt = NSTextField(labelWithString: "")
     private static let actionSize: CGFloat = 20
     private static let actionSpacing: CGFloat = 1
+    // The button's hit area extends beyond its glyph. Let the excerpt use that transparent leading edge.
+    private static let excerptOverlap: CGFloat = 1
     private let applyButton = NSButton(image: NSImage(systemSymbolName: "arrow.turn.down.right",
                                                         accessibilityDescription: nil)!,
                                              target: nil, action: nil)
@@ -238,9 +323,12 @@ final class FindResultCell: NSTableCellView {
     private var selected = false
     private var acceptsActions = false
     private var replacementAvailable = false
-    private var tracking: NSTrackingArea?
-    private lazy var excerptBeforeDismiss = excerpt.trailingAnchor.constraint(equalTo: dismissButton.leadingAnchor, constant: -4)
-    private lazy var excerptBeforeApply = excerpt.trailingAnchor.constraint(equalTo: applyButton.leadingAnchor, constant: -4)
+    private lazy var excerptBeforeDismiss = excerpt.trailingAnchor.constraint(
+        equalTo: dismissButton.leadingAnchor, constant: Self.excerptOverlap
+    )
+    private lazy var excerptBeforeApply = excerpt.trailingAnchor.constraint(
+        equalTo: applyButton.leadingAnchor, constant: Self.excerptOverlap
+    )
     private var onApply: (() -> Void)?
     private var onDismiss: (() -> Void)?
 
@@ -255,6 +343,8 @@ final class FindResultCell: NSTableCellView {
         excerpt.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         excerpt.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
+        excerpt.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(excerpt)
         for (button, label, action) in [
             (applyButton, "Replace This Match", #selector(applyMatch(_:))),
             (dismissButton, "Dismiss This Match", #selector(dismissMatch(_:))),
@@ -274,13 +364,11 @@ final class FindResultCell: NSTableCellView {
                 button.centerYAnchor.constraint(equalTo: centerYAnchor),
             ])
         }
-        excerpt.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(excerpt)
         NSLayoutConstraint.activate([
-            excerpt.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 5),
+            excerpt.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3),
             excerpt.heightAnchor.constraint(lessThanOrEqualTo: heightAnchor),
             excerpt.centerYAnchor.constraint(equalTo: centerYAnchor),
-            dismissButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            dismissButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1),
             applyButton.trailingAnchor.constraint(equalTo: dismissButton.leadingAnchor, constant: -Self.actionSpacing),
             excerptBeforeDismiss,
         ])
@@ -311,17 +399,19 @@ final class FindResultCell: NSTableCellView {
         updateActions()
     }
 
-    override func updateTrackingAreas() {
-        if let tracking { removeTrackingArea(tracking) }
-        let tracking = NSTrackingArea(rect: .zero, options: [.inVisibleRect, .activeInKeyWindow, .mouseEnteredAndExited],
-                                      owner: self, userInfo: nil)
-        addTrackingArea(tracking)
-        self.tracking = tracking
-        super.updateTrackingAreas()
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        hover = false
+        selected = false
+        acceptsActions = false
+        updateActions()
     }
 
-    override func mouseEntered(with event: NSEvent) { hover = true; updateActions() }
-    override func mouseExited(with event: NSEvent) { hover = false; updateActions() }
+    func updateHover(_ hovered: Bool) {
+        guard hover != hovered else { return }
+        hover = hovered
+        updateActions()
+    }
 
     private func updateActions() {
         let showDismiss = acceptsActions && (hover || selected)

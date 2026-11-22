@@ -138,7 +138,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private let resultIcon = NSImageView()
     private let resultStatus = NSTextField(labelWithString: "No results")
     private let results = FindResultsTable()
-    private let resultScroll = NSScrollView()
+    private let resultScroll = FindResultsScrollView()
     private let replaceRow = NSStackView()
     private let split = NSSplitViewController()
     private let splitView = FindSplitView(frame: .zero)
@@ -164,6 +164,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private var matches: [FindHit] = []
     private var dismissed: Set<NSRange> = []
     private var selected: Int?
+    private var selectedMatchLocation: Int?
     private var editingResults = false
     private var previewRequested = false
     private var movingDismissalsForReplacement = false
@@ -216,7 +217,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
         rememberFocus(entering: mode)
         switch mode {
-        case .search: openField(replace: false)
+        case .search: focusSearch()
         case .worktree: showWorktree()
         }
     }
@@ -399,6 +400,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     func bufferReplaced() {
         dismissed.removeAll()
+        selectedMatchLocation = nil
         advanceFrom = nil
         queuedDirection = nil
         pendingResultFocus = nil
@@ -411,7 +413,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         guard let storage = notification.object as? NSTextStorage,
               storage.editedMask.contains(.editedCharacters) else { return }
         let text = storage.string
-        if !movingDismissalsForReplacement && !dismissed.isEmpty {
+        let movesDismissals = !movingDismissalsForReplacement && !dismissed.isEmpty
+        if selectedMatchLocation != nil || movesDismissals {
             let range = storage.editedRange
             let oldLength = range.length - storage.changeInLength
             let edit: FindTextEdit
@@ -423,7 +426,13 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             } else {
                 edit = FindTextEdit.singleChange(from: bufferSnapshot as NSString, to: text as NSString)
             }
-            dismissed = FindTextEdit.moving(dismissed, through: [edit])
+            if movesDismissals { dismissed = FindTextEdit.moving(dismissed, through: [edit]) }
+            if let location = selectedMatchLocation, edit.range.location <= location {
+                // Preserve the position in the current buffer, including while its search is pending.
+                selectedMatchLocation = location >= NSMaxRange(edit.range)
+                    ? location + edit.replacement.utf16.count - edit.range.length
+                    : edit.range.location
+            }
         }
         bufferSnapshot = text
         generation &+= 1
@@ -523,7 +532,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             content.addArrangedSubview(control)
         }
         content.orientation = .vertical
-        content.alignment = .leading
+        content.alignment = .centerX
         content.spacing = 5
         content.setCustomSpacing(10, after: replaceRow)
         content.translatesAutoresizingMaskIntoConstraints = false
@@ -543,15 +552,16 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             trailing,
             sidebarContent.topAnchor.constraint(equalTo: view.topAnchor),
             sidebarContent.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            content.leadingAnchor.constraint(equalTo: sidebarContent.leadingAnchor, constant: Self.contentInset),
-            content.trailingAnchor.constraint(equalTo: sidebarContent.trailingAnchor, constant: -Self.contentInset),
+            content.leadingAnchor.constraint(equalTo: sidebarContent.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: sidebarContent.trailingAnchor),
             content.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 6),
             content.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             resultScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 0),
         ])
-        for control in [findRow, replaceRow, resultHeader, resultScroll] {
-            control.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        for control in [findRow, replaceRow, resultHeader] {
+            control.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -2 * Self.contentInset).isActive = true
         }
+        resultScroll.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         resultScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
         replaceButton.isEnabled = false
     }
@@ -664,7 +674,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         column.minWidth = 0
         results.addTableColumn(column)
         results.headerView = nil
-        results.style = .sourceList
+        results.style = .fullWidth
         results.rowSizeStyle = .custom
         results.rowHeight = 24
         results.usesAutomaticRowHeights = false
@@ -678,6 +688,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         results.target = self
         results.doubleAction = #selector(openClickedResult(_:))
         results.onReturn = { [weak self] in self?.activateResult() }
+        results.onSpace = { [weak self] in
+            guard let self, let selected else { return }
+            openResult(at: selected)
+        }
         results.onEscape = { [weak self] in self?.clearResultFocus() }
         resultScroll.drawsBackground = false
         resultScroll.automaticallyAdjustsContentInsets = false
@@ -879,6 +893,19 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         updateSidebarToolbarVisibility()
     }
 
+    private func focusSearch() {
+        guard selectedMatchLocation != nil else {
+            openField(replace: false)
+            return
+        }
+        document.requestAutosave()
+        previewRequested = settings.showsReplacement
+        showSearch(focusing: results)
+        if validResults, let selected {
+            selectRow(selected, reveal: true, preview: true)
+        }
+    }
+
     private func openField(replace: Bool) {
         document.requestAutosave()
         var changedQuery = false
@@ -894,6 +921,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
                     findInput.value = query
                     dismissed.removeAll()
                     selected = nil
+                    selectedMatchLocation = nil
                 }
             }
         }
@@ -976,6 +1004,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         pendingResultFocus = nil
         advanceFrom = nil
         selected = nil
+        selectedMatchLocation = nil
         previewRequested = false
         requestSearch()
     }
@@ -1037,12 +1066,16 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     private func publish(_ found: [FindHit], invalid: Bool = false) {
-        let previous = selected.flatMap { matches.indices.contains($0) ? matches[$0].range : nil }
+        let previousLocation = selectedMatchLocation
         baseMatches = found
         matches = found.filter { !dismissed.contains($0.range) }
         validResults = !invalid && !settings.query.isEmpty
-        let target = previous.flatMap { range in matches.firstIndex { $0.range == range } }
+        let target = previousLocation.flatMap { location in
+            matches.firstIndex { $0.range.location >= location } ?? matches.indices.first
+        }
+        let focusedResults = document.window.firstResponder === results
         selected = nil
+        selectedMatchLocation = nil
         editingResults = true
         results.reloadData()
         results.deselectAll(nil)
@@ -1061,9 +1094,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             self.queuedDirection = nil
             moveResult(by: queuedDirection)
         } else if let target {
-            selectRow(target, reveal: false, preview: previewRequested)
+            selectRow(target, reveal: focusedResults, preview: previewRequested)
         } else {
             previewRequested = false
+            if focusedResults { document.window.makeFirstResponder(findInput.input) }
         }
         if let input = pendingResultFocus {
             pendingResultFocus = nil
@@ -1116,6 +1150,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
         let previous = selected
         selected = index
+        selectedMatchLocation = index.map { matches[$0].range.location }
         previewRequested = index != nil && preview && settings.showsReplacement && searchVisible
         if results.selectedRow != (index ?? -1) {
             editingResults = true
@@ -1238,6 +1273,14 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     func numberOfRows(in tableView: NSTableView) -> Int { matches.count }
 
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        let identifier = NSUserInterfaceItemIdentifier("FindResultRow")
+        if let row = tableView.makeView(withIdentifier: identifier, owner: nil) as? FindResultRow { return row }
+        let view = FindResultRow()
+        view.identifier = identifier
+        return view
+    }
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let identifier = NSUserInterfaceItemIdentifier("FindMatch")
         let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? FindResultCell
@@ -1256,6 +1299,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
                            apply([match], advance: true)
                        },
                        dismiss: { [weak self] in self?.dismiss(range) })
+        results.configureHover(for: cell, row: row)
     }
 
     private func updateRowSelection(_ row: Int?) {

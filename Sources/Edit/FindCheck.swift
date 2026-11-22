@@ -62,6 +62,7 @@ enum FindCheck {
         document.performFind(.next)
         try expect(editor.string == "cat cat\ncat", "finding with the sidebar hidden preserves text")
         try await checkReturnNavigation(in: app.makeDocument())
+        try await checkResumingResult(in: app)
         try await checkRenderedHighlights(in: app.makeDocument())
         try await checkSidebarLayout(in: app.makeDocument())
         try await checkSidebarReversal(in: app.makeDocument())
@@ -202,6 +203,94 @@ enum FindCheck {
         document.performFind(.find)
         try await waitUntil("toggling Find focus cancels deferred focus of results") {
             table.numberOfRows == 2 && window.firstResponder === editor && document.findSettings.visible
+        }
+    }
+
+    private static func checkResumingResult(in app: Edit) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "find-result-focus-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = directory.appending(path: "First.txt")
+        let second = directory.appending(path: "Second.txt")
+        try Data("cat one\ncat two\ncat three\ncat four\n".utf8).write(to: first)
+        try Data("cat other\ncat last\n".utf8).write(to: second)
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        let window = document.window
+        let editor = document.editor
+        _ = try await app.openFile(first, in: document)
+        document.performFind(.find)
+        let field = try require(window.firstResponder as? FindFieldTextView, "Find starts in its query field")
+        let table = try require(descendant(of: window.contentView, type: FindResultsTable.self), "Find result focus table")
+        func key(_ characters: String, code: UInt16) throws -> NSEvent {
+            try require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                         windowNumber: window.windowNumber, context: nil, characters: characters,
+                                         charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code),
+                        "Find keyboard event")
+        }
+
+        let enter = try key("\r", code: 36)
+        let down = try key("\u{F701}", code: 125)
+        let space = try key(" ", code: 49)
+        func caretAfter(_ match: String) -> NSRange {
+            NSRange(location: (editor.string as NSString).range(of: match).location + 3, length: 0)
+        }
+
+        field.insertText("cat", replacementRange: NSRange(location: 0, length: 0))
+        field.keyDown(with: enter)
+        try await waitUntil("Return focuses the first result") { window.firstResponder === table && table.selectedRow == 0 }
+        table.keyDown(with: down)
+        try expect(table.selectedRow == 1, "Down selects the second match")
+        table.keyDown(with: space)
+        try expect(window.firstResponder === editor && editor.selectedRange() == caretAfter("cat two"),
+                   "Space opens the selected match after its text")
+        document.performFind(.find)
+        try expect(window.firstResponder === table && table.selectedRow == 1 && field.string == "cat",
+                   "Command-F returns to the same result and query after Space")
+
+        table.keyDown(with: enter)
+        try expect(window.firstResponder === editor && editor.selectedRange() == caretAfter("cat two"),
+                   "Return opens the same selected match")
+        editor.insertText("cat zero\n", replacementRange: NSRange(location: 0, length: 0))
+        document.performFind(.find)
+        try await waitUntil("Command-F follows the same match through an earlier insertion") {
+            table.numberOfRows == 5 && window.firstResponder === table && table.selectedRow == 2
+        }
+        table.keyDown(with: enter)
+        try expect(editor.selectedRange() == caretAfter("cat two"), "the resumed row still points to the original match")
+
+        let removedMatch = (editor.string as NSString).range(of: "cat two")
+        editor.insertText("gone two", replacementRange: removedMatch)
+        document.performFind(.find)
+        try await waitUntil("Command-F focuses the next surviving match when the active match disappears") {
+            table.numberOfRows == 4 && window.firstResponder === table && table.selectedRow == 2
+        }
+        table.keyDown(with: enter)
+        try expect(editor.selectedRange() == caretAfter("cat three"), "the next row opens the following match")
+
+        _ = try await app.openFile(second, in: document)
+        document.performFind(.find)
+        try await waitUntil("Command-F on another file starts at its query field") {
+            table.numberOfRows == 2 && window.firstResponder === field && table.selectedRow == -1
+        }
+        field.keyDown(with: enter)
+        try expect(window.firstResponder === table && table.selectedRow == 0, "the query can focus a result in the new file")
+        table.keyDown(with: down)
+        document.performFind(.toggleReplace)
+        table.keyDown(with: space)
+        try expect(window.firstResponder === editor && editor.selectedRange() == caretAfter("cat last") &&
+                   editor.string.contains("cat last"), "Space opens a result with Replace visible")
+        let lastMatch = (editor.string as NSString).range(of: "cat last")
+        editor.insertText("gone last", replacementRange: lastMatch)
+        document.performFind(.find)
+        try await waitUntil("removing the last match wraps to the first remaining result") {
+            table.numberOfRows == 1 && window.firstResponder === table && table.selectedRow == 0
+        }
+        table.keyDown(with: space)
+        editor.insertText("no matches", replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
+        document.performFind(.find)
+        try await waitUntil("an empty result list returns focus to Find") {
+            table.numberOfRows == 0 && window.firstResponder === field
         }
     }
 
@@ -439,29 +528,34 @@ enum FindCheck {
                        "long excerpts are one line and fit at sidebar width \(width)")
             let font = field.attributedStringValue.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
             try expect(font == editor.font, "result excerpts use the editor font")
-            let dismiss = try require(
-                cell.subviews.first { $0.accessibilityLabel() == "Dismiss This Match" }, "the row has a Dismiss button"
-            )
-            try expect(!dismiss.isHidden && abs(dismiss.frame.maxX - (cell.bounds.maxX - 4)) < 1,
+            let dismiss = try resultAction(in: cell, named: "Dismiss This Match")
+            let apply = try resultAction(in: cell, named: "Replace This Match")
+            let cellFrame = cell.convert(cell.bounds, to: nil)
+            let clip = try require(table.enclosingScrollView?.contentView, "results scroll clip")
+            let viewport = clip.convert(clip.bounds, to: nil)
+            let leftInset = cellFrame.minX - viewport.minX
+            let rightInset = viewport.maxX - cellFrame.maxX
+            try expect(leftInset >= 0 && leftInset <= 6 && abs(leftInset - rightInset) < 1,
+                       "each row uses the results viewport with small balanced insets (\(cellFrame), \(viewport))")
+            let sidebarBounds = sidebar.convert(sidebar.bounds, to: nil)
+            try expect(abs(viewport.minX - sidebarBounds.minX) < 1 && sidebarBounds.maxX - viewport.maxX <= 16,
+                       "results use the sidebar width with room for the system scrollbar")
+            try expect(!dismiss.isHidden && abs(dismiss.frame.maxX - (cell.bounds.maxX - 1)) < 1,
                        "Dismiss stays at the right edge of the result row")
+            try checkExcerptGap(field, before: apply, in: cell)
             let style = field.attributedStringValue.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
             try expect(style?.tighteningFactorForTruncation == 0, "truncating excerpts preserves character spacing")
-            func hoverEvent(_ type: NSEvent.EventType) throws -> NSEvent {
-                try require(NSEvent.enterExitEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
-                                                   windowNumber: window.windowNumber, context: nil,
-                                                   eventNumber: 0, trackingNumber: 0, userData: nil),
-                            "search row hover event")
-            }
             let selectedFrame = field.frame
             cell.updateSelection(false)
             cell.layoutSubtreeIfNeeded()
             try expect(dismiss.isHidden && field.frame == selectedFrame,
                        "the result excerpt keeps its width when selection changes (\(selectedFrame) to \(field.frame))")
-            cell.mouseEntered(with: try hoverEvent(.mouseEntered))
-            cell.layoutSubtreeIfNeeded()
+            let row = table.rect(ofRow: 4)
+            let pointer = table.convert(NSPoint(x: row.midX, y: row.midY), to: nil)
+            table.mouseEntered(with: try hoverEvent(.mouseEntered, at: pointer, in: window))
             try expect(!dismiss.isHidden && field.frame == selectedFrame,
                        "the result excerpt keeps its width when row buttons appear on hover")
-            cell.mouseExited(with: try hoverEvent(.mouseExited))
+            table.mouseExited(with: try hoverEvent(.mouseExited, at: pointer, in: window))
             cell.updateSelection(true)
         }
         let fourthLine = lines.prefix(4).reduce(0) { $0 + $1.utf16.count + 1 }
@@ -476,6 +570,9 @@ enum FindCheck {
         document.performFind(.clearSelection)
         let plainDistance = abs(lineRect(fourthLine).minY - lineRect(followingLine).minY)
         try expect(plainDistance < previewDistance, "clearing preview restores the original line spacing")
+        document.performFind(.toggleReplace)
+        window.layoutIfNeeded()
+        try checkResultHover(in: table, window: window)
 
         window.makeFirstResponder(editor)
         editor.setSelectedRange(NSRange(location: sampleLocation, length: 0))
@@ -535,6 +632,61 @@ enum FindCheck {
         try expect(abs(scroll.visibleContentOrigin.x - scrolled.x) < 1,
                    "reopening the sidebar preserves a nonzero horizontal scroll offset")
         try expect(!picker.isHidden, "reopening the sidebar restores its menu")
+    }
+
+    private static func resultAction(in cell: FindResultCell, named name: String) throws -> NSButton {
+        try require(cell.subviews.compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == name },
+                    "result row action \(name)")
+    }
+
+    private static func checkExcerptGap(_ excerpt: NSTextField, before button: NSButton, in cell: FindResultCell) throws {
+        let buttonCell = try require(button.cell as? NSButtonCell, "the row action has a native button cell")
+        let glyph = button.convert(buttonCell.imageRect(forBounds: button.bounds), to: cell)
+        let gap = glyph.minX - excerpt.frame.maxX
+        try expect(gap >= -1 && gap <= 6,
+                   "the excerpt uses the available width before the action symbol (gap \(gap))")
+    }
+
+    private static func hoverEvent(_ type: NSEvent.EventType, at location: NSPoint, in window: NSWindow) throws -> NSEvent {
+        try require(NSEvent.enterExitEvent(with: type, location: location, modifierFlags: [], timestamp: 0,
+                                          windowNumber: window.windowNumber, context: nil,
+                                          eventNumber: 0, trackingNumber: 0, userData: nil),
+                    "search result hover event")
+    }
+
+    private static func checkResultHover(in table: FindResultsTable, window: NSWindow) throws {
+        let scroll = try require(table.enclosingScrollView, "search results are scrollable")
+        let clip = scroll.contentView
+        let row = table.rect(ofRow: 4)
+        let location = table.convert(NSPoint(x: row.midX, y: row.midY), to: nil)
+        let before = try require(table.view(atColumn: 0, row: 4, makeIfNecessary: true) as? FindResultCell, "first hovered row")
+        let dismissBefore = try resultAction(in: before, named: "Dismiss This Match")
+        let field = try require(descendant(of: before, type: NSTextField.self), "search-only excerpt")
+        before.layoutSubtreeIfNeeded()
+        try checkExcerptGap(field, before: dismissBefore, in: before)
+
+        table.mouseEntered(with: try hoverEvent(.mouseEntered, at: location, in: window))
+        try expect(!dismissBefore.isHidden, "only the row under the pointer exposes its Dismiss action")
+        clip.scroll(to: NSPoint(x: 0, y: 30 * table.rowHeight))
+        scroll.reflectScrolledClipView(clip)
+        window.layoutIfNeeded()
+        let hovered = table.row(at: table.convert(location, from: nil))
+        try expect(hovered >= 0 && hovered != 4 && dismissBefore.isHidden,
+                   "scrolling clears hover from the old or reused row")
+        let after = try require(table.view(atColumn: 0, row: hovered, makeIfNecessary: true) as? FindResultCell, "new hovered row")
+        let dismissAfter = try resultAction(in: after, named: "Dismiss This Match")
+        table.mouseEntered(with: try hoverEvent(.mouseEntered, at: location, in: window))
+        try expect(!dismissAfter.isHidden, "the pointer location resolves to the new row after scrolling")
+        let visible = table.rows(in: table.visibleRect)
+        for row in visible.location..<NSMaxRange(visible) where row != hovered {
+            guard let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? FindResultCell else { continue }
+            let button = try resultAction(in: cell, named: "Dismiss This Match")
+            try expect(button.isHidden, "other inactive rows stay clear after scrolling")
+        }
+        table.mouseExited(with: try hoverEvent(.mouseExited, at: location, in: window))
+        try expect(dismissAfter.isHidden, "leaving the list clears the final hovered row")
+        clip.scroll(to: .zero)
+        scroll.reflectScrolledClipView(clip)
     }
 
     private static func checkSidebarReversal(in document: DocumentWindow) async throws {
