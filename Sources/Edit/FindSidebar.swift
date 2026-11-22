@@ -2,6 +2,13 @@ import AppKit
 
 enum SidebarMode: String, Codable, Sendable {
     case search, worktree
+
+    var title: String {
+        switch self {
+        case .search: "Search"
+        case .worktree: "Worktree"
+        }
+    }
 }
 
 enum FindCommand {
@@ -26,31 +33,64 @@ private final class FindSplitView: NSSplitView {
 @MainActor
 final class SidebarMenuItem: NSToolbarItem {
     let menu = NSMenu(title: "Sidebars")
+    let showsTitle: Bool
 
-    override init(itemIdentifier identifier: NSToolbarItem.Identifier) {
+    init(itemIdentifier identifier: NSToolbarItem.Identifier, showsTitle: Bool, mode: SidebarMode) {
+        self.showsTitle = showsTitle
         super.init(itemIdentifier: identifier)
         label = "Sidebar Menu"
         isHidden = true
         autovalidates = false
         menu.autoenablesItems = false
-        let image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: label)!
-        let button = NSButton(image: image, target: self, action: #selector(showMenu(_:)))
-        button.bezelStyle = .glass
+
+        let button = NSButton()
+        button.target = self
+        button.action = #selector(showMenu(_:))
         button.controlSize = .small
         button.toolTip = label
         button.setAccessibilityLabel(label)
-        button.widthAnchor.constraint(equalToConstant: 26).isActive = true
-        button.heightAnchor.constraint(equalTo: button.widthAnchor).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        if showsTitle {
+            let font = NSFont.titleBarFont(ofSize: 0)
+            button.font = font
+            button.alignment = .natural
+            button.isBordered = false
+            button.imagePosition = .imageTrailing
+            button.imageHugsTitle = true
+            button.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+            // Reserve space for the longer title and the button cell’s horizontal insets.
+            let titleWidth = (SidebarMode.worktree.title as NSString).size(withAttributes: [.font: font]).width
+            let chevronWidth = button.image?.size.width ?? 0
+            button.widthAnchor.constraint(equalToConstant: ceil(titleWidth + chevronWidth) + 16).isActive = true
+        } else {
+            button.bezelStyle = .glass
+            button.imagePosition = .imageOnly
+            button.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: nil)
+            button.widthAnchor.constraint(equalTo: button.heightAnchor).isActive = true
+        }
         view = button
+        updateTitle(for: mode)
 
         let overflow = NSMenuItem(title: label, action: nil, keyEquivalent: "")
         overflow.submenu = menu
         menuFormRepresentation = overflow
     }
 
+    func updateTitle(for mode: SidebarMode) {
+        guard showsTitle, let button = view as? NSButton else { return }
+        button.title = mode.title
+        button.setAccessibilityLabel("\(mode.title) sidebar menu")
+    }
+
     func popupOrigin(in button: NSView) -> NSPoint {
         let bounds = button.bounds
-        let x = button.userInterfaceLayoutDirection == .rightToLeft ? bounds.maxX : bounds.maxX - menu.size.width
+        let x: CGFloat
+        if button.userInterfaceLayoutDirection == .rightToLeft {
+            x = bounds.maxX
+        } else {
+            x = showsTitle ? bounds.minX : bounds.maxX - menu.size.width
+        }
         return NSPoint(x: x, y: button.isFlipped ? bounds.maxY : bounds.minY)
     }
 
@@ -62,6 +102,7 @@ final class SidebarMenuItem: NSToolbarItem {
 @MainActor
 final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
     private static let sidebarMenuItem = NSToolbarItem.Identifier("Edit.SidebarMenu")
+    private static let sidebarTitleItem = NSToolbarItem.Identifier("Edit.SidebarTitle")
     private static let minimumSidebarWidth: CGFloat = 185
     private static let minimumEditorWidth: CGFloat = 128
     private static let contentInset: CGFloat = 10
@@ -89,7 +130,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private let sidebarContent = NSView()
     private let searchContent = NSStackView()
     private(set) var worktree: WorktreeSidebar?
-    private weak var sidebarMenu: NSMenu?
     private var contentTrailing: NSLayoutConstraint?
     private var contentWidth: NSLayoutConstraint?
     private let sidebar = NSViewController()
@@ -97,6 +137,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private lazy var sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
     private lazy var decorations = FindDecorations(editor: document.editor)
     private var installed = false
+    private var fullScreen: Bool
     private var sidebarTransition: UInt64 = 0
     private var sidebarAnimating = false
     private var bufferSnapshot: String
@@ -122,6 +163,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     init(document: DocumentWindow, app: Edit) {
         self.document = document
         self.app = app
+        fullScreen = document.window.styleMask.contains(.fullScreen)
         bufferSnapshot = document.editor.string
         super.init()
         configure()
@@ -482,7 +524,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, Self.sidebarMenuItem, .sidebarTrackingSeparator] + DocumentTitleBar.itemIdentifiers
+        [Self.sidebarTitleItem, .flexibleSpace, Self.sidebarMenuItem, .sidebarTrackingSeparator] +
+            DocumentTitleBar.itemIdentifiers
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -492,20 +535,29 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         if let item = document.titleBar.makeItem(identifier) { return item }
-        guard identifier == Self.sidebarMenuItem else { return nil }
-        let item = SidebarMenuItem(itemIdentifier: identifier)
-        sidebarMenu = item.menu
-        updateSidebarMenu()
+        guard identifier == Self.sidebarMenuItem || identifier == Self.sidebarTitleItem else { return nil }
+        let item = SidebarMenuItem(itemIdentifier: identifier, showsTitle: identifier == Self.sidebarTitleItem,
+                                   mode: document.sidebarMode)
+        updateSidebarMenu(item)
         return item
     }
 
     private func updateSidebarMenu() {
-        guard let menu = sidebarMenu else { return }
+        for case let item as SidebarMenuItem in document.window.toolbar?.items ?? [] {
+            updateSidebarMenu(item)
+        }
+    }
+
+    private func updateSidebarMenu(_ item: SidebarMenuItem) {
+        item.updateTitle(for: document.sidebarMode)
+        let menu = item.menu
         menu.removeAllItems()
-        let search = menu.addItem(withTitle: "Search", action: #selector(selectSearchSidebar(_:)), keyEquivalent: "")
+        let search = menu.addItem(withTitle: SidebarMode.search.title, action: #selector(selectSearchSidebar(_:)),
+                                  keyEquivalent: "")
         search.target = self
         search.state = document.sidebarMode == .search ? .on : .off
-        let tree = menu.addItem(withTitle: "Worktree", action: #selector(selectWorktreeSidebar(_:)), keyEquivalent: "")
+        let tree = menu.addItem(withTitle: SidebarMode.worktree.title, action: #selector(selectWorktreeSidebar(_:)),
+                                keyEquivalent: "")
         tree.target = self
         tree.state = document.sidebarMode == .worktree ? .on : .off
         tree.isEnabled = document.folderURL != nil
@@ -584,6 +636,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
         toolbar.allowsDisplayModeCustomization = false
+        toolbar.autosavesConfiguration = false
         window.toolbar = toolbar
         if window.frame != oldFrame { window.setFrame(oldFrame, display: window.isVisible) }
         window.initialFirstResponder = document.editor
@@ -654,14 +707,22 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         refreshDecorations()
     }
 
+    func setFullScreen(_ fullScreen: Bool) {
+        self.fullScreen = fullScreen
+        updateSidebarToolbarVisibility()
+    }
+
     private func updateSidebarToolbarVisibility() {
+        guard let toolbar = document.window.toolbar else { return }
         let hidden = !settings.visible || sidebarItem.isCollapsed || sidebarAnimating
-        guard let item = document.window.toolbar?.items.first(where: { $0.itemIdentifier == Self.sidebarMenuItem }),
-              item.isHidden != hidden else { return }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0
-            context.allowsImplicitAnimation = false
-            item.isHidden = hidden
+        for case let item as SidebarMenuItem in toolbar.items {
+            let itemHidden = hidden || item.showsTitle != fullScreen
+            guard item.isHidden != itemHidden else { continue }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0
+                context.allowsImplicitAnimation = false
+                item.isHidden = itemHidden
+            }
         }
     }
 

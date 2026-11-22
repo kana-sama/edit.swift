@@ -602,20 +602,50 @@ enum FindCheck {
         app.openFind(nil)
         try expect(document.findSettings.visible && document.sidebarMode == .search &&
                    window.firstResponder is FindFieldTextView, "Command-F opens Search and focuses its field")
-        let menu = try sidebarMenu(in: window).menu
+        window.layoutIfNeeded()
+        let ellipsis = try sidebarMenu(in: window)
+        let title = try require(window.toolbar?.items.compactMap { $0 as? SidebarMenuItem }.first(where: \.showsTitle),
+                                "the fullscreen sidebar title is available")
+        let ellipsisButton = try require(ellipsis.view as? NSButton, "the menu uses a native icon button")
+        let titleButton = try require(title.view as? NSButton, "the title is a native menu button")
+        let ellipsisFrame = ellipsisButton.convert(ellipsisButton.bounds, to: nil)
+        let titlebarBottom = window.contentLayoutRect.maxY
+        try expect(!ellipsis.isHidden && title.isHidden, "a regular window shows the ellipsis")
+
+        document.windowDidEnterFullScreen(Notification(name: NSWindow.didEnterFullScreenNotification, object: window))
+        window.layoutIfNeeded()
+        let titleFrame = titleButton.convert(titleButton.bounds, to: nil)
+        try expect(ellipsis.isHidden && !title.isHidden && titleButton.title == "Search" &&
+                   titleButton.imagePosition == .imageTrailing && titleButton.image != nil &&
+                   titleButton.target === title && titleButton.action != nil &&
+                   titleFrame.minX < ellipsisFrame.minX && abs(titleFrame.height - ellipsisFrame.height) < 0.5 &&
+                   abs(window.contentLayoutRect.maxY - titlebarBottom) < 0.5,
+                   "fullscreen places the active sidebar title and chevron at the left without resizing the header")
+        try expect(title.popupOrigin(in: titleButton).x == titleButton.bounds.minX,
+                   "the fullscreen menu aligns with the leading edge of its title")
+
+        let menu = title.menu
         try expect(menu.item(withTitle: "Worktree")?.isEnabled == true, "opening a folder enables Worktree")
         menu.performActionForItem(at: menu.indexOfItem(withTitle: "Worktree"))
         try expect(document.findSettings.visible && document.sidebarMode == .worktree &&
                    menu.items.map(\.title) == ["Search", "Worktree", "", "Show Hidden Files"] &&
                    menu.item(withTitle: "Search")?.isEnabled == true && menu.item(withTitle: "Worktree")?.state == .on,
                    "Worktree still offers Search alongside its own menu option")
+        window.layoutIfNeeded()
+        let titleFont = try require(titleButton.font, "the fullscreen title has a native font")
+        let titleCell = try require(titleButton.cell as? NSButtonCell, "the title has a native button cell")
+        let titleRect = titleCell.titleRect(forBounds: titleButton.bounds)
+        let textWidth = (titleButton.title as NSString).size(withAttributes: [.font: titleFont]).width
+        try expect(titleButton.title == "Worktree" &&
+                   titleRect.width >= floor(textWidth),
+                   "the complete Worktree title fits after switching modes (text \(textWidth), title \(titleRect.width), button \(titleButton.bounds.width), intrinsic \(titleButton.intrinsicContentSize.width))")
         menu.performActionForItem(at: menu.indexOfItem(withTitle: "Search"))
         try expect(document.sidebarMode == .search && window.firstResponder is FindFieldTextView,
                    "choosing Search from Worktree opens the Find field")
         document.toggleWorktreeSidebar()
 
         app.toggleSidebar(nil)
-        try expect(!document.findSettings.visible && document.sidebarMode == .worktree,
+        try expect(!document.findSettings.visible && document.sidebarMode == .worktree && title.isHidden && ellipsis.isHidden,
                    "Command-B hides the open tree and remembers its mode")
         app.toggleSidebar(nil)
         try expect(document.findSettings.visible && document.sidebarMode == .worktree &&
@@ -634,6 +664,8 @@ enum FindCheck {
         try expect(menu.item(withTitle: "Worktree")?.isEnabled == false &&
                    menu.item(withTitle: "Worktree")?.isHidden == false,
                    "losing the open folder leaves a disabled Worktree option")
+        document.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: window))
+        try expect(!ellipsis.isHidden && title.isHidden, "leaving fullscreen restores the ellipsis")
     }
 
     private static func sidebarMenu(in window: NSWindow) throws -> SidebarMenuItem {

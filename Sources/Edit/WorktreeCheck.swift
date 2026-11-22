@@ -160,9 +160,13 @@ enum WorktreeCheck {
                                          timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
                                          eventNumber: 1, clickCount: 1, pressure: 1), "outline click")
         }
-        let down = try event(.leftMouseDown)
-        NSApp.postEvent(try event(.leftMouseUp), atStart: true)
         window.makeFirstResponder(outline)
+        let press = try event(.leftMouseDown)
+        NSApp.postEvent(try event(.leftMouseUp), atStart: true)
+        NSApp.postEvent(press, atStart: true)
+        // Give native outline tracking the mouse-down as the current application event.
+        let down = try require(NSApp.nextEvent(matching: .leftMouseDown, until: .distantPast,
+                                              inMode: .default, dequeue: true), "queued outline click")
         outline.mouseDown(with: down)
     }
 
