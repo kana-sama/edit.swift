@@ -30,7 +30,9 @@ struct ControlCommand {
         if action == #selector(Edit.focusSelection(_:)) { return document.canFocusSelection }
         if action == #selector(Edit.exitFocus(_:)) { return document.canExitFocus }
         if documentOnly {
-            return !document.isShowingFilePreview && document.window.attachedSheet == nil && document.editor.responds(to: action)
+            guard !document.isShowingFilePreview, document.window.attachedSheet == nil,
+                  document.editor.responds(to: action) else { return false }
+            return !Self.isBracketCommand(action) || document.editor.canNavigateBrackets
         }
         if let target = item.target as? NSUserInterfaceValidations {
             return target.validateUserInterfaceItem(item)
@@ -140,8 +142,13 @@ struct ControlCommand {
             if prefix == "Window",
                action != #selector(NSWindow.performMiniaturize(_:)),
                action != #selector(NSWindow.performZoom(_:)) { return [] }
-            return [ControlCommand(id: NSStringFromSelector(action), title: "\(prefix): \(item.title)", item: item)]
+            return [ControlCommand(id: NSStringFromSelector(action), title: "\(prefix): \(item.title)", item: item,
+                                   documentOnly: isBracketCommand(action))]
         }
+    }
+
+    private static func isBracketCommand(_ action: Selector) -> Bool {
+        action == #selector(EditorTextView.goToBracket(_:)) || action == #selector(EditorTextView.selectToBracket(_:))
     }
 }
 

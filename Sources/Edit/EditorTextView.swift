@@ -48,6 +48,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var onFindViewportChange: (() -> Void)?
     var onDrawFindHighlights: ((NSRect) -> Void)?
     weak var syntaxHighlighting: SyntaxHighlighting?
+    lazy var bracketNavigation = BracketNavigation(editor: self)
     var preferredLineEnding = "\n"
 
 
@@ -153,6 +154,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         multiCaret.pendingSkip = false
         if multiCaretComposition != nil { unmarkText() }
         hideCaretDecorations()
+        bracketNavigation.clearHighlights()
         onBlur?()
         return true
     }
@@ -829,6 +831,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         }
         resetSelectionHistory()
         multiCaret.restartBlink = true
+        bracketNavigation.reset()
         requestLineRefresh()
         onTextChange?()
     }
@@ -854,6 +857,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.refreshCurrentLine()
+            self.bracketNavigation.refresh()
             self.lineRefreshPending = false
             self.onFindViewportChange?()
         }
@@ -893,6 +897,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             NSColor.labelColor.withAlphaComponent(0.06).setFill()
             stripe.fill()
         }
+        bracketNavigation.draw(in: dirtyRect)
         onDrawFindHighlights?(dirtyRect)
         drawSecondarySelections(in: dirtyRect)
     }

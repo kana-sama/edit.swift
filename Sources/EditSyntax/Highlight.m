@@ -92,6 +92,7 @@ typedef struct {
     EditCapture capture;
     EditCancelled cancelled;
     void *context;
+    bool bracketContext;
 } Input;
 
 static bool cancelled(Input *input) {
@@ -222,6 +223,136 @@ static const TSQuery *loadQuery(const TSLanguage *language, NSString *path) {
     }
 }
 
+static bool bracketTextNode(const char *type, bool interpolation) {
+    // An interpolated wrapper stays traversable so its expression tokens remain visible.
+    if (strcmp(type, "string") == 0) return !interpolation;
+    static const char *const ignored[] = {
+        "comment", "line_comment", "block_comment", "multiline_comment", "js_comment", "html_comment", "shebang",
+        "string_literal", "interpreted_string_literal", "raw_string_literal", "char_literal", "rune_literal",
+        "char_lit", "character", "system_lib_string", "hex_string_literal", "unicode_string_literal",
+        "yul_string_literal", "yul_hex_string_literal", "string_value", "single_quote_scalar", "double_quote_scalar",
+        "block_scalar", "multi_string", "raw_string", "ansi_c_string", "multiline_string",
+        "char", "str_lit", "regex_lit", "regex", "regex_literal", "regex_pattern",
+        "string_content", "string_fragment", "line_str_text", "multi_line_str_text", "raw_str_part",
+        "raw_str_end_part", "heredoc_content", "escape_sequence", "str_escaped_char"
+    };
+    for (size_t index = 0; index < sizeof(ignored) / sizeof(*ignored); ++index) {
+        if (strcmp(type, ignored[index]) == 0) return true;
+    }
+    return false;
+}
+
+static bool angleOperator(TSNode node, const char *type) {
+    if (!strchr(type, '<') && !strchr(type, '>')) return false;
+    if (type[strspn(type, "<>=!")] != '\0') return false;
+    if (type[1] != '\0') return true; // Shifts, comparisons, and arrows are single operator tokens.
+    TSNode parent = ts_node_parent(node);
+    return !ts_node_is_null(parent) && strcmp(ts_node_type(parent), "binary_expression") == 0;
+}
+
+static bool tagAngle(TSNode node, const char *type) {
+    if (strcmp(type, "<") != 0 && strcmp(type, "</") != 0 && strcmp(type, ">") != 0 && strcmp(type, "/>") != 0) return false;
+    TSNode parent = ts_node_parent(node);
+    return !ts_node_is_null(parent) && strncmp(ts_node_type(parent), "jsx_", 4) == 0;
+}
+
+static bool templateDelimiter(TSNode node, const char *type) {
+    if (strcmp(type, "${") == 0) return true;
+    if (strcmp(type, "}") != 0) return false;
+    TSNode parent = ts_node_parent(node);
+    return !ts_node_is_null(parent) && strcmp(ts_node_type(parent), "template_substitution") == 0;
+}
+
+// A grammar can recover a not-yet-closed C-style comment as ordinary operators.
+// Find its opener only in the code gaps between ranges already classified by the grammar.
+static uint32_t recoverBlockComments(Input *input, uint32_t start, uint32_t limit, uint32_t offset, bool nested) {
+    uint32_t length = input->bytes / 2u;
+    uint32_t steps = 0;
+    const uint16_t *units = input->units;
+    while (start < limit && start + 1 < length) {
+        if ((++steps & 4095u) == 0 && cancelled(input)) return length;
+        if (units[start] != '/' || units[start + 1] != '*') {
+            ++start;
+            continue;
+        }
+        uint32_t end = start + 2;
+        uint32_t nesting = 1;
+        while (end + 1 < length && nesting > 0) {
+            if ((++steps & 4095u) == 0 && cancelled(input)) return length;
+            if (units[end] == '*' && units[end + 1] == '/') {
+                --nesting;
+                end += 2;
+            } else if (nested && units[end] == '/' && units[end + 1] == '*') {
+                ++nesting;
+                end += 2;
+            } else {
+                ++end;
+            }
+        }
+        if (nesting > 0) end = length;
+        input->capture(input->context, offset + start, offset + end, NULL);
+        start = end;
+    }
+    return start;
+}
+
+static void readBracketContext(Input *input, TSNode root, const TSLanguage *language, const char *name,
+                               uint32_t offset, int depth) {
+    bool interpolation = strcmp(name, "python") == 0 || strcmp(name, "ruby") == 0 || strcmp(name, "shell") == 0;
+    bool swift = strcmp(name, "swift") == 0;
+    bool tsx = strcmp(name, "tsx") == 0;
+    bool angleTokens = strcmp(name, "typescript") == 0 || tsx;
+    bool js = strcmp(name, "javascript") == 0 || strcmp(name, "javascript-jsx") == 0;
+    bool nestedComments = swift || strcmp(name, "rust") == 0;
+    bool cStyleComments = nestedComments || angleTokens || js || strcmp(name, "c") == 0 || strcmp(name, "cpp") == 0 ||
+        strcmp(name, "go") == 0 || strcmp(name, "css") == 0 || strcmp(name, "solidity") == 0 || strcmp(name, "json") == 0;
+    // Tree-sitter symbols are grammar-local. Classify the small symbol table once per parse.
+    uint32_t symbols = ts_language_symbol_count(language);
+    bool *ignored = calloc(symbols, sizeof(*ignored));
+    if (!ignored) return;
+    for (uint32_t symbol = 0; symbol < symbols; ++symbol) {
+        const char *type = ts_language_symbol_name(language, (TSSymbol) symbol);
+        if (!type) continue;
+        ignored[symbol] = bracketTextNode(type, interpolation) && !(swift && strcmp(type, "raw_string_literal") == 0);
+    }
+
+    TSTreeCursor cursor = ts_tree_cursor_new(root);
+    uint32_t visited = 0;
+    uint32_t codeStart = 0;
+    for (;;) {
+        if ((++visited & 255u) == 0 && cancelled(input)) goto done;
+        TSNode node = ts_tree_cursor_current_node(&cursor);
+        TSSymbol symbol = ts_node_symbol(node);
+        const char *type = ts_node_type(node);
+        bool delimiter = !ts_node_is_named(node);
+        bool skip = (symbol < symbols && ignored[symbol]) ||
+            (delimiter && ((angleTokens && angleOperator(node, type)) || (tsx && tagAngle(node, type)) ||
+                           (depth > 0 && (angleTokens || js) && templateDelimiter(node, type))));
+        if (skip) {
+            uint32_t start = ts_node_start_byte(node) / 2u;
+            uint32_t end = ts_node_end_byte(node) / 2u;
+            if (start < end) {
+                if (cStyleComments && codeStart < start) {
+                    codeStart = recoverBlockComments(input, codeStart, start, offset, nestedComments);
+                }
+                if (end > codeStart) codeStart = end;
+                input->capture(input->context, offset + start, offset + end, NULL);
+            }
+        } else if (ts_tree_cursor_goto_first_child(&cursor)) {
+            continue;
+        }
+        while (!ts_tree_cursor_goto_next_sibling(&cursor)) {
+            if (!ts_tree_cursor_goto_parent(&cursor)) {
+                if (cStyleComments && !cancelled(input)) recoverBlockComments(input, codeStart, input->bytes / 2u, offset, nestedComments);
+                goto done;
+            }
+        }
+    }
+done:
+    ts_tree_cursor_delete(&cursor);
+    free(ignored);
+}
+
 static void runQuery(Input *input, const TSQuery *query, TSNode root, NSString *directory,
                      uint32_t offset, int depth, bool injection, const Preview *preview) {
     TSQueryCursor *cursor = ts_query_cursor_new();
@@ -254,6 +385,9 @@ static void runQuery(Input *input, const TSQuery *query, TSNode root, NSString *
                     Input section = *input;
                     section.units += from / 2u;
                     section.bytes = to - from;
+                    if (input->bracketContext) {
+                        input->capture(input->context, offset + from / 2u, offset + to / 2u, nestedName);
+                    }
                     runGrammar(section, nestedName, directory, offset + from / 2u, depth + 1, NULL);
                 }
             }
@@ -265,9 +399,12 @@ static void runQuery(Input *input, const TSQuery *query, TSNode root, NSString *
 static bool runGrammar(Input input, const char *name, NSString *directory, uint32_t offset, int depth, const Preview *preview) {
     const TSLanguage *language = languageForName(name);
     if (!language || cancelled(&input)) return false;
-    NSString *queryPath = [directory stringByAppendingPathComponent:[@(name) stringByAppendingString:@".scm"]];
-    const TSQuery *query = loadQuery(language, queryPath);
-    if (!query) return false;
+    const TSQuery *query = NULL;
+    if (!input.bracketContext) {
+        NSString *queryPath = [directory stringByAppendingPathComponent:[@(name) stringByAppendingString:@".scm"]];
+        query = loadQuery(language, queryPath);
+        if (!query) return false;
+    }
     TSParser *parser = ts_parser_new();
     bool ready = ts_parser_set_language(parser, language);
     TSInput text = {.payload = &input, .read = readInput, .encoding = TSInputEncodingUTF16LE};
@@ -282,12 +419,16 @@ static bool runGrammar(Input input, const char *name, NSString *directory, uint3
             NSString *injectionPath = [directory stringByAppendingPathComponent:[@(name) stringByAppendingString:@"-injections.scm"]];
             injections = loadQuery(language, injectionPath);
         }
-        if (preview && !cancelled(&input)) {
-            runQuery(&input, query, root, directory, offset, depth, false, preview);
-            if (injections) runQuery(&input, injections, root, directory, offset, depth, true, preview);
-            if (!cancelled(&input)) preview->publish(input.context);
+        if (input.bracketContext) {
+            readBracketContext(&input, root, language, name, offset, depth);
+        } else {
+            if (preview && !cancelled(&input)) {
+                runQuery(&input, query, root, directory, offset, depth, false, preview);
+                if (injections) runQuery(&input, injections, root, directory, offset, depth, true, preview);
+                if (!cancelled(&input)) preview->publish(input.context);
+            }
+            if (!cancelled(&input)) runQuery(&input, query, root, directory, offset, depth, false, NULL);
         }
-        if (!cancelled(&input)) runQuery(&input, query, root, directory, offset, depth, false, NULL);
         if (injections && !cancelled(&input)) runQuery(&input, injections, root, directory, offset, depth, true, NULL);
         ts_tree_delete(tree);
     }
@@ -303,10 +444,23 @@ EDIT_VISIBLE bool edit_syntax_highlight_with_viewport(const char *language, cons
     @autoreleasepool {
         NSString *directory = [NSString stringWithUTF8String:queryDirectory];
         if (!directory) return false;
-        Input input = {units, count * 2u, callback, check, context};
+        Input input = {units, count * 2u, callback, check, context, false};
         Preview preview = {previewStart * 2u, previewEnd * 2u, publishPreview};
         const bool canPreview = publishPreview && previewStart < previewEnd && previewEnd <= count;
         return runGrammar(input, language, directory, 0, 0, canPreview ? &preview : NULL);
+    }
+}
+
+// A null capture name marks text excluded from matching. A language name marks an injection.
+EDIT_VISIBLE bool edit_syntax_bracket_context(const char *language, const char *queryDirectory,
+                                             const uint16_t *units, uint32_t count,
+                                             EditCapture callback, EditCancelled check, void *context) {
+    if (!language || !queryDirectory || !units || !callback || count > UINT32_MAX / 2u) return false;
+    @autoreleasepool {
+        NSString *directory = [NSString stringWithUTF8String:queryDirectory];
+        if (!directory) return false;
+        Input input = {units, count * 2u, callback, check, context, true};
+        return runGrammar(input, language, directory, 0, 0, NULL);
     }
 }
 

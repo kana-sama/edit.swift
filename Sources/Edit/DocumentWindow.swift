@@ -729,6 +729,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     @objc private func undoOrRedo(_ notification: Notification) {
         guard let manager = notification.object as? UndoManager, manager === editor.undoManager else { return }
+        editor.bracketNavigation.reset()
+        editor.requestLineRefresh()
         textDidChange()
     }
 
@@ -741,6 +743,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func refreshSyntax(immediate: Bool, preparedSyntax: SyntaxSnapshot? = nil) {
         let language = resolvedSyntaxLanguage
+        editor.bracketNavigation.setLanguage(language)
         if language == .plainText {
             syntaxHighlighting?.cancel()
             return
@@ -1011,9 +1014,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.preferredLineEnding = format.lineEnding
         editor.resetMultiCarets()
         syntaxHighlighting?.prepareForBufferReplacement()
+        editor.bracketNavigation.reset()
         editor.string = text
         refreshSyntax(immediate: true, preparedSyntax: preparedSyntax)
         editor.setSelectedRange(NSRange(location: 0, length: 0))
+        editor.requestLineRefresh()
         editor.scrollRangeToVisible(editor.selectedRange())
         editor.undoManager?.removeAllActions()
         updateTitle(revealInWorktree: revealInWorktree)

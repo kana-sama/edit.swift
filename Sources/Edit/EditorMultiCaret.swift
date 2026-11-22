@@ -82,7 +82,7 @@ extension EditorTextView {
 
     func setCaretSelections(
         _ ranges: [NSRange], record: Bool = true, navigation: [NSRange: NSTextSelection] = [:],
-        focusNavigation: [FocusNavigationSelection]? = nil
+        focusNavigation: [FocusNavigationSelection]? = nil, primaryAffinity: NSSelectionAffinity? = nil
     ) {
         let selections = MultiCaretEditing.merged(ranges)
         guard let primary = selections.last else { return }
@@ -94,7 +94,11 @@ extension EditorTextView {
         multiCaret.selections = selections
         multiCaret.navigation = navigation
         multiCaret.focusNavigation = focusNavigation
-        setSelectedRange(primary)
+        if let primaryAffinity {
+            setSelectedRange(primary, affinity: primaryAffinity, stillSelecting: false)
+        } else {
+            setSelectedRange(primary)
+        }
         multiCaret.isApplying = false
         requestLineRefresh()
     }
@@ -275,6 +279,7 @@ extension EditorTextView {
 
     func validateSelectionCommand(_ action: Selector?) -> Bool? {
         switch action {
+        case #selector(goToBracket(_:)), #selector(selectToBracket(_:)): return canNavigateBrackets
         case #selector(undoSelection(_:)): return !multiCaret.undo.isEmpty
         case #selector(redoSelection(_:)): return !multiCaret.redo.isEmpty
         case #selector(keepPrimarySelection(_:)): return hasSecondarySelections
@@ -334,7 +339,9 @@ extension EditorTextView {
     }
 
     func moveSecondarySelections(command: Selector) -> Bool {
-        guard (hasSecondarySelections || focusRanges != nil), !hasMarkedText() else { return false }
+        let primary = selectedRange()
+        let hasBackwardSelection = primary.length > 0 && multiCaret.navigation[primary]?.affinity == .upstream
+        guard (hasSecondarySelections || focusRanges != nil || hasBackwardSelection), !hasMarkedText() else { return false }
         typealias Direction = NSTextSelectionNavigation.Direction
         typealias Destination = NSTextSelectionNavigation.Destination
         let movement: (Direction, Destination, Bool)

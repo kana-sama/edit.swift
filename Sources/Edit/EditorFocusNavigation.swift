@@ -280,7 +280,7 @@ extension EditorTextView {
         if let head = selections.last?.head { scrollRangeToVisible(NSRange(location: head, length: 0)) }
     }
 
-    private func focusedSelections(in scope: [NSRange]) -> [FocusNavigationSelection] {
+    func focusedSelections(in scope: [NSRange]) -> [FocusNavigationSelection] {
         if let selections = multiCaret.focusNavigation { return selections }
         return caretSelections.filter { $0.location != NSNotFound }.map { range in
             let head = activeEnd(of: range)
@@ -290,7 +290,7 @@ extension EditorTextView {
         }
     }
 
-    private func setFocusedSelections(_ ranges: [FocusNavigationSelection], in scope: [NSRange], record: Bool = true) {
+    func setFocusedSelections(_ ranges: [FocusNavigationSelection], in scope: [NSRange], record: Bool = true) {
         // Merge selections and carets in logical space, preserving the active end of the newest one.
         let merged = MultiCaretEditing.merged(ranges.map(\.extent))
         let groups = merged.count == ranges.count ? ranges : merged.compactMap { extent -> FocusNavigationSelection? in
