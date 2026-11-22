@@ -8,10 +8,15 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         case create(in: URL, directory: Bool)
     }
 
+    enum TrashSelectionChange {
+        case removed([URL])
+        case restored([URL])
+    }
+
     private enum FileChange {
         case rename(WorktreeFileOperations.Transfer)
-        case trash([URL])
-        case restore([WorktreeFileOperations.Transfer])
+        case trash([URL], selectingOnRestore: [URL])
+        case restore([WorktreeFileOperations.Transfer], selecting: [URL])
 
         var name: String {
             switch self {
@@ -30,6 +35,7 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         let inverse: FileChange?
         var remaining: FileChange? = nil
         var failure: String? = nil
+        var selection: TrashSelectionChange? = nil
     }
 
     private weak var document: DocumentWindow?
@@ -226,11 +232,12 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
             items.allSatisfy { WorktreeFileOperations.canTrash($0, within: root) }
     }
 
-    func trash(_ items: [URL], within root: URL) {
+    func trash(_ items: [URL], within root: URL, updateSelection: @escaping (TrashSelectionChange) -> Void) {
         guard canTrash(items, in: root) else { return }
         run("Could Not Move Items to Trash", within: root) { _ in
-            let result = try await self.execute(.trash(items), within: root)
+            let result = try await self.execute(.trash(items, selectingOnRestore: items), within: root)
             if let inverse = result.inverse { self.recordUndo(inverse, in: root) }
+            if let selection = result.selection { updateSelection(selection) }
             if let failure = result.failure { throw TransferError(detail: failure) }
         }
     }
@@ -242,7 +249,7 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         return (redo ? history.redo.last : history.undo.last)?.name
     }
 
-    func undo(in root: URL, redo: Bool) {
+    func undo(in root: URL, redo: Bool, updateSelection: @escaping (TrashSelectionChange) -> Void) {
         let key = WorktreeFileOperations.path(root)
         guard var history = historyByFolder[key], let change = redo ? history.redo.last : history.undo.last else {
             return
@@ -260,6 +267,7 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
                 if let inverse = result.inverse { history.redo.append(inverse) }
             }
             self.historyByFolder[key] = history
+            if let selection = result.selection { updateSelection(selection) }
             if let failure = result.failure { throw TransferError(detail: failure) }
         }
     }
@@ -286,7 +294,7 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         case .rename(let move):
             let completed = try await rename(move.source, to: move.destination.lastPathComponent, within: root)
             return ChangeResult(inverse: completed.map { .rename(.init(source: $0.destination, destination: $0.source)) })
-        case .trash(let items):
+        case .trash(let items, let selection):
             let targets = try await Task.detached(priority: .userInitiated) {
                 try WorktreeFileOperations.trashTargets(items, within: root)
             }.value
@@ -297,21 +305,45 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
                 }
                 return result
             }
-            let completed = Set(result.completed.map { WorktreeFileOperations.path($0.source) })
+            let removed = result.completed.map(\.source)
+            let completed = Set(removed.map(WorktreeFileOperations.path))
             let remaining = targets.filter { !completed.contains(WorktreeFileOperations.path($0)) }
-            return ChangeResult(inverse: result.completed.isEmpty ? nil : .restore(result.completed),
-                                remaining: remaining.isEmpty ? nil : .trash(remaining), failure: result.failure)
-        case .restore(let moves):
+            let (restoredSelection, remainingSelection) = splitSelection(selection, within: removed)
+            return ChangeResult(
+                inverse: removed.isEmpty ? nil : .restore(result.completed, selecting: restoredSelection),
+                remaining: remaining.isEmpty ? nil : .trash(remaining, selectingOnRestore: remainingSelection),
+                failure: result.failure, selection: removed.isEmpty ? nil : .removed(removed)
+            )
+        case .restore(let moves, let selection):
             let result = try await app.performWorktreeMutation(affecting: moves.map(\.source)) {
                 await Task.detached(priority: .userInitiated) {
                     WorktreeFileOperations.restoreTrashed(moves, within: root)
                 }.value
             }
-            let completed = Set(result.completed.map(\.source))
+            let restored = result.completed.map(\.source)
+            let completed = Set(restored)
             let remaining = moves.filter { !completed.contains($0.source) }
-            return ChangeResult(inverse: result.completed.isEmpty ? nil : .trash(result.completed.map(\.source)),
-                                remaining: remaining.isEmpty ? nil : .restore(remaining), failure: result.failure)
+            let (restoredSelection, remainingSelection) = splitSelection(selection, within: restored)
+            return ChangeResult(
+                inverse: restored.isEmpty ? nil : .trash(restored, selectingOnRestore: restoredSelection),
+                remaining: remaining.isEmpty ? nil : .restore(remaining, selecting: remainingSelection),
+                failure: result.failure, selection: restoredSelection.isEmpty ? nil : .restored(restoredSelection)
+            )
         }
+    }
+
+    private func splitSelection(_ selection: [URL], within items: [URL]) -> (matched: [URL], remaining: [URL]) {
+        let paths = Set(items.map(WorktreeFileOperations.path))
+        var matched: [URL] = []
+        var remaining: [URL] = []
+        for item in selection {
+            if WorktreeFileOperations.isUnderSelection(item, paths: paths) {
+                matched.append(item)
+            } else {
+                remaining.append(item)
+            }
+        }
+        return (matched, remaining)
     }
 
     private func recycle(_ targets: [URL]) async throws -> WorktreeFileOperations.TransferResult {

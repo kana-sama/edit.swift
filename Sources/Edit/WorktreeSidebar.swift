@@ -61,6 +61,9 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     private var currentPath: String?
     private var currentDirectories: Set<String> = []
     private var pathToReveal: String?
+    private var restoredSelection: [String] = []
+    private var selectionRevision: UInt64 = 0
+    private var restoringSelection = false
     private var manualHidden: Set<String> = []
     private var expanded: Set<String> = []
     private var requests: [String: Task<Void, Never>] = [:]
@@ -143,6 +146,8 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         guard isActive != active else { return }
         isActive = active
         if !active {
+            restoredSelection.removeAll()
+            selectionRevision &+= 1
             pendingOpen = nil
             if let nameEdit { finishNameEdit(nameEdit) }
         }
@@ -159,6 +164,8 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         let folderPath = WorktreeFileOperations.path(folder)
         let rootChanged = root?.path != folderPath
         if rootChanged {
+            restoredSelection.removeAll()
+            selectionRevision &+= 1
             if let nameEdit { finishNameEdit(nameEdit) }
             for request in requests.values { request.cancel() }
             requests.removeAll()
@@ -312,6 +319,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         reloading = false
         restoreSelection(selection)
         revealPendingItem()
+        reselectRestoredItems()
     }
 
     private func updateVisibleChildren(of item: Item) {
@@ -350,6 +358,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         reloading = false
         restoreSelection(selection)
         revealPendingItem()
+        reselectRestoredItems()
     }
 
     private func restoreExpansion(from item: Item) {
@@ -362,12 +371,41 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     private func restoreSelection(_ paths: [String]) {
-        let rows = IndexSet(paths.compactMap { path in
+        selectRows(visibleRows(for: paths))
+    }
+
+    private func visibleRows(for paths: [String]) -> IndexSet {
+        IndexSet(paths.compactMap { path in
             guard let item = item(at: path) else { return nil }
             let row = tree.row(forItem: item)
             return row >= 0 ? row : nil
         })
+    }
+
+    private func selectRows(_ rows: IndexSet) {
+        restoringSelection = true
+        defer { restoringSelection = false }
         tree.selectRowIndexes(rows, byExtendingSelection: false)
+    }
+
+    func outlineViewSelectionDidChange(_ notification: Notification) {
+        guard !reloading, !restoringSelection else { return }
+        selectionRevision &+= 1
+        restoredSelection.removeAll()
+    }
+
+    private func reselectRestoredItems() {
+        guard !restoredSelection.isEmpty else { return }
+        guard document.window.firstResponder === tree, nameEdit == nil else {
+            restoredSelection.removeAll()
+            return
+        }
+        let rows = visibleRows(for: restoredSelection)
+        guard let first = rows.first else { return }
+        let firstChanged = tree.selectedRowIndexes.first != first
+        selectRows(rows)
+        if firstChanged { tree.scrollRowToVisible(first) }
+        if rows.count == restoredSelection.count { restoredSelection.removeAll() }
     }
 
     private func revealPendingItem() {
@@ -723,13 +761,15 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         return actions.menu(for: item.url, isDirectory: item.isDirectory, selection: urls, root: folder) { [weak self] in
             guard let self, actions.canTrash(urls, in: folder) else { return }
             document.window.makeFirstResponder(tree)
-            actions.trash(urls, within: folder)
+            actions.trash(urls, within: folder, updateSelection: trashSelectionUpdate(in: folder))
         }
     }
 
     func trashSelection() {
         guard let root, nameEdit == nil else { return }
-        actions.trash(selectedItems.map(\.url), within: root.url)
+        let items = selectedItems.map(\.url)
+        guard actions.canTrash(items, in: root.url) else { return }
+        actions.trash(items, within: root.url, updateSelection: trashSelectionUpdate(in: root.url))
     }
 
     func undoActionName(redo: Bool) -> String? {
@@ -739,7 +779,52 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     func undoFileChange(redo: Bool) {
         guard let root, nameEdit == nil else { return }
-        actions.undo(in: root.url, redo: redo)
+        actions.undo(in: root.url, redo: redo, updateSelection: trashSelectionUpdate(in: root.url))
+    }
+
+    private func trashSelectionUpdate(in folder: URL) -> (WorktreeActions.TrashSelectionChange) -> Void {
+        let revision = selectionRevision
+        let folderPath = WorktreeFileOperations.path(folder)
+        let selection = selectedItems.map(\.url)
+        let anchor = tree.selectedRowIndexes.first
+        var neighbors: [URL] = []
+        if let anchor {
+            let paths = Set(selection.map(WorktreeFileOperations.path))
+            func nearbyItem(in rows: some Sequence<Int>) -> URL? {
+                rows.lazy.compactMap { (self.tree.item(atRow: $0) as? Item)?.url }
+                    .first { !WorktreeFileOperations.isUnderSelection($0, paths: paths) }
+            }
+            if let next = nearbyItem(in: (anchor + 1)..<tree.numberOfRows) { neighbors.append(next) }
+            if let previous = nearbyItem(in: (0..<anchor).reversed()) { neighbors.append(previous) }
+        }
+        return { [weak self] change in
+            guard let self, root?.path == folderPath, selectionRevision == revision,
+                  document.window.firstResponder === tree, nameEdit == nil else { return }
+            pathToReveal = nil
+            switch change {
+            case .removed(let removed):
+                let removedPaths = Set(removed.map(WorktreeFileOperations.path))
+                func wasRemoved(_ item: URL) -> Bool {
+                    WorktreeFileOperations.isUnderSelection(item, paths: removedPaths)
+                }
+                guard selection.contains(where: wasRemoved) else { return }
+                let surviving = selection.filter { !wasRemoved($0) }
+                var rows = visibleRows(for: surviving.map(WorktreeFileOperations.path))
+                if rows.isEmpty {
+                    let nearby = neighbors.filter { !wasRemoved($0) }.map(WorktreeFileOperations.path)
+                    for path in nearby {
+                        rows = visibleRows(for: [path])
+                        if !rows.isEmpty { break }
+                    }
+                }
+                selectRows(rows)
+                if let first = rows.first { tree.scrollRowToVisible(first) }
+            case .restored(let items):
+                restoredSelection = items.map(WorktreeFileOperations.path)
+                for item in items { expanded.formUnion(ancestors(of: item, in: folder).subtracting([folderPath])) }
+                reloadTree()
+            }
+        }
     }
 
     func setRecycleForCheck(_ recycle: @escaping ([URL]) async throws -> WorktreeFileOperations.TransferResult) {

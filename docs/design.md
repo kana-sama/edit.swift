@@ -8,10 +8,28 @@ Match the corresponding interaction in the current macOS system app by default. 
 - For opening files and confirming unsaved changes, use the system file panel and document sheet conventions. Reserve modal confirmation for actions that require a separate decision.
 - For sidebars and menus, follow native placement, keyboard navigation, glass materials, and active and inactive selection states.
 
-Verify changes to those interactions in a running AppKit window. Exercise the normal keyboard and mouse paths, including how focus enters and leaves the control.
-
 Document windows use the compact unified AppKit toolbar with a fixed icon-only display. Let editor content scroll beneath the filename and system window buttons to receive the native scroll-edge material. Let the editor’s scroll view extend behind the native sidebar. Use AppKit’s safe area and automatic scroll insets so text begins in the exposed area and can pass under the titlebar and sidebar during scrolling.
 
 Use system appearance, semantic colors, text styles, control metrics, and SF Symbols for interface chrome. Respect platform preferences for contrast and reduced transparency. Keep persistent controls focused on actions the owner needs.
+
+## Verifying native interactions
+
+Before implementing or changing an interaction, identify the closest system app and the equivalent view on the supported macOS release. Use Finder list view for a file tree. Follow the system app for layout, controls, feedback, keyboard access, and state transitions. Record any owner-requested exception in the feature specification.
+
+1. Start with Apple’s user guide for the actual commands, then consult the Human Interface Guidelines and the framework documentation for the matching controls. Use an existing system control wherever it supplies the behavior.
+2. Reproduce the action in the system app with disposable data. Exercise the keyboard, the relevant mouse or context-menu path, and the sequence immediately after the action. For selection and focus, record where focus starts and ends, which rows are selected, and what the next key does. Include relevant boundaries such as the first and last row, an empty list, multiple selection, cancellation, and undo or redo. For scrolling, resizing, and animation, observe intermediate frames as well as the settled state.
+3. Put the repeatable steps, macOS version, expected results, and primary source links in the feature specification when they affect the implementation. Identify observations, explicit product decisions, and states that still need verification. Keep the reference and test data disposable.
+4. Repeat the sequence in a running AppKit instance of Edit. Compare the starting, intermediate, and final states with the reference. Assert the affected focus, selection, visible rows, or geometry in the native check when a regression can otherwise pass. Report the tested sequence and any remaining verification gap.
+
+For file-list checks, create a disposable folder and open it in Finder when the reference window can be used without interrupting ongoing work.
+
+```bash
+finder_fixture="$(mktemp -d "${TMPDIR%/}/edit-finder.XXXXXX")"
+mkdir "$finder_fixture/Folder"
+touch "$finder_fixture/"{A,B,C,D,E}.txt "$finder_fixture/Folder/Child.txt"
+open -a Finder "$finder_fixture"
+```
+
+Use Command-2 for list view and sort by name. Select C, E, B through C, B and D, B and E, and then all items in separate trials. Use Shift-click for ranges and Command-click for separate rows. Exercise Command-Delete and contextual Move to Trash, check selection with Up or Down, and repeat with Command-Z and Shift-Command-Z. Use the same boundaries and selection order in Edit. [Mac keyboard shortcuts](https://support.apple.com/102650) · [Select items](https://support.apple.com/guide/mac-help/select-items-mchlp1378/mac)
 
 Record app-wide visual rules here when they are used across features. Record the feature's layout, controls, and interaction states in its own specification.

@@ -312,6 +312,12 @@ enum WorktreeCheck {
         }
         try await waitFor("show both disposable files") { tree.numberOfRows == 3 }
 
+        func selectionIs(_ names: [String]) -> Bool {
+            let rows = IndexSet(names.compactMap { row(named: $0, in: tree) })
+            return rows.count == names.count && tree.selectedRowIndexes == rows &&
+                document.window.firstResponder === tree
+        }
+
         func selectFiles() throws -> Int {
             let firstRow = try require(row(named: "One.txt", in: tree), "first Trash file")
             let secondRow = try require(row(named: "Two.txt", in: tree), "second Trash file")
@@ -326,35 +332,91 @@ enum WorktreeCheck {
         try expect(item.isEnabled && item.keyEquivalent == "\u{7f}" && item.keyEquivalentModifierMask == .command,
                    "the context menu shows the active Command-Delete command")
         menu.performActionForItem(at: menu.index(of: item))
-        try await waitFor("context menu recycles both selected files") { tree.numberOfRows == 1 }
+        try await waitFor("contextual Trash selects the surviving row and keeps focus") {
+            tree.numberOfRows == 1 && selectionIs(["README.md"])
+        }
         try expect(!files.fileExists(atPath: first.path) && !files.fileExists(atPath: second.path) &&
                    document.window.firstResponder === tree, "the entire selection moves and retains Worktree focus")
 
         try performHistoryAction(in: tree, redo: false, title: "Undo Move to Trash")
-        try await waitFor("one undo restores both contextual Trash entries") { tree.numberOfRows == 3 }
+        try await waitFor("one undo restores and selects both contextual Trash entries") {
+            tree.numberOfRows == 3 && selectionIs(["One.txt", "Two.txt"])
+        }
         let restored = try [first, second].map { try String(contentsOf: $0, encoding: .utf8) }
         try expect(restored == ["One.txt", "Two.txt"], "undo restores each exact file to its original path")
         try performHistoryAction(in: tree, redo: true, title: "Redo Move to Trash")
-        try await waitFor("one redo recycles both entries again") { tree.numberOfRows == 1 }
+        try await waitFor("one redo recycles both entries and selects the neighbor") {
+            tree.numberOfRows == 1 && selectionIs(["README.md"])
+        }
         try performHistoryAction(in: tree, redo: false, title: "Undo Move to Trash")
         try await waitFor("files are back before checking the keyboard shortcut") { tree.numberOfRows == 3 }
 
         _ = try selectFiles()
         try press("\u{7f}", code: 51, in: tree, modifiers: .command)
-        try await waitFor("Command-Delete recycles the selection") { tree.numberOfRows == 1 }
+        try await waitFor("Command-Delete recycles the selection and selects its neighbor") {
+            tree.numberOfRows == 1 && selectionIs(["README.md"])
+        }
 
         try Data("new occupant".utf8).write(to: first)
         try performHistoryAction(in: tree, redo: false, title: "Undo Move to Trash")
         try await waitFor("undo restores the other file when one name now conflicts") {
-            files.fileExists(atPath: second.path) && tree.numberOfRows == 3
+            files.fileExists(atPath: second.path) && tree.numberOfRows == 3 && selectionIs(["Two.txt"])
         }
         let occupant = try String(contentsOf: first, encoding: .utf8)
         try expect(occupant == "new occupant", "undo never replaces a file at the original path")
         try files.removeItem(at: first)
         try performHistoryAction(in: tree, redo: false, title: "Undo Move to Trash")
-        try await waitFor("undo can retry the conflicted entry") { files.fileExists(atPath: first.path) }
+        try await waitFor("undo can retry and select the conflicted entry") {
+            files.fileExists(atPath: first.path) && selectionIs(["One.txt"])
+        }
         let retried = try String(contentsOf: first, encoding: .utf8)
         try expect(retried == "One.txt", "the conflicted item remains available to restore")
+
+        let last = try require(row(named: "Two.txt", in: tree), "last file")
+        tree.selectRowIndexes(IndexSet(integer: last), byExtendingSelection: false)
+        try press("\u{7f}", code: 51, in: tree, modifiers: .command)
+        try await waitFor("deleting the last file selects its predecessor") {
+            tree.numberOfRows == 2 && selectionIs(["README.md"])
+        }
+        try performHistoryAction(in: tree, redo: false, title: "Undo Move to Trash")
+        try await waitFor("undo selects the restored last file") { selectionIs(["Two.txt"]) }
+
+        tree.selectRowIndexes(IndexSet(integersIn: 0..<tree.numberOfRows), byExtendingSelection: false)
+        try press("\u{7f}", code: 51, in: tree, modifiers: .command)
+        try await waitFor("empty Worktree keeps keyboard focus after Trash") {
+            tree.numberOfRows == 0 && selectionIs([])
+        }
+        try performHistoryAction(in: tree, redo: false, title: "Undo Move to Trash")
+        try await waitFor("undo reselects the original group from an empty tree") {
+            selectionIs(["One.txt", "README.md", "Two.txt"])
+        }
+
+        let directory = root.appending(path: "Folder")
+        let sibling = root.appending(path: "Other Folder")
+        for folder in [directory, sibling] { try files.createDirectory(at: folder, withIntermediateDirectories: false) }
+        try Data().write(to: directory.appending(path: "Child.txt"))
+        try Data().write(to: sibling.appending(path: "Other Child.txt"))
+        worktree.refresh()
+        try await waitFor("load the folders before checking selection across levels") {
+            row(named: "Folder", in: tree) != nil && row(named: "Other Folder", in: tree) != nil
+        }
+        let folderRow = try require(row(named: "Folder", in: tree), "folder row")
+        tree.expandItem(tree.item(atRow: folderRow))
+        try await waitFor("show a child row") { row(named: "Child.txt", in: tree) != nil }
+        let child = try require(row(named: "Child.txt", in: tree), "child row")
+        tree.selectRowIndexes(IndexSet([folderRow, child]), byExtendingSelection: false)
+        try press("\u{7f}", code: 51, in: tree, modifiers: .command)
+        try await waitFor("trashing a selected subtree selects the following folder") {
+            tree.numberOfRows == 4 && selectionIs(["Other Folder"])
+        }
+        try press(" ", code: 49, in: tree)
+        try await waitFor("Space acts on the next selected folder without leaving the tree") {
+            row(named: "Other Child.txt", in: tree) != nil && selectionIs(["Other Folder"])
+        }
+        try performHistoryAction(in: tree, redo: false, title: "Undo Move to Trash")
+        try await waitFor("undo restores selection of both the folder and its selected child") {
+            selectionIs(["Folder", "Child.txt"])
+        }
     }
 
     private static func performHistoryAction(in tree: NSOutlineView, redo: Bool, title: String) throws {

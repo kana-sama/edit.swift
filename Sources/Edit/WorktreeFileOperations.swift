@@ -171,6 +171,11 @@ enum WorktreeFileOperations {
         return TransferResult(completed: completed, failure: nil)
     }
 
+    static func isUnderSelection(_ item: URL, paths: Set<String>) -> Bool {
+        let itemPath = path(item)
+        return paths.contains(itemPath) || containsSelectedParent(of: URL(filePath: itemPath), in: paths)
+    }
+
     private static func containsSelectedParent(of source: URL, in paths: Set<String>) -> Bool {
         var parent = source.deletingLastPathComponent()
         while parent.path != "/" && !parent.path.isEmpty {
