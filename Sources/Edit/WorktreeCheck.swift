@@ -214,7 +214,7 @@ enum WorktreeCheck {
 
     private static func checkInlineNames(in document: DocumentWindow, tree: NSOutlineView, directory: URL) async throws {
         let window = document.window
-        let toolbarItem = try require(window.toolbar?.items.compactMap { $0 as? SidebarMenuItem }.first(where: { !$0.showsTitle }),
+        let toolbarItem = try require(window.toolbar?.items.compactMap { $0 as? SidebarMenuItem }.first?.options,
                                       "find the Worktree toolbar menu")
         toolbarItem.menu.update()
         toolbarItem.menu.performActionForItem(at: toolbarItem.menu.indexOfItem(withTitle: "New Folder…"))

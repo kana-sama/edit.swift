@@ -794,7 +794,7 @@ enum FindCheck {
             let sidebarFrame = sidebar.convert(sidebar.bounds, to: nil)
             try expect(!ellipsis.isHidden && !title.isHidden && titleButton.window === window && ellipsisButton.window === window &&
                        titleButton.menu === title.menu && !titleButton.pullsDown &&
-                       titleFrame.maxX <= ellipsisFrame.minX && ellipsisFrame.maxX <= sidebarFrame.maxX + 0.5 &&
+                       titleFrame.maxX <= ellipsisFrame.minX && abs(sidebarFrame.maxX - ellipsisFrame.maxX - 10) < 0.5 &&
                        abs(titleFrame.midY - ellipsisFrame.midY) < 0.5 &&
                        abs(window.contentLayoutRect.maxY - titlebarBottom) < 0.5,
                        "the title and ellipsis share the sidebar header (title \(titleFrame), ellipsis \(ellipsisFrame), sidebar \(sidebarFrame))")
@@ -837,7 +837,12 @@ enum FindCheck {
         try checkTitleWeight()
 
         let sidebarWidth = sidebar.frame.width
-        split.splitView.setPosition(split.splitViewItems[0].minimumThickness, ofDividerAt: 0)
+        let minimumWidth = split.splitViewItems[0].minimumThickness
+        for width in [minimumWidth + 10, minimumWidth + 4, minimumWidth, sidebarWidth] {
+            split.splitView.setPosition(width, ofDividerAt: 0)
+            try checkHeader()
+        }
+        split.splitView.setPosition(minimumWidth, ofDividerAt: 0)
         try checkHeader()
         let titleFont = try require(titleButton.font, "the sidebar title has a native font")
         let titleRect = titleCell.titleRect(forBounds: titleButton.bounds)
@@ -851,6 +856,7 @@ enum FindCheck {
         try expect(document.sidebarMode == .search && window.firstResponder is FindFieldTextView,
                    "choosing Search from Worktree opens the Find field")
         try expect(abs(titleLeadingEdge() - searchLeading) < 0.5, "returning to Search keeps the same left inset")
+        try checkHeader()
         document.toggleSidebarFocus(.worktree)
 
         app.toggleSidebar(nil)
@@ -897,8 +903,8 @@ enum FindCheck {
     }
 
     private static func sidebarMenu(in window: NSWindow, showsTitle: Bool = false) throws -> SidebarMenuItem {
-        try require(window.toolbar?.items.compactMap { $0 as? SidebarMenuItem }.first { $0.showsTitle == showsTitle },
-                    "the sidebar header contains a native menu")
+        let header = window.toolbar?.items.compactMap { $0 as? SidebarMenuItem }.first
+        return try require(showsTitle ? header : header?.options, "the sidebar header contains a native menu")
     }
 
     private static func dragDivider(_ splitView: NSSplitView, sidebar: NSView, in window: NSWindow, by distance: CGFloat) throws {
