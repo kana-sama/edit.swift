@@ -12,8 +12,6 @@ enum FindCommand {
 
 @MainActor
 private final class FindSplitView: NSSplitView {
-    var trackDivider: ((() -> Void) -> Void)?
-
     @objc dynamic var animatedDividerPosition: CGFloat {
         get { arrangedSubviews.first?.frame.maxX ?? 0 }
         set { setPosition(newValue, ofDividerAt: 0) }
@@ -22,14 +20,6 @@ private final class FindSplitView: NSSplitView {
     override class func defaultAnimation(forKey key: NSAnimatablePropertyKey) -> Any? {
         if key == #keyPath(FindSplitView.animatedDividerPosition) { return CABasicAnimation() }
         return super.defaultAnimation(forKey: key)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        if let trackDivider {
-            trackDivider { super.mouseDown(with: event) }
-        } else {
-            super.mouseDown(with: event)
-        }
     }
 }
 
@@ -71,7 +61,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private lazy var sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
     private lazy var decorations = FindDecorations(editor: document.editor)
     private var installed = false
-    private var layoutAnchor: NSPoint?
     private var sidebarTransition: UInt64 = 0
     private var sidebarAnimating = false
     private var bufferSnapshot: String
@@ -558,17 +547,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         sidebarItem.isCollapsed = true
         splitView.isVertical = true
         splitView.dividerStyle = .thin
-        splitView.trackDivider = { [weak self] track in
-            guard let self else {
-                track()
-                return
-            }
-            guard !sidebarAnimating else { return }
-            let transition = beginSidebarTransition()
-            track()
-            // NSTextView can scroll to its caret as AppKit ends live resize, after the last split notification.
-            finishSidebarTransition(transition)
-        }
         split.splitView = splitView
         split.addSplitViewItem(sidebarItem)
         split.addSplitViewItem(editorItem)
@@ -581,7 +559,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         window.toolbar = toolbar
         if window.frame != oldFrame { window.setFrame(oldFrame, display: window.isVisible) }
         window.initialFirstResponder = document.editor
-        restoreEditorAnchor()
         NotificationCenter.default.addObserver(self, selector: #selector(splitResized(_:)),
                                                name: NSSplitView.didResizeSubviewsNotification, object: split.splitView)
         installed = true
@@ -594,7 +571,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     @objc private func splitResized(_ notification: Notification) {
         guard installed else { return }
         resizeTitleBar()
-        restoreEditorAnchor()
         guard !sidebarAnimating else { return }
         settings.visible = !sidebarItem.isCollapsed
         let width = sidebar.view.frame.width
@@ -661,12 +637,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         }
     }
 
-    func preserveRestoredEditorPosition() {
-        if layoutAnchor != nil { layoutAnchor = document.scrollView.visibleContentOrigin }
-    }
-
     private func beginSidebarTransition() -> UInt64 {
-        layoutAnchor = document.scrollView.visibleContentOrigin
         sidebarTransition &+= 1
         return sidebarTransition
     }
@@ -735,18 +706,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         document.window.layoutIfNeeded()
         resizeTitleBar()
         updateSidebarToolbarVisibility()
-        restoreEditorAnchor()
-        // AppKit also reconciles its text viewport after focus and split changes.
-        Task { @MainActor [weak self] in
-            guard let self, sidebarTransition == transition else { return }
-            restoreEditorAnchor()
-            layoutAnchor = nil
-        }
-    }
-
-    private func restoreEditorAnchor() {
-        guard let layoutAnchor else { return }
-        document.scrollView.scrollToVisibleContentOrigin(layoutAnchor)
     }
 
     private func openField(replace: Bool) {
@@ -995,7 +954,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         updateRowSelection(previous)
         if previous != index { updateRowSelection(index) }
         if reveal, let index {
-            layoutAnchor = nil
             results.scrollRowToVisible(index)
             document.editor.scrollRangeToVisible(matches[index].range)
         }
@@ -1023,7 +981,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     private func openResult(at row: Int) {
         guard validResults, matches.indices.contains(row) else { return }
-        layoutAnchor = nil
         selectRow(row, reveal: false, preview: false)
         let caret = NSRange(location: NSMaxRange(matches[row].range), length: 0)
         let editor = document.editor

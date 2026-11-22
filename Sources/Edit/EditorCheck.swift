@@ -98,6 +98,57 @@ enum EditorCheck {
         editor.refreshCurrentLine()
     }
 
+    static func checkViewportResize(in document: DocumentWindow) async throws {
+        let window = document.window
+        let editor = document.editor
+        let scroll = document.scrollView
+        defer { window.close() }
+
+        let line = "Prefix " + String(repeating: "0123456789 ", count: 45)
+        editor.string = Array(repeating: line, count: 70).joined(separator: "\n")
+        window.makeFirstResponder(editor)
+        window.layoutIfNeeded()
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+
+        for sidebar in [false, true] {
+            if sidebar {
+                document.performFind(.find)
+                window.layoutIfNeeded()
+                await Task.yield()
+                try expect(scroll.contentInsets.left > 0, "resize check includes a visible sidebar")
+            }
+            let cases: [(NSRange, NSPoint, CGFloat)] = [
+                (NSRange(location: 280, length: 0), .zero, 540),
+                (NSRange(location: 0, length: 5), NSPoint(x: 145, y: 72), 900),
+                (NSRange(location: 280, length: 0), NSPoint(x: 145, y: 72), 640),
+            ]
+            for (selection, origin, width) in cases {
+                editor.setSelectedRange(selection)
+                editor.scrollRangeToVisible(selection)
+                scroll.scrollToVisibleContentOrigin(origin)
+                editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+                func checkPosition(_ stage: String) throws {
+                    let actual = scroll.visibleContentOrigin
+                    try expect(abs(actual.x - origin.x) < 1 && abs(actual.y - origin.y) < 1
+                               && editor.selectedRange() == selection,
+                               "resize preserves the viewport and selection \(stage), sidebar \(sidebar), \(origin) → \(actual)")
+                }
+
+                try checkPosition("before resizing")
+                var frame = window.frame
+                frame.size.width = width
+                editor.viewWillStartLiveResize()
+                window.setFrame(frame, display: false)
+                window.layoutIfNeeded()
+                try checkPosition("during resizing")
+                editor.viewDidEndLiveResize()
+                try checkPosition("at the end of resizing")
+                try await Task.sleep(for: .milliseconds(20))
+                try checkPosition("after layout settles")
+            }
+        }
+    }
+
     static func checkScrolledZoom(in document: DocumentWindow) async throws {
         let window = document.window
         let editor = document.editor

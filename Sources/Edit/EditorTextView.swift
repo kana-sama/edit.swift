@@ -43,7 +43,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var preferredLineEnding = "\n"
 
     static func scrollingEditor(in frame: NSRect) -> (NSScrollView, EditorTextView) {
-        let scrollView = NSScrollView(frame: frame)
+        let scrollView = EditorScrollView(frame: frame)
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
@@ -101,6 +101,15 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         if hasSecondarySelections {
             hideSecondaryCarets()
             requestLineRefresh()
+        }
+    }
+
+    override func viewDidEndLiveResize() {
+        // TextKit may reveal its selection when a window or a split view finishes resizing.
+        if let scroll = enclosingScrollView as? EditorScrollView {
+            scroll.preserveViewport { super.viewDidEndLiveResize() }
+        } else {
+            super.viewDidEndLiveResize()
         }
     }
 
@@ -786,6 +795,28 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         }
         onDrawFindHighlights?(dirtyRect)
         drawSecondarySelections(in: dirtyRect)
+    }
+}
+
+@MainActor
+private final class EditorScrollView: NSScrollView {
+    private var preservingViewport = false
+
+    override var contentInsets: NSEdgeInsets {
+        get { super.contentInsets }
+        set { preserveViewport { super.contentInsets = newValue } }
+    }
+
+    func preserveViewport(_ change: () -> Void) {
+        guard documentView != nil, !preservingViewport else {
+            change()
+            return
+        }
+        let origin = visibleContentOrigin
+        preservingViewport = true
+        defer { preservingViewport = false }
+        change()
+        if origin != visibleContentOrigin { scrollToVisibleContentOrigin(origin) }
     }
 }
 

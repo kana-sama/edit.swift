@@ -261,7 +261,6 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             window.layoutIfNeeded()
             editor.restorePosition(position)
         }
-        findPanel?.preserveRestoredEditorPosition()
     }
 
     func rememberFilePosition(_ position: EditorPosition? = nil) {
