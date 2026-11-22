@@ -134,6 +134,7 @@ extension EditorTextView {
         resetSelectionHistory()
         breakUndoCoalescing()
         editorUndoManager.endFocus()
+        requestLineRefresh()
         if notify { onFocusScopeChange?() }
     }
 

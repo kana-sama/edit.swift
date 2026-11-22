@@ -418,24 +418,39 @@ extension EditorTextView {
         var highlights: [NSRect] = []
         var carets: [NSRect] = []
         let viewportRect = visibleRect
-        if showCarets || selections.count > 1, let window, let layout = textLayoutManager {
+        let focusedGroups = focusRanges == nil ? [] : (multiCaret.focusNavigation ?? [])
+        if showCarets || selections.count > 1 || !focusedGroups.isEmpty, let window, let layout = textLayoutManager {
             let visible = layout.textViewportLayoutController.viewportRange.map { charRange($0, in: layout) }
                 ?? NSRange(location: 0, length: 0)
-            for (index, range) in selections.enumerated() {
-                if range.length == 0 {
-                    guard showCarets, range.location >= visible.location, range.location <= NSMaxRange(visible) else { continue }
+            var drawnRanges = Array(selections.dropLast())
+            if let scope = focusRanges, !focusedGroups.isEmpty, let text = textStorage?.mutableString {
+                for (block, next) in zip(scope, scope.dropFirst()) where
+                    visible.location <= block.upperBound && block.upperBound < visible.upperBound {
+                    if focusedGroups.contains(where: {
+                        $0.extent.location <= block.upperBound && next.location <= $0.extent.upperBound
+                    }) {
+                        // Borrow the real separator's geometry for the virtual newline.
+                        // It stays outside the editor's actual selections.
+                        drawnRanges.append(LineEditing.line(at: block.upperBound, in: text).separatorRange)
+                    }
+                }
+            }
+            for range in drawnRanges {
+                let visibleSelection = NSIntersectionRange(range, visible)
+                guard visibleSelection.length > 0, let selected = textRange(visibleSelection, in: layout) else { continue }
+                layout.enumerateTextSegments(in: selected, type: .selection, options: .rangeNotRequired) {
+                    _, frame, _, _ in
+                    highlights.append(frame.offsetBy(dx: self.textContainerOrigin.x, dy: self.textContainerOrigin.y))
+                    return true
+                }
+            }
+            if showCarets {
+                for range in selections where range.length == 0 &&
+                    visible.location <= range.location && range.location <= visible.upperBound {
                     let screenRect = firstRect(forCharacterRange: range, actualRange: nil)
                     let caret = convert(window.convertFromScreen(screenRect), from: nil)
                     // TextKit can return a zero-width rectangle for a caret.
                     if caret.height > 0, caret.insetBy(dx: -1, dy: 0).intersects(viewportRect) { carets.append(caret) }
-                } else if index < selections.count - 1 {
-                    let visibleSelection = NSIntersectionRange(range, visible)
-                    guard visibleSelection.length > 0, let selected = textRange(visibleSelection, in: layout) else { continue }
-                    layout.enumerateTextSegments(in: selected, type: .selection, options: .rangeNotRequired) {
-                        _, frame, _, _ in
-                        highlights.append(frame.offsetBy(dx: self.textContainerOrigin.x, dy: self.textContainerOrigin.y))
-                        return true
-                    }
                 }
             }
         }

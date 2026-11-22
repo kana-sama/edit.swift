@@ -37,7 +37,7 @@ Switching buffers, closing the window, or reloading the document ends Focus when
 
 ## Appearance
 
-Use the current text surface, syntax colors, window appearance, and system selection styling. Dim the text on protected lines. Mark the top and bottom of each focused block with thin horizontal rules in the system accent color, spanning the visible width of the editor. Include blank focused lines, including a new empty line after Return. The rules stay anchored to the block while the text selection and horizontal scroll position change. Keep the editor, sidebar, scrollbars, and title bar in their normal positions. Verify that the blocks remain discernible in light and dark appearances, with Increase Contrast or Reduce Transparency, while scrolling, and after zooming.
+Use the current text surface, syntax colors, window appearance, and system selection styling. A selected logical line break at a block boundary extends the selection fill to the right edge of the preceding line, just like a selected line break inside a block. Dim the text on protected lines. Mark the top and bottom of each focused block with thin horizontal rules in the system accent color, spanning the visible width of the editor. Include blank focused lines, including a new empty line after Return. The rules stay anchored to the block while the text selection and horizontal scroll position change. Keep the editor, sidebar, scrollbars, and title bar in their normal positions. Verify that the blocks remain discernible in light and dark appearances, with Increase Contrast or Reduce Transparency, while scrolling, and after zooming.
 
 ## Acceptance
 

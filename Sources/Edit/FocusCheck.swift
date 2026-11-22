@@ -243,6 +243,22 @@ enum FocusCheck {
                    "Select All Occurrences finds three logical matches, with two highlights for the virtual newline match")
         try expect(editor.selectedRange() == leftMatch, "Select All Occurrences keeps the original primary selection")
 
+        document.window.layoutIfNeeded()
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        editor.refreshCaretDecorations()
+        let seamLine = try require(editor.lineBounds(at: leftBlock.upperBound))
+        let gapLine = try require(editor.lineBounds(at: leftBlock.upperBound + 1))
+        let x = editor.visibleRect.midX
+        let seamHighlight = NSPoint(x: x, y: seamLine.midY)
+        let gapHighlight = NSPoint(x: x, y: gapLine.midY)
+        try expect(editor.multiCaret.highlights.contains(where: { $0.contains(seamHighlight) }) &&
+                   !editor.multiCaret.highlights.contains(where: { $0.contains(gapHighlight) }),
+                   "the selected virtual newline fills its row without painting the protected line")
+        editor.setCaretSelections([splitMatch[0], leftMatch])
+        editor.refreshCaretDecorations()
+        try expect(!editor.multiCaret.highlights.contains(where: { $0.contains(seamHighlight) }),
+                   "selecting only the final character leaves the virtual newline unhighlighted")
+
         editor.setCaretSelections([leftMatch])
         editor.doCommand(by: #selector(EditorTextView.selectNextOccurrence(_:)))
         try expect(editor.focusedSelectionGroups == [[leftMatch], splitMatch] &&
