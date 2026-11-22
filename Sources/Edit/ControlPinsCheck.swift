@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 @MainActor
 enum ControlPinsCheck {
@@ -73,4 +73,35 @@ enum ControlPinsCheck {
 
         var errorDescription: String? { "Control pins could not \(message)." }
     }
+}
+
+@MainActor
+final class ControlPinDragCheck: NSObject, NSDraggingInfo {
+    let draggingSource: Any?
+    let draggingDestinationWindow: NSWindow?
+    let draggingLocation: NSPoint
+    let draggingPasteboard: NSPasteboard
+    let draggingSourceOperationMask: NSDragOperation = .move
+    let draggedImageLocation = NSPoint.zero
+    let draggedImage: NSImage? = nil
+    let draggingSequenceNumber = 0
+    let springLoadingHighlight: NSSpringLoadingHighlight = .none
+    var draggingFormation: NSDraggingFormation = .none
+    var animatesToDestination = false
+    var numberOfValidItemsForDrop = 1
+
+    init(table: NSTableView, location: NSPoint, pasteboard: NSPasteboard) {
+        draggingSource = table
+        draggingDestinationWindow = table.window
+        draggingLocation = location
+        draggingPasteboard = pasteboard
+    }
+
+    func slideDraggedImage(to screenPoint: NSPoint) {}
+
+    func enumerateDraggingItems(options: NSDraggingItemEnumerationOptions, for view: NSView?,
+                                classes: [AnyClass], searchOptions: [NSPasteboard.ReadingOptionKey: Any],
+                                using block: (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
+
+    func resetSpringLoading() {}
 }

@@ -685,30 +685,27 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     private func moveSelectedPin(by offset: Int) {
         guard !pending else { return }
         let rows = pinnedRows
-        guard let index = rows.firstIndex(of: table.selectedRow), rows.indices.contains(index + offset) else { return }
-        _ = movePin(from: table.selectedRow, to: rows[index + offset], among: rows)
-    }
-
-    private func movePin(from source: Int, to destination: Int, among rows: [Int]) -> Bool {
-        guard source != destination, let from = rows.firstIndex(of: source),
-              let to = rows.firstIndex(of: destination) else { return false }
+        guard let from = rows.firstIndex(of: table.selectedRow), rows.indices.contains(from + offset) else { return }
+        let to = from + offset
         var reordered = rows.map { entries[$0] }
         let moving = reordered.remove(at: from)
         reordered.insert(moving, at: to)
-        let order = reordered.compactMap { pins.pin(matching: $0.entry) }
-        guard order.count == reordered.count else { return false }
-        pins.reorder(order)
-        cachedPinnedRows = nil
-        pinsChangedInPlace = true
+        let pinOrder = reordered.compactMap { pins.pin(matching: $0.entry) }
+        guard pinOrder.count == reordered.count else { return }
 
-        // Only the slots occupied by pinned items participate, including in a filtered list.
+        // Keyboard moves step through the visible pinned slots.
         let range = min(from, to)...max(from, to)
         for index in range { entries[rows[index]] = reordered[index] }
-        let changed = IndexSet(range.map { rows[$0] })
-        table.reloadData(forRowIndexes: changed, columnIndexes: IndexSet(integer: 0))
+        finishPinMove(to: rows[to], changedRows: IndexSet(range.map { rows[$0] }), pinOrder: pinOrder)
+    }
+
+    private func finishPinMove(to destination: Int, changedRows: IndexSet, pinOrder: [ControlPin]) {
+        pins.reorder(pinOrder)
+        cachedPinnedRows = nil
+        pinsChangedInPlace = true
+        table.reloadData(forRowIndexes: changedRows, columnIndexes: IndexSet(integer: 0))
         table.selectRowIndexes(IndexSet(integer: destination), byExtendingSelection: false)
         reveal(destination)
-        return true
     }
 
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
@@ -726,19 +723,30 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     func tableView(_ tableView: NSTableView, validateDrop info: any NSDraggingInfo, proposedRow row: Int,
                    proposedDropOperation operation: NSTableView.DropOperation) -> NSDragOperation {
         guard let drop = pinDrop(info, row: row, operation: operation) else { return [] }
-        tableView.setDropRow(drop.from < drop.to ? drop.to + 1 : drop.to, dropOperation: .above)
+        tableView.setDropRow(drop.boundary, dropOperation: .above)
         return .move
     }
 
     func tableView(_ tableView: NSTableView, acceptDrop info: any NSDraggingInfo, row: Int,
                    dropOperation operation: NSTableView.DropOperation) -> Bool {
         guard let drop = pinDrop(info, row: row, operation: operation) else { return false }
-        return movePin(from: drop.from, to: drop.to, among: drop.rows)
+        var reorderedPins = pinnedRows.filter { $0 != drop.source }
+        let pinIndex = reorderedPins.firstIndex { $0 >= drop.boundary } ?? reorderedPins.endIndex
+        reorderedPins.insert(drop.source, at: pinIndex)
+        let pinOrder = reorderedPins.compactMap { pin(at: $0) }
+
+        let destination = drop.source < drop.boundary ? drop.boundary - 1 : drop.boundary
+        let moving = entries.remove(at: drop.source)
+        entries.insert(moving, at: destination)
+        let changedRows = min(drop.source, destination)..<(max(drop.source, destination) + 1)
+        finishPinMove(to: destination, changedRows: IndexSet(integersIn: changedRows), pinOrder: pinOrder)
+        return true
     }
 
     private func pinDrop(_ info: any NSDraggingInfo, row: Int,
-                         operation: NSTableView.DropOperation) -> (from: Int, to: Int, rows: [Int])? {
+                         operation: NSTableView.DropOperation) -> (source: Int, boundary: Int)? {
         guard !pending, (info.draggingSource as? NSTableView) === table,
+              (0...entries.count).contains(row),
               let id = info.draggingPasteboard.string(forType: Self.pinDragType) else { return nil }
         let rows = pinnedRows
         guard let source = rows.first(where: { entries[$0].entry.id == id }) else { return nil }
@@ -747,9 +755,9 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             let point = table.convert(info.draggingLocation, from: nil)
             if point.y >= table.rect(ofRow: row).midY { boundary += 1 }
         }
-        let destination = source < boundary ? rows.last { $0 < boundary } : rows.first { $0 >= boundary }
-        guard let destination, destination != source else { return nil }
-        return (source, destination, rows)
+        guard boundary != source, boundary != source + 1,
+              rows.contains(boundary) || rows.contains(boundary - 1) else { return nil }
+        return (source, boundary)
     }
 
     private func reveal(_ row: Int) {
@@ -947,31 +955,61 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let moveDown = key("\u{F701}", 125, [.option, .shift])
         show(in: document, mode: .commands)
         await request?.value
-        guard entries.count > 4 else { throw CheckFailure.invalidPins("load command rows") }
+        guard entries.count > 5 else { throw CheckFailure.invalidPins("load command rows") }
         let starting = entries.map { $0.entry.id }
-        let second = starting[2]
-        let fourth = starting[4]
+        let earlier = starting[2]
+        let later = starting[5]
         table.selectRowIndexes(IndexSet(integer: 2), byExtendingSelection: false)
-        guard intercept(toggle) == nil, pin(at: 2) == .command(second),
+        guard intercept(toggle) == nil, pin(at: 2) == .command(earlier),
               table.selectedRow == 2, entries.map({ $0.entry.id }) == starting,
               document.editor.string == originalText else {
             throw CheckFailure.invalidPins("toggle a command without moving, selecting, or running it")
         }
-        table.selectRowIndexes(IndexSet(integer: 4), byExtendingSelection: false)
+        table.selectRowIndexes(IndexSet(integer: 5), byExtendingSelection: false)
         _ = intercept(toggle)
         _ = intercept(moveUp)
-        guard entries[2].entry.id == fourth, entries[3].entry.id == starting[3],
-              entries[4].entry.id == second, table.selectedRow == 2 else {
+        guard entries[2].entry.id == later, entries[3].entry.id == starting[3],
+              entries[4].entry.id == starting[4], entries[5].entry.id == earlier, table.selectedRow == 2 else {
             throw CheckFailure.invalidPins("move only the pinned slots, including immediately after pinning")
         }
         let drag = self.tableView(table, pasteboardWriterForRow: 2) as? NSPasteboardItem
-        guard drag?.string(forType: Self.pinDragType) == fourth,
+        guard drag?.string(forType: Self.pinDragType) == later,
               self.tableView(table, pasteboardWriterForRow: 3) == nil else {
             throw CheckFailure.invalidPins("export only pinned rows for local dragging")
         }
 
+        let beforeDrag = entries
+        let firstGap = starting[3]
+        let secondGap = starting[4]
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        let drops: [(source: Int, target: Int, below: Bool, destination: Int, order: [String])] = [
+            (5, 2, true, 3, [later, earlier, firstGap, secondGap]),
+            (5, 2, false, 2, [earlier, later, firstGap, secondGap]),
+            (2, 5, true, 5, [firstGap, secondGap, earlier, later]),
+            (2, 5, false, 4, [firstGap, secondGap, later, earlier]),
+        ]
+        for drop in drops {
+            apply(beforeDrag, selected: beforeDrag[drop.source].entry.id)
+            guard let payload = tableView(table, pasteboardWriterForRow: drop.source) else {
+                throw CheckFailure.invalidPins("start the pin drag")
+            }
+            pasteboard.clearContents()
+            guard pasteboard.writeObjects([payload]) else { throw CheckFailure.invalidPins("write the pin drag payload") }
+            let rect = table.rect(ofRow: drop.target)
+            let y = rect.midY + rect.height * (drop.below ? 0.25 : -0.25)
+            let location = table.convert(NSPoint(x: rect.midX, y: y), to: nil)
+            let info = ControlPinDragCheck(table: table, location: location, pasteboard: pasteboard)
+            let boundary = drop.target + (drop.below ? 1 : 0)
+            guard tableView(table, validateDrop: info, proposedRow: drop.target, proposedDropOperation: .on) == .move,
+                  tableView(table, acceptDrop: info, row: boundary, dropOperation: .above),
+                  entries[2...5].map({ $0.entry.id }) == drop.order, table.selectedRow == drop.destination else {
+                throw CheckFailure.invalidPins("insert a dragged pin at its marked position and shift the intervening rows")
+            }
+        }
+
         show(in: document, mode: .commands)
-        guard entries.prefix(2).map({ $0.entry.id }) == [fourth, second] else {
+        guard entries.prefix(2).map({ $0.entry.id }) == [later, earlier] else {
             throw CheckFailure.invalidPins("show the saved command order on reopening")
         }
         let reordered = entries.map { $0.entry.id }
@@ -985,7 +1023,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         guard entries.first?.entry.title == "File: Save" else { throw CheckFailure.invalidPins("rank filtered commands normally") }
         clearQuery()
         await request?.value
-        guard entries.first?.entry.id == second else { throw CheckFailure.invalidPins("apply pin order on clearing the query") }
+        guard entries.first?.entry.id == earlier else { throw CheckFailure.invalidPins("apply pin order on clearing the query") }
 
         show(in: document, mode: .files)
         await request?.value

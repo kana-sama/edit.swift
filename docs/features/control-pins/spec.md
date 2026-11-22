@@ -4,8 +4,8 @@ In Control, Shift-Return toggles the pin on the selected file or command. A pin 
 
 An empty query shows pinned entries in their saved order ahead of the ordinary results. File and command pins have separate orders and are remembered across launches. File pins are independent of recent history. A file deliberately pinned from a folder result stays available in the empty list. Command pins appear when the command is available. A query uses the ordinary matching and ranking, including matching pinned files that are absent from history. An explicit directory query keeps its directory scope.
 
-Drag a pinned row relative to another pinned row, or use Option-Shift-Up or Option-Shift-Down on a selected pin. Only the pinned rows shown in the current list participate. The moved row stays selected and the new order is saved.
+Drop a pinned row on the insertion line above or below another pin. The dragged row moves to that position and the intervening results shift in order. Option-Shift-Up and Option-Shift-Down move the selected pin through the visible pinned slots. The moved row stays selected and the visible pins’ relative order is saved.
 
 ## Acceptance
 
-Filter for a file and for a command and toggle their pins with Shift-Return. Check that only the pin marker changes. Clear the query and reopen Control to verify the pinned entries come first. Move a pin using both a drag and the keyboard, then reopen and verify the order. Remove a pinned file from recent history and check that it stays accessible.
+Filter for a file and for a command and toggle their pins with Shift-Return. Check that only the pin marker changes. Clear the query and reopen Control to verify the pinned entries come first. Drop a pin above and below a nonadjacent pin and verify that the rows between them keep their relative order. Move a pin with the keyboard, then reopen and verify the saved pin order. Remove a pinned file from recent history and check that it stays accessible.
