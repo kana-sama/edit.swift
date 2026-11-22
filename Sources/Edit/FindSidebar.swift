@@ -392,9 +392,9 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
                                            language: document.manualSyntaxLanguage?.iconIdentifier)
     }
 
-    func updateCurrentFile() {
+    func updateCurrentFile(reveal: Bool) {
         if worktreeVisible, let folder = document.folderURL {
-            worktree?.update(folder: folder, currentFile: document.fileURL)
+            worktree?.update(folder: folder, currentFile: document.fileURL, revealCurrentFile: reveal)
         }
     }
 

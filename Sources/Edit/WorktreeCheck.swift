@@ -18,6 +18,7 @@ enum WorktreeCheck {
         for file in [readme, ignored, nested, external] { try Data("Sample\n".utf8).write(to: file) }
         try Data("*.log\n".utf8).write(to: project.appending(path: ".gitignore"))
         try await checkFolderAnimation(in: app, under: temporary)
+        try await checkKeyboardFolders(in: app, under: temporary)
         try await checkTrash(in: app, under: temporary)
 
         let document = app.makeDocument()
@@ -98,8 +99,9 @@ enum WorktreeCheck {
         try expect(rename.string == "Build.log" && rename.selectedRange() == NSRange(location: 0, length: 5),
                    "Return edits the selected name in place and selects its stem")
         try pressNameKey(53, characters: "\u{1B}", in: document.window)
-        try expect(document.window.firstResponder === tree && document.fileURL?.lastPathComponent == "Build.log",
-                   "Escape cancels rename and restores tree focus")
+        try expect(document.window.firstResponder === tree && tree.selectedRow == log &&
+                   document.fileURL?.lastPathComponent == "Build.log",
+                   "Escape cancels rename and keeps the original file selected in the focused tree")
 
         try press("\u{F701}", code: 125, in: tree)
         try press(" ", code: 49, in: tree)
@@ -272,17 +274,50 @@ enum WorktreeCheck {
 
         document.editor.insertText("unsaved", replacementRange: NSRange(location: 0, length: 0))
         try performHistoryAction(in: tree, redo: false, title: "Undo Rename")
-        try await waitFor("undo rename retargets the open buffer") {
-            document.fileURL?.lastPathComponent == "File.swift" && row(named: "File.swift", in: tree) != nil
+        try await waitFor("undo rename selects the original name in the focused tree") {
+            let original = row(named: "File.swift", in: tree)
+            return document.fileURL?.lastPathComponent == "File.swift" && original == tree.selectedRow &&
+                window.firstResponder === tree
         }
         try expect(document.editor.string == "unsaved" && FileManager.default.fileExists(atPath: file.path),
                    "undo rename preserves text and restores the original name")
         try performHistoryAction(in: tree, redo: true, title: "Redo Rename")
-        try await waitFor("redo rename retargets the same open buffer") {
-            document.fileURL?.lastPathComponent == "Renamed.swift" && row(named: "Renamed.swift", in: tree) != nil
+        try await waitFor("redo rename selects the new name in the focused tree") {
+            let renamed = row(named: "Renamed.swift", in: tree)
+            return document.fileURL?.lastPathComponent == "Renamed.swift" && renamed == tree.selectedRow &&
+                window.firstResponder === tree
         }
         try expect(document.editor.string == "unsaved" && !FileManager.default.fileExists(atPath: file.path),
                    "redo rename preserves text and reapplies the new name")
+
+        let sourceRow = try require(row(named: "Sources", in: tree), "expanded parent of the open file")
+        tree.selectRowIndexes(IndexSet(integer: sourceRow), byExtendingSelection: false)
+        try press("\r", code: 36, in: tree)
+        try replaceName(with: "Discarded", in: window)
+        try pressNameKey(53, characters: "\u{1B}", in: window)
+        try expect(window.firstResponder === tree && row(named: "Sources", in: tree) == tree.selectedRow,
+                   "Escape keeps the renamed folder selected even with a child open in the editor")
+
+        try press("\r", code: 36, in: tree)
+        try replaceName(with: "MovedSources", in: window)
+        try pressNameKey(36, characters: "\r", in: window)
+        try await waitFor("rename selects the expanded folder and keeps its child visible") {
+            row(named: "MovedSources", in: tree) == tree.selectedRow && row(named: "Renamed.swift", in: tree) != nil &&
+                window.firstResponder === tree
+        }
+        try performHistoryAction(in: tree, redo: false, title: "Undo Rename")
+        try await waitFor("undo selects the renamed folder instead of its open descendant") {
+            row(named: "Sources", in: tree) == tree.selectedRow && row(named: "Renamed.swift", in: tree) != nil &&
+                window.firstResponder === tree
+        }
+
+        let retained = try require(row(named: "Taken.swift", in: tree), "another file in the expanded folder")
+        tree.selectRowIndexes(IndexSet(integer: retained), byExtendingSelection: false)
+        try performHistoryAction(in: tree, redo: true, title: "Redo Rename")
+        window.makeFirstResponder(document.editor)
+        try await waitFor("redo renames the folder while leaving newer editor focus alone") {
+            row(named: "MovedSources", in: tree) != nil && window.firstResponder === document.editor
+        }
     }
 
     private static func checkTrash(in app: Edit, under temporary: URL) async throws {
@@ -466,6 +501,100 @@ enum WorktreeCheck {
                    "the root menu offers creation without a root row")
     }
 
+    private static func checkKeyboardFolders(in app: Edit, under directory: URL) async throws {
+        let root = directory.appending(path: "Keyboard")
+        for name in ["Alpha/Nested", "Bravo", "Charlie", "Delta"] {
+            try FileManager.default.createDirectory(at: root.appending(path: name), withIntermediateDirectories: true)
+        }
+        for name in ["Alpha/Nested/Leaf.txt", "Bravo/Bravo.txt", "Charlie/Charlie.txt", "Delta/Delta.txt", "README.md"] {
+            try Data().write(to: root.appending(path: name))
+        }
+        let document = app.makeDocument()
+        let window = document.window
+        defer { window.close() }
+        _ = try await app.openFile(root, in: document)
+        document.toggleSidebarFocus(.worktree)
+        let tree = try require(document.worktreeSidebar?.outline, "keyboard outline")
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
+        window.orderBack(nil)
+        try await waitFor("keyboard fixture shows four collapsed folders") { tree.numberOfRows == 5 }
+        window.layoutIfNeeded()
+        window.makeFirstResponder(tree)
+
+        func item(named name: String) throws -> Any {
+            let row = try require(row(named: name, in: tree), "visible folder \(name)")
+            return try require(tree.item(atRow: row), "folder \(name)")
+        }
+        func arrow(expanding: Bool) throws {
+            try press(expanding ? "\u{F703}" : "\u{F702}", code: expanding ? 124 : 123, in: tree, enqueue: true)
+        }
+        func select(_ names: [String]) throws {
+            let rows = try names.map { try require(row(named: $0, in: tree), "selected row \($0)") }
+            tree.selectRowIndexes(IndexSet(rows), byExtendingSelection: false)
+        }
+        func retainsSelection(_ names: [String]) -> Bool {
+            let rows = IndexSet(names.compactMap { row(named: $0, in: tree) })
+            return rows.count == names.count && tree.selectedRowIndexes == rows && window.firstResponder === tree
+        }
+        func waitForRows(_ names: [String], movement: String) async throws {
+            let pitch = tree.rect(ofRow: 1).minY - tree.rect(ofRow: 0).minY
+            let offset = tree.rect(ofRow: 0).minY
+            var animated = false
+            func observeRows() {
+                let last = tree.numberOfRows - 1
+                if let row = tree.rowView(atRow: last, makeIfNecessary: false), let layer = row.layer {
+                    let y = layer.presentation()?.frame.minY ?? row.frame.minY
+                    let units = (y - offset) / pitch
+                    animated = animated || abs(units - units.rounded()) * pitch > 0.5 ||
+                        layer.animation(forKey: "position") != nil || layer.animation(forKey: "bounds") != nil
+                }
+            }
+            try await waitFor(movement) {
+                observeRows()
+                return names.allSatisfy { row(named: $0, in: tree) != nil }
+            }
+            for _ in 0..<6 {
+                try await Task.sleep(for: .milliseconds(16))
+                observeRows()
+            }
+            try expect(!animated, movement + " without animating the neighboring rows")
+        }
+
+        let alpha = try item(named: "Alpha")
+        try select(["Alpha"])
+        try arrow(expanding: true)
+        try expect(tree.isItemExpanded(alpha) && retainsSelection(["Alpha"]), "Right opens a cold folder immediately")
+        try await waitForRows(["Nested"], movement: "first keyboard expansion shows children")
+
+        let nested = try item(named: "Nested")
+        let bravo = try item(named: "Bravo")
+        let charlie = try item(named: "Charlie")
+        let group = ["Alpha", "Nested", "Bravo", "Charlie"]
+        try select(group)
+        try arrow(expanding: true)
+        try expect(tree.isItemExpanded(alpha) && tree.isItemExpanded(nested) && tree.isItemExpanded(bravo) &&
+                   tree.isItemExpanded(charlie) && retainsSelection(group), "Right expands every selected folder and keeps the group selected")
+        try await waitForRows(["Leaf.txt", "Bravo.txt", "Charlie.txt"], movement: "group keyboard expansion shows all children")
+
+        try select(group + ["README.md"])
+        try arrow(expanding: false)
+        try expect(!tree.isItemExpanded(alpha) && !tree.isItemExpanded(bravo) && !tree.isItemExpanded(charlie) &&
+                   retainsSelection(["Alpha", "Bravo", "Charlie", "README.md"]), "Left collapses the selected branches and keeps visible selection")
+        try await waitForRows(["Alpha", "Bravo", "Charlie"], movement: "group keyboard collapse settles")
+        try select(["Alpha"])
+        try arrow(expanding: true)
+        try expect(tree.isItemExpanded(nested) && row(named: "Leaf.txt", in: tree) != nil && retainsSelection(["Alpha"]),
+                   "reopening the parent preserves its descendant's expanded state")
+
+        let delta = try item(named: "Delta")
+        try select(["Delta"])
+        try press(" ", code: 49, in: tree, enqueue: true)
+        try expect(tree.isItemExpanded(delta) && retainsSelection(["Delta"]), "Space opens a cold folder immediately")
+        try await waitForRows(["Delta.txt"], movement: "first Space expansion shows children")
+    }
+
     private static func checkFolderAnimation(in app: Edit, under directory: URL) async throws {
         guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
         let root = directory.appending(path: "Animation", directoryHint: .isDirectory)
@@ -620,13 +749,20 @@ enum WorktreeCheck {
     }
 
     private static func press(_ characters: String, code: UInt16, in outline: NSOutlineView,
-                              modifiers: NSEvent.ModifierFlags = []) throws {
+                              modifiers: NSEvent.ModifierFlags = [], enqueue: Bool = false) throws {
         let window = try require(outline.window, "keyboard navigation window")
         let event = try require(NSEvent.keyEvent(
             with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0, windowNumber: window.windowNumber,
             context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code
         ), "outline key event")
-        outline.keyDown(with: event)
+        if enqueue {
+            NSApp.postEvent(event, atStart: true)
+            let queued = try require(NSApp.nextEvent(matching: .keyDown, until: .distantPast,
+                                                     inMode: .default, dequeue: true), "queued Worktree key")
+            outline.keyDown(with: queued)
+        } else {
+            outline.keyDown(with: event)
+        }
     }
 
     private static func click(

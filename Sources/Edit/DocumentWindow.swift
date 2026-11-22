@@ -441,7 +441,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if autosaveTask == nil { scheduleIdleAutosave() }
     }
 
-    func retargetMovedFile(from source: URL, to destination: URL) {
+    func retargetMovedFile(from source: URL, to destination: URL, revealInWorktree: Bool = true) {
         if let folderURL, let suffix = Self.worktreePathSuffix(from: source, to: folderURL) {
             let movedFolder = suffix.isEmpty ? destination : destination.appending(path: suffix, directoryHint: .isDirectory)
             setFolder(URL(filePath: movedFolder.path, directoryHint: .isDirectory))
@@ -456,7 +456,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             app.syntaxOverrides.set(manualSyntaxLanguage, for: fileURL)
         }
         autosaveFailure = nil
-        updateTitle()
+        updateTitle(revealInWorktree: revealInWorktree)
         if resolvedSyntaxLanguage != previousLanguage { refreshSyntax(immediate: true) }
         if let fileURL {
             let recents = app.recentFiles
@@ -740,7 +740,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.preferredLineEnding = format.lineEnding
     }
 
-    private func updateTitle() {
+    private func updateTitle(revealInWorktree: Bool = true) {
         if window.representedURL != fileURL { window.representedURL = fileURL }
         if let folderURL {
             let folderName = folderURL.lastPathComponent
@@ -750,7 +750,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
         titleBar.update()
         findPanel?.updateName()
-        findPanel?.updateCurrentFile()
+        findPanel?.updateCurrentFile(reveal: revealInWorktree)
     }
 
     private func updateEditedState() {

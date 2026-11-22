@@ -159,7 +159,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         }
     }
 
-    func update(folder: URL, currentFile: URL?) {
+    func update(folder: URL, currentFile: URL?, revealCurrentFile: Bool = true) {
         let folder = folder.standardizedFileURL
         let folderPath = WorktreeFileOperations.path(folder)
         let rootChanged = root?.path != folderPath
@@ -183,7 +183,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         if !rootChanged, let outside { expanded.remove(outside.path) }
         outside = nil
         // Loading a previous selection must not move the highlight back during rapid navigation.
-        pathToReveal = openingFile == nil ? filePath : nil
+        pathToReveal = revealCurrentFile && openingFile == nil ? filePath : nil
         if let file, WorktreeFileOperations.contains(file, in: folder) {
             currentDirectories = ancestors(of: file, in: folder)
             expanded.formUnion(currentDirectories.subtracting([folderPath]))
@@ -277,6 +277,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     private func apply(_ entries: [WorktreeDirectory.Entry], to item: Item) {
         let shouldAnimateExpansion = item.expandWithAnimationWhenLoaded
+        let firstLoad = !item.isLoaded && item.visibleChildren.isEmpty
         item.expandWithAnimationWhenLoaded = false
         let changed = !item.isLoaded || entries.count != item.children.count || zip(entries, item.children).contains { entry, child in
             WorktreeFileOperations.path(entry.url) != child.path || entry.isDirectory != child.isDirectory ||
@@ -314,8 +315,18 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         }
         let selection = selectedItems.map(\.path)
         reloading = true
-        tree.reloadItem(item, reloadChildren: true)
-        restoreExpansion(from: item)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            if firstLoad, tree.isItemExpanded(item) {
+                // A keyboard expansion is already open while its first directory read is pending.
+                tree.insertItems(at: IndexSet(integersIn: 0..<item.visibleChildren.count),
+                                 inParent: item, withAnimation: [])
+            } else {
+                tree.reloadItem(item, reloadChildren: true)
+            }
+            restoreExpansion(from: item)
+        }
         reloading = false
         restoreSelection(selection)
         revealPendingItem()
@@ -564,15 +575,26 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         tree.setFolderExpanded(item, expanded: expand, animated: animated)
     }
 
-    func navigateFolder(expanding: Bool) -> Bool {
-        guard let item = tree.item(atRow: tree.selectedRow) as? Item,
-              item.isDirectory, item !== provisionalEntry else { return false }
-        if item.expandWithAnimationWhenLoaded {
-            item.expandWithAnimationWhenLoaded = false
-            if !expanding { return true }
+    func navigateFolders(expanding: Bool) -> Bool {
+        let selection = selectedItems
+        let folders = selection.filter { $0.isDirectory && $0 !== provisionalEntry }
+        guard !folders.isEmpty else { return false }
+
+        let cancelledMouseExpansion = folders.contains(where: \.expandWithAnimationWhenLoaded)
+        for folder in folders { folder.expandWithAnimationWhenLoaded = false }
+        let changed = folders.filter { tree.isItemExpanded($0) != expanding }
+        guard !changed.isEmpty else { return cancelledMouseExpansion || selection.count > 1 }
+
+        let closingPaths = Set(expanding ? [] : changed.map(\.path))
+        for folder in changed {
+            // Collapsing a parent leaves the expansion state of its hidden children intact.
+            if !expanding,
+               WorktreeFileOperations.isUnderSelection(folder.url.deletingLastPathComponent(), paths: closingPaths) {
+                continue
+            }
+            tree.setFolderExpanded(folder, expanded: expanding, animated: false)
         }
-        guard tree.isItemExpanded(item) != expanding else { return false }
-        tree.setFolderExpanded(item, expanded: expanding, animated: false)
+        if selection.count > 1 { restoreSelection(selection.map(\.path)) }
         return true
     }
 
@@ -682,6 +704,9 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
                 let url = try await actions.commitName(name, for: edit.request, in: edit.root)
                 guard nameEdit === edit else { return }
                 let path = WorktreeFileOperations.path(url)
+                if case .rename(let source) = edit.request {
+                    retargetExpansion(from: source, to: url)
+                }
                 expanded.formUnion(ancestors(of: url, in: edit.root).subtracting([WorktreeFileOperations.path(edit.root)]))
                 pathToReveal = path
                 let stillEditing = document.window.firstResponder === editor
@@ -761,7 +786,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         return actions.menu(for: item.url, isDirectory: item.isDirectory, selection: urls, root: folder) { [weak self] in
             guard let self, actions.canTrash(urls, in: folder) else { return }
             document.window.makeFirstResponder(tree)
-            actions.trash(urls, within: folder, updateSelection: trashSelectionUpdate(in: folder))
+            actions.trash(urls, within: folder, updateSelection: fileSelectionUpdate(in: folder))
         }
     }
 
@@ -769,7 +794,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         guard let root, nameEdit == nil else { return }
         let items = selectedItems.map(\.url)
         guard actions.canTrash(items, in: root.url) else { return }
-        actions.trash(items, within: root.url, updateSelection: trashSelectionUpdate(in: root.url))
+        actions.trash(items, within: root.url, updateSelection: fileSelectionUpdate(in: root.url))
     }
 
     func undoActionName(redo: Bool) -> String? {
@@ -779,10 +804,10 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     func undoFileChange(redo: Bool) {
         guard let root, nameEdit == nil else { return }
-        actions.undo(in: root.url, redo: redo, updateSelection: trashSelectionUpdate(in: root.url))
+        actions.undo(in: root.url, redo: redo, updateSelection: fileSelectionUpdate(in: root.url))
     }
 
-    private func trashSelectionUpdate(in folder: URL) -> (WorktreeActions.TrashSelectionChange) -> Void {
+    private func fileSelectionUpdate(in folder: URL) -> (WorktreeActions.SelectionChange) -> Void {
         let revision = selectionRevision
         let folderPath = WorktreeFileOperations.path(folder)
         let selection = selectedItems.map(\.url)
@@ -798,7 +823,11 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             if let previous = nearbyItem(in: (0..<anchor).reversed()) { neighbors.append(previous) }
         }
         return { [weak self] change in
-            guard let self, root?.path == folderPath, selectionRevision == revision,
+            guard let self, root?.path == folderPath else { return }
+            if case .renamed(let move) = change {
+                retargetExpansion(from: move.source, to: move.destination)
+            }
+            guard selectionRevision == revision,
                   document.window.firstResponder === tree, nameEdit == nil else { return }
             pathToReveal = nil
             switch change {
@@ -820,11 +849,30 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
                 selectRows(rows)
                 if let first = rows.first { tree.scrollRowToVisible(first) }
             case .restored(let items):
-                restoredSelection = items.map(WorktreeFileOperations.path)
-                for item in items { expanded.formUnion(ancestors(of: item, in: folder).subtracting([folderPath])) }
-                reloadTree()
+                revealSelection(items, in: folder)
+            case .renamed(let move):
+                revealSelection([move.destination], in: folder)
             }
         }
+    }
+
+    private func revealSelection(_ items: [URL], in folder: URL) {
+        restoredSelection = items.map(WorktreeFileOperations.path)
+        let rootPath = WorktreeFileOperations.path(folder)
+        for item in items { expanded.formUnion(ancestors(of: item, in: folder).subtracting([rootPath])) }
+        reloadTree()
+    }
+
+    private func retargetExpansion(from source: URL, to destination: URL) {
+        let sourcePath = WorktreeFileOperations.path(source)
+        let destinationPath = WorktreeFileOperations.path(destination)
+        guard sourcePath != destinationPath else { return }
+        let prefix = sourcePath + "/"
+        expanded = Set(expanded.map { path in
+            if path == sourcePath { return destinationPath }
+            if path.hasPrefix(prefix) { return destinationPath + path.dropFirst(sourcePath.count) }
+            return path
+        })
     }
 
     func setRecycleForCheck(_ recycle: @escaping ([URL]) async throws -> WorktreeFileOperations.TransferResult) {
@@ -981,7 +1029,7 @@ private final class WorktreeOutline: NSOutlineView, NSMenuItemValidation {
         let unmodified = modifiers.isEmpty
         if event.keyCode == 123 || event.keyCode == 124 {
             let expanding = (event.keyCode == 124) != (userInterfaceLayoutDirection == .rightToLeft)
-            if unmodified && owner?.navigateFolder(expanding: expanding) == true { return }
+            if unmodified && owner?.navigateFolders(expanding: expanding) == true { return }
             // Keep the outline's native parent, child and modified-arrow navigation.
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0

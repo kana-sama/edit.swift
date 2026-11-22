@@ -8,9 +8,10 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         case create(in: URL, directory: Bool)
     }
 
-    enum TrashSelectionChange {
+    enum SelectionChange {
         case removed([URL])
         case restored([URL])
+        case renamed(WorktreeFileOperations.Transfer)
     }
 
     private enum FileChange {
@@ -35,7 +36,7 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         let inverse: FileChange?
         var remaining: FileChange? = nil
         var failure: String? = nil
-        var selection: TrashSelectionChange? = nil
+        var selection: SelectionChange? = nil
     }
 
     private weak var document: DocumentWindow?
@@ -232,7 +233,7 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
             items.allSatisfy { WorktreeFileOperations.canTrash($0, within: root) }
     }
 
-    func trash(_ items: [URL], within root: URL, updateSelection: @escaping (TrashSelectionChange) -> Void) {
+    func trash(_ items: [URL], within root: URL, updateSelection: @escaping (SelectionChange) -> Void) {
         guard canTrash(items, in: root) else { return }
         run("Could Not Move Items to Trash", within: root) { _ in
             let result = try await self.execute(.trash(items, selectingOnRestore: items), within: root)
@@ -249,7 +250,7 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         return (redo ? history.redo.last : history.undo.last)?.name
     }
 
-    func undo(in root: URL, redo: Bool, updateSelection: @escaping (TrashSelectionChange) -> Void) {
+    func undo(in root: URL, redo: Bool, updateSelection: @escaping (SelectionChange) -> Void) {
         let key = WorktreeFileOperations.path(root)
         guard var history = historyByFolder[key], let change = redo ? history.redo.last : history.undo.last else {
             return
@@ -278,13 +279,15 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         historyByFolder[key]?.redo.removeAll()
     }
 
-    private func rename(_ item: URL, to name: String, within root: URL) async throws -> WorktreeFileOperations.Transfer? {
+    private func rename(
+        _ item: URL, to name: String, within root: URL, revealInWorktree: Bool = true
+    ) async throws -> WorktreeFileOperations.Transfer? {
         let destination = item.deletingLastPathComponent().appending(path: name)
         return try await app.performWorktreeMutation(affecting: [item, destination]) {
             let result = try await Task.detached(priority: .userInitiated) {
                 try WorktreeFileOperations.rename(item, to: name, within: root)
             }.value
-            if let result { retarget(result) }
+            if let result { retarget(result, revealInWorktree: revealInWorktree) }
             return result
         }
     }
@@ -292,8 +295,13 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
     private func execute(_ change: FileChange, within root: URL) async throws -> ChangeResult {
         switch change {
         case .rename(let move):
-            let completed = try await rename(move.source, to: move.destination.lastPathComponent, within: root)
-            return ChangeResult(inverse: completed.map { .rename(.init(source: $0.destination, destination: $0.source)) })
+            let completed = try await rename(
+                move.source, to: move.destination.lastPathComponent, within: root, revealInWorktree: false
+            )
+            return ChangeResult(
+                inverse: completed.map { .rename(.init(source: $0.destination, destination: $0.source)) },
+                selection: completed.map(SelectionChange.renamed)
+            )
         case .trash(let items, let selection):
             let targets = try await Task.detached(priority: .userInitiated) {
                 try WorktreeFileOperations.trashTargets(items, within: root)
@@ -362,9 +370,9 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         }
     }
 
-    private func retarget(_ move: WorktreeFileOperations.Transfer) {
+    private func retarget(_ move: WorktreeFileOperations.Transfer, revealInWorktree: Bool = true) {
         for document in app.documents {
-            document.retargetMovedFile(from: move.source, to: move.destination)
+            document.retargetMovedFile(from: move.source, to: move.destination, revealInWorktree: revealInWorktree)
         }
     }
 

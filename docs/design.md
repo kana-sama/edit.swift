@@ -25,11 +25,11 @@ For file-list checks, create a disposable folder and open it in Finder when the 
 
 ```bash
 finder_fixture="$(mktemp -d "${TMPDIR%/}/edit-finder.XXXXXX")"
-mkdir "$finder_fixture/Folder"
-touch "$finder_fixture/"{A,B,C,D,E}.txt "$finder_fixture/Folder/Child.txt"
+mkdir -p "$finder_fixture/Folder/Nested" "$finder_fixture/OtherFolder"
+touch "$finder_fixture/"{A,B,C,D,E}.txt "$finder_fixture/Folder/Nested/Child.txt" "$finder_fixture/OtherFolder/Child.txt"
 open -a Finder "$finder_fixture"
 ```
 
-Use Command-2 for list view and sort by name. Select C, E, B through C, B and D, B and E, and then all items in separate trials. Use Shift-click for ranges and Command-click for separate rows. Exercise Command-Delete and contextual Move to Trash, check selection with Up or Down, and repeat with Command-Z and Shift-Command-Z. Use the same boundaries and selection order in Edit. [Mac keyboard shortcuts](https://support.apple.com/102650) · [Select items](https://support.apple.com/guide/mac-help/select-items-mchlp1378/mac)
+Use Command-2 for list view and sort by name. Select C, E, B through C, B and D, B and E, and then all items in separate trials. Use Shift-click for ranges and Command-click for separate rows. Exercise Command-Delete and contextual Move to Trash, check selection with Up or Down, and repeat with Command-Z and Shift-Command-Z. Select both folders and press Right and Left, then repeat with a file also selected. Test the first expansion and a second expansion of the same branch. With a descendant already expanded, collapse and reopen its parent. Use Return, type another name, and press Escape. Then commit a rename and press Command-Z and Shift-Command-Z. Check the focused control and selected row after each action. Use the same boundaries and selection order in Edit. [Mac keyboard shortcuts](https://support.apple.com/102650) · [Select items](https://support.apple.com/guide/mac-help/select-items-mchlp1378/mac)
 
 Record app-wide visual rules here when they are used across features. Record the feature's layout, controls, and interaction states in its own specification.
