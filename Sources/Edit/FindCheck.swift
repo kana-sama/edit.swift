@@ -894,6 +894,25 @@ enum FindCheck {
         app.toggleWorktreeSidebar(nil)
         try expect(document.findSettings.visible && window.firstResponder === document.editor,
                    "repeating Command-Shift-E keeps the sidebar open and returns editor focus")
+
+        var record = document.sessionDocument()
+        record.findSettings?.width = 256
+        let restored = app.makeDocument()
+        defer { restored.window.close() }
+        restored.window.layoutIfNeeded()
+        await app.restore(EditorSession(documents: [record], activeIndex: 0, lastWindow: nil), reusing: restored)
+        restored.window.layoutIfNeeded()
+        let restoredSplit = try require(restored.window.contentViewController as? NSSplitViewController,
+                                        "restoring the session reopens the split view")
+        let restoredSidebar = restoredSplit.splitViewItems[0].viewController.view
+        let restoredOptions = try sidebarMenu(in: restored.window)
+        let restoredButton = try require(restoredOptions.view, "restoring Worktree attaches its options button")
+        let restoredInset = restoredSidebar.convert(restoredSidebar.bounds, to: nil).maxX
+            - restoredButton.convert(restoredButton.bounds, to: nil).maxX
+        try expect(restored.sidebarMode == .worktree && restored.findSettings.visible && !restoredOptions.isHidden &&
+                   restoredButton.window === restored.window && abs(restoredInset - 10) < 0.5,
+                   "restoring an open Worktree places its menu at the trailing edge (\(restoredInset) pt)")
+
         document.setFolder(nil)
         try expect(menu.item(withTitle: "Worktree")?.isEnabled == false &&
                    menu.item(withTitle: "Worktree")?.isHidden == false,

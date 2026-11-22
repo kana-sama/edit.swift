@@ -59,6 +59,11 @@ private final class SidebarHeaderView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("SidebarHeaderView is created in code.") }
 
+    override var intrinsicContentSize: NSSize {
+        let width = headerWidth.constant
+        return NSSize(width: width > 0 ? width : NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
+
     override func layout() {
         super.layout()
         alignOptions()
@@ -71,7 +76,24 @@ private final class SidebarHeaderView: NSView {
         let width = max(0, divider - leadingEdge - trailingInset)
         if headerWidth.constant != width {
             headerWidth.constant = width
+            invalidateIntrinsicContentSize()
         }
+    }
+
+    func finishLayout() {
+        guard let window, let sidebar, !isHiddenOrHasHiddenAncestor else { return }
+        alignOptions()
+        guard abs(bounds.width - headerWidth.constant) > 0.5 else { return }
+
+        // AppKit measures the toolbar item before attaching this view on first show.
+        // Invalidate its enclosing layout so the toolbar picks up the new fitting width.
+        let sharedAncestor = ancestorShared(with: sidebar)
+        var ancestor = superview
+        while let view = ancestor, view !== sharedAncestor {
+            view.needsLayout = true
+            ancestor = view.superview
+        }
+        window.layoutIfNeeded()
     }
 }
 
@@ -969,6 +991,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         document.window.layoutIfNeeded()
         resizeTitleBar()
         updateSidebarToolbarVisibility()
+        if let header = sidebarHeader, !header.isHidden {
+            document.window.layoutIfNeeded()
+            (header.view as? SidebarHeaderView)?.finishLayout()
+        }
     }
 
     private func focusSearch() {
