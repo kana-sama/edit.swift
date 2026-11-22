@@ -14,6 +14,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         var children: [Item] = []
         var visibleChildren: [Item] = []
         var isLoaded = false
+        var expandWithAnimationWhenLoaded = false
 
         init(_ url: URL, directory: Bool, outside: Bool = false) {
             self.url = url
@@ -255,7 +256,6 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             guard !Task.isCancelled, let self else { return }
             requests.removeValue(forKey: path)
             guard let item else { return }
-            item.isLoaded = true
             switch result {
             case .success(let entries):
                 apply(entries, to: item)
@@ -267,6 +267,15 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     private func apply(_ entries: [WorktreeDirectory.Entry], to item: Item) {
+        let shouldAnimateExpansion = item.expandWithAnimationWhenLoaded
+        item.expandWithAnimationWhenLoaded = false
+        let changed = !item.isLoaded || entries.count != item.children.count || zip(entries, item.children).contains { entry, child in
+            WorktreeFileOperations.path(entry.url) != child.path || entry.isDirectory != child.isDirectory ||
+                entry.isIgnored != child.isIgnored || entry.isHidden != child.isSystemHidden
+        }
+        item.isLoaded = true
+        // Reloading identical rows would interrupt the outline's expansion animation.
+        guard changed || shouldAnimateExpansion else { return }
         let previous = Dictionary(uniqueKeysWithValues: item.children.map { ($0.path, $0) })
         item.children = entries.map { entry in
             let child: Item
@@ -287,6 +296,13 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         }
         updateVisibleChildren(of: item)
         guard tree.row(forItem: item) >= 0 else { return }
+        if shouldAnimateExpansion && isActive && !tree.isItemExpanded(item) {
+            reloading = true
+            tree.setFolderExpanded(item, expanded: true, animated: true)
+            reloading = false
+            if tree.isItemExpanded(item) { expanded.insert(item.path) }
+            return
+        }
         let selection = selectedItems.map(\.path)
         reloading = true
         tree.reloadItem(item, reloadChildren: true)
@@ -437,7 +453,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     func outlineViewItemDidExpand(_ notification: Notification) {
         guard !reloading, let item = notification.userInfo?["NSObject"] as? Item else { return }
         expanded.insert(item.path)
-        load(item, force: true)
+        load(item, force: item.isLoaded)
     }
 
     func outlineViewItemDidCollapse(_ notification: Notification) {
@@ -447,7 +463,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
         outlineView.makeView(withIdentifier: WorktreeRow.reuseIdentifier, owner: nil) as? WorktreeRow
-            ?? WorktreeRow()
+            ?? WorktreeRow(outline: tree)
     }
 
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item object: Any) -> NSView? {
@@ -480,23 +496,44 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     @objc private func activateClickedDirectory(_ sender: NSOutlineView) {
-        guard tree.isPlainPrimaryClick, sender.clickedRow >= 0,
-              let item = tree.item(atRow: sender.clickedRow) as? Item, item.isDirectory else { return }
-        toggleFolder(item)
+        guard tree.isPlainPrimaryClick else { return }
+        toggleFolder(at: sender.clickedRow, animated: true)
     }
 
     func activateSelection() {
         if let item = tree.item(atRow: tree.selectedRow) as? Item, item.isDirectory {
-            toggleFolder(item)
+            toggleFolder(at: tree.selectedRow, animated: false)
         } else {
             focusEditor()
         }
     }
 
-    private func toggleFolder(_ item: Item) {
-        guard item !== provisionalEntry else { return }
-        if tree.isItemExpanded(item) { tree.collapseItem(item) }
-        else { tree.expandItem(item) }
+    func toggleFolder(at row: Int, animated: Bool) {
+        guard row >= 0, let item = tree.item(atRow: row) as? Item,
+              item.isDirectory, item !== provisionalEntry else { return }
+        if item.expandWithAnimationWhenLoaded {
+            item.expandWithAnimationWhenLoaded = false
+            return
+        }
+        let expand = !tree.isItemExpanded(item)
+        if animated && expand && !item.isLoaded && !item.outside {
+            item.expandWithAnimationWhenLoaded = true
+            load(item)
+            return
+        }
+        tree.setFolderExpanded(item, expanded: expand, animated: animated)
+    }
+
+    func navigateFolder(expanding: Bool) -> Bool {
+        guard let item = tree.item(atRow: tree.selectedRow) as? Item,
+              item.isDirectory, item !== provisionalEntry else { return false }
+        if item.expandWithAnimationWhenLoaded {
+            item.expandWithAnimationWhenLoaded = false
+            if !expanding { return true }
+        }
+        guard tree.isItemExpanded(item) != expanding else { return false }
+        tree.setFolderExpanded(item, expanded: expanding, animated: false)
+        return true
     }
 
     func renameSelection() {
@@ -799,11 +836,18 @@ private final class WorktreeOutline: NSOutlineView {
         return button
     }
 
-    @objc private func toggleDirectory(_ sender: NSButton) {
-        let row = row(for: sender)
-        guard row >= 0, let item = item(atRow: row) else { return }
-        if isItemExpanded(item) { collapseItem(item) }
-        else { expandItem(item) }
+    @objc func toggleDirectory(_ sender: NSButton) {
+        owner?.toggleFolder(at: row(for: sender), animated: true)
+    }
+
+    func setFolderExpanded(_ item: Any, expanded: Bool, animated: Bool) {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = animated ? 0.2 : 0
+            context.allowsImplicitAnimation = animated
+            let outline = animated ? animator() : self
+            if expanded { outline.expandItem(item) }
+            else { outline.collapseItem(item) }
+        }
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -811,7 +855,19 @@ private final class WorktreeOutline: NSOutlineView {
     }
 
     override func keyDown(with event: NSEvent) {
-        guard event.modifierFlags.intersection([.command, .shift, .control, .option]).isEmpty else {
+        let unmodified = event.modifierFlags.intersection([.command, .shift, .control, .option]).isEmpty
+        if event.keyCode == 123 || event.keyCode == 124 {
+            let expanding = (event.keyCode == 124) != (userInterfaceLayoutDirection == .rightToLeft)
+            if unmodified && owner?.navigateFolder(expanding: expanding) == true { return }
+            // Keep the outline's native parent, child and modified-arrow navigation.
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0
+                context.allowsImplicitAnimation = false
+                super.keyDown(with: event)
+            }
+            return
+        }
+        guard unmodified else {
             super.keyDown(with: event)
             return
         }
@@ -838,8 +894,10 @@ private final class WorktreeOutline: NSOutlineView {
 @MainActor
 private final class WorktreeRow: NSTableRowView {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("WorktreeRow")
+    private weak var outline: WorktreeOutline?
 
-    init() {
+    init(outline: WorktreeOutline) {
+        self.outline = outline
         super.init(frame: .zero)
         identifier = Self.reuseIdentifier
     }
@@ -860,6 +918,8 @@ private final class WorktreeRow: NSTableRowView {
               button.identifier == NSOutlineView.disclosureButtonIdentifier ||
               button.identifier == NSOutlineView.showHideButtonIdentifier else { return }
         button.contentTintColor = .secondaryLabelColor
+        button.target = outline
+        button.action = #selector(WorktreeOutline.toggleDirectory(_:))
     }
 }
 

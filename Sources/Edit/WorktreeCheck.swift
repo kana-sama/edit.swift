@@ -17,6 +17,7 @@ enum WorktreeCheck {
         let external = temporary.appending(path: "External.txt")
         for file in [readme, ignored, nested, external] { try Data("Sample\n".utf8).write(to: file) }
         try Data("*.log\n".utf8).write(to: project.appending(path: ".gitignore"))
+        try await checkFolderAnimation(in: app, under: temporary)
 
         let document = app.makeDocument()
         defer { document.window.close() }
@@ -302,6 +303,72 @@ enum WorktreeCheck {
         try expect(menu.item(withTitle: "New File…")?.isEnabled == true &&
                    menu.item(withTitle: "New Folder…")?.isEnabled == true && menu.item(withTitle: "Rename…") == nil,
                    "the root menu offers creation without a root row")
+    }
+
+    private static func checkFolderAnimation(in app: Edit, under directory: URL) async throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let root = directory.appending(path: "Animation", directoryHint: .isDirectory)
+        let folder = root.appending(path: "Folder", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data().write(to: folder.appending(path: "Child.txt"))
+        try Data().write(to: root.appending(path: "README.md"))
+        let document = app.makeDocument()
+        let window = document.window
+        defer { window.close() }
+        _ = try await app.openFile(root, in: document)
+        document.toggleSidebarFocus(.worktree)
+        let tree = try require(document.worktreeSidebar?.outline, "animation outline")
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
+        window.orderBack(nil)
+        try expect(window.isVisible && !NSApp.isActive, "quiet live animation instance")
+        try await waitFor("animation fixture loads") { tree.numberOfRows == 2 }
+        window.layoutIfNeeded()
+        let item = try require(tree.item(atRow: 0), "animation folder")
+        let collapsedY = tree.rect(ofRow: 1).minY
+        let expandedY = collapsedY + tree.rect(ofRow: 1).height
+        func siblingRow() -> NSTableRowView? {
+            tree.rowView(atRow: tree.numberOfRows - 1, makeIfNecessary: false)
+        }
+        func displayedY() -> CGFloat? {
+            guard let sibling = siblingRow() else { return nil }
+            return sibling.layer?.presentation()?.frame.minY ?? sibling.frame.minY
+        }
+        func clickChevron() throws {
+            let button = try disclosure(at: 0, in: tree)
+            let action = try require(button.action, "disclosure action")
+            try expect(NSApp.sendAction(action, to: button.target, from: button), "dispatch the chevron action")
+        }
+        func expectKeyboardStep(_ characters: String, code: UInt16, expanded: Bool) throws {
+            try press(characters, code: code, in: tree)
+            let settledY = expanded ? expandedY : collapsedY
+            let row = try require(siblingRow(), "sibling row after keyboard expansion")
+            try expect(tree.isItemExpanded(item) == expanded && abs(row.frame.minY - settledY) < 0.5 &&
+                       row.layer?.animationKeys()?.isEmpty != false && document.window.firstResponder === tree,
+                       "keyboard expansion or collapse updates row geometry immediately")
+        }
+
+        try await waitFor("render the collapsed rows") { abs((displayedY() ?? -1) - collapsedY) < 0.5 }
+        try clickChevron()
+        try await waitFor("the first mouse expansion animates after loading the folder") {
+            guard tree.isItemExpanded(item), let y = displayedY() else { return false }
+            return y > collapsedY + 0.5 && y < expandedY - 0.5
+        }
+        try await waitFor("the expanded rows settle") { abs((displayedY() ?? -1) - expandedY) < 0.5 }
+        try clickChevron()
+        try await waitFor("mouse collapse animates the sibling back into place") {
+            guard !tree.isItemExpanded(item), let y = displayedY() else { return false }
+            return y > collapsedY + 0.5 && y < expandedY - 0.5
+        }
+        try await waitFor("the collapsed rows settle") { abs((displayedY() ?? -1) - collapsedY) < 0.5 }
+
+        tree.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        window.makeFirstResponder(tree)
+        try expectKeyboardStep("\u{F703}", code: 124, expanded: true)
+        try expectKeyboardStep("\u{F702}", code: 123, expanded: false)
+        try expectKeyboardStep(" ", code: 49, expanded: true)
+        try expectKeyboardStep(" ", code: 49, expanded: false)
     }
 
     private static func disclosure(at row: Int, in outline: NSOutlineView) throws -> NSButton {
