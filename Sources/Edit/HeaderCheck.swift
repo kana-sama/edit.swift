@@ -3,20 +3,20 @@ import AppKit
 @MainActor
 enum HeaderCheck {
     static func fileIcon(in document: DocumentWindow) -> NSImageView? {
-        fileTitle(in: document)?.arrangedSubviews.compactMap { $0 as? NSImageView }.first
+        fileTitle(in: document.window)?.arrangedSubviews.compactMap { $0 as? NSImageView }.first
     }
 
-    private static func fileTitle(in document: DocumentWindow) -> NSStackView? {
-        document.window.toolbar?.items.first { $0.itemIdentifier == DocumentTitleBar.fileItemIdentifier }?.view as? NSStackView
+    private static func fileTitle(in window: NSWindow) -> NSStackView? {
+        window.toolbar?.items.first { $0.itemIdentifier == DocumentTitleBar.fileItemIdentifier }?.view as? NSStackView
     }
 
-    private static func folderLabel(in document: DocumentWindow) -> NSTextField? {
-        let title = document.window.toolbar?.items.first { $0.itemIdentifier == DocumentTitleBar.folderItemIdentifier }?.view
+    private static func folderLabel(in window: NSWindow) -> NSTextField? {
+        let title = window.toolbar?.items.first { $0.itemIdentifier == DocumentTitleBar.folderItemIdentifier }?.view
         return (title as? NSStackView)?.arrangedSubviews.compactMap { $0 as? NSTextField }.first
     }
 
-    private static func fileLabel(in document: DocumentWindow) -> NSTextField? {
-        fileTitle(in: document)?.arrangedSubviews.compactMap { $0 as? NSTextField }.first
+    private static func fileLabel(in window: NSWindow) -> NSTextField? {
+        fileTitle(in: window)?.arrangedSubviews.compactMap { $0 as? NSTextField }.first
     }
 
     static func run(in app: Edit) async throws {
@@ -44,7 +44,7 @@ enum HeaderCheck {
         _ = try await app.openFile(source, in: document)
 
         document.window.layoutIfNeeded()
-        guard let folderTitle = folderLabel(in: document), let fileTitle = fileLabel(in: document),
+        guard let folderTitle = folderLabel(in: document.window), let fileTitle = fileLabel(in: document.window),
               let icon = fileIcon(in: document) else { throw Failure("title has two text labels and a file icon") }
         try expect(folderTitle.stringValue == "Project" && fileTitle.stringValue == "Main.swift",
                    "the folder appears before the file name")
@@ -85,6 +85,8 @@ enum HeaderCheck {
         try expect(siblings.items.allSatisfy { $0.image != nil && $0.preferredImageVisibility == .visible },
                    "all sibling files show icons on macOS 27")
 
+        try await checkDetachedToolbar(in: document, app: app)
+
         let count = app.documents.count
         siblings.performActionForItem(at: 1)
         try await waitFor("a sibling opens in the same window") {
@@ -101,15 +103,15 @@ enum HeaderCheck {
 
         document.performFind(.toggleSidebar)
         document.window.layoutIfNeeded()
-        try expect(folderLabel(in: document)?.stringValue == "Another folder"
-                   && fileLabel(in: document)?.stringValue == "Untitled" && fileIcon(in: document)?.image != nil,
+        try expect(folderLabel(in: document.window)?.stringValue == "Another folder"
+                   && fileLabel(in: document.window)?.stringValue == "Untitled" && fileIcon(in: document)?.image != nil,
                    "the folder, file and language icon remain in the toolbar alongside the sidebar")
 
         document.toggleWorktreeSidebar()
         document.window.layoutIfNeeded()
         guard let split = document.window.contentViewController as? NSSplitViewController,
               let sidebar = split.splitViewItems.first?.viewController.view,
-              let visibleFolder = folderLabel(in: document) else { throw Failure("the folder title sits next to the sidebar") }
+              let visibleFolder = folderLabel(in: document.window) else { throw Failure("the folder title sits next to the sidebar") }
         let divider = sidebar.convert(sidebar.bounds, to: nil).maxX
         let gutter = visibleFolder.convert(visibleFolder.bounds, to: nil).minX - divider
         try expect((10...18).contains(gutter), "the folder title clears the sidebar divider (\(gutter) pt)")
@@ -132,6 +134,47 @@ enum HeaderCheck {
         try expect(compactIcon.window === document.window && rect.width > 0 && rect.minX >= 0 &&
                    rect.maxX <= document.window.frame.width,
                    "the file icon stays visible with long names in a narrow window (\(rect), window width \(document.window.frame.width), attached \(compactIcon.window === document.window))")
+    }
+
+    private static func checkDetachedToolbar(in document: DocumentWindow, app: Edit) async throws {
+        let window = document.window
+        guard let toolbar = window.toolbar else { throw Failure("the document has a toolbar to reveal in fullscreen") }
+        // Host the real toolbar in another window without switching the user's Space.
+        let host = NSWindow(contentRect: NSRect(x: -1000, y: -1000, width: 640, height: 180),
+                            styleMask: [.titled], backing: .buffered, defer: false)
+        host.isReleasedWhenClosed = false
+        host.collectionBehavior = [.fullScreenAuxiliary]
+        host.toolbarStyle = window.toolbarStyle
+        window.toolbar = nil
+        host.toolbar = toolbar
+        defer {
+            host.toolbar = nil
+            window.toolbar = toolbar
+            window.layoutIfNeeded()
+            host.close()
+        }
+
+        host.layoutIfNeeded()
+        guard let folder = folderLabel(in: host), let file = fileLabel(in: host),
+              let icon = fileTitle(in: host)?.arrangedSubviews.compactMap({ $0 as? NSImageView }).first,
+              [folder, file, icon].allSatisfy({ $0.window === host }) else {
+            throw Failure("the detached toolbar hosts the real folder, file, and language icon")
+        }
+
+        for controlClick in [false, true] {
+            let previous = document.titleBar.agentContextMenu
+            try secondaryClick(folder, in: host, controlClick: controlClick)
+            let recent = document.titleBar.agentContextMenu
+            try expect(recent !== previous && recent?.title == "Recent Folders",
+                       "opening recent folders from the detached toolbar")
+            try secondaryClick(file, in: host, controlClick: controlClick)
+            try await waitFor("opening sibling files from the detached toolbar") {
+                document.titleBar.agentContextMenu !== recent &&
+                    document.titleBar.agentContextMenu?.items.map(\.title) == ["Main.swift", "Notes.txt"]
+            }
+            try secondaryClick(icon, in: host, controlClick: controlClick)
+            try app.checkHeaderLanguagePicker(in: document)
+        }
     }
 
     private static func secondaryClick(_ view: NSView, in window: NSWindow, controlClick: Bool = false) throws {

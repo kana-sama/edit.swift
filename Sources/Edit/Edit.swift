@@ -8,6 +8,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     lazy var syntaxOverrides = SyntaxLanguageOverrides(defaults: isAgentCheck ? nil : .standard)
     private weak var recentMenu: NSMenu?
     private var controlPanel: ControlPanel?
+    private var titleClickMonitor: Any?
     private var openFilePanel: OpenFilePanel?
     private weak var openPanelDocument: DocumentWindow?
     private(set) lazy var recentFiles = RecentFiles(url: recentHistoryURL)
@@ -51,6 +52,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     func applicationDidFinishLaunching(_ notification: Notification) {
         let app = NSApplication.shared
         installMenus(in: app)
+        titleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            guard let self else { return event }
+            return routeTitleClick(event)
+        }
         let initial = makeDocument()
         if isAgentCheck {
             Task { @MainActor in
@@ -128,6 +133,26 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 .first(where: { $0.name == "path" })?.value,
               path.hasPrefix("/"), !path.utf8.contains(0) else { return nil }
         return URL(fileURLWithPath: path)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if let titleClickMonitor { NSEvent.removeMonitor(titleClickMonitor) }
+    }
+
+    private func routeTitleClick(_ event: NSEvent) -> NSEvent? {
+        let modifiers = event.modifierFlags.intersection([.control, .command, .option, .shift])
+        guard !isQuitting, let window = event.window,
+              event.type == .rightMouseDown || (event.type == .leftMouseDown && modifiers == .control) else { return event }
+
+        // AppKit can host the fullscreen toolbar in a different window from the document.
+        for document in documents {
+            if document.titleBar.handleSecondaryClick(at: event.locationInWindow, in: window) { return nil }
+        }
+        return event
+    }
+
+    func dismissControlForTitleClick() {
+        controlPanel?.dismiss(restoreFocus: false)
     }
 
     func applicationWillResignActive(_ notification: Notification) {

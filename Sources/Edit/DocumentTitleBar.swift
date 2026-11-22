@@ -204,24 +204,27 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         Task { [app, document] in await app.openFiles([url], in: document) }
     }
 
-    func handleSecondaryClick(_ event: NSEvent) -> Bool {
+    func handleSecondaryClick(at location: NSPoint, in window: NSWindow) -> Bool {
         guard document.window.attachedSheet == nil else { return false }
 
         func hits(_ view: NSView) -> Bool {
-            let point = view.convert(event.locationInWindow, from: nil)
-            return view.window === document.window && !view.isHiddenOrHasHiddenAncestor &&
-                view.bounds.contains(point) && view.visibleRect.contains(point)
+            guard view.window === window, !view.isHiddenOrHasHiddenAncestor else { return false }
+            let point = view.convert(location, from: nil)
+            return view.bounds.contains(point) && view.visibleRect.contains(point)
         }
 
+        let show: () -> Void
         if let folderLabel, document.folderURL != nil, hits(folderLabel) {
-            showFolderMenu(from: folderLabel)
+            show = { self.showFolderMenu(from: folderLabel) }
         } else if let languageIcon, hits(languageIcon) {
-            showLanguagePicker()
+            show = { self.showLanguagePicker() }
         } else if let fileLabel, document.fileURL != nil, hits(fileLabel) {
-            showSiblingMenu(from: fileLabel)
+            show = { self.showSiblingMenu(from: fileLabel) }
         } else {
             return false
         }
+        app.dismissControlForTitleClick()
+        show()
         return true
     }
 
@@ -249,7 +252,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     }
 
     private func popUp(_ menu: NSMenu, from label: TitleBarLabel) {
-        guard let first = menu.items.first, label.window === document.window else { return }
+        guard let first = menu.items.first, label.window != nil, !label.isHiddenOrHasHiddenAncestor else { return }
         if app.isAgentCheck {
             agentContextMenu = menu
             return
