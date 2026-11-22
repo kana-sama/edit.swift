@@ -62,8 +62,20 @@ final class SidebarMenuItem: NSToolbarItem {
             button.alignment = .natural
             button.imagePosition = .imageTrailing
             button.imageHugsTitle = true
-            button.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
-                .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+            if let glyph = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold)) {
+                let gap: CGFloat = 3
+                let isRightToLeft = button.userInterfaceLayoutDirection == .rightToLeft
+                let size = NSSize(width: glyph.size.width + gap, height: glyph.size.height)
+                button.image = NSImage(size: size, flipped: false) { bounds in
+                    let rect = NSRect(origin: NSPoint(x: bounds.minX + (isRightToLeft ? 0 : gap), y: bounds.minY),
+                                      size: glyph.size)
+                    glyph.draw(in: rect)
+                    NSColor.secondaryLabelColor.setFill()
+                    rect.fill(using: .sourceIn)
+                    return true
+                }
+            }
             // Reserve space for the longer title and the button cell’s horizontal insets.
             let titleWidth = (SidebarMode.worktree.title as NSString).size(withAttributes: [.font: Self.titleFont]).width
             let chevronWidth = button.image?.size.width ?? 0
