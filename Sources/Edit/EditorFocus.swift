@@ -115,14 +115,17 @@ extension EditorTextView {
             return NSRange(location: min(activeEnd(of: selection), lines.contentEnd), length: 0)
         }
         let origin = enclosingScrollView?.visibleContentOrigin
+        startFocus(with: ranges)
+        setCaretSelections(carets, record: false)
+        if let origin { enclosingScrollView?.scrollToVisibleContentOrigin(origin) }
+        onFocusScopeChange?()
+    }
+
+    func startFocus(with ranges: [NSRange]) {
         breakUndoCoalescing()
         editorUndoManager.beginFocus()
         focusSession = EditorFocusSession(ranges)
         resetSelectionHistory()
-        setCaretSelections(carets, record: false)
-        if let origin { enclosingScrollView?.scrollToVisibleContentOrigin(origin) }
-        requestLineRefresh()
-        onFocusScopeChange?()
     }
 
     func exitFocus(notify: Bool = true) {

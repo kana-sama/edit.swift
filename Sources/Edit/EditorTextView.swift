@@ -605,18 +605,23 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func capturePosition() -> EditorPosition {
+        let focus = captureFocusPosition()
         guard let scroll = enclosingScrollView else {
-            return EditorPosition(selections: caretSelections, horizontalOffset: 0, verticalOffset: 0, topLine: nil)
+            return EditorPosition(selections: caretSelections, horizontalOffset: 0, verticalOffset: 0, topLine: nil,
+                                  focus: focus)
         }
         let top = textViewport(in: scroll).lowerBound
         return EditorPosition(selections: caretSelections, horizontalOffset: scroll.visibleContentOrigin.x,
-                              verticalOffset: top, topLine: capturePositionTopLine(at: top))
+                              verticalOffset: top, topLine: capturePositionTopLine(at: top), focus: focus)
     }
 
     func restorePosition(_ position: EditorPosition) {
         if let text = textStorage?.mutableString {
-            let selections = position.selections.compactMap { restoredSelection($0, in: text) }
-            setCaretSelections(selections.isEmpty ? [NSRange(location: 0, length: 0)] : selections, record: false)
+            let focusRestored = position.focus.map { restoreFocusPosition($0, in: text) } ?? false
+            if !focusRestored {
+                let selections = position.selections.compactMap { restoredSelection($0, in: text) }
+                setCaretSelections(selections.isEmpty ? [NSRange(location: 0, length: 0)] : selections, record: false)
+            }
         }
 
         guard let scroll = enclosingScrollView,

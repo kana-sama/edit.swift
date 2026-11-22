@@ -1,6 +1,6 @@
 import AppKit
 
-struct FocusNavigationSelection: Equatable {
+struct FocusNavigationSelection: Codable, Equatable, Sendable {
     let anchor: Int
     let head: Int
 
@@ -106,6 +106,39 @@ extension EditorTextView {
         if selectingAll { setFocusedSelections(matches + [primary], in: scope) }
         return true
     }
+
+    func captureFocusPosition() -> EditorPosition.Focus? {
+        guard let scope = focusRanges else { return nil }
+        return EditorPosition.Focus(text: string, ranges: scope, selections: focusedSelections(in: scope))
+    }
+
+    func restoreFocusPosition(_ position: EditorPosition.Focus, in text: NSString) -> Bool {
+        // A buffer switch restores the position before re-enabling editing.
+        guard focusSession == nil, !hasMarkedText(), !position.ranges.isEmpty, !position.selections.isEmpty,
+              position.matches(string) else { return false }
+
+        // Stored UTF-16 offsets must describe complete, ordered blocks of this text.
+        var previousLineEnd = -1
+        for range in position.ranges {
+            guard range.location > previousLineEnd, range.location <= text.length,
+                  range.length >= 0, range.length <= text.length - range.location,
+                  LineEditing.line(at: range.location, in: text).start == range.location else { return false }
+            let lastLine = LineEditing.line(at: range.upperBound, in: text)
+            guard lastLine.contentEnd == range.upperBound else { return false }
+            previousLineEnd = lastLine.end
+        }
+
+        func contains(_ offset: Int) -> Bool {
+            position.ranges.contains { $0.location <= offset && offset <= $0.upperBound }
+        }
+        guard position.selections.allSatisfy({ contains($0.anchor) && contains($0.head) }) else { return false }
+
+        startFocus(with: position.ranges)
+        setFocusedSelections(position.selections, in: position.ranges, record: false)
+        onFocusScopeChange?()
+        return true
+    }
+
     var focusedSelectionGroups: [[NSRange]]? {
         guard let scope = focusRanges else { return nil }
         return focusedSelections(in: scope).map { $0.pieces(in: scope) }

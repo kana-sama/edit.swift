@@ -352,11 +352,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func restoreEditorPosition(_ position: EditorPosition?) {
-        if let position {
-            // AppKit calculates the titlebar inset during layout, including in a window not presented yet.
-            window.layoutIfNeeded()
-            editor.restorePosition(position)
-        }
+        guard !isShowingFilePreview, let position else { return }
+        // AppKit calculates the titlebar inset during layout, including in a window not presented yet.
+        window.layoutIfNeeded()
+        editor.restorePosition(position)
     }
 
     func rememberFilePosition(_ position: EditorPosition? = nil) {

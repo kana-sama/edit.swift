@@ -132,6 +132,7 @@ enum FocusCheck {
         try verifyLineScope(in: app)
         try verifyOccurrencesAcrossFocusBlocks(in: app)
         try await verifyFileLifecycle(in: app)
+        try await verifyRememberedFocus(in: app)
     }
 
     private static func clickCharacter(at offset: Int, editor: EditorTextView, window: NSWindow) throws {
@@ -334,6 +335,120 @@ enum FocusCheck {
         await document.newBuffer()
         try expect(editor.focusRanges == [NSRange(location: 0, length: 11)] && editor.string == "plain draft",
                    "cancelling replacement of a dirty draft preserves Focus")
+    }
+
+    private static func verifyRememberedFocus(in app: Edit) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "focus-position-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let existing = app.documents.count
+        defer { app.documents.dropFirst(existing).forEach { $0.window.close() } }
+        let source = directory.appending(path: "Focused source.txt")
+        let other = directory.appending(path: "Unrelated source.txt")
+        let filler = (0..<110).map { "position_\($0) " + String(repeating: "wide text ", count: 22) + "\n" }.joined()
+        let contents = "first block\nprotected middle\n" + filler + "last block\n"
+        try Data(contents.utf8).write(to: source)
+        try Data("other file\n".utf8).write(to: other)
+        let text = contents as NSString
+        let firstBlock = text.range(of: "first block")
+        let middleBlock = text.range(of: "protected middle")
+        let lastBlock = text.range(of: "last block")
+        let selectedPrefix = NSRange(location: lastBlock.location, length: 4)
+        let anchor = NSRange(location: selectedPrefix.upperBound, length: 0)
+
+        func expectBackwardSelection(in document: DocumentWindow, _ message: String) throws {
+            let editor = document.editor
+            try expect(editor.focusRanges == [firstBlock, lastBlock] &&
+                       editor.focusedSelectionGroups == [[firstBlock, selectedPrefix]] &&
+                       editor.selectedRange() == firstBlock && editor.activeEnd(of: firstBlock) == firstBlock.location,
+                       message)
+        }
+
+        func expectViewport(in document: DocumentWindow, at expected: EditorPosition) throws {
+            let actual = document.editor.capturePosition()
+            let expectedLine = try require(expected.topLine)
+            let actualLine = try require(actual.topLine)
+            try expect(actualLine.textOffset == expectedLine.textOffset &&
+                       abs(actualLine.offsetIntoLine - expectedLine.offsetIntoLine) <= 1 &&
+                       abs(actual.horizontalOffset - expected.horizontalOffset) <= 1,
+                       "restoring Focus keeps the saved viewport with the primary selection offscreen")
+        }
+
+        let first = app.makeDocument()
+        _ = try await app.openFile(source, in: first)
+        first.editor.setCaretSelections([firstBlock, lastBlock])
+        first.focusSelection()
+        first.editor.setCaretSelections([anchor])
+        first.editor.doCommand(by: #selector(NSResponder.moveToBeginningOfDocumentAndModifySelection(_:)))
+        try expectBackwardSelection(in: first, "create a backward logical selection across two focused blocks")
+
+        let scrollAnchor = text.range(of: "position_42 ")
+        first.editor.scrollRangeToVisible(scrollAnchor)
+        first.window.layoutIfNeeded()
+        first.editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        let line = try require(first.editor.lineBounds(at: scrollAnchor.location))
+        first.scrollView.scrollToVisibleContentOrigin(NSPoint(x: 170, y: line.minY + 4))
+        first.editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        let viewport = first.editor.capturePosition()
+        try expect(viewport.horizontalOffset > 100 && viewport.verticalOffset > 500,
+                   "the Focus restoration scenario starts scrolled in both directions")
+
+        _ = try await app.openFile(other, in: first)
+        try expect(first.editor.focusRanges == nil && first.editor.string == "other file\n",
+                   "switching to an unrelated file leaves Focus behind")
+        _ = try await app.openFile(source, in: first)
+        try expectBackwardSelection(in: first, "reopening a file restores its saved Focus and direction")
+        try expectViewport(in: first, at: viewport)
+
+        let second = app.makeDocument()
+        _ = try await app.openFile(source, in: second)
+        second.editor.exitFocus()
+        second.editor.setCaretSelections([middleBlock])
+        let middleCaret = NSRange(location: second.editor.activeEnd(of: middleBlock), length: 0)
+        second.focusSelection()
+        try expect(second.editor.focusRanges == [middleBlock] && second.editor.selectedRange() == middleCaret,
+                   "another window can focus a different line in the same file")
+
+        let draft = app.makeDocument()
+        let draftText = "outside draft\ninside draft"
+        draft.editor.insertText(draftText, replacementRange: NSRange(location: NSNotFound, length: 0))
+        let draftBlock = (draftText as NSString).range(of: "inside draft")
+        draft.editor.setCaretSelections([draftBlock])
+        draft.focusSelection()
+
+        let store = SessionStore(url: directory.appending(path: "focus-session.json"))
+        try store.write(EditorSession(documents: [first, second, draft].map { $0.sessionDocument() },
+                                      activeIndex: 0, lastWindow: nil))
+        let session = try require(store.read())
+        [first, second, draft].forEach { $0.window.close() }
+        let placeholder = app.makeDocument()
+        await app.restore(session, reusing: placeholder)
+        let restored = Array(app.documents.dropFirst(existing))
+        try expect(restored.count == 3 && restored.first === placeholder,
+                   "restore the saved Focus windows, including the untitled draft")
+        try expectBackwardSelection(in: restored[0], "session restores the first window's own Focus and active end")
+        try expectViewport(in: restored[0], at: viewport)
+        try expect(restored[1].editor.focusRanges == [middleBlock] &&
+                   restored[1].editor.selectedRange() == middleCaret,
+                   "session restores the second window's own Focus even for the same file")
+        try expect(restored[2].fileURL == nil && restored[2].window.isDocumentEdited &&
+                   restored[2].editor.string == draftText && restored[2].editor.focusRanges == [draftBlock],
+                   "session restores a focused untitled draft with its text and dirty state")
+
+        let editor = restored[0].editor
+        editor.doCommand(by: #selector(NSResponder.moveRightAndModifySelection(_:)))
+        let shortened = NSRange(location: firstBlock.location + 1, length: firstBlock.length - 1)
+        try expect(editor.focusedSelectionGroups == [[shortened, selectedPrefix]] &&
+                   editor.activeEnd(of: shortened) == shortened.location,
+                   "Shift-Right shrinks the restored logical selection from its original active end")
+
+        _ = try await app.openFile(other, in: restored[0])
+        let changed = "other block\nprotected middle\n" + filler + "last block\n"
+        try Data(changed.utf8).write(to: source)
+        _ = try await app.openFile(source, in: restored[0])
+        try expect(editor.string == changed && editor.focusRanges == nil &&
+                   editor.caretSelections == [selectedPrefix, shortened],
+                   "an external same-length edit discards stale Focus boundaries and keeps the ordinary selections")
     }
 
     private static func descendant<T: NSView>(of view: NSView?, type: T.Type) -> T? {

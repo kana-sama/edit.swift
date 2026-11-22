@@ -33,7 +33,7 @@ An insertion at either endpoint belongs to the block. Return at the end creates 
 
 A compound edit, including multiple carets or Replace All, forms one undo step. Undo and redo within Focus cover this session's edits and restore the text, selections, and range boundaries together. The first edit starts a fresh undo group. Entering and exiting without edits preserves the existing undo and redo history and dirty state. The full document history is available again on exit.
 
-Switching buffers, closing the window, or reloading the document ends Focus when the operation proceeds. Cancelling a save or close confirmation keeps the active session. Saving the document or changing its name through Save As keeps the scope. Normal session restoration remembers the editor's position and opens the document for ordinary editing.
+Save the focused blocks and their directional selections with the [buffer position](../files/spec.md). Restore them when returning to a recent file or restoring an open window or draft. Each restored window uses its own saved state, including when two windows show the same file. When the current text differs from the saved text, restore the ordinary position and selections and open in ordinary editing mode. Cancelling a save or close confirmation keeps the active session. Saving the document or changing its name through Save As keeps the scope.
 
 ## Appearance
 
@@ -47,6 +47,7 @@ Use the current text surface, syntax colors, window appearance, and system selec
 - With the same query inside and outside the scope, check the result count, Command-G and wrap, then Replace All. Check a regex that would only match by reading across a range boundary and a multiline query contained entirely within one range. Exit and verify that the full-document results are available again.
 - Open Command Mode from a nonempty selection and invoke Focus Selection. Press Escape during IME composition, while Control or Search has focus, with selected text, with extra carets, and with one empty caret. Verify that the appropriate interaction handles each press. Drag out from inside a range and click outside it in separate trials.
 - Edit a named file and verify both autosave and Save As preserve the protected text and line endings. Cancel a replacement of an edited untitled document and verify the scope and edits are still present. Exit Focus and undo a change made before entering the mode.
+- Switch away from a focused file and reopen it. Verify its scope and a selection across two blocks are restored with the viewport. Restore a session with two windows showing that file in different scopes and an untitled draft in Focus. If a file changes on disk before reopening, verify its old scope is cleared.
 - Inspect initial caret placement, both horizontal rules, scroll and zoom behavior, and appearance changes. Open the same file in a second window and verify the first window's scope belongs to its own view.
 
 ## Reference
