@@ -67,6 +67,9 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         scrollView.backgroundColor = .textBackgroundColor
 
         let editor = EditorTextView(usingTextLayoutManager: true)
+        if let layout = editor.textLayoutManager {
+            layout.textSelectionNavigation = EditorWordNavigation(dataSource: layout)
+        }
         editor.frame = NSRect(origin: .zero, size: scrollView.contentSize)
         editor.minSize = .zero
         editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)

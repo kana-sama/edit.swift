@@ -6,7 +6,7 @@ Use Menlo Regular at 12 points with an 18-point line height, matching the defaul
 
 ## Editing
 
-- Type and select Unicode text with the keyboard, mouse, or macOS input methods. Use native character and word movement, page navigation, and editing key bindings.
+- Type and select Unicode text with the keyboard, mouse, or macOS input methods. Use native character movement, page navigation, and editing key bindings. Word commands treat a dot as a separator. In `item.action`, Option-Right from the beginning reaches the end of `item` and then the end of `action`. Option-Left reaches the start of `action` and then the start of `item`. Shift extends from the current anchor, and Option-delete respects the same word boundary.
 - Use the Edit menu or Command-X, C, V, A, Z, and Shift-Command-Z for Cut, Copy, Paste, Select All, Undo, and Redo. Copy and Cut with an empty selection act on the current line. Pasting a whole-line copy at a caret inserts it above that line. Selected text uses native clipboard behavior.
 - Return inserts a line break with the leading spaces or tabs before the caret. Tab inserts four spaces at a caret or indents the selected lines. Shift-Tab outdents the affected lines.
 - Option-Up and Option-Down move the current line or selected block up or down and keep the selection with the moved text. At the document boundary the block stays in place.

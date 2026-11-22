@@ -117,6 +117,36 @@ enum MultiCaretCheck {
             }
             if !editor.performKeyEquivalent(with: event) { editor.keyDown(with: event) }
         }
+
+        set("if item.action", [range(3)])
+        try arrow(124, "\u{F703}", .option)
+        try expect(editor.caretSelections == [range(7)], "Option-Right stops before the dot")
+        try arrow(124, "\u{F703}", .option)
+        try expect(editor.caretSelections == [range(14)], "Option-Right then reaches the end of action")
+        try arrow(123, "\u{F702}", .option)
+        try expect(editor.caretSelections == [range(8)], "Option-Left stops at the start of action")
+        try arrow(123, "\u{F702}", .option)
+        try expect(editor.caretSelections == [range(3)], "Option-Left then reaches the start of item")
+
+        set("item.action\nitem.action", [range(0), range(12)])
+        try arrow(124, "\u{F703}", [.option, .shift])
+        try expect(editor.caretSelections == [range(0, 4), range(12, 4)], "Shift-Option-Right stops both selections before their dots")
+        try arrow(124, "\u{F703}", [.option, .shift])
+        try expect(editor.caretSelections == [range(0, 11), range(12, 11)], "Shift-Option-Right extends to the end of action")
+        try arrow(123, "\u{F702}", [.option, .shift])
+        try expect(editor.caretSelections == [range(0, 5), range(12, 5)], "Shift-Option-Left shrinks the selections at both dots")
+        try arrow(123, "\u{F702}", [.option, .shift])
+        try expect(editor.caretSelections == [range(0), range(12)], "reversed word movement returns to both anchors")
+
+        set("item.action", [range(11)])
+        edit { editor.deleteWordBackward(nil) }
+        try expect(editor.string == "item.", "Option-Delete stops after the dot")
+        undo.undo()
+        try expect(editor.string == "item.action", "undo restores the deleted word")
+        editor.setCaretSelections([range(0)])
+        edit { editor.deleteWordForward(nil) }
+        try expect(editor.string == ".action", "Option-Forward Delete stops before the dot")
+
         let movementText = "zero one\ntwo three\nfour five\nsix seven\n"
         let originalCarets = [range(2), range(12)]
         set(movementText, originalCarets)
