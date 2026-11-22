@@ -60,6 +60,12 @@ final class SyntaxHighlighting {
         }
     }
 
+    func prepareForBufferReplacement() {
+        cancelPending()
+        spans = []
+        clearColors()
+    }
+
     func install(_ result: [SyntaxSpan]) {
         cancelPending()
         display(result)

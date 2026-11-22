@@ -117,9 +117,11 @@ enum SyntaxEngine {
 
     private static let queries = Bundle.main.resourceURL?.appending(path: "syntax/queries").path
 
+    private static let firstFrameByteLimit = 64 * 1_024
+
     static func prepareSmallDocument(_ text: String, language: SyntaxLanguage) -> SyntaxSnapshot? {
         // Keep large documents on the progressive path so their first display won't wait for a full query.
-        guard language != .plainText, text.utf8.count <= 32 * 1_024,
+        guard language != .plainText, text.utf8.count <= firstFrameByteLimit,
               let spans = spans(in: text, language: language) else { return nil }
         return SyntaxSnapshot(language: language, spans: spans)
     }
@@ -133,7 +135,8 @@ enum SyntaxEngine {
         let units = Array(text.utf16)
         guard let count = UInt32(exactly: units.count) else { return nil }
         let viewport = visibleRange ?? NSRange(location: 0, length: min(4_096, units.count))
-        let prioritizesViewport = onPreview != nil && units.count >= 64 * 1_024 && viewport.length < units.count / 4
+        let prioritizesViewport = onPreview != nil && text.utf8.count > firstFrameByteLimit
+            && viewport.length < units.count / 4
         let previewStart = prioritizesViewport ? UInt32(min(viewport.location, units.count)) : 0
         let previewEnd = prioritizesViewport ? UInt32(min(NSMaxRange(viewport), units.count)) : 0
         let sink = Captures(length: units.count, onPreview: onPreview)

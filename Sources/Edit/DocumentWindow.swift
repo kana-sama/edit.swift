@@ -720,13 +720,14 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private func installText(_ text: String, preparedSyntax: SyntaxSnapshot? = nil) {
         editor.preferredLineEnding = format.lineEnding
         editor.resetMultiCarets()
+        syntaxHighlighting?.prepareForBufferReplacement()
         editor.string = text
+        refreshSyntax(immediate: true, preparedSyntax: preparedSyntax)
         editor.setSelectedRange(NSRange(location: 0, length: 0))
         editor.scrollRangeToVisible(editor.selectedRange())
         editor.undoManager?.removeAllActions()
         updateTitle()
         updateEditedState()
-        refreshSyntax(immediate: true, preparedSyntax: preparedSyntax)
         findPanel?.bufferReplaced()
     }
 

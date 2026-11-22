@@ -10,6 +10,7 @@ enum SyntaxCheck {
     static func run(in app: Edit) async throws {
         try await checkFirstDraw(in: app, appearance: .aqua)
         try await checkFirstDraw(in: app, appearance: .darkAqua)
+        try await checkSwiftFirstDraw(in: app)
         try await checkModeRepaint(in: app)
         try await Task.detached { try checkGrammars() }.value
         let document = app.makeDocument()
@@ -71,6 +72,50 @@ enum SyntaxCheck {
         scrollView.reflectScrolledClipView(clip)
         try expectDrawnColor(in: clip, primaryChannel: 0, after: "scrolling back to string literals")
         print("Syntax in the first frame of a \(source.utf8.count)-byte file: open \(opened), scroll \(scrolled).")
+    }
+
+    private static func checkSwiftFirstDraw(in app: Edit) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let warmup = directory.appending(path: "Warmup.swift")
+        let target = directory.appending(path: "Target.swift")
+        let source = (0..<360).map {
+            "func sample\($0)(value: Int) -> Int {\n    let doubled = value * 2\n    return doubled\n}\n"
+        }.joined() + String(repeating: "// comment in a different viewport\n", count: 250)
+        try Data("let marker = 10\n".utf8).write(to: warmup)
+        try Data(source.utf8).write(to: target)
+
+        let document = app.makeDocument()
+        let window = document.window
+        let scroll = document.scrollView
+        let clip = scroll.contentView
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
+        window.orderBack(nil)
+        defer { window.close() }
+        guard window.isVisible, !NSApp.isActive else { throw Failure("Could not prepare a quiet Swift editor window.") }
+        guard try await app.openFile(warmup, in: document) === document else {
+            throw Failure("Could not open the Swift warmup fixture.")
+        }
+
+        let start = ContinuousClock.now
+        guard try await app.openFile(target, in: document) === document else {
+            throw Failure("Could not open the mid-size Swift fixture.")
+        }
+        let opened = start.duration(to: .now)
+        window.layoutIfNeeded()
+        try expectDrawnColor(in: clip, primaryChannel: 2, after: "opening a mid-size Swift file")
+        try await waitForPaint(in: clip, language: .swift)
+        let painted = start.duration(to: .now)
+        print("Syntax in a \(source.utf8.count)-byte Swift file: open \(opened), live color \(painted), with first-frame colors.")
+        let scrollStart = ContinuousClock.now
+        clip.scroll(to: NSPoint(x: 0, y: clip.documentRect.maxY - clip.bounds.height))
+        scroll.reflectScrolledClipView(clip)
+        try expectDrawnColor(in: clip, primaryChannel: 1, after: "scrolling to newly visible Swift comments")
+        print("Scroll to colored Swift comments: \(scrollStart.duration(to: .now)).")
     }
 
     private static func checkModeRepaint(in app: Edit) async throws {
@@ -149,7 +194,7 @@ enum SyntaxCheck {
         }
         switch language {
         case .rust: return hasGreen
-        case .markdown: return hasBlue && !hasGreen
+        case .markdown, .swift: return hasBlue && !hasGreen
         default: return hasText && !hasGreen && !hasBlue
         }
     }
@@ -164,13 +209,14 @@ enum SyntaxCheck {
         bitmap.size = bounds.size
         clip.cacheDisplay(in: bounds, to: bitmap)
         guard let pixels = bitmap.bitmapData else { throw Failure("No viewport pixels were drawn.") }
-        let otherChannel = 1 - primaryChannel
+        let otherChannel = (primaryChannel + 1) % 3
+        let thirdChannel = (primaryChannel + 2) % 3
         for y in 0..<bitmap.pixelsHigh {
             for x in 0..<min(300, bitmap.pixelsWide) {
                 let offset = y * bitmap.bytesPerRow + x * 4
                 let color = Int(pixels[offset + primaryChannel])
                 if color - Int(pixels[offset + otherChannel]) > 32,
-                   color - Int(pixels[offset + 2]) > 32 { return }
+                   color - Int(pixels[offset + thirdChannel]) > 32 { return }
             }
         }
         throw Failure("Missing syntax color in the first frame after \(action).")
