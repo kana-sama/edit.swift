@@ -10,6 +10,10 @@ Review a change in the editor where it was made. Inline diff uses the same compa
 - Several changes can stay open. Escape collapses them together before ordinary editor selection cancellation. When the native input method or a modal sheet handles Escape, it receives it first. Closing a change with focus in its removed text returns focus to the source editor.
 - Keep the open hunks anchored to the diff baseline across refreshes of the same document. Keep a refreshed change open when its base range overlaps the previous open change, such as when editing the live line below a deletion turns it into a replacement. Remove an open hunk when its comparison disappears or when another document replaces the buffer. During a short pending refresh, keep the visible diff and disable hunk actions until a current result is ready. Follow the [asynchronous update rules](../../design.md#asynchronous-updates).
 
+## Layout
+
+The editor uses a single text view. Its TextKit layout reserves room for removed paragraphs, and native TextKit line fragments supply their glyphs and character geometry. Draw removed text and both change backgrounds in the editor's own document coordinates. The same layout supplies the removed caret, mouse hit testing, selection painting, and scrolling. Sidebars change the visible area of that document and clip all rows together. The live buffer remains the source for editing, saving, Jujutsu comparisons, and undo.
+
 ## Contextual actions
 
 An open change shows compact AppKit actions when the latest caret is on one of its rows or the mouse is over one of its rows. When the caret and mouse are on different open changes, show their panels simultaneously. When both are on the same change, show one panel. Use a matte, opaque panel at the upper trailing edge of the change. Keep it reachable while the top of the block scrolls away. The panel overlays the text at the same position even when it covers part of a line. Moving onto a panel keeps it tied to its own change. Use native buttons for **Restore**, **Previous Change**, and **Next Change**, with tooltips and accessibility labels.

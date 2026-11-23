@@ -23,16 +23,17 @@ final class JJInlineDiffInteraction {
     private var navigationSelection: NSTextSelection?
     private var navigationNeedsText = true
     private var navigationFont: NSFont?
-    private lazy var navigationView: NSTextView = {
-        let view = NSTextView(usingTextLayoutManager: true)
-        view.frame = NSRect(x: 0, y: 0, width: 720, height: 480)
-        view.textContainer?.widthTracksTextView = false
-        view.textContainer?.heightTracksTextView = false
-        view.textContainer?.size = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        if let layout = view.textLayoutManager {
-            layout.textSelectionNavigation = EditorWordNavigation(dataSource: layout)
-        }
-        return view
+    private let navigationContent = NSTextContentStorage()
+    private let navigationStorage = NSTextStorage()
+    private lazy var navigationLayout: NSTextLayoutManager = {
+        let manager = NSTextLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                                     height: CGFloat.greatestFiniteMagnitude))
+        manager.textContainer = container
+        navigationContent.textStorage = navigationStorage
+        navigationContent.addTextLayoutManager(manager)
+        manager.textSelectionNavigation = EditorWordNavigation(dataSource: manager)
+        return manager
     }()
     private(set) var isMirroringProjectedSelection = false
 
@@ -47,6 +48,11 @@ final class JJInlineDiffInteraction {
     }
 
     var head: Position? { selection?.head }
+
+    var caretRect: NSRect? {
+        guard hasProjectedCaret, case .removed(let key, let offset) = head else { return nil }
+        return layout.removedCaretRect(key: key, offset: offset)
+    }
 
     var projectedEditRange: NSRange? {
         guard let projection, let range = selectedRange(in: projection),
@@ -82,8 +88,7 @@ final class JJInlineDiffInteraction {
     }
 
     func updatePresentation() {
-        let caret = hasProjectedCaret ? selection?.head : nil
-        layout.showSelection(projection.flatMap { selectedRange(in: $0) }, caret: caret, in: projection)
+        layout.showSelection(projection.flatMap { selectedRange(in: $0) }, in: projection)
     }
 
     @discardableResult
@@ -93,6 +98,7 @@ final class JJInlineDiffInteraction {
         guard let offsets = next.offsets(in: projection),
               let live = projection.liveRange(for: Self.range(offsets.anchor, offsets.head)),
               editor.focusAllowsEdits([live]) else { return false }
+        if selection?.head != head { editor.multiCaret.restartBlink = true }
         selection = next
         navigationSelection = nil
         isMirroringProjectedSelection = true
@@ -135,7 +141,6 @@ final class JJInlineDiffInteraction {
         }
         guard window.makeFirstResponder(editor) else { return false }
         let previous = currentSelection(in: editor)
-        if case .removed = hit { editor.onFindEditorInteraction?() }
 
         let granularity: NSSelectionGranularity = event.clickCount >= 3 ? .selectByParagraph
             : event.clickCount == 2 ? .selectByWord : .selectByCharacter
@@ -184,8 +189,10 @@ final class JJInlineDiffInteraction {
         }
         guard let movement = editor.selectionMovement(for: command) else { return false }
         let old = currentSelection(in: editor)
-        guard let offsets = old.offsets(in: projection), let textLayout = prepareNavigation(for: editor, projection: projection),
+        let textLayout = prepareNavigation(for: editor, projection: projection)
+        guard let offsets = old.offsets(in: projection),
               let textRange = editor.textRange(Self.range(offsets.anchor, offsets.head), in: textLayout) else { return false }
+        textLayout.ensureLayout(for: textRange)
         var result = navigationSelection ?? NSTextSelection(
             range: textRange, affinity: offsets.head < offsets.anchor ? .upstream : .downstream, granularity: .character
         )
@@ -244,22 +251,31 @@ final class JJInlineDiffInteraction {
     private func selectionRange(at offset: Int, granularity: NSSelectionGranularity,
                                 editor: EditorTextView, projection: JJInlineDiffSelection) -> NSRange {
         let caret = NSRange(location: offset, length: 0)
-        guard granularity != .selectByCharacter, prepareNavigation(for: editor, projection: projection) != nil else { return caret }
-        return navigationView.selectionRange(forProposedRange: caret, granularity: granularity)
+        guard granularity != .selectByCharacter else { return caret }
+        let layout = prepareNavigation(for: editor, projection: projection)
+        guard let range = editor.textRange(caret, in: layout) else { return caret }
+        let selection = NSTextSelection(range: range, affinity: .downstream, granularity: .character)
+        let result = layout.textSelectionNavigation.textSelection(for: granularity == .selectByWord ? .word : .paragraph,
+                                                                  enclosing: selection)
+        guard let first = result.textRanges.first, let last = result.textRanges.last else { return caret }
+        return NSUnionRange(editor.charRange(first, in: layout), editor.charRange(last, in: layout))
     }
 
-    private func prepareNavigation(for editor: EditorTextView, projection: JJInlineDiffSelection) -> NSTextLayoutManager? {
+    private func prepareNavigation(for editor: EditorTextView, projection: JJInlineDiffSelection) -> NSTextLayoutManager {
+        let layout = navigationLayout
         let font = editor.font ?? EditorTextView.defaultFont
         if navigationNeedsText || navigationFont != font {
             let paragraph = editor.defaultParagraphStyle ?? .default
-            navigationView.textStorage?.setAttributedString(NSAttributedString(
-                string: projection.string, attributes: [.font: font, .paragraphStyle: paragraph]
-            ))
-            navigationView.defaultParagraphStyle = paragraph
+            layout.textContainer?.lineFragmentPadding = editor.textContainer?.lineFragmentPadding ?? 0
+            navigationContent.performEditingTransaction {
+                navigationStorage.setAttributedString(NSAttributedString(
+                    string: projection.string, attributes: [.font: font, .paragraphStyle: paragraph]
+                ))
+            }
             navigationFont = font
             navigationNeedsText = false
         }
-        return navigationView.textLayoutManager
+        return layout
     }
 
     private static func range(_ a: Int, _ b: Int) -> NSRange {

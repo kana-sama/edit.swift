@@ -25,12 +25,6 @@ final class JJInlineDiff: NSResponder {
         self.display = display
         interaction = JJInlineDiffInteraction(editor: editor, layout: display)
         super.init()
-        display.onSelectionChange = { [weak self] in
-            guard let self, self.display.hunk(for: self.editor?.window?.firstResponder) != nil else { return }
-            selectionChanged()
-        }
-        display.onCancel = { [weak self] in self?.collapseAll() == true }
-        display.onMouseDown = { [weak self] in self?.handleMouseDown($0) == true }
     }
 
     required init?(coder: NSCoder) { fatalError("Inline diff is programmatically constructed") }
@@ -38,6 +32,7 @@ final class JJInlineDiff: NSResponder {
     var hasExpandedHunks: Bool { !expanded.isEmpty }
     var projectedEditRange: NSRange? { interaction.projectedEditRange }
     var hasProjectedCaret: Bool { interaction.hasProjectedCaret }
+    var projectedCaretRect: NSRect? { interaction.caretRect }
     var isMirroringProjectedSelection: Bool { interaction.isMirroringProjectedSelection }
 
     func handleMouseDown(_ event: NSEvent) -> Bool { interaction.mouseDown(with: event) }
@@ -111,6 +106,7 @@ final class JJInlineDiff: NSResponder {
         guard hasExpandedHunks else { return }
         display.layout()
         interaction.updatePresentation()
+        if interaction.hasProjectedCaret { editor?.refreshCaretDecorations() }
         refreshControls()
     }
 
@@ -121,6 +117,10 @@ final class JJInlineDiff: NSResponder {
     func expandedRegion(for mark: JJLineMark) -> NSRect? {
         guard let hunk = visibleHunks.first(where: { $0.mark == mark }) else { return nil }
         return display.rect(for: hunk)
+    }
+
+    func removedCaretRect(key: NSRange, offset: Int) -> NSRect? {
+        display.removedCaretRect(key: key, offset: offset)
     }
 
     func revealExpanded(_ mark: JJLineMark) -> Bool {
@@ -203,10 +203,6 @@ final class JJInlineDiff: NSResponder {
         var responder = editor.window?.firstResponder
         if let view = responder as? NSView, panels.values.contains(where: { view.isDescendant(of: $0) }) {
             responder = lastTextResponder
-        }
-        if let focused = display.hunk(for: responder) {
-            lastTextResponder = responder
-            return focused
         }
         guard responder === editor, let selection = editor.caretSelections.last else { return nil }
         lastTextResponder = editor

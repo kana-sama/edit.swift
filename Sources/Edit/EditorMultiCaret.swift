@@ -435,8 +435,9 @@ extension EditorTextView {
     func refreshCaretDecorations() {
         let selections = caretSelections
         let hidesLiveCaret = jjInlineDiff?.projectedEditRange?.length == 0
-        let showCarets = !hidesLiveCaret && isEditable && !hasMarkedText() && window?.isKeyWindow == true
-            && window?.firstResponder === self
+        let projectedCaret = hidesLiveCaret ? jjInlineDiff?.projectedCaretRect : nil
+        let showCarets = (hidesLiveCaret ? projectedCaret != nil && isSelectable : isEditable)
+            && !hasMarkedText() && window?.isKeyWindow == true && window?.firstResponder === self
         let old = multiCaret.highlights
         var highlights: [NSRect] = []
         var carets: [NSRect] = []
@@ -467,7 +468,9 @@ extension EditorTextView {
                     return true
                 }
             }
-            if showCarets {
+            if showCarets, let projectedCaret {
+                if projectedCaret.insetBy(dx: -1, dy: 0).intersects(viewportRect) { carets.append(projectedCaret) }
+            } else if showCarets {
                 for range in selections where range.length == 0 &&
                     visible.location <= range.location && range.location <= visible.upperBound {
                     let screenRect = firstRect(forCharacterRange: range, actualRange: nil)

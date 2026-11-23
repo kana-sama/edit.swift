@@ -995,7 +995,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         refreshFocusDecoration()
         let location = selectedRange().location
         var newLine = NSRect.zero
-        if window != nil, caretIsNearViewport(location) {
+        if jjInlineDiff?.hasProjectedCaret == true {
+            if let line = jjInlineDiff?.projectedCaretRect {
+                newLine = NSRect(x: bounds.minX, y: line.minY, width: bounds.width, height: line.height)
+            }
+        } else if window != nil, caretIsNearViewport(location) {
             if let line = currentLineBounds(at: location) {
                 newLine = NSRect(x: bounds.minX, y: line.minY, width: bounds.width, height: line.height)
             } else if textStorage?.length == 0, let paragraph = defaultParagraphStyle {

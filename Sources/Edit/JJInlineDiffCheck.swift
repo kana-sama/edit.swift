@@ -91,24 +91,30 @@ enum JJInlineDiffCheck {
         guard editor.string == current, !undo.canUndo, sourceLine.minY > initialLine.minY + 1 else {
             throw Failure("reserve display space without editing the buffer or its undo history")
         }
-        let removed = try require(descendant(of: editor) { (view: NSTextView) in
-            view.string == replacement.removedText && !view.isHiddenOrHasHiddenAncestor
-        }, "show the removed text in its native text view")
-        let removedFrame = removed.convert(removed.bounds, to: editor)
-        guard block.intersects(removedFrame), removedFrame.maxY <= sourceLine.minY + 2,
-              !removed.isEditable, removed.isSelectable else {
-            throw Failure("show selectable, read-only removed text above the source line")
+        let firstRemoved = try require(controller.removedCaretRect(key: replacement.baseRange, offset: 0),
+                                       "lay out the first removed caret in the editor")
+        let nextRemoved = try require(controller.removedCaretRect(key: replacement.baseRange, offset: 1),
+                                      "lay out the second removed caret in the editor")
+        let firstRemovedLine = (replacement.removedText as NSString).lineRange(for: NSRange(location: 0, length: 0))
+        let lastRemoved = try require(controller.removedCaretRect(key: replacement.baseRange,
+                                                                 offset: NSMaxRange(firstRemovedLine)),
+                                      "lay out the last removed row in the editor")
+        guard block.contains(NSPoint(x: firstRemoved.minX, y: firstRemoved.midY)),
+              lastRemoved.maxY <= sourceLine.minY + 2,
+              descendant(of: editor, matching: { (view: NSTextView) in view !== editor }) == nil else {
+            throw Failure("lay out removed and live rows in the same editor without a second text view")
         }
-        guard let highlight = replacement.removedHighlights.first,
-              removed.textStorage?.attribute(.backgroundColor, at: highlight.location, effectiveRange: nil) != nil else {
-            throw Failure("highlight the changed words in the removed text")
+        let glyph = NSRect(x: firstRemoved.minX, y: firstRemoved.minY + 1,
+                           width: nextRemoved.minX - firstRemoved.minX, height: firstRemoved.height - 2)
+        let luminance = try renderedColors(in: glyph, of: editor).map { ($0.redComponent + $0.greenComponent + $0.blueComponent) / 3 }
+        guard let darkest = luminance.min(), let lightest = luminance.max(), lightest - darkest > 0.18 else {
+            throw Failure("render the removed glyph in the editor's TextKit surface")
         }
         editor.setCaretSelections([NSRange(location: replacement.currentRange.location, length: 0)], record: false)
         editor.doCommand(by: #selector(NSResponder.moveUp(_:)))
         guard window.firstResponder === editor, controller.hasProjectedCaret else {
             throw Failure("move the editor caret into removed rows")
         }
-        let firstRemovedLine = (replacement.removedText as NSString).lineRange(for: NSRange(location: 0, length: 0))
         let lastRemovedStart = JJInlineDiffSelection.Position.removed(key: replacement.baseRange,
                                                                       offset: NSMaxRange(firstRemovedLine))
         guard controller.select(from: lastRemovedStart, to: lastRemovedStart) else {
@@ -121,8 +127,7 @@ enum JJInlineDiffCheck {
 
         // Put the source caret outside the change so its controls require pointer hover.
         editor.setCaretSelections([NSRange(location: 0, length: 0)], record: false)
-        let removedInWindow = removed.convert(removed.bounds, to: nil)
-        let hoverPoint = NSPoint(x: removedInWindow.midX, y: removedInWindow.midY)
+        let hoverPoint = editor.convert(NSPoint(x: block.midX, y: firstRemoved.midY), to: nil)
         controller.mouseMoved(with: try mouse(.mouseMoved, at: hoverPoint, in: window))
         let hoverPanel = try require(panels(in: scroll).first, "show a panel on mouse hover")
         let next = try button("Edit.Diff.Next", in: hoverPanel)
@@ -220,7 +225,38 @@ enum JJInlineDiffCheck {
 
         try checkMouseNavigation(in: document, controller: controller)
         try checkMixedSelection(in: document, controller: controller, undo: undo)
+        try checkWholeFileDeletion(in: document, controller: controller)
         try checkSidebarGeometry(in: document, controller: controller)
+    }
+
+    private static func checkWholeFileDeletion(in document: DocumentWindow, controller: JJInlineDiff) throws {
+        let editor = document.editor
+        let first = "first\n"
+        let base = first + "second\n"
+        let analysis = JJLineDiff.analyze(base: base, current: "", isConflicted: false, recordedConflict: nil)
+        let hunk = try require(analysis.hunks.first, "make a whole-file deletion")
+        controller.collapseAll()
+        editor.string = ""
+        editor.setCaretSelections([NSRange(location: 0, length: 0)], record: false)
+        document.window.makeFirstResponder(editor)
+        editor.setJJLineMarks(analysis.marks, lineStarts: analysis.lineStarts, hunks: analysis.hunks)
+        controller.toggle(hunk.mark)
+
+        let firstRow = try require(controller.removedCaretRect(key: hunk.baseRange, offset: 0),
+                                   "lay out the first removed row over an empty source")
+        let secondRow = try require(controller.removedCaretRect(key: hunk.baseRange, offset: first.utf16.count),
+                                    "lay out the second removed row over an empty source")
+        let start = JJInlineDiffSelection.Position.removed(key: hunk.baseRange, offset: 0)
+        let end = JJInlineDiffSelection.Position.removed(key: hunk.baseRange, offset: base.utf16.count)
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        guard firstRow.midY < secondRow.midY,
+              controller.select(from: start, to: end),
+              controller.copyProjectedSelection(to: pasteboard, cutting: false),
+              pasteboard.string(forType: .string) == base,
+              controller.projectedEditRange == NSRange(location: 0, length: 0), editor.string.isEmpty else {
+            throw Failure("keep removed text selectable when it is the only text on screen")
+        }
     }
 
     private static func checkSidebarGeometry(in document: DocumentWindow, controller: JJInlineDiff) throws {
@@ -248,21 +284,24 @@ enum JJInlineDiffCheck {
             let characterWidth = ("0" as NSString).size(withAttributes: [.font: font]).width
             let offset = max(0, Int((scroll.visibleContentOrigin.x + 32 - editor.textContainerOrigin.x) / characterWidth))
             for phase in ["on resize", "after relayout"] {
-                let removed = try require(descendant(of: editor) { (view: NSTextView) in
-                    view.string == hunk.removedText && !view.isHiddenOrHasHiddenAncestor
-                }, "show the removed line \(state) \(phase)")
-                let row = try require(removed.superview, "find the removed row background")
-                let background = row.convert(row.bounds, to: editor)
-                let exposed = scroll.documentVisibleRect.intersection(editor.bounds)
-                guard background.minX <= exposed.minX + 1, background.maxX >= exposed.maxX - 1 else {
-                    throw Failure("keep the removed row visible across the editor \(state) \(phase)")
-                }
-                let oldGlyph = removed.firstRect(forCharacterRange: NSRange(location: offset, length: 1), actualRange: nil)
-                let newGlyph = editor.firstRect(forCharacterRange: NSRange(location: hunk.currentRange.location + offset,
-                                                                           length: 1), actualRange: nil)
+                let oldGlyph = try require(controller.removedCaretRect(key: hunk.baseRange, offset: offset),
+                                           "lay out the removed caret \(state) \(phase)")
+                let newGlyph = try require(editor.lineBounds(at: hunk.currentRange.location + offset),
+                                           "lay out the live caret \(state) \(phase)")
                 guard oldGlyph.height > 0, newGlyph.height > 0, abs(oldGlyph.minX - newGlyph.minX) < 1,
-                      oldGlyph.midY > newGlyph.midY else {
+                      oldGlyph.midY < newGlyph.midY else {
                     throw Failure("align red and live columns \(state) \(phase) (\(oldGlyph), \(newGlyph))")
+                }
+                if state == "after returning to the first column" && phase == "on resize" {
+                    let exposed = scroll.documentVisibleRect.intersection(editor.bounds)
+                    for x in [exposed.minX + 18, exposed.maxX - 24] {
+                        let oldBand = NSRect(x: x, y: oldGlyph.minY + 1, width: 3, height: oldGlyph.height - 2)
+                        let newBand = NSRect(x: x, y: newGlyph.minY + 1, width: 3, height: newGlyph.height - 2)
+                        guard try renderedColors(in: oldBand, of: editor).contains(where: { $0.redComponent > $0.greenComponent + 0.025 }),
+                              try renderedColors(in: newBand, of: editor).contains(where: { $0.greenComponent > $0.redComponent + 0.025 }) else {
+                            throw Failure("paint both diff rows out to the exposed edges before relayout")
+                        }
+                    }
                 }
                 if phase == "on resize" { controller.layout() }
             }
@@ -356,9 +395,8 @@ enum JJInlineDiffCheck {
         guard editor.string == "Xne 3\n" else { throw Failure("typing replaces only the selected live characters") }
         let replacement = try refresh(editor.string)
         guard replacement.mark.kind == .replacement, controller.expandedRegion(for: replacement.mark) != nil,
-              descendant(of: editor, matching: { (view: NSTextView) in
-                  view.string == base && !view.isHiddenOrHasHiddenAncestor && !view.isEditable
-              }) != nil else {
+              replacement.removedText == base,
+              controller.removedCaretRect(key: replacement.baseRange, offset: 14) != nil else {
             throw Failure("the updated open comparison contains all three original red lines")
         }
 
@@ -370,20 +408,15 @@ enum JJInlineDiffCheck {
         }
         try checkCopy("2\nli")
 
-        let redView = try require(descendant(of: editor) { (view: NSTextView) in
-            view.string == deletion.removedText && !view.isHiddenOrHasHiddenAncestor
-        }, "lay out the removed rows for a mouse drag")
-        func caretPoint(in view: NSTextView, at offset: Int) throws -> NSPoint {
-            let rect = view.firstRect(forCharacterRange: NSRange(location: offset, length: 0), actualRange: nil)
-            guard rect.height > 0 else { throw Failure("locate the text caret for a mouse drag") }
-            return window.convertPoint(fromScreen: NSPoint(x: rect.minX, y: rect.midY))
-        }
-        let startPoint = try caretPoint(in: editor, at: 2)
-        let endPoint = try caretPoint(in: redView, at: 12)
-        for (view, start, end) in [(editor as NSTextView, startPoint, endPoint), (redView, endPoint, startPoint)] {
+        let liveRect = try require(editor.lineBounds(at: 2), "lay out the live caret for a mouse drag")
+        let redRect = try require(controller.removedCaretRect(key: deletion.baseRange, offset: 12),
+                                  "lay out the removed caret for a mouse drag")
+        let startPoint = editor.convert(NSPoint(x: liveRect.minX, y: liveRect.midY), to: nil)
+        let endPoint = editor.convert(NSPoint(x: redRect.minX, y: redRect.midY), to: nil)
+        for (start, end) in [(startPoint, endPoint), (endPoint, startPoint)] {
             NSApp.postEvent(try mouse(.leftMouseUp, at: end, in: window), atStart: true)
             NSApp.postEvent(try mouse(.leftMouseDragged, at: end, in: window), atStart: true)
-            view.mouseDown(with: try mouse(.leftMouseDown, at: start, in: window))
+            editor.mouseDown(with: try mouse(.leftMouseDown, at: start, in: window))
             guard controller.projectedEditRange == editableRange else {
                 throw Failure("drag across the live and removed rows as one selection in both directions")
             }
@@ -481,6 +514,16 @@ enum JJInlineDiffCheck {
 
     private static func panels(in scroll: NSScrollView) -> [JJInlineDiffControls] {
         scroll.subviews.compactMap { $0 as? JJInlineDiffControls }.filter { !$0.isHiddenOrHasHiddenAncestor }
+    }
+
+    private static func renderedColors(in rect: NSRect, of view: NSView) throws -> [NSColor] {
+        guard !rect.isEmpty, let bitmap = view.bitmapImageRepForCachingDisplay(in: rect) else {
+            throw Failure("capture the inline diff pixels")
+        }
+        view.cacheDisplay(in: rect, to: bitmap)
+        return (0..<bitmap.pixelsHigh).flatMap { y in
+            (0..<bitmap.pixelsWide).compactMap { x in bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) }
+        }
     }
 
     private static func descendant<View: NSView>(of root: NSView, matching predicate: (View) -> Bool) -> View? {
