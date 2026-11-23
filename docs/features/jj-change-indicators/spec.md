@@ -28,7 +28,7 @@ Folder names summarize their descendants even while collapsed. A conflict takes 
 
 ## Editor markers
 
-Use the same status colors in Worktree and the editor, with red reserved for line deletions. Draw markers in a narrow strip to the left of the text, aligned with the text layout and fixed during horizontal scrolling. The strip has no click action. Review the exact spacing, palette, and hatching in both appearances. Focus editing always compares the full source buffer, including protected text.
+Use the same status colors in Worktree and the editor, with red reserved for line deletions. Draw markers in a narrow strip to the left of the text, aligned with the text layout and fixed during horizontal scrolling. Clip the strip's drawing to its bounds so the editor text stays visible when marks appear or refresh. The strip has no click action. Review the exact spacing, palette, and hatching in both appearances. Focus editing always compares the full source buffer, including protected text.
 
 | Text change | Marker |
 | --- | --- |

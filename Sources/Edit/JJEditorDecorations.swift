@@ -40,6 +40,8 @@ final class JJEditorDecorations {
 
     init(editor: EditorTextView) {
         self.editor = editor
+        gutter.clipsToBounds = true
+        track.clipsToBounds = true
         gutter.drawMarks = { [weak self] rect in self?.drawGutter(in: rect) }
         track.drawMarks = { [weak self] rect in self?.drawTrack(in: rect) }
         track.onClick = { [weak self] event in self?.clickTrack(event) }
