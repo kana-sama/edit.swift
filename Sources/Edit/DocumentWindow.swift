@@ -300,12 +300,6 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     var isTerminalDockedRight: Bool { terminalSidebar != nil }
 
-    var terminalSidebarThickness: CGFloat {
-        guard let terminalSidebar else { return 0 }
-        let width = visibleTerminalSidebarWidth(terminalSidebar)
-        return width > 0 ? width + documentSplitView.dividerThickness : 0
-    }
-
     func terminalHasFocus(_ responder: NSResponder?) -> Bool {
         isTerminalVisible && terminalPanel?.containsTerminalResponder(responder) == true
     }
@@ -497,8 +491,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 terminalPanel?.fitDockedHeader(to: limit)
             }
         }
-        if let findPanel { findPanel.resizeTitleBar() }
-        else { titleBar.resize() }
+        titleBar.resize()
     }
 
     @objc private func documentSplitDidResize(_ notification: Notification) {

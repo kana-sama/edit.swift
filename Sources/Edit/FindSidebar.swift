@@ -825,13 +825,9 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         installed = true
     }
 
-    func resizeTitleBar() {
-        document.titleBar.resize(sidebarWidth: installed && !sidebarItem.isCollapsed ? sidebar.view.frame.width : 0)
-    }
-
     @objc private func splitResized(_ notification: Notification) {
         guard installed else { return }
-        resizeTitleBar()
+        document.titleBar.resize()
         settings.visible = !sidebarItem.isCollapsed
         let width = sidebar.view.frame.width
         if settings.visible && width >= sidebarItem.minimumThickness {
@@ -916,7 +912,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         sidebarItem.isCollapsed = collapsed
         if let desiredWidth { splitView.setPosition(desiredWidth, ofDividerAt: 0) }
         document.window.layoutIfNeeded()
-        resizeTitleBar()
+        document.titleBar.resize()
         updateSidebarToolbarVisibility()
     }
 

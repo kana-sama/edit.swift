@@ -21,7 +21,6 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     private weak var fileWidthLimit: NSLayoutConstraint?
     private let fullScreenDividers = TitleBarDividers(frame: .zero)
     private var isFullScreen = false
-    private var availableWidth: CGFloat = 0
     private var siblingRequest: Task<Void, Never>?
     private(set) var agentContextMenu: NSMenu?
 
@@ -112,7 +111,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             item.label = "File"
             item.visibilityPriority = .high
             let label = makeLabel()
-            fileWidthLimit = constrainWidth(of: label, to: 240)
+            fileWidthLimit = constrainWidth(of: label, to: document.window.frame.width)
             let icon = TitleBarIcon()
             icon.imageScaling = .scaleProportionallyDown
             icon.setAccessibilityLabel("Change Language Mode")
@@ -155,12 +154,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         return limit
     }
 
-    func resize(sidebarWidth: CGFloat = 0) {
-        let window = document.window
-        let zoom = window.standardWindowButton(.zoomButton)
-        let controls = zoom.map { $0.convert($0.bounds, to: nil).maxX + 8 } ?? 84
-        let leading = sidebarWidth > 0 ? sidebarWidth : controls
-        availableWidth = max(0, floor(window.frame.width - leading - document.terminalSidebarThickness))
+    func resize() {
         fitLabels()
         if isFullScreen { updateFullScreenDividers() }
     }
@@ -218,11 +212,16 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     }
 
     private func fitLabels() {
+        let window = document.window
+        let editor = document.editorContentView
+        let exposed = editor.window === window ? editor.convert(editor.safeAreaRect, to: nil) : window.contentLayoutRect
+        let zoom = window.standardWindowButton(.zoomButton)
+        let controls = zoom.map { $0.convert($0.bounds, to: nil).maxX + 8 } ?? 84
         // Keep the icon and a compact file name inside the editor pane as the divider moves.
-        let width = max(0, availableWidth - 40)
+        let width = max(0, floor(exposed.maxX - max(exposed.minX, controls) - 40))
         let folder = document.folderURL == nil ? 0 : min(160, width * 0.4)
         let folderUsed = min(folderLabel?.intrinsicContentSize.width ?? 0, folder)
-        let file = min(240, max(0, width - folderUsed))
+        let file = max(0, width - folderUsed)
         if folderWidthLimit?.constant != folder { folderWidthLimit?.constant = folder }
         if fileWidthLimit?.constant != file { fileWidthLimit?.constant = file }
     }
@@ -240,7 +239,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         fileItem?.isHidden = document.showsEmptyFolder
         fileLabel?.stringValue = document.displayName
         fileLabel?.toolTip = document.displayedFileURL?.path ?? document.displayName
-        if availableWidth == 0 { resize() } else { fitLabels() }
+        fitLabels()
         if document.displayedFileURL == nil && document.manualSyntaxLanguage == nil {
             languageIcon?.image = NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
         } else {

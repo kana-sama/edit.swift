@@ -162,6 +162,60 @@ enum HeaderCheck {
         try expect(compactIcon.window === document.window && rect.width > 0 && rect.minX >= 0 &&
                    rect.maxX <= document.window.frame.width,
                    "the file icon stays visible with long names in a narrow window (\(rect), window width \(document.window.frame.width), attached \(compactIcon.window === document.window))")
+
+        try await checkFileTitleWidth(in: app, folder: folder)
+    }
+
+    private static func checkFileTitleWidth(in app: Edit, folder: URL) async throws {
+        let short = folder.appending(path: "build.zig")
+        let longer = folder.appending(path: "build.zig.zon")
+        let wide = folder.appending(path: "project-configuration-for-a-wide-editor.zig.zon")
+        for url in [short, longer, wide] { try Data("Sample\n".utf8).write(to: url) }
+
+        let document = app.makeDocument()
+        let window = document.window
+        defer { window.close() }
+        window.setFrame(NSRect(x: -10_000, y: -10_000, width: 1186, height: 630), display: false)
+        _ = try await app.openFile(folder, in: document)
+        _ = try await app.openFile(short, in: document)
+        document.toggleSidebarFocus(.worktree)
+        document.restoreTerminal(DocumentTerminalState(
+            panel: TerminalPanelState(dock: .right, spaces: [], selectedSpace: nil, nextSpaceNumber: 1),
+            sizes: TerminalDockSizes(belowHeight: 220, rightWidth: 425), isVisible: true, wasFocused: false
+        ))
+        window.layoutIfNeeded()
+        let split = document.documentSplitView
+        guard document.worktreeSidebar != nil, document.isTerminalDockedRight,
+              let leading = split.arrangedSubviews.first, let terminal = split.arrangedSubviews.last else {
+            throw Failure("put the file title between Worktree and the terminal sidebar")
+        }
+        let leadingEdge = split.convert(leading.bounds, from: leading).maxX
+        let terminalDivider = split.convert(terminal.bounds, from: terminal).minX - split.dividerThickness
+        let divider = split.arrangedSubviews.count - 2
+
+        func expectTitle(_ url: URL, fits: Bool) throws {
+            window.layoutIfNeeded()
+            guard let label = fileLabel(in: window), label.stringValue == url.lastPathComponent,
+                  label.window === window, !label.isHiddenOrHasHiddenAncestor else {
+                throw Failure("show the current file in the visible title")
+            }
+            let width = label.bounds.width
+            let naturalWidth = label.intrinsicContentSize.width
+            try expect((width + 0.5 >= naturalWidth) == fits,
+                       "use the available title width for \(url.lastPathComponent) (\(width) of \(naturalWidth) points)")
+        }
+
+        for url in [longer, wide] {
+            _ = try await app.openFile(url, in: document)
+            try expectTitle(url, fits: true)
+        }
+        split.setPosition(leadingEdge + 200, ofDividerAt: divider)
+        try expectTitle(wide, fits: false)
+        _ = try await app.openFile(longer, in: document)
+        split.setPosition(terminalDivider, ofDividerAt: divider)
+        try expectTitle(longer, fits: true)
+        _ = try await app.openFile(wide, in: document)
+        try expectTitle(wide, fits: true)
     }
 
     private static func checkDetachedToolbar(in document: DocumentWindow, app: Edit) async throws {
