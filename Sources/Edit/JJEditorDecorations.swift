@@ -25,6 +25,7 @@ final class JJEditorDecorations {
     private struct PositionedMark {
         let mark: JJLineMark
         let rect: NSRect
+        let documentY: CGFloat
     }
 
     private struct GutterMark {
@@ -43,6 +44,7 @@ final class JJEditorDecorations {
     private var lastMarkLines: [Int] = []
     private var trackSize = NSSize.zero
     private var trackOverviewRevision: UInt = 0
+    private var trackFont: NSFont?
     private var trackMarks: [PositionedMark] = []
     private static var restingOverlaySlots: [NSControl.ControlSize: NSRect] = [:]
     private let gutterWidth: CGFloat = 7
@@ -116,7 +118,8 @@ final class JJEditorDecorations {
         }
         let frame = trackFrame(in: scroll, scroller: scroller)
         if track.frame != frame { track.frame = frame }
-        if styleChanged || frame.size != trackSize || trackOverviewRevision != (editor.jjInlineDiff?.overviewRevision ?? 0) {
+        if styleChanged || frame.size != trackSize || trackFont != editor.font ||
+            trackOverviewRevision != editor.layoutSpacing.overviewRevision {
             updateTrackMarks()
         }
         if style != .overlay { track.needsDisplay = true }
@@ -184,35 +187,37 @@ final class JJEditorDecorations {
 
     private func updateTrackMarks() {
         trackSize = track.bounds.size
-        let diff = editor?.jjInlineDiff
-        trackOverviewRevision = diff?.overviewRevision ?? 0
+        guard let editor else { return }
+        trackOverviewRevision = editor.layoutSpacing.overviewRevision
+        trackFont = editor.font
+        let geometry = EditorOverviewGeometry(editor: editor, lineStarts: lineStarts)
         let height = trackSize.height
         let sideClearance: CGFloat = scrollerStyle == .overlay ? 2 : 0
         let width = min(4, max(0, trackSize.width - sideClearance))
         let minimumHeight = min(3, height)
-        let rowCount = CGFloat(max(1, diff?.overviewRow(lineStarts.count, includingRemovedAtBoundary: true) ?? lineStarts.count))
         trackMarks = marks.map { mark in
-            let rows = diff?.overviewRows(for: mark) ?? mark.lines
-            let top = height * CGFloat(rows.lowerBound) / rowCount
-            let bottom = height * CGFloat(rows.upperBound) / rowCount
+            let position = geometry.position(at: mark.lines.lowerBound)
+            let end = geometry.position(at: mark.lines.upperBound, afterReservation: mark.lines.isEmpty)
+            let top = height * geometry.fraction(at: position)
+            let bottom = height * geometry.fraction(at: max(end, position))
             let markHeight = min(height, max(minimumHeight, bottom - top))
             let centered = (top + bottom - markHeight) / 2
             let rect = NSRect(x: (trackSize.width - width) / 2, y: max(0, min(height - markHeight, centered)),
                               width: width, height: markHeight)
-            return PositionedMark(mark: mark, rect: rect)
+            return PositionedMark(mark: mark, rect: rect, documentY: position)
         }.sorted { $0.mark.kind.drawingPriority < $1.mark.kind.drawingPriority }
         track.needsDisplay = true
     }
 
-    private func trackMark(at point: NSPoint) -> JJLineMark? {
+    private func trackMark(at point: NSPoint) -> PositionedMark? {
         if !track.bounds.contains(point) {
             // Retain click slop in the native slot when an overlay expands beyond its resting lane.
             guard scrollerStyle == .overlay, let scroller = nativeScroller,
                   track.convert(scroller.rect(for: .knobSlot), from: scroller).contains(point) else { return nil }
         }
         // Choose visible paint before hit slop so the visible priority always wins collisions.
-        return trackMarks.reversed().first { $0.rect.contains(point) }?.mark
-            ?? trackMarks.reversed().first { $0.rect.insetBy(dx: -3, dy: -1).contains(point) }?.mark
+        return trackMarks.reversed().first { $0.rect.contains(point) }
+            ?? trackMarks.reversed().first { $0.rect.insetBy(dx: -3, dy: -1).contains(point) }
     }
 
     private func clickTrack(_ event: NSEvent) {
@@ -221,10 +226,11 @@ final class JJEditorDecorations {
             return
         }
         guard allowsNavigation, let editor, let scroll = editor.enclosingScrollView,
-              let mark = trackMark(at: track.convert(event.locationInWindow, from: nil)) else { return }
+              let positioned = trackMark(at: track.convert(event.locationInWindow, from: nil)) else { return }
+        let mark = positioned.mark
         if editor.jjInlineDiff?.revealExpanded(mark) == true { return }
         let line = mark.lines.lowerBound
-        let lineHeight = editor.defaultParagraphStyle?.minimumLineHeight ?? 18
+        let geometry = EditorOverviewGeometry(editor: editor, lineStarts: lineStarts)
         let visibleHeight = max(0, scroll.documentVisibleRect.height - scroll.contentInsets.top - scroll.contentInsets.bottom)
         let horizontal = scroll.visibleContentOrigin.x
         func center(_ y: CGFloat) {
@@ -234,17 +240,16 @@ final class JJEditorDecorations {
                 editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
             }
         }
-        let estimate = editor.textContainerOrigin.y + CGFloat(line) * lineHeight
-        let first = boundary(line, editor: editor) ?? estimate
+        let first = geometry.nativeBoundary(at: line) ?? positioned.documentY
         center(first)
         // TextKit lays out the destination after scrolling and may refine its original estimate.
-        if let settled = boundary(line, editor: editor) {
+        if let settled = geometry.nativeBoundary(at: line) {
             if abs(settled - first) > 0.5 { center(settled) }
         } else {
             let offset = lineStarts.indices.contains(line) ? lineStarts[line] : (editor.textStorage?.length ?? 0)
             editor.scrollRangeToVisible(NSRange(location: offset, length: 0))
             editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
-            if let settled = boundary(line, editor: editor) {
+            if let settled = geometry.nativeBoundary(at: line) {
                 center(settled)
             } else {
                 var origin = scroll.visibleContentOrigin

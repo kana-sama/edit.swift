@@ -25,8 +25,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     private var sidebarHeaderVisible = false
     private var terminalHeaderVisible = false
     private var terminalDocked = false
-    private let fullScreenDividers = TitleBarDividers(frame: .zero)
-    private var isFullScreen = false
+    private let dividerContinuation = TitleBarDividers(frame: .zero)
     private var siblingRequest: Task<Void, Never>?
     private(set) var agentContextMenu: NSMenu?
     private(set) lazy var toolbar = makeToolbar()
@@ -104,6 +103,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             let window = document.window
             window.layoutIfNeeded()
             if let host = toolbarWindow, host !== window { host.layoutIfNeeded() }
+            updateDividerContinuation()
         }
     }
 
@@ -167,10 +167,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             title.alignment = .centerY
             title.spacing = 2
             title.setVisibilityPriority(.detachOnlyIfNecessary, for: label)
-            title.onLayout = { [weak self] in
-                guard let self, isFullScreen else { return }
-                updateFullScreenDividers()
-            }
+            title.onLayout = { [weak self] in self?.updateDividerContinuation() }
             fileTitle = title
             item.view = title
         }
@@ -195,33 +192,32 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
 
     func resize() {
         fitLabels()
-        if isFullScreen { updateFullScreenDividers() }
+        updateDividerContinuation()
     }
 
-    func setFullScreen(_ enabled: Bool) {
-        isFullScreen = enabled
-        if enabled { updateFullScreenDividers() }
-        else { fullScreenDividers.removeFromSuperview() }
+    func fullScreenTransitionDidFinish() {
         finishSidebarHeaderLayout()
+        updateDividerContinuation()
     }
 
-    private func updateFullScreenDividers() {
+    private func updateDividerContinuation() {
         let window = document.window
         guard let fileTitle, let toolbarWindow = fileTitle.window,
+              toolbarWindow !== window || !window.styleMask.contains(.fullSizeContentView),
               let split = window.contentViewController as? NSSplitViewController else {
-            fullScreenDividers.removeFromSuperview()
+            dividerContinuation.removeFromSuperview()
             return
         }
 
-        // AppKit can move the toolbar away from the window that owns the split.
-        // Attach the continuation to the common host of the document and sidebar headers.
+        // AppKit's tracking separators require the toolbar and split view in the same window.
+        // A detached toolbar can still continue the visible sidebar edges across its own material.
         let host = toolbar.items.reduce(fileTitle as NSView) { commonAncestor, item in
             guard item.itemIdentifier == Self.sidebarItemIdentifier || item.itemIdentifier == Self.terminalItemIdentifier,
                   let view = item.view, view.window === toolbarWindow, !item.isHidden else { return commonAncestor }
             return commonAncestor.ancestorShared(with: view) ?? commonAncestor
         }
         guard host !== fileTitle else {
-            fullScreenDividers.removeFromSuperview()
+            dividerContinuation.removeFromSuperview()
             return
         }
         let strokes: [NSRect] = split.splitViewItems.compactMap { item in
@@ -244,15 +240,15 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
                           width: toolbarFrame.width, height: host.bounds.height)
         }
         guard !strokes.isEmpty else {
-            fullScreenDividers.removeFromSuperview()
+            dividerContinuation.removeFromSuperview()
             return
         }
-        if fullScreenDividers.superview !== host {
-            fullScreenDividers.removeFromSuperview()
-            host.addSubview(fullScreenDividers, positioned: .above, relativeTo: nil)
+        if dividerContinuation.superview !== host {
+            dividerContinuation.removeFromSuperview()
+            host.addSubview(dividerContinuation, positioned: .above, relativeTo: nil)
         }
-        if fullScreenDividers.frame != host.bounds { fullScreenDividers.frame = host.bounds }
-        fullScreenDividers.update(strokes, color: split.splitView.dividerColor)
+        if dividerContinuation.frame != host.bounds { dividerContinuation.frame = host.bounds }
+        dividerContinuation.update(strokes, color: split.splitView.dividerColor)
     }
 
     private func fitLabels() {

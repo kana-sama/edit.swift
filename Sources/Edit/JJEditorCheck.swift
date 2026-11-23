@@ -24,6 +24,15 @@ enum JJEditorCheck {
         scroll.backgroundColor = sampleBackground
         editor.backgroundColor = sampleBackground
         editor.string = String(repeating: row, count: starts.count)
+        let previousOverview = EditorOverviewGeometry(editor: editor, lineStarts: starts)
+        let reservation = EditorLayoutSpacing.Block(id: .replacement, paragraph: starts[2], edge: .after, height: 72)
+        editor.layoutSpacing.set([reservation], for: .find)
+        let expandedOverview = EditorOverviewGeometry(editor: editor, lineStarts: starts)
+        guard abs(expandedOverview.position(at: 150) - previousOverview.position(at: 150) - 72) < 0.5,
+              abs(expandedOverview.height - previousOverview.height - 72) < 0.5 else {
+            throw Failure("include earlier editor reservations in both overview positioning and the offscreen jump")
+        }
+        editor.layoutSpacing.set([], for: .find)
         let selection = NSRange(location: 2, length: 3)
         editor.setSelectedRange(selection)
         window.makeFirstResponder(editor)

@@ -1,5 +1,7 @@
 import AppKit
 
+// The native input client displays one primary preview. The original selections
+// and attributed text are the baseline for the eventual editor transaction.
 private struct MultiCaretComposition {
     let selections: [NSRange]
     let original: NSAttributedString
@@ -54,6 +56,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     fileprivate var jjDecorations: JJEditorDecorations?
     private(set) var jjInlineDiff: JJInlineDiff?
     weak var syntaxHighlighting: SyntaxHighlighting?
+    let syntaxAnalysis = EditorSyntaxAnalysis()
     lazy var bracketNavigation = BracketNavigation(editor: self)
     lazy var occurrenceHighlighting = OccurrenceHighlighting(editor: self)
     var preferredLineEnding = "\n"
@@ -524,6 +527,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     func discardMultiCaretComposition() {
         guard let composition = multiCaretComposition else { return }
+        restoreCompositionBaseline(composition)
+        onJJCompositionChange?()
+    }
+
+    private func restoreCompositionBaseline(_ composition: MultiCaretComposition) {
         multiCaretComposition = nil
         withTransientComposition {
             super.unmarkText()
@@ -539,12 +547,13 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
                 setCaretSelections(composition.selections, record: false)
             }
         }
-        onJJCompositionChange?()
     }
 
     private func commitMultiCaretComposition(_ text: String) {
-        discardMultiCaretComposition()
+        guard let composition = multiCaretComposition else { return }
+        restoreCompositionBaseline(composition)
         _ = insertAtCarets(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+        onJJCompositionChange?()
     }
 
     override func uppercaseWord(_ sender: Any?) {
@@ -964,7 +973,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     @objc private func storageDidEdit(_ notification: Notification) {
         guard let storage = notification.object as? NSTextStorage, storage.editedMask.contains(.editedCharacters) else { return }
+        syntaxHighlighting?.storageDidEdit(storage)
         layoutSpacing.sourceDidEdit()
+        // Both preedit and its rollback are presentation. Subscribers still hold
+        // the baseline onto which the real replacements will be applied.
+        guard !updatingComposition else { return }
         onBufferEdit?(storage, applyingTextEdits)
     }
 

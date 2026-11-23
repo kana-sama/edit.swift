@@ -128,6 +128,7 @@ enum FilesCheck {
         try await checkRecentFiles(in: app, directory: directory)
         try await checkEncodings(in: app, directory: directory)
         try checkSaveMetadata(in: directory)
+        try await checkCoordinatedSave(in: directory)
         try await checkAutosaveAndNewBuffer(in: app, directory: directory)
         try await checkRememberedPosition(in: app, directory: directory)
         try await checkInterruptedDrafts(in: app, directory: directory)
@@ -710,6 +711,44 @@ enum FilesCheck {
             let retained = try FileBuffer.read(alias)
             try expect(retained.identity == FileIdentity.at(url) && retained.text == reopened.text,
                        "a rejected save keeps both hard links and their original bytes")
+        }
+    }
+
+    private static func checkCoordinatedSave(in directory: URL) async throws {
+        let url = directory.appending(path: "Coordinated save.txt")
+        let format = FileFormat()
+        let original = try FileBuffer.save("Original", to: url, format: format, expected: .missing).file
+        let acquired = DispatchSemaphore(value: 0)
+        let publish = DispatchSemaphore(value: 0)
+        let external = Task.detached {
+            let coordinator = NSFileCoordinator(filePresenter: nil)
+            var accessError: NSError?
+            var result: Result<Void, Error>?
+            coordinator.coordinate(writingItemAt: url, options: .forReplacing, error: &accessError) { target in
+                acquired.signal()
+                guard publish.wait(timeout: .now() + 5) == .success else { return }
+                result = Result { try Data("External".utf8).write(to: target, options: .atomic) }
+            }
+            if let accessError { throw accessError }
+            guard let result else { throw Failure("the coordinated external write could not acquire its turn") }
+            return try result.get()
+        }
+        defer { publish.signal() }
+        let ready = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            DispatchQueue.global().async {
+                continuation.resume(returning: acquired.wait(timeout: .now() + 5) == .success)
+            }
+        }
+        try expect(ready, "a competing writer acquires the coordinated file")
+        let edit = Task.detached { try FileBuffer.save("Local", to: url, format: format, expected: original.revision) }
+        try await Task.sleep(for: .milliseconds(100))
+        publish.signal()
+        try await external.value
+        do {
+            _ = try await edit.value
+            throw Failure("a coordinated save must validate the version after the competing writer finishes")
+        } catch FileBufferError.changedOnDisk {
+            try expect(try FileBuffer.read(url).text == "External", "keep the coordinated writer's newer version")
         }
     }
 

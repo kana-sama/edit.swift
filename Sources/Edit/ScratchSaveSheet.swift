@@ -206,6 +206,7 @@ final class ScratchSaveSheet: NSObject {
     }
 }
 
+#if EDIT_AGENT_CHECKS
 extension ScratchSaveSheet {
     static func check() async throws {
         struct Failure: LocalizedError {
@@ -305,3 +306,4 @@ extension ScratchSaveSheet {
         try expect(writes.count == 2, "cancel without saving")
     }
 }
+#endif

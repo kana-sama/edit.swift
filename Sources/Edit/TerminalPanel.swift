@@ -667,6 +667,38 @@ final class TerminalScrollView: NSScrollView {
         }
         return false
     }
+
+    func layoutViewport(_ viewport: NSRect, minimumColumns: Int?) {
+        if frame != viewport { frame = viewport }
+        guard viewport.width > 0, viewport.height > 0, let terminal = documentView as? TerminalView else { return }
+
+        let viewportWidth = contentSize.width
+        let gridWidth: CGFloat
+        if let minimumColumns, let currentColumns = terminal.terminalInputStateSnapshot()?.dimensions.cols, currentColumns > 0 {
+            // SwiftTerm's overlay scroller reserves no width. Its optimal frame is the point width of its grid.
+            let columnWidth = terminal.getOptimalFrameSize().width / CGFloat(currentColumns)
+            let scale = window?.backingScaleFactor ?? 1
+            gridWidth = ceil(CGFloat(minimumColumns) * columnWidth * scale) / scale
+        } else {
+            gridWidth = 0
+        }
+
+        let shouldScroll = gridWidth > viewportWidth
+        if hasHorizontalScroller != shouldScroll { hasHorizontalScroller = shouldScroll }
+        let size = NSSize(width: max(viewportWidth, gridWidth), height: contentSize.height)
+        if terminal.frame.size != size {
+            let offset = contentView.bounds.minX
+            terminal.setFrameSize(size)
+            scrollHorizontally(to: offset)
+        }
+    }
+
+    func scrollHorizontally(to offset: CGFloat) {
+        let clip = contentView
+        let end = max(0, (documentView?.frame.width ?? 0) - clip.bounds.width)
+        clip.scroll(to: NSPoint(x: offset.isFinite ? min(end, max(0, offset)) : 0, y: 0))
+        reflectScrolledClipView(clip)
+    }
 }
 
 @MainActor
@@ -748,6 +780,7 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
         terminal.processDelegate = self
         terminal.configureNativeColors()
         terminal.backgroundOpacity = 0
+        terminal.scrollerStyle = .overlay
         let pointSize = restoredState?.pointSize ?? Self.defaultFontSize
         setFontSize(pointSize.isFinite ? min(72, max(6, pointSize)) : Self.defaultFontSize)
         scrollView.drawsBackground = false
@@ -870,6 +903,11 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
         if !running, stoppedActions.isHidden { startShell() }
     }
 
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        needsLayout = true
+    }
+
     override func layout() {
         super.layout()
         layoutTerminal()
@@ -881,35 +919,11 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
         layoutTerminal()
     }
 
-    private var cellWidth: CGFloat {
-        let columns = terminal.terminalInputStateSnapshot()?.dimensions.cols ?? 1
-        return terminal.getOptimalFrameSize().width / CGFloat(max(1, columns))
-    }
-
     private func layoutTerminal() {
         let inset = TerminalPaneEdges.borderWidth
         let viewport = NSRect(x: bounds.minX + inset, y: bounds.minY + inset,
                               width: max(0, bounds.width - 2 * inset), height: max(0, bounds.height - 2 * inset))
-        if scrollView.frame != viewport { scrollView.frame = viewport }
-        guard scrollView.bounds.width > 0, scrollView.bounds.height > 0 else { return }
-        let width = scrollView.contentSize.width
-        // SwiftTerm derives the PTY column count from the document view's width.
-        let characterWidth = fixedColumns == nil ? 0 : cellWidth
-        let wideWidth = CGFloat(fixedColumns ?? 0) * characterWidth
-        scrollView.hasHorizontalScroller = wideWidth > width
-        let documentWidth = scrollView.hasHorizontalScroller ? wideWidth + characterWidth / 8 : width
-        let size = NSSize(width: documentWidth, height: scrollView.contentSize.height)
-        if terminal.frame.size != size {
-            terminal.setFrameSize(size)
-            scrollHorizontally(to: scrollView.contentView.bounds.minX)
-        }
-    }
-
-    private func scrollHorizontally(to offset: CGFloat) {
-        let clip = scrollView.contentView
-        let end = max(0, terminal.frame.width - clip.bounds.width)
-        clip.scroll(to: NSPoint(x: offset.isFinite ? min(end, max(0, offset)) : 0, y: 0))
-        scrollView.reflectScrolledClipView(clip)
+        scrollView.layoutViewport(viewport, minimumColumns: fixedColumns)
     }
 
     func toggleContentWidth(forNewOutput: Bool = false) {
@@ -931,7 +945,7 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
             fixedColumns = min(Self.maximumFixedColumns, max(content.dimensions.cols, columns))
         }
         layoutTerminal()
-        scrollHorizontally(to: 0)
+        scrollView.scrollHorizontally(to: 0)
     }
 
     func snapshot() -> TerminalPaneState {
@@ -979,7 +993,7 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
         }
         if let pendingHorizontalOffset {
             self.pendingHorizontalOffset = nil
-            scrollHorizontally(to: pendingHorizontalOffset)
+            scrollView.scrollHorizontally(to: pendingHorizontalOffset)
         }
     }
 
@@ -1057,7 +1071,7 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
             terminal.feed(text: "\u{1B}[2J\u{1B}[3J\u{1B}[H")
         }
         terminal.scrollTo(row: Int.max, notifyAccessibility: false)
-        scrollHorizontally(to: 0)
+        scrollView.scrollHorizontally(to: 0)
     }
 
     func zoom(_ action: TerminalZoom) {

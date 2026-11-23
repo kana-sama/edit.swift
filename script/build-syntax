@@ -26,7 +26,8 @@ key="$(
     {
         printf '%s\n' "$target" "$clang" "$sdk" &&
         /usr/bin/stat -L -f '%i:%m:%c:%z' "$clang" "$sdk/SDKSettings.plist" &&
-        /usr/bin/shasum -a 256 script/build-syntax Sources/EditSyntax/Highlight.m resources/syntax/sources.tar.gz
+        /usr/bin/shasum -a 256 script/build-syntax Sources/EditSyntax/Highlight.m Sources/EditSyntaxABI/EditSyntaxABI.h \
+            resources/syntax/sources.tar.gz
     } | /usr/bin/shasum -a 256
 )"
 key="${key%% *}"

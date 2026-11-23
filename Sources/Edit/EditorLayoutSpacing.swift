@@ -41,6 +41,10 @@ final class EditorLayoutSpacing: NSObject, NSTextLayoutManagerDelegate {
     private nonisolated let gaps = OSAllocatedUnfairLock(initialState: [Int: Gap]())
     private var emptyInset: NSSize?
     private var sourceChanged = false
+    private(set) var overviewRevision: UInt = 0
+    private(set) var reservedBlocks: [Block] = []
+
+    var unspacedOriginY: CGFloat? { emptyInset?.height }
 
     init(editor: EditorTextView) { self.editor = editor }
 
@@ -56,8 +60,14 @@ final class EditorLayoutSpacing: NSObject, NSTextLayoutManagerDelegate {
         var next: [Int: Gap] = [:]
         var slots: [ID: Slot] = [:]
         // Place a Replace preview immediately after its live line, before a deletion at EOF.
-        for block in groups[.find, default: []] + groups[.diff, default: []]
-            where block.paragraph >= 0 && (source.length == 0 ? block.paragraph == 0 : block.paragraph < source.length) {
+        let blocks = (groups[.find, default: []] + groups[.diff, default: []]).filter {
+            $0.paragraph >= 0 && (source.length == 0 ? $0.paragraph == 0 : $0.paragraph < source.length)
+        }
+        if blocks != reservedBlocks {
+            reservedBlocks = blocks
+            overviewRevision &+= 1
+        }
+        for block in blocks {
             var gap = next[block.paragraph, default: Gap()]
             switch block.edge {
             case .before:
@@ -83,12 +93,13 @@ final class EditorLayoutSpacing: NSObject, NSTextLayoutManagerDelegate {
             editor.textContainerInset = original
         }
 
-        let changed = gaps.withLock { [next] previous in
-            guard previous != next else { return false }
+        let changedOffsets = gaps.withLock { [next] previous in
+            let changed = Set(previous.keys).union(next.keys).filter { previous[$0] != next[$0] }
             previous = next
-            return true
+            return changed
         }
-        guard changed || sourceChanged else { return }
+        let textWasEdited = sourceChanged
+        guard !changedOffsets.isEmpty || textWasEdited else { return }
         sourceChanged = false
         if next.isEmpty {
             if manager.delegate === self { manager.delegate = nil }
@@ -99,10 +110,18 @@ final class EditorLayoutSpacing: NSObject, NSTextLayoutManagerDelegate {
             storage.beginEditing()
             // A layout invalidation alone can reuse fragments. Rebuild through the delegate
             // by changing only this presentation marker on affected paragraphs.
-            storage.enumerateAttribute(Self.attribute, in: NSRange(location: 0, length: source.length)) { value, range, _ in
-                if value != nil { storage.removeAttribute(Self.attribute, range: range) }
+            if textWasEdited {
+                // An edit can move or split a previous marker.
+                storage.enumerateAttribute(Self.attribute, in: NSRange(location: 0, length: source.length)) { value, range, _ in
+                    if value != nil { storage.removeAttribute(Self.attribute, range: range) }
+                }
+            } else {
+                for offset in changedOffsets where offset < source.length {
+                    let range = source.lineRange(for: NSRange(location: offset, length: 0))
+                    storage.removeAttribute(Self.attribute, range: range)
+                }
             }
-            for offset in next.keys {
+            for offset in next.keys where textWasEdited || changedOffsets.contains(offset) {
                 let range = source.lineRange(for: NSRange(location: offset, length: 0))
                 storage.addAttribute(Self.attribute, value: true, range: range)
             }

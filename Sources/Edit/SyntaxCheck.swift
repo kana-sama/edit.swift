@@ -13,6 +13,7 @@ enum SyntaxCheck {
         try await checkSwiftDrawing(in: app, requiresFirstFrame: true)
         try await checkSwiftDrawing(in: app, requiresFirstFrame: false)
         try await checkModeRepaint(in: app)
+        try await checkSharedAnalysis()
         try await Task.detached { try checkGrammars() }.value
         let document = app.makeDocument()
         defer { document.window.close() }
@@ -43,6 +44,24 @@ enum SyntaxCheck {
         document.restoreDraft(record, text: input)
         guard document.resolvedSyntaxLanguage == .plainText, document.manualSyntaxLanguage == .plainText else {
             throw Failure("Session restoration lost the manual Plain Text mode.")
+        }
+    }
+
+    private static func checkSharedAnalysis() async throws {
+        let source = "# Example\n\n```rs\nfn main() { let text = \"(\"; }\n```\n"
+        let cache = EditorSyntaxAnalysis()
+        let colors = cache.request(in: source, language: .markdown, publishesPreview: true)
+        let brackets = cache.request(in: source, language: .markdown)
+        guard colors.task == brackets.task, let analysis = await colors.task.value else {
+            throw Failure("Syntax highlighting and bracket navigation did not share one parse.")
+        }
+        let function = (source as NSString).range(of: "main")
+        let ignored = (source as NSString).range(of: "\"(\"")
+        guard analysis.spans.contains(where: { $0.color == .function && $0.start <= function.location && $0.end >= function.upperBound }),
+              analysis.brackets.embeddedLanguages.contains(where: { $0.language == .rust && NSLocationInRange(ignored.location, $0.range) }),
+              analysis.brackets.ignoredRanges.contains(where: { NSIntersectionRange($0, ignored).length == ignored.length }),
+              cache.request(in: source + "Changed", language: .markdown).task != colors.task else {
+            throw Failure("Embedded colors or bracket context were missing from the current parse.")
         }
     }
 

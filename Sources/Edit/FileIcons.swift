@@ -95,12 +95,18 @@ enum FileIcons {
     }
 
     private static func load() -> Assets? {
+        let bundled = Bundle.main.resourceURL?.appendingPathComponent("Seti")
         #if SWIFT_PACKAGE
-        let resources = Bundle.module.resourceURL
+        let folder: URL?
+        if let bundled, FileManager.default.fileExists(atPath: bundled.path) {
+            folder = bundled
+        } else {
+            folder = Bundle.module.resourceURL?.appendingPathComponent("Seti")
+        }
         #else
-        let resources = Bundle.main.resourceURL
+        let folder = bundled
         #endif
-        guard let folder = resources?.appendingPathComponent("Seti"),
+        guard let folder,
               let themeData = try? Data(contentsOf: folder.appendingPathComponent("vs-seti-icon-theme.json")),
               let associationsData = try? Data(contentsOf: folder.appendingPathComponent("language-associations.json"))
         else { return nil }

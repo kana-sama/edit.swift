@@ -1,4 +1,5 @@
 import Darwin
+import EditSyntaxABI
 import Foundation
 
 enum SyntaxColor: Sendable, Hashable, CaseIterable {
@@ -57,21 +58,22 @@ struct SyntaxSpan: Sendable {
 
 struct SyntaxSnapshot: Sendable {
     let language: SyntaxLanguage
-    let spans: [SyntaxSpan]
+    let analysis: SyntaxAnalysis
     let coversDocument: Bool
 }
 
-enum SyntaxEngine {
-    private typealias Capture = @convention(c) (UnsafeMutableRawPointer?, UInt32, UInt32, UnsafePointer<CChar>?) -> Void
-    private typealias Preview = @convention(c) (UnsafeMutableRawPointer?) -> Void
-    private typealias Cancelled = @convention(c) (UnsafeMutableRawPointer?) -> Bool
-    private typealias Highlight = @convention(c) (
-        UnsafePointer<CChar>, UnsafePointer<CChar>, UnsafePointer<UInt16>, UInt32,
-        UInt32, UInt32, Preview?, Capture, Cancelled, UnsafeMutableRawPointer?
-    ) -> Bool
+struct SyntaxAnalysis: Sendable {
+    let spans: [SyntaxSpan]
+    let brackets: BracketSyntax.Context
 
+    static let empty = Self(spans: [], brackets: .empty)
+}
+
+enum SyntaxEngine {
     private final class Captures {
         var values: [SyntaxSpan] = []
+        var excluded: [NSRange] = []
+        var languages: [BracketSyntax.EmbeddedLanguage] = []
         private var colors: [UnsafePointer<CChar>: SyntaxColor?] = [:]
         private let length: Int
         private let onPreview: (@Sendable ([SyntaxSpan]) -> Void)?
@@ -100,20 +102,44 @@ enum SyntaxEngine {
                 values.append(SyntaxSpan(start: Int(start), end: Int(end), color: color))
             }
         }
+
+        func appendBracket(start: UInt32, end: UInt32, name: UnsafePointer<CChar>?) {
+            guard start < end else { return }
+            let range = NSRange(location: Int(start), length: Int(end - start))
+            if let name {
+                if let language = SyntaxLanguage(rawValue: String(cString: name)) {
+                    languages.append(.init(range: range, language: language))
+                }
+            } else {
+                excluded.append(range)
+            }
+        }
+
+        func bracketContext() -> BracketSyntax.Context {
+            var merged: [NSRange] = []
+            for range in excluded.sorted(by: { $0.location < $1.location }) {
+                if let previous = merged.last, range.location <= previous.upperBound {
+                    merged[merged.count - 1] = NSUnionRange(previous, range)
+                } else {
+                    merged.append(range)
+                }
+            }
+            return .init(ignoredRanges: merged, embeddedLanguages: languages)
+        }
     }
 
     // The signed library is loaded only when the first supported file needs highlighting.
     // The handle is intentionally kept for the process lifetime with the function pointer.
-    private static let highlight: Highlight? = {
+    private static let analyze: EditSyntaxAnalyze? = {
         guard let directory = Bundle.main.privateFrameworksURL,
               let handle = dlopen(directory.appending(path: "libEditSyntax.dylib").path, RTLD_LOCAL | RTLD_NOW) else {
             return nil
         }
-        guard let entry = dlsym(handle, "edit_syntax_highlight_with_viewport") else {
+        guard let entry = dlsym(handle, "edit_syntax_analyze_v1") else {
             dlclose(handle)
             return nil
         }
-        return unsafeBitCast(entry, to: Highlight.self)
+        return unsafeBitCast(entry, to: EditSyntaxAnalyze.self)
     }()
 
     private static let queries = Bundle.main.resourceURL?.appending(path: "syntax/queries").path
@@ -129,8 +155,8 @@ enum SyntaxEngine {
         let units = text.utf16
         let prefix = units.prefix(maximumPrefixLength)
         if prefix.endIndex == units.endIndex {
-            guard let colors = spans(in: text, language: language) else { return nil }
-            return SyntaxSnapshot(language: language, spans: colors, coversDocument: true)
+            guard let analysis = analysis(in: text, language: language) else { return nil }
+            return SyntaxSnapshot(language: language, analysis: analysis, coversDocument: true)
         }
         let lines = String(decoding: prefix, as: UTF16.self) as NSString
         guard topOffset <= lines.length else { return nil }
@@ -148,16 +174,22 @@ enum SyntaxEngine {
             end = next
         }
 
-        guard let colors = spans(in: lines.substring(to: end), language: language) else { return nil }
-        return SyntaxSnapshot(language: language, spans: colors, coversDocument: false)
+        guard let analysis = analysis(in: lines.substring(to: end), language: language, includesBrackets: false) else { return nil }
+        return SyntaxSnapshot(language: language, analysis: analysis, coversDocument: false)
     }
 
-    static func spans(
+    #if EDIT_AGENT_CHECKS
+    static func spans(in text: String, language: SyntaxLanguage) -> [SyntaxSpan]? {
+        analysis(in: text, language: language, includesBrackets: false)?.spans
+    }
+    #endif
+
+    static func analysis(
         in text: String, language: SyntaxLanguage, visibleRange: NSRange? = nil,
-        onPreview: (@Sendable ([SyntaxSpan]) -> Void)? = nil
-    ) -> [SyntaxSpan]? {
-        guard !text.isEmpty else { return [] }
-        guard language != .plainText, let highlight, let queries, !Task.isCancelled else { return nil }
+        includesBrackets: Bool = true, onPreview: (@Sendable ([SyntaxSpan]) -> Void)? = nil
+    ) -> SyntaxAnalysis? {
+        guard !text.isEmpty else { return .empty }
+        guard language != .plainText, let analyze, let queries, !Task.isCancelled else { return nil }
         let units = Array(text.utf16)
         guard let count = UInt32(exactly: units.count) else { return nil }
         let viewport = visibleRange ?? NSRange(location: 0, length: min(4_096, units.count))
@@ -167,17 +199,21 @@ enum SyntaxEngine {
         let previewEnd = prioritizesViewport ? UInt32(min(NSMaxRange(viewport), units.count)) : 0
         let sink = Captures(length: units.count, onPreview: onPreview)
         let context = Unmanaged.passUnretained(sink).toOpaque()
+        let bracket: EditSyntaxCapture = { context, start, end, name in
+            guard let context else { return }
+            Unmanaged<Captures>.fromOpaque(context).takeUnretainedValue().appendBracket(start: start, end: end, name: name)
+        }
         let success = units.withUnsafeBufferPointer { buffer in
-            highlight(language.rawValue, queries, buffer.baseAddress!, count, previewStart, previewEnd, { context in
+            analyze(language.rawValue, queries, buffer.baseAddress!, count, previewStart, previewEnd, { context in
                 guard let context else { return }
                 Unmanaged<Captures>.fromOpaque(context).takeUnretainedValue().publishPreview()
             }, { context, start, end, name in
                 guard let context, let name else { return }
                 Unmanaged<Captures>.fromOpaque(context).takeUnretainedValue().append(start: start, end: end, name: name)
-            }, { _ in Task.isCancelled }, context)
+            }, includesBrackets ? bracket : nil, { _ in Task.isCancelled }, context)
         }
         guard success, !Task.isCancelled else { return nil }
-        return resolveOverlaps(sink.values, length: units.count)
+        return SyntaxAnalysis(spans: resolveOverlaps(sink.values, length: units.count), brackets: sink.bracketContext())
     }
 
     private static func resolveOverlaps(_ input: [SyntaxSpan], length: Int) -> [SyntaxSpan] {

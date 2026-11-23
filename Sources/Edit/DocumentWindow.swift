@@ -68,6 +68,11 @@ final class EditorDocumentWindow: NSWindow {
         titlebarTrackingArea = area
     }
 
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .scrollWheel, TerminalScrollView.routeWheel(event, in: self, at: event.locationInWindow) { return }
+        super.sendEvent(event)
+    }
+
     // Focused controls get Escape before it reaches these window-level fallbacks.
     override func cancelOperation(_ sender: Any?) {
         guard !isFullScreenEscape(NSApp.currentEvent) else { return }
@@ -101,11 +106,6 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         case emptyFolder(focusContent: Bool, folder: URL? = nil)
     }
 
-    private struct AutosaveRequest {
-        let generation: UInt
-        let text: String
-    }
-
     let window: EditorDocumentWindow
     let editor: EditorTextView
     let scrollView: NSScrollView
@@ -137,8 +137,6 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var filePreview: OpenFilePreview?
     private var filePreviewView: FilePreviewView?
     private var emptyFolderView: EmptyFolderView?
-    private(set) var openRequestGeneration: UInt64 = 0
-    private var openReplacementWaiters: [CheckedContinuation<Void, Never>]?
     var isShowingFilePreview: Bool { filePreview != nil }
     var showsEmptyFolder: Bool { emptyFolderView != nil }
     var hasTextDocument: Bool { !isShowingFilePreview && !showsEmptyFolder }
@@ -157,7 +155,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if url == nil && showsEmptyFolder {
             let wasFocused = contentHasFocus
             removeEmptyFolder()
-            if worktreeMutation { worktreePriorEditability = true }
+            activity.restoreEditabilityAfterMutation()
             editor.isEditable = !isBusy && !app.isQuitting
             if wasFocused { focusContent() }
         }
@@ -172,16 +170,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var revision: FileRevision?
     private var normalFrame: NSRect?
     private var pendingFullScreen = false
-    private var saving = false
-    private var promptingToClose = false
-    private var worktreeMutation = false
-    private var worktreePriorEditability = true
-    private var editGeneration: UInt = 0
-    private var idleSave: Task<Void, Never>?
-    private var autosaveTask: Task<Void, Never>?
-    private var queuedAutosave: AutosaveRequest?
-    private var writingGeneration: UInt?
-    private var autosaveFailure: (generation: UInt, detail: String, reported: Bool)?
+    private let activity = DocumentActivity()
+    private lazy var autosave = DocumentAutosave(document: self)
     private var draftRecoveryRevision: DraftRecoveryRevision?
     var draftRecoveryID: UUID? { draftRecoveryRevision?.id }
     private var draftCheckpoint: Task<Void, Never>?
@@ -212,19 +202,17 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         refreshSyntax(immediate: true)
     }
 
-    var isBusy: Bool { saving || promptingToClose || worktreeMutation }
+    var isBusy: Bool { activity.isBusy }
     var canReplaceBuffer: Bool { !isBusy && window.attachedSheet == nil }
-    var canRequestOpen: Bool { window.attachedSheet == nil && (!isBusy || openReplacementWaiters != nil) }
+    var canRequestOpen: Bool { window.attachedSheet == nil && activity.acceptsOpenRequest }
     var canRestoreSession: Bool {
         folderURL == nil && displayedFileURL == nil && !sidebar.hasContent && terminalPanel == nil && pendingTerminalRestore == nil &&
-            !window.isDocumentEdited && editGeneration == 0 && openRequestGeneration == 0 &&
+            !window.isDocumentEdited && autosave.generation == 0 && openRequestGeneration == 0 &&
             !editor.hasMarkedText() && canReplaceBuffer
     }
 
-    func beginOpenRequest() -> UInt64 {
-        openRequestGeneration &+= 1
-        return openRequestGeneration
-    }
+    var openRequestGeneration: UInt64 { activity.openGeneration }
+    func beginOpenRequest() -> UInt64 { activity.beginOpenRequest() }
 
     init(app: Edit, placement: WindowPlacement? = nil) {
         self.app = app
@@ -624,21 +612,21 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         pendingFullScreen = false
         restoreVisibleTerminalIfReady()
         resizeTitleBars()
-        titleBar.setFullScreen(true)
+        titleBar.fullScreenTransitionDidFinish()
         app.didFinishFullScreenRestore(for: self)
     }
 
     func windowDidFailToEnterFullScreen(_ window: NSWindow) {
         pendingFullScreen = false
         restoreVisibleTerminalIfReady()
-        titleBar.setFullScreen(false)
+        titleBar.fullScreenTransitionDidFinish()
         app.didFinishFullScreenRestore(for: self)
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
         normalFrame = nil
         resizeTitleBars()
-        titleBar.setFullScreen(false)
+        titleBar.fullScreenTransitionDidFinish()
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -743,7 +731,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         savedText = "" as NSString
         format = FileFormat()
         revision = nil
-        autosaveFailure = nil
+        autosave.clearFailure()
         installText("")
     }
 
@@ -815,15 +803,14 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     @discardableResult
     func save(asNew: Bool = false, to selectedURL: URL? = nil, encoding: FileTextEncoding? = nil) async -> Bool {
-        guard hasTextDocument, !saving, !worktreeMutation else { return false }
-        saving = true
+        guard hasTextDocument, activity.beginSave() else { return false }
         if editor.hasMarkedText() { editor.unmarkText() }
         defer {
-            saving = false
-            startRequestedAutosave()
+            activity.endSave()
+            autosave.resume()
             reportAutosaveFailure()
         }
-        await autosaveTask?.value
+        await autosave.waitForWrite()
         if selectedURL == nil, !asNew, fileURL != nil, revision != .missing, !window.isDocumentEdited {
             return true
         }
@@ -856,7 +843,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         defer { app.finishSave(to: target) }
 
         let text = editor.string
-        let writtenGeneration = editGeneration
+        let writtenGeneration = autosave.generation
         let expected = target == fileURL ? revision : nil
 
         do {
@@ -867,15 +854,16 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                     await showError("The file changed on disk.")
                     return false
                 }
+                let conflictingRevision = try await Task.detached { try FileBuffer.revision(at: target) }.value
                 let alert = NSAlert()
                 alert.messageText = "The file changed on disk."
                 alert.informativeText = "Replace the on-disk version of “\(target.lastPathComponent)” with the text in Edit?"
                 alert.addButton(withTitle: "Cancel").keyEquivalent = "\r"
                 alert.addButton(withTitle: "Replace").hasDestructiveAction = true
                 guard await response(to: alert) == .alertSecondButtonReturn else { return false }
-                try await write(text, to: target, format: saveFormat, expected: nil)
+                try await write(text, to: target, format: saveFormat, expected: conflictingRevision)
             }
-            resumeAutosave(afterSaving: writtenGeneration)
+            autosave.didSave(through: writtenGeneration)
             if promote && !app.scratchStore.identifiesScratch(at: target) {
                 await app.recentFiles.record(destination, in: folderURL)
             }
@@ -887,15 +875,14 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func saveAsScratch() async {
-        guard canReplaceBuffer, hasTextDocument, !app.isQuitting else { return }
-        saving = true
+        guard canReplaceBuffer, hasTextDocument, !app.isQuitting, activity.beginSave() else { return }
         defer {
-            saving = false
-            startRequestedAutosave()
+            activity.endSave()
+            autosave.resume()
             reportAutosaveFailure()
         }
         if editor.hasMarkedText() { editor.unmarkText() }
-        await autosaveTask?.value
+        await autosave.waitForWrite()
         let known = (try? await app.scratchStore.files()) ?? []
         let folders = app.recentFiles.folders.map(\.canonicalURL) + known.compactMap { file in
             file.folderPath.map { URL(filePath: $0, directoryHint: .isDirectory) }
@@ -921,19 +908,14 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func saveScratch(name: String, folder: URL?, encoding: FileTextEncoding? = nil) async throws -> ScratchFile {
         let text = editor.string
-        let writtenGeneration = editGeneration
+        let writtenGeneration = autosave.generation
         let saveFormat = format.using(encoding ?? format.encoding)
         let (scratch, buffer) = try await app.scratchStore.create(name: name, text: text, format: saveFormat,
                                                                   in: folder, openedAt: Date())
         adoptSavedFile(buffer, scratch: scratch)
-        resumeAutosave(afterSaving: writtenGeneration)
+        autosave.didSave(through: writtenGeneration)
         app.scratchesDidChange()
         return scratch
-    }
-
-    private func resumeAutosave(afterSaving generation: UInt) {
-        if let queuedAutosave, queuedAutosave.generation <= generation { self.queuedAutosave = nil }
-        if window.isDocumentEdited { scheduleIdleAutosave() }
     }
 
     private func write(_ text: String, to target: URL, format: FileFormat, expected: FileRevision?) async throws {
@@ -964,67 +946,27 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
         updateTitle()
         updateEditedState()
-        autosaveFailure = nil
+        autosave.clearFailure()
     }
 
-    func requestAutosave() {
-        guard fileURL != nil, !app.isQuitting,
-              window.isDocumentEdited || autosaveTask != nil || saving else { return }
-        if editor.hasMarkedText() {
-            scheduleIdleAutosave()
-            return
-        }
-        guard queuedAutosave?.generation != editGeneration, writingGeneration != editGeneration,
-              autosaveFailure?.generation != editGeneration else { return }
-        queuedAutosave = AutosaveRequest(generation: editGeneration, text: editor.string)
-        startRequestedAutosave()
+    var canScheduleAutosave: Bool {
+        fileURL != nil && !app.isQuitting && (window.isDocumentEdited || autosave.hasWorker || activity.isSaving)
     }
 
-    private func startRequestedAutosave() {
-        guard queuedAutosave != nil, autosaveTask == nil, !isBusy, !app.isQuitting else { return }
-        autosaveTask = Task {
-            while let request = queuedAutosave, !isBusy, !app.isQuitting {
-                queuedAutosave = nil
-                if editor.hasMarkedText() {
-                    scheduleIdleAutosave()
-                    break
-                }
-                await writeAutosave(request)
-            }
-            autosaveTask = nil
-            reportAutosaveFailure()
-        }
-    }
+    var canRunAutosave: Bool { !isBusy && !app.isQuitting }
 
-    // Closing, replacing, and quitting hold off new background writes while draining this one.
-    func flushAutosave() async {
-        idleSave?.cancel()
-        idleSave = nil
-        await autosaveTask?.value
-        queuedAutosave = nil
-        if window.isDocumentEdited {
-            await writeAutosave(AutosaveRequest(generation: editGeneration, text: editor.string), retryFailed: true)
-        }
-    }
+    func requestAutosave() { autosave.request() }
 
-    private func writeAutosave(_ request: AutosaveRequest, retryFailed: Bool = false) async {
-        let generation = request.generation
-        guard let target = fileURL, let revision, savedText?.isEqual(to: request.text) != true,
-              retryFailed || autosaveFailure?.generation != generation else { return }
-        writingGeneration = generation
-        defer { writingGeneration = nil }
+    // Closing, replacing, and quitting hold off new writes while draining the queue.
+    func flushAutosave() async { await autosave.flush() }
+
+    func writeAutosave(_ text: String) async throws {
+        guard let target = fileURL, let revision, savedText?.isEqual(to: text) != true else { return }
         guard app.reserveSave(to: target, identity: fileIdentity, for: self) else {
-            autosaveFailure = (generation, "The file is in use by another window.", false)
-            return
+            throw DocumentAutosave.WriteError.inUse
         }
         defer { app.finishSave(to: target) }
-        do {
-            try await write(request.text, to: target, format: format, expected: revision)
-        } catch FileBufferError.changedOnDisk {
-            autosaveFailure = (generation, "The file changed on disk. Use Save to review whether to replace it.", false)
-        } catch {
-            autosaveFailure = (generation, error.localizedDescription, false)
-        }
+        try await write(text, to: target, format: format, expected: revision)
     }
 
     func worktreeMutationAffects(_ sources: [URL]) -> Bool {
@@ -1035,22 +977,20 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func beginWorktreeMutation() {
         if editor.hasMarkedText() { editor.unmarkText() }
-        worktreeMutation = true
-        worktreePriorEditability = editor.isEditable
+        activity.beginMutation(wasEditable: editor.isEditable)
         editor.isEditable = false
-        idleSave?.cancel()
-        idleSave = nil
+        autosave.cancelIdle()
     }
 
     func waitForWorktreeWrites() async {
-        await autosaveTask?.value
+        await autosave.waitForWrite()
     }
 
     func finishWorktreeMutation() {
-        worktreeMutation = false
-        editor.isEditable = hasTextDocument && worktreePriorEditability
-        startRequestedAutosave()
-        if autosaveTask == nil { scheduleIdleAutosave() }
+        let wasEditable = activity.endMutation()
+        editor.isEditable = hasTextDocument && wasEditable
+        autosave.resume()
+        if !autosave.hasWorker { autosave.scheduleIdle() }
     }
 
     func retargetMovedFile(from source: URL, to destination: URL, revealInWorktree: Bool = true) {
@@ -1078,7 +1018,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             app.syntaxOverrides.set(nil, for: original)
             app.syntaxOverrides.set(manualSyntaxLanguage, for: fileURL)
         }
-        autosaveFailure = nil
+        autosave.clearFailure()
         updateTitle(revealInWorktree: revealInWorktree)
         if resolvedSyntaxLanguage != previousLanguage { refreshSyntax(immediate: true) }
         if let fileURL {
@@ -1094,19 +1034,19 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         let wasPreview = isShowingFilePreview
         let wasFocused = contentHasFocus
         removeFilePreview()
-        if wasPreview { worktreePriorEditability = true }
+        if wasPreview { activity.restoreEditabilityAfterMutation() }
         let edited = window.isDocumentEdited
         let previousLanguage = resolvedSyntaxLanguage
         self.fileURL = nil
         fileIdentity = nil
         savedText = "" as NSString
         revision = nil
-        queuedAutosave = nil
-        autosaveFailure = nil
+        autosave.reset()
         if edited {
             manualSyntaxLanguage = previousLanguage == .plainText ? nil : previousLanguage
             updateTitle()
             updateEditedState()
+            scheduleDraftCheckpoint()
         } else {
             manualSyntaxLanguage = nil
             format = FileFormat()
@@ -1129,38 +1069,18 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func takeAutosaveFailure() -> String? {
-        guard let failure = autosaveFailure, !failure.reported, window.isDocumentEdited else { return nil }
-        autosaveFailure?.reported = true
-        return "“\(displayName)” — \(failure.detail)"
+        guard window.isDocumentEdited, let detail = autosave.takeFailure() else { return nil }
+        return "“\(displayName)” — \(detail)"
     }
 
-    private func reportAutosaveFailure() {
-        guard let failure = autosaveFailure, !failure.reported, window.isDocumentEdited,
-              !isBusy, !app.isQuitting, !app.isAgentCheck, window.isKeyWindow,
-              NSApplication.shared.isActive, window.attachedSheet == nil else { return }
-        autosaveFailure?.reported = true
+    func reportAutosaveFailure() {
+        guard window.isDocumentEdited, !isBusy, !app.isQuitting, !app.isAgentCheck, window.isKeyWindow,
+              NSApplication.shared.isActive, window.attachedSheet == nil, let detail = autosave.takeFailure() else { return }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Could Not Autosave “\(displayName)”"
-        alert.informativeText = failure.detail
+        alert.informativeText = detail
         alert.beginSheetModal(for: window)
-    }
-
-    private func scheduleIdleAutosave() {
-        idleSave?.cancel()
-        idleSave = nil
-        guard fileURL != nil, !app.isQuitting,
-              window.isDocumentEdited || autosaveTask != nil || saving else { return }
-        idleSave = Task { [weak self] in
-            do {
-                try await Task.sleep(for: .seconds(1))
-            } catch {
-                return
-            }
-            guard !Task.isCancelled, let self else { return }
-            idleSave = nil
-            requestAutosave()
-        }
     }
 
     @objc private func undoOrRedo(_ notification: Notification) {
@@ -1172,10 +1092,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func textDidChange() {
-        editGeneration &+= 1
+        autosave.noteEdit()
         updateEditedState()
         scheduleDraftCheckpoint()
-        scheduleIdleAutosave()
+        autosave.scheduleIdle()
         refreshSyntax(immediate: false)
         jjDocumentChanges?.bufferChanged()
     }
@@ -1205,29 +1125,25 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             if let event = NSApp.currentEvent, event.type == .keyDown, event.isARepeat,
                event.modifierFlags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "w" { return false }
             if !showsEmptyFolder {
-                openRequestGeneration &+= 1
-                promptingToClose = true
+                activity.beginClose(invalidateOpenRequests: true)
                 Task { await closeBuffer(destination: .emptyFolder(focusContent: true)) }
                 return false
             }
         }
-        guard window.isDocumentEdited || autosaveTask != nil else { return true }
-        promptingToClose = true
+        guard window.isDocumentEdited || autosave.hasWorker else { return true }
+        activity.beginClose()
         Task { await closeBuffer(destination: .window) }
         return false
     }
 
     func newBuffer() async {
         guard canReplaceBuffer, !app.isQuitting else { return }
-        openRequestGeneration &+= 1
-        promptingToClose = true
+        activity.beginClose(invalidateOpenRequests: true)
         await closeBuffer(destination: .buffer(nil))
     }
 
     func open(_ destination: CloseDestination, while isCurrent: () -> Bool) async -> Bool {
-        if openReplacementWaiters != nil {
-            await withCheckedContinuation { openReplacementWaiters?.append($0) }
-        }
+        await activity.waitForOpenReplacement()
         guard canReplaceBuffer, isCurrent() else { return false }
         switch destination {
         case .buffer(let file, _, _, let folder?) where file?.url == displayedFileURL:
@@ -1239,13 +1155,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         default:
             break
         }
-        promptingToClose = true
-        openReplacementWaiters = []
-        defer {
-            let waiters = openReplacementWaiters ?? []
-            openReplacementWaiters = nil
-            for waiter in waiters { waiter.resume() }
-        }
+        activity.beginOpenReplacement()
         return await closeBuffer(destination: destination, while: isCurrent)
     }
 
@@ -1257,9 +1167,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.isEditable = false
         defer {
             editor.isEditable = hasTextDocument && wasEditable
-            promptingToClose = false
+            activity.endReplacement()
             if folderURL != previousFolder { sidebar.folderChanged() }
-            startRequestedAutosave()
+            autosave.resume()
         }
 
         await flushAutosave()
@@ -1330,12 +1240,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                     resetDocument()
                 }
             }
-            autosaveFailure = nil
+            autosave.clearFailure()
             if restoreFocus { focusContent() }
             restoreEditorPosition(position)
         case .preview(let preview, let focusEditor, let folder):
             let restoreFocus = focusEditor || contentHasFocus
-            autosaveFailure = nil
+            autosave.clearFailure()
             rememberFilePosition()
             installContent(in: folder) { loadPreview(preview) }
             if restoreFocus { focusContent() }
@@ -1403,9 +1313,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         let alert = NSAlert()
         alert.messageText = "Save changes to “\(displayName)”?"
         let consequence = "Closing this document without saving discards your edits."
-        if let failure = autosaveFailure {
-            alert.informativeText = failure.detail + "\n\n" + consequence
-            autosaveFailure?.reported = true
+        if let detail = autosave.takeFailure(includingReported: true) {
+            alert.informativeText = detail + "\n\n" + consequence
         } else {
             alert.informativeText = consequence
         }
@@ -1450,9 +1359,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.exitFocus(notify: false)
         filePreviewView?.stop()
         syntaxHighlighting?.cancel(clearingColors: false)
-        idleSave?.cancel()
-        idleSave = nil
-        queuedAutosave = nil
+        autosave.reset()
         app.didClose(self)
     }
 

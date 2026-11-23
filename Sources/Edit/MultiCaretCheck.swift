@@ -269,9 +269,18 @@ enum MultiCaretCheck {
         let selections = [NSRange(location: 3, length: 2), NSRange(location: 9, length: 2)]
         let implicit = NSRange(location: NSNotFound, length: 0)
         let notify = editor.onTextChange
+        let notifyBuffer = editor.onBufferEdit
         var changes = 0
+        var bufferEdits: [[EditorTextEdit]?] = []
         editor.onTextChange = { changes += 1 }
-        defer { editor.onTextChange = notify }
+        editor.onBufferEdit = { storage, edits in
+            bufferEdits.append(edits)
+            notifyBuffer?(storage, edits)
+        }
+        defer {
+            editor.onTextChange = notify
+            editor.onBufferEdit = notifyBuffer
+        }
 
         func edit(_ action: () -> Void) {
             undo.beginUndoGrouping()
@@ -285,6 +294,7 @@ enum MultiCaretCheck {
             editor.setCaretSelections(selections, record: false)
             undo.removeAllActions()
             changes = 0
+            bufferEdits.removeAll()
         }
 
         func mark(_ text: String) {
@@ -295,12 +305,15 @@ enum MultiCaretCheck {
         reset()
         mark("ka")
         mark("かな")
-        try expect(editor.hasMarkedText() && editor.string == "aa BB cc かな ee" && changes == 0 && !undo.canUndo,
+        try expect(editor.hasMarkedText() && editor.string == "aa BB cc かな ee" && changes == 0 &&
+                   bufferEdits.isEmpty && !undo.canUndo,
                    "native primary preedit stays out of edit notifications and Undo")
         let markedRange = editor.markedRange()
         edit { editor.insertText("仮名", replacementRange: markedRange) }
         try expect(!editor.hasMarkedText() && editor.string == "aa 仮名 cc 仮名 ee" && changes == 1,
                    "commit broadcasts input with one edit notification")
+        try expect(bufferEdits.count == 1 && bufferEdits[0]?.map(\.range) == selections,
+                   "publish only the committed replacements in the original buffer coordinates")
         undo.undo()
         try expect(editor.string == original && editor.caretSelections == selections && !undo.canUndo,
                    "one Undo restores text and selections before the composition")
@@ -311,7 +324,7 @@ enum MultiCaretCheck {
         mark("한")
         mark("")
         try expect(!editor.hasMarkedText() && editor.string == original
-                   && editor.caretSelections == selections && changes == 0 && !undo.canUndo,
+                   && editor.caretSelections == selections && changes == 0 && bufferEdits.isEmpty && !undo.canUndo,
                    "empty preedit cancels composition without history or an edit notification")
 
         reset()

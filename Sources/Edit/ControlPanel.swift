@@ -473,6 +473,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         return arranged.filter { ids.insert($0.id).inserted }.map(\.result)
     }
 
+    #if EDIT_AGENT_CHECKS
     func checkTerminalCommands(in document: DocumentWindow, expected: Bool) throws {
         show(in: document, mode: .commands)
         defer { dismiss(restoreFocus: false) }
@@ -481,6 +482,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let found = entries.contains { splitIDs.contains($0.entry.id) }
         guard expected ? shown == splitIDs : !found else { throw CheckFailure.shortcutEscaped }
     }
+    #endif
 
     private var selectedID: String? {
         entries.indices.contains(table.selectedRow) ? entries[table.selectedRow].entry.id : nil
@@ -857,6 +859,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
 
     @objc private func activateClickedRow() { _ = activate(row: table.clickedRow) }
 
+    #if EDIT_AGENT_CHECKS
     func checkHidden(in document: DocumentWindow) throws {
         guard app.isAgentCheck else { return }
         show(in: document)
@@ -1375,6 +1378,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             }
         }
     }
+
+    #endif
 
     @discardableResult
     private func activate(row: Int) -> Task<Void, Never>? {

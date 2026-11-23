@@ -6,7 +6,6 @@ final class SyntaxHighlighting {
     private var spans: [SyntaxSpan] = []
     private var hasRenderingColors = false
     private var backedColorRange: NSRange?
-    private var backingRangeWasEdited = false
     private var task: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var activity: NSTitlebarAccessoryViewController?
@@ -19,12 +18,12 @@ final class SyntaxHighlighting {
 
     func update(language: SyntaxLanguage, immediate: Bool, keepingColors: Bool = false) {
         cancelPending()
+        if let editor { editor.syntaxAnalysis.cancelIfChanged(to: editor.string, language: language) }
         let request = generation
         if !keepingColors {
             if immediate {
                 display([])
             } else {
-                backingRangeWasEdited = backedColorRange != nil
                 spans = []
             }
         }
@@ -37,25 +36,22 @@ final class SyntaxHighlighting {
             guard !Task.isCancelled, let editor = self?.editor else { return }
             let source = editor.string
             let visibleRange = self?.visibleRange()
-            let (updates, continuation) = AsyncStream<[SyntaxSpan]>.makeStream(bufferingPolicy: .bufferingNewest(1))
-            let worker = Task.detached(priority: .userInitiated) {
-                defer { continuation.finish() }
-                let publishPreview: @Sendable ([SyntaxSpan]) -> Void = { preview in
-                    continuation.yield(preview)
-                }
-                let result = SyntaxEngine.spans(in: source, language: language, visibleRange: visibleRange,
-                                                onPreview: keepingColors ? nil : publishPreview)
-                if !Task.isCancelled, result != nil || !keepingColors { continuation.yield(result ?? []) }
+            let job = editor.syntaxAnalysis.request(in: source, language: language,
+                                                    visibleRange: visibleRange, publishesPreview: !keepingColors)
+            for await preview in job.previews {
+                guard !Task.isCancelled, let self, self.generation == request else { return }
+                self.display(preview)
+                self.stopProgress()
             }
-            await withTaskCancellationHandler {
-                for await result in updates {
-                    guard !Task.isCancelled, let self, self.generation == request else { break }
-                    self.display(result)
-                    self.stopProgress()
-                }
-            } onCancel: {
-                worker.cancel()
+            guard !Task.isCancelled else { return }
+            let result = await job.task.value
+            guard !Task.isCancelled, let self, self.generation == request else { return }
+            if let result {
+                self.display(result.spans)
+            } else if !keepingColors {
+                self.display([])
             }
+            self.stopProgress()
         }
 
         if immediate && !keepingColors {
@@ -69,6 +65,7 @@ final class SyntaxHighlighting {
 
     func prepareForBufferReplacement() {
         cancelPending()
+        editor?.syntaxAnalysis.cancel()
         spans = []
         clearColors()
         updateBackingColors(in: nil)
@@ -76,14 +73,17 @@ final class SyntaxHighlighting {
 
     func install(_ snapshot: SyntaxSnapshot) {
         cancelPending()
-        display(snapshot.spans)
-        if !snapshot.coversDocument {
+        display(snapshot.analysis.spans)
+        if snapshot.coversDocument, let editor {
+            editor.syntaxAnalysis.install(snapshot.analysis, in: editor.string, language: snapshot.language)
+        } else {
             update(language: snapshot.language, immediate: true, keepingColors: true)
         }
     }
 
     func cancel(clearingColors: Bool = true) {
         cancelPending()
+        editor?.syntaxAnalysis.cancel()
         if clearingColors { display([]) }
     }
 
@@ -115,6 +115,27 @@ final class SyntaxHighlighting {
         editor.setNeedsDisplay(editor.visibleRect)
     }
 
+    func storageDidEdit(_ storage: NSTextStorage) {
+        guard let backed = backedColorRange else { return }
+        let edit = storage.editedRange
+        let delta = storage.changeInLength
+        let replacedLength = edit.length - delta
+        guard edit.location != NSNotFound, edit.location <= storage.length,
+              edit.length <= storage.length - edit.location, replacedLength >= 0 else {
+            backedColorRange = NSRange(location: 0, length: storage.length)
+            return
+        }
+        let beforeEnd = edit.location + replacedLength
+        if beforeEnd < backed.location {
+            backedColorRange = NSRange(location: backed.location + delta, length: backed.length)
+        } else if edit.location <= backed.upperBound {
+            // Edits touching the cached colors can inherit them across the replaced range.
+            let start = min(backed.location, edit.location)
+            let end = max(edit.upperBound, backed.upperBound + delta)
+            backedColorRange = NSRange(location: start, length: end - start)
+        }
+    }
+
     private func updateBackingColors(in visible: NSRange?) {
         guard let editor, !editor.hasMarkedText(), let storage = editor.textStorage,
               let content = editor.textLayoutManager?.textContentManager else { return }
@@ -122,22 +143,15 @@ final class SyntaxHighlighting {
         let previous = backedColorRange.map { NSIntersectionRange($0, document) }
         let visible = visible.map { NSIntersectionRange($0, document) }
         let colors = visible.map { spans(overlapping: $0) } ?? []
-        guard backingRangeWasEdited || (previous?.length ?? 0) > 0 || (visible?.length ?? 0) > 0 else {
+        guard (previous?.length ?? 0) > 0 || (visible?.length ?? 0) > 0 else {
             backedColorRange = nil
-            backingRangeWasEdited = false
             return
         }
         var typingAttributes = editor.typingAttributes
         typingAttributes[.foregroundColor] = NSColor.textColor
         content.performEditingTransaction {
             storage.beginEditing()
-            if backingRangeWasEdited {
-                // Character edits may move or split the old runs. Reset only those now carrying color.
-                storage.enumerateAttribute(.foregroundColor, in: document) { value, range, _ in
-                    guard let color = value as? NSColor, color != .textColor else { return }
-                    storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: range)
-                }
-            } else if let previous, previous.length > 0, previous != visible {
+            if let previous, previous.length > 0, previous != visible {
                 storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: previous)
             }
             if let visible, visible.length > 0 {
@@ -151,7 +165,6 @@ final class SyntaxHighlighting {
         }
         editor.typingAttributes = typingAttributes
         backedColorRange = colors.isEmpty ? nil : visible
-        backingRangeWasEdited = false
     }
 
     private func visibleRange() -> NSRange? {

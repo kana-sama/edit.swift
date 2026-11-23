@@ -9,8 +9,6 @@ final class JJInlineDiff: NSResponder {
     private var expandableMarks: Set<JJLineMark> = []
     private var expanded: Set<NSRange> = []
     private var visibleHunks: [JJDiffHunk] = []
-    private var removedRows: [(line: Int, cumulative: Int)] = []
-    private(set) var overviewRevision: UInt = 0
     private var normalizeCRLF = false
     private var current = true
     private var panels: [NSRange: JJInlineDiffControls] = [:]
@@ -130,24 +128,6 @@ final class JJInlineDiff: NSResponder {
         return true
     }
 
-    func overviewRows(for mark: JJLineMark) -> Range<Int> {
-        let start = overviewRow(mark.lines.lowerBound, includingRemovedAtBoundary: false)
-        let end = overviewRow(mark.lines.upperBound, includingRemovedAtBoundary: mark.lines.isEmpty)
-        return start..<end
-    }
-
-    func overviewRow(_ line: Int, includingRemovedAtBoundary: Bool) -> Int {
-        var low = 0
-        var high = removedRows.count
-        while low < high {
-            let middle = (low + high) / 2
-            let boundary = removedRows[middle].line
-            if boundary < line || (includingRemovedAtBoundary && boundary == line) { low = middle + 1 }
-            else { high = middle }
-        }
-        return line + (low > 0 ? removedRows[low - 1].cumulative : 0)
-    }
-
     override func mouseEntered(with event: NSEvent) { mouseMoved(with: event) }
 
     override func mouseMoved(with event: NSEvent) {
@@ -164,13 +144,6 @@ final class JJInlineDiff: NSResponder {
         let next = hunks.filter { expanded.contains($0.baseRange) }
         if next != visibleHunks {
             visibleHunks = next
-            var total = 0
-            removedRows = next.compactMap { hunk in
-                guard !hunk.removedText.isEmpty else { return nil }
-                hunk.removedText.enumerateLines { _, _ in total += 1 }
-                return (hunk.mark.lines.lowerBound, total)
-            }
-            overviewRevision &+= 1
             interaction.clear()
             display.display(next)
         }

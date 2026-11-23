@@ -390,11 +390,16 @@ enum TerminalCheck {
         let document = app.makeDocument()
         let window = document.window
         defer { window.close() }
+        window.setFrame(NSRect(x: -10_000, y: -10_600, width: 1024, height: 600), display: false)
         document.showTerminal()
         let options = try require(view("Edit.Terminal.Options", in: window.contentView) as? NSButton,
                                   "find the terminal dock options")
         let panel = try require(options.target as? TerminalPanel, "find the terminal controller")
         try expect(dockAction(.right, in: panel), "prepare the right panel's toolbar item")
+        document.performFind(.toggleSidebar)
+        let split = try require(window.contentViewController as? NSSplitViewController, "find both sidebar edges")
+        let sidebar = try require(split.splitViewItems.first?.viewController.view, "find the leading sidebar")
+        let inspector = try require(split.splitViewItems.last?.viewController.view, "find the trailing sidebar")
         let toolbar = try require(window.toolbar, "find the document toolbar")
         // Keep the real item in a separate window, as AppKit can do in full screen.
         let frame = NSRect(x: -10_000, y: -10_000, width: 1024, height: 180)
@@ -407,8 +412,10 @@ enum TerminalCheck {
         window.toolbar = nil
         companion.toolbar = toolbar
         defer {
-            companion.toolbar = nil
-            window.toolbar = toolbar
+            if companion.toolbar != nil {
+                companion.toolbar = nil
+                window.toolbar = toolbar
+            }
             companion.close()
         }
         companion.orderBack(nil)
@@ -416,6 +423,20 @@ enum TerminalCheck {
         companion.layoutIfNeeded()
         try expect(companion.isVisible && !NSApp.isActive && document.titleBar.toolbarWindow === companion,
                    "host the toolbar in a transparent, inactive companion window")
+        document.titleBar.fullScreenTransitionDidFinish()
+        let continuation = try require(view("Edit.TitleBar.Dividers", in: companion.contentView?.superview) as? TitleBarDividers,
+                                       "continue the sidebar edges in a detached toolbar")
+        func backingEdge(_ x: CGFloat) -> CGFloat {
+            let screen = window.convertToScreen(NSRect(x: x, y: 0, width: 0, height: 0))
+            return companion.convertToBacking(companion.convertFromScreen(screen)).minX.rounded()
+        }
+        let strokes = continuation.strokes.map {
+            companion.convertToBacking(continuation.convert($0, to: nil))
+        }.sorted { $0.minX < $1.minX }
+        let leading = backingEdge(windowPosition(of: sidebar).maxX) - 1
+        let trailing = backingEdge(windowPosition(of: inspector).minX)
+        try expect(strokes.map(\.minX) == [leading, trailing] && strokes.allSatisfy { $0.width == 1 },
+                   "continue both sidebar edges at the same one-pixel screen positions in the detached toolbar")
         let header = try rightHeader(in: companion)
         try expect(header.window === companion, "attach the right header to the companion window")
         let headerFrame = windowPosition(of: header)
@@ -428,6 +449,11 @@ enum TerminalCheck {
                    restored.superview?.layer?.animation(forKey: #keyPath(CALayer.transform)) == nil &&
                    restored.superview?.layer?.animation(forKey: #keyPath(CALayer.opacity)) == nil,
                    "restore the full-size native title immediately in the companion window")
+        companion.toolbar = nil
+        window.toolbar = toolbar
+        window.layoutIfNeeded()
+        document.titleBar.fullScreenTransitionDidFinish()
+        try expect(continuation.superview == nil, "return to native tracking separators when the toolbar rejoins the window")
     }
 
     private static func checkFocusOutline(in document: DocumentWindow,
@@ -774,25 +800,14 @@ enum TerminalCheck {
         document.windowDidEnterFullScreen(Notification(name: NSWindow.didEnterFullScreenNotification, object: window))
         _ = try checkRightSidebar(in: document, panel: panel)
         try checkLeftHeader(in: window, sidebar: leftSidebar)
-        let dividers = try require(view("Edit.TitleBar.Dividers", in: window.contentView?.superview) as? TitleBarDividers,
-                                   "find the full-screen title bar dividers")
-        let strokes = dividers.strokes.map { dividers.convert($0, to: nil) }.sorted { $0.minX < $1.minX }
-        let backingStrokes = strokes.map { window.convertToBacking($0) }
-        let leftEdge = window.convertToBacking(windowPosition(of: leftSidebar)).maxX.rounded()
-        let rightEdge = window.convertToBacking(windowPosition(of: panel)).minX.rounded()
-        try expect(backingStrokes.count == 2 && backingStrokes[0].minX == leftEdge - 1 &&
-                   backingStrokes[1].minX == rightEdge && backingStrokes.allSatisfy { $0.width == 1 },
-                   "continue both visible sidebar edges with one aligned backing pixel (got \(backingStrokes), edges \(leftEdge) and \(rightEdge))")
-        try expect(strokes.allSatisfy { abs($0.minY - window.contentLayoutRect.maxY) <= 2 &&
-                       abs($0.maxY - windowPosition(of: split.splitView).maxY) <= 2 },
-                   "extend both sidebar dividers through the full title bar (strokes \(strokes), title bar bottom \(window.contentLayoutRect.maxY))")
+        try expect(view("Edit.TitleBar.Dividers", in: window.contentView?.superview) == nil,
+                   "keep native tracking separators through a full-screen callback in the shared window")
         try expect(abs(panel.frame.width - originalWidth) <= 1,
                    "preserve the right sidebar width on full-screen entry (got \(panel.frame.width), expected \(originalWidth))")
         try expect(window.firstResponder === focus, "preserve focus on full-screen entry")
 
         window.setFrame(originalFrame, display: false)
         document.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: window))
-        try expect(dividers.superview == nil, "return to the native windowed title bar dividers on exit")
         _ = try checkRightSidebar(in: document, panel: panel)
         try checkLeftHeader(in: window, sidebar: leftSidebar)
         let restoredHeader = try rightHeader(in: window)
@@ -809,16 +824,31 @@ enum TerminalCheck {
         try expect(document.handleTerminalKey(widthKey) && scroll.hasHorizontalScroller &&
                    terminal.frame.width > scroll.contentSize.width, "fit the full output line and enable horizontal scrolling")
         let wide = try require(terminal.terminalContentSnapshot(region: .viewport), "read the widened buffer")
-        try expect(wide.rows.contains { $0.text.hasPrefix("LongStart") && $0.text.hasSuffix("LongEnd") },
+        let lineColumns = columns * 2 + "LongStartLongEnd".count
+        try expect(wide.dimensions.cols == lineColumns &&
+                   wide.rows.contains { $0.text.hasPrefix("LongStart") && $0.text.hasSuffix("LongEnd") },
                    "reflow the entire long line into one terminal row")
 
-        let wheel = try require(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
-                                        wheel1: 0, wheel2: -180, wheel3: 0).flatMap(NSEvent.init(cgEvent:)),
-                                "make a horizontal scroll event")
         let point = scroll.convert(NSPoint(x: scroll.bounds.midX, y: scroll.bounds.midY), to: nil)
-        try expect(TerminalScrollView.routeWheel(wheel, in: document.window, at: point),
-                   "dispatch the horizontal wheel event to the terminal under the pointer")
+        func wheel(horizontal: Int32, vertical: Int32) throws -> NSEvent {
+            try require(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
+                                wheel1: vertical, wheel2: horizontal, wheel3: 0).flatMap(NSEvent.init(cgEvent:)),
+                        "make a diagonal scroll event")
+        }
+        let visibleRow = wide.capturedRange.lowerBound
+        try expect(TerminalScrollView.routeWheel(try wheel(horizontal: -180, vertical: 12), in: document.window, at: point),
+                   "send a horizontal-dominant gesture to the terminal viewport under the pointer")
         try await waitFor("scroll the terminal horizontally") { scroll.contentView.bounds.minX > 0 }
+        try expect(terminal.terminalContentSnapshot(region: .viewport)?.capturedRange.lowerBound == visibleRow,
+                   "leave vertical scrollback in place on a horizontal-dominant gesture")
+        let vertical = try wheel(horizontal: -12, vertical: 180)
+        try expect(!TerminalScrollView.routeWheel(vertical, in: document.window, at: point),
+                   "leave a vertical-dominant gesture to the terminal renderer")
+        terminal.scrollWheel(with: vertical)
+        try await waitFor("scroll the terminal renderer vertically") {
+            (terminal.terminalContentSnapshot(region: .viewport)?.capturedRange.lowerBound ?? visibleRow) < visibleRow
+        }
+        terminal.scrollTo(row: Int.max, notifyAccessibility: false)
         try expect(document.handleTerminalKey(widthKey) && !scroll.hasHorizontalScroller &&
                    scroll.contentView.bounds.minX == 0, "return to the fitted width and left edge")
 

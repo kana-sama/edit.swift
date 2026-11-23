@@ -2,18 +2,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include "../EditSyntaxABI/EditSyntaxABI.h"
 #include "tree_sitter/api.h"
 
 #define EDIT_VISIBLE __attribute__((visibility("default")))
 
-typedef void (*EditCapture)(void *context, uint32_t start, uint32_t end, const char *name);
-typedef bool (*EditCancelled)(void *context);
-typedef void (*EditPreview)(void *context);
-
 typedef struct {
     uint32_t startByte;
     uint32_t endByte;
-    EditPreview publish;
+    EditSyntaxPreview publish;
 } Preview;
 
 #define DECLARE(name) extern const TSLanguage *tree_sitter_##name(void)
@@ -89,10 +86,13 @@ static const TSLanguage *languageForName(const char *name) {
 typedef struct {
     const uint16_t *units;
     uint32_t bytes;
-    EditCapture capture;
-    EditCancelled cancelled;
+    EditSyntaxCapture highlight;
+    EditSyntaxCapture bracket;
+    EditSyntaxCancelled cancelled;
     void *context;
-    bool bracketContext;
+    // A viewport query can visit an injection before the complete query visits it.
+    __unsafe_unretained NSMutableDictionary<NSString *, NSValue *> *trees;
+    bool previewPass;
 } Input;
 
 static bool cancelled(Input *input) {
@@ -290,7 +290,7 @@ static uint32_t recoverBlockComments(Input *input, uint32_t start, uint32_t limi
             }
         }
         if (nesting > 0) end = length;
-        input->capture(input->context, offset + start, offset + end, NULL);
+        input->bracket(input->context, offset + start, offset + end, NULL);
         start = end;
     }
     return start;
@@ -336,7 +336,7 @@ static void readBracketContext(Input *input, TSNode root, const TSLanguage *lang
                     codeStart = recoverBlockComments(input, codeStart, start, offset, nestedComments);
                 }
                 if (end > codeStart) codeStart = end;
-                input->capture(input->context, offset + start, offset + end, NULL);
+                input->bracket(input->context, offset + start, offset + end, NULL);
             }
         } else if (ts_tree_cursor_goto_first_child(&cursor)) {
             continue;
@@ -380,13 +380,13 @@ static void runQuery(Input *input, const TSQuery *query, TSNode root, NSString *
                 uint32_t to = ts_node_end_byte(capture.node);
                 if (from >= to || to > input->bytes) continue;
                 if (!injection) {
-                    input->capture(input->context, offset + from / 2u, offset + to / 2u, name);
+                    input->highlight(input->context, offset + from / 2u, offset + to / 2u, name);
                 } else if (nestedName && strcmp(name, "injection.content") == 0 && !cancelled(input)) {
                     Input section = *input;
                     section.units += from / 2u;
                     section.bytes = to - from;
-                    if (input->bracketContext) {
-                        input->capture(input->context, offset + from / 2u, offset + to / 2u, nestedName);
+                    if (input->bracket) {
+                        input->bracket(input->context, offset + from / 2u, offset + to / 2u, nestedName);
                     }
                     runGrammar(section, nestedName, directory, offset + from / 2u, depth + 1, NULL);
                 }
@@ -400,16 +400,26 @@ static bool runGrammar(Input input, const char *name, NSString *directory, uint3
     const TSLanguage *language = languageForName(name);
     if (!language || cancelled(&input)) return false;
     const TSQuery *query = NULL;
-    if (!input.bracketContext) {
+    if (input.highlight) {
         NSString *queryPath = [directory stringByAppendingPathComponent:[@(name) stringByAppendingString:@".scm"]];
         query = loadQuery(language, queryPath);
-        if (!query) return false;
+        if (!query && !input.bracket) return false;
     }
-    TSParser *parser = ts_parser_new();
-    bool ready = ts_parser_set_language(parser, language);
-    TSInput text = {.payload = &input, .read = readInput, .encoding = TSInputEncodingUTF16LE};
-    TSParseOptions options = {.payload = &input, .progress_callback = parseProgress};
-    TSTree *tree = ready ? ts_parser_parse_with_options(parser, NULL, text, options) : NULL;
+    // Only preview and full highlighting can revisit the same injection within an analysis.
+    NSString *key = depth > 0 && input.trees ? [NSString stringWithFormat:@"%u:%u:%s", offset, input.bytes, name] : nil;
+    TSTree *tree = key ? [input.trees[key] pointerValue] : NULL;
+    if (tree) {
+        if (!input.previewPass) [input.trees removeObjectForKey:key];
+    } else {
+        TSParser *parser = ts_parser_new();
+        if (!parser) return false;
+        bool ready = ts_parser_set_language(parser, language);
+        TSInput text = {.payload = &input, .read = readInput, .encoding = TSInputEncodingUTF16LE};
+        TSParseOptions options = {.payload = &input, .progress_callback = parseProgress};
+        tree = ready ? ts_parser_parse_with_options(parser, NULL, text, options) : NULL;
+        ts_parser_delete(parser);
+        if (tree && key && input.previewPass) input.trees[key] = [NSValue valueWithPointer:tree];
+    }
     const bool parsed = tree != NULL;
     if (parsed) {
         TSNode root = ts_tree_root_node(tree);
@@ -419,55 +429,65 @@ static bool runGrammar(Input input, const char *name, NSString *directory, uint3
             NSString *injectionPath = [directory stringByAppendingPathComponent:[@(name) stringByAppendingString:@"-injections.scm"]];
             injections = loadQuery(language, injectionPath);
         }
-        if (input.bracketContext) {
-            readBracketContext(&input, root, language, name, offset, depth);
-        } else {
+        if (query) {
             if (preview && !cancelled(&input)) {
-                runQuery(&input, query, root, directory, offset, depth, false, preview);
-                if (injections) runQuery(&input, injections, root, directory, offset, depth, true, preview);
+                Input visible = input;
+                visible.bracket = NULL;
+                visible.previewPass = true;
+                runQuery(&visible, query, root, directory, offset, depth, false, preview);
+                if (injections) runQuery(&visible, injections, root, directory, offset, depth, true, preview);
                 if (!cancelled(&input)) preview->publish(input.context);
             }
             if (!cancelled(&input)) runQuery(&input, query, root, directory, offset, depth, false, NULL);
         }
+        if (input.bracket && !cancelled(&input)) readBracketContext(&input, root, language, name, offset, depth);
         if (injections && !cancelled(&input)) runQuery(&input, injections, root, directory, offset, depth, true, NULL);
-        ts_tree_delete(tree);
+        if (!key || !input.previewPass) ts_tree_delete(tree);
     }
-    ts_parser_delete(parser);
     return parsed && !cancelled(&input);
 }
 
-EDIT_VISIBLE bool edit_syntax_highlight_with_viewport(const char *language, const char *queryDirectory,
-                                                     const uint16_t *units, uint32_t count,
-                                                     uint32_t previewStart, uint32_t previewEnd, EditPreview publishPreview,
-                                                     EditCapture callback, EditCancelled check, void *context) {
-    if (!language || !queryDirectory || !units || !callback || count > UINT32_MAX / 2u) return false;
+EDIT_VISIBLE bool edit_syntax_analyze_v1(const char *language, const char *queryDirectory,
+                                        const uint16_t *units, uint32_t count,
+                                        uint32_t previewStart, uint32_t previewEnd, EditSyntaxPreview publishPreview,
+                                        EditSyntaxCapture highlight, EditSyntaxCapture bracket,
+                                        EditSyntaxCancelled check, void *context) {
+    if ((!highlight && !bracket) || count > UINT32_MAX / 2u) return false;
     @autoreleasepool {
         NSString *directory = [NSString stringWithUTF8String:queryDirectory];
         if (!directory) return false;
-        Input input = {units, count * 2u, callback, check, context, false};
+        const bool canPreview = highlight && publishPreview && previewStart < previewEnd && previewEnd <= count;
+        NSMutableDictionary<NSString *, NSValue *> *trees = canPreview ? [NSMutableDictionary dictionary] : nil;
+        Input input = {units, count * 2u, highlight, bracket, check, context, trees, false};
         Preview preview = {previewStart * 2u, previewEnd * 2u, publishPreview};
-        const bool canPreview = publishPreview && previewStart < previewEnd && previewEnd <= count;
-        return runGrammar(input, language, directory, 0, 0, canPreview ? &preview : NULL);
+        const bool result = runGrammar(input, language, directory, 0, 0, canPreview ? &preview : NULL);
+        for (NSValue *tree in trees.allValues) ts_tree_delete(tree.pointerValue);
+        return result;
     }
+}
+
+/* Running editors can load this library after a development rebuild. Keep prior entry points. */
+EDIT_VISIBLE bool edit_syntax_highlight_with_viewport(const char *language, const char *queryDirectory,
+                                                     const uint16_t *units, uint32_t count,
+                                                     uint32_t previewStart, uint32_t previewEnd, EditSyntaxPreview publishPreview,
+                                                     EditSyntaxCapture callback, EditSyntaxCancelled check, void *context) {
+    if (!language || !queryDirectory || !units || !callback) return false;
+    return edit_syntax_analyze_v1(language, queryDirectory, units, count, previewStart, previewEnd,
+                                 publishPreview, callback, NULL, check, context);
 }
 
 // A null capture name marks text excluded from matching. A language name marks an injection.
 EDIT_VISIBLE bool edit_syntax_bracket_context(const char *language, const char *queryDirectory,
                                              const uint16_t *units, uint32_t count,
-                                             EditCapture callback, EditCancelled check, void *context) {
-    if (!language || !queryDirectory || !units || !callback || count > UINT32_MAX / 2u) return false;
-    @autoreleasepool {
-        NSString *directory = [NSString stringWithUTF8String:queryDirectory];
-        if (!directory) return false;
-        Input input = {units, count * 2u, callback, check, context, true};
-        return runGrammar(input, language, directory, 0, 0, NULL);
-    }
+                                             EditSyntaxCapture callback, EditSyntaxCancelled check, void *context) {
+    if (!language || !queryDirectory || !units || !callback) return false;
+    return edit_syntax_analyze_v1(language, queryDirectory, units, count, 0, 0, NULL, NULL, callback, check, context);
 }
 
 /* A running editor may first open a highlighted file after its development bundle is rebuilt. */
 EDIT_VISIBLE bool edit_syntax_highlight(const char *language, const char *queryDirectory,
                                        const uint16_t *units, uint32_t count,
-                                       EditCapture callback, EditCancelled check, void *context) {
+                                       EditSyntaxCapture callback, EditSyntaxCancelled check, void *context) {
     return edit_syntax_highlight_with_viewport(language, queryDirectory, units, count,
                                              0, 0, NULL, callback, check, context);
 }

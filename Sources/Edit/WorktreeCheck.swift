@@ -789,6 +789,19 @@ enum WorktreeCheck {
             let childBounds = outlineLayer.convert(childLayer.bounds, from: childLayer)
             return abs(childBounds.maxY - y) < 0.5
         }
+        func waitForExpandedViewport(width: CGFloat) async throws {
+            try await waitFor("present the expanded rows at the resized sidebar width") {
+                guard abs(clip.bounds.width - width) < 0.5, let outline = tree.layer?.presentation(),
+                      abs(outline.bounds.width - tree.bounds.width) < 0.5,
+                      let sibling = siblingRow(), let child = tree.rowView(atRow: childCount, makeIfNecessary: false),
+                      let siblingLayer = sibling.layer?.presentation(), let childLayer = child.layer?.presentation() else { return false }
+                let siblingFrame = outline.convert(siblingLayer.bounds, from: siblingLayer)
+                let childFrame = outline.convert(childLayer.bounds, from: childLayer)
+                return abs(siblingFrame.width - sibling.frame.width) < 0.5 &&
+                    abs(childFrame.width - child.frame.width) < 0.5 &&
+                    abs(siblingFrame.minY - expandedY) < 0.5 && abs(childFrame.maxY - expandedY) < 0.5
+            }
+        }
         func clickChevron() throws {
             let button = try disclosure(at: 0, in: tree)
             let action = try require(button.action, "disclosure action")
@@ -805,8 +818,8 @@ enum WorktreeCheck {
 
         try await waitFor("render the collapsed rows") { abs((displayedY() ?? -1) - collapsedY) < 0.5 }
         sampleDisclosureCursor()
-        try click(0, in: tree)
-        try await waitFor("the first mouse expansion slides the children and sibling together") {
+        try clickChevron()
+        try await waitFor("the first native disclosure loads and slides the children and sibling together", interval: .milliseconds(5)) {
             sampleDisclosureCursor()
             return tree.isItemExpanded(item) && childrenMoveWithSibling(tree.rowView(atRow: childCount, makeIfNecessary: false))
         }
@@ -823,13 +836,17 @@ enum WorktreeCheck {
         window.layoutIfNeeded()
         try expect(clip.bounds.width < sidebarWidth, "resizing the sidebar narrows the visible Worktree")
         try checkViewportWidth()
+        try await waitForExpandedViewport(width: clip.bounds.width)
         split.splitView.setPosition(sidebarWidth, ofDividerAt: 0)
         window.layoutIfNeeded()
         try checkViewportWidth()
+        // The native collapse uses the previous row layers. Flush the resize through a
+        // rendered frame before sampling the last expanded child for the animation.
+        try await waitForExpandedViewport(width: clip.bounds.width)
 
         let lastChild = try require(tree.rowView(atRow: childCount, makeIfNecessary: false), "last expanded child")
         try clickChevron()
-        try await waitFor("mouse collapse slides the children and sibling together") {
+        try await waitFor("mouse collapse slides the children and sibling together", interval: .milliseconds(5)) {
             sampleDisclosureCursor()
             return !tree.isItemExpanded(item) && childrenMoveWithSibling(lastChild)
         }
@@ -985,11 +1002,12 @@ enum WorktreeCheck {
         outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSTableCellView
     }
 
-    private static func waitFor(_ detail: String, until condition: () -> Bool) async throws {
-        for _ in 0..<150 {
+    private static func waitFor(_ detail: String, interval: Duration = .milliseconds(20), until condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(3)
+        repeat {
             if condition() { return }
-            try await Task.sleep(for: .milliseconds(20))
-        }
+            try await Task.sleep(for: interval)
+        } while ContinuousClock.now < deadline
         throw Failure(detail)
     }
 

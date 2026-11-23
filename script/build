@@ -5,16 +5,17 @@ source script/app-bundle.sh
 
 configuration="${1:-debug}"
 case "$configuration" in
-    debug) swift_flags=(-Onone -g -D DEBUG) ;;
-    release) swift_flags=(-O -whole-module-optimization) ;;
+    debug|release) ;;
     *) printf 'Usage: %s [debug|release]\n' "$0" >&2; exit 2 ;;
 esac
 
 build_dir="${EDIT_BUILD_DIR:-$PWD/.build}"
 sdk_cache="${EDIT_SDK_CACHE_DIR:-$PWD/.local/swift-sdk}"
 bundle_name=Edit
+product=Edit
 if [[ "${EDIT_AGENT_BUILD:-0}" == 1 ]]; then
     bundle_name='Edit Agent'
+    product=EditAgent
 fi
 
 compiler="$(xcrun --find swiftc)"
@@ -23,6 +24,7 @@ minimum_version="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' re
 target="$(uname -m)-apple-macosx$minimum_version"
 sources=()
 while IFS= read -r -d '' path; do
+    if [[ "$bundle_name" == Edit && "$path" == *Check.swift ]]; then continue; fi
     sources+=("$path")
 done < <(/usr/bin/find -s Sources/Edit -type f -name '*.swift' -print0)
 
@@ -33,7 +35,7 @@ build_fingerprint() {
         /usr/bin/stat -L -f '%i:%m:%c:%z' "$compiler" "$sdk/SDKSettings.plist" &&
         /usr/bin/shasum -a 256 "${sources[@]}" Package.swift Package.resolved resources/Info.plist resources/Edit.icns \
             script/build script/build-syntax script/app-bundle.sh script/publish-app.c Sources/Edit/Resources/Seti/* \
-            Sources/EditSyntax/Highlight.m resources/syntax/sources.tar.gz \
+            Sources/EditSyntax/Highlight.m Sources/EditSyntaxABI/* resources/syntax/sources.tar.gz \
             resources/syntax/queries/*.scm resources/syntax/licenses/* resources/syntax/README.md
     } | /usr/bin/shasum -a 256
 }
@@ -54,27 +56,21 @@ stage="$(mktemp -d "$output/.edit-bundle.XXXXXX")"
 app="$stage/$bundle_name.app"
 trap 'finish_app_stage "$stage" "$app"' EXIT
 
-# Swift Build emits the pinned terminal module and its relocatable object
-# together. Link the object into the existing standalone app executable.
+# SwiftPM links the editor product and its pinned dependencies. Package the
+# executable under the same native bundle layout used by the app and checks.
 swiftpm_scratch="$sdk_cache/swiftpm"
-terminal_build=(/usr/bin/env "SWIFTPM_MODULECACHE_OVERRIDE=$sdk_cache/clang" "$(xcrun --find swift)" build
+editor_build=(/usr/bin/env "SWIFTPM_MODULECACHE_OVERRIDE=$sdk_cache/clang" "$(xcrun --find swift)" build
     --build-system swiftbuild
     --scratch-path "$swiftpm_scratch"
     --cache-path "$sdk_cache/swiftpm-cache"
     --config-path "$sdk_cache/swiftpm-config"
     --security-path "$sdk_cache/swiftpm-security"
     --configuration "$configuration" --triple "$target" --sdk "$sdk" --force-resolved-versions)
-"${terminal_build[@]}" --target SwiftTerm >&2
-terminal_products="$("${terminal_build[@]}" --show-bin-path)"
-
-"$compiler" -sdk "$sdk" -target "$target" -swift-version 6 -module-name Edit \
-    -parse-as-library -explicit-module-build -j "$(getconf _NPROCESSORS_ONLN)" \
-    -module-cache-path "$sdk_cache/clang" -sdk-module-cache-path "$sdk_cache/modules" \
-    -I "$terminal_products" "${swift_flags[@]}" "${sources[@]}" \
-    "$terminal_products/SwiftTerm.o" -o "$stage/Edit"
+"${editor_build[@]}" --product "$product" >&2
+products="$("${editor_build[@]}" --show-bin-path)"
 
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/syntax" "$app/Contents/Frameworks"
-mv "$stage/Edit" "$app/Contents/MacOS/Edit"
+cp -p "$products/$product" "$app/Contents/MacOS/Edit"
 syntax_library="$(./script/build-syntax "$sdk_cache" "$sdk" "$target")"
 cp -p "$syntax_library" "$app/Contents/Frameworks/libEditSyntax.dylib"
 cp -R resources/syntax/queries resources/syntax/licenses resources/syntax/README.md "$app/Contents/Resources/syntax/"
@@ -97,7 +93,8 @@ if [[ "$(build_fingerprint)" != "$fingerprint" ]]; then
 fi
 printf '%s\n' "$fingerprint" > "$app/Contents/Resources/build-fingerprint"
 sign_app "$app"
-if [[ -d "$stage/Edit.dSYM" ]]; then
+if [[ -d "$products/$product.dSYM" ]]; then
+    cp -Rp "$products/$product.dSYM" "$stage/Edit.dSYM"
     publish_path "$stage/Edit.dSYM" "$output/$bundle_name.dSYM"
 fi
 publish_app "$app" "$destination"

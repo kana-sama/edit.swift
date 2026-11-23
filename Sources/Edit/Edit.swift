@@ -53,7 +53,11 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         weak var document: DocumentWindow?
     }
 
+#if EDIT_AGENT_CHECKS
     let isAgentCheck = CommandLine.arguments.dropFirst().first == "--agent-check"
+#else
+    let isAgentCheck = false
+#endif
     private lazy var sessionStore = SessionStore.application()
     lazy var draftRecovery = DraftRecoveryStore(directory: storageFolder.appending(path: "DraftRecovery", directoryHint: .isDirectory))
     lazy var syntaxOverrides = SyntaxLanguageOverrides(defaults: isAgentCheck ? nil : .standard)
@@ -111,11 +115,12 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     func applicationDidFinishLaunching(_ notification: Notification) {
         let app = NSApplication.shared
         installMenus(in: app)
-        windowEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .scrollWheel]) { [weak self] event in
+        windowEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
             guard let self else { return event }
             return routeWindowEvent(event)
         }
         let initial = makeDocument()
+#if EDIT_AGENT_CHECKS
         if isAgentCheck {
             Task { @MainActor in
                 do {
@@ -162,6 +167,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             return
         }
 
+#endif
         initial.present()
         app.activate()
 
@@ -231,9 +237,6 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     func routeWindowEvent(_ event: NSEvent) -> NSEvent? {
         switch event.type {
-        case .scrollWheel:
-            guard let window = event.window else { return event }
-            return TerminalScrollView.routeWheel(event, in: window, at: event.locationInWindow) ? nil : event
         case .keyDown:
             let document = documents.first { $0.window === event.window }
             return document?.handleTerminalKey(event) == true ? nil : event
@@ -304,10 +307,13 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     @objc func showCommandMode(_ sender: Any?) { showControl(.commands) }
     @objc func showLanguageModes(_ sender: Any?) { showControl(.languages) }
 
+#if EDIT_AGENT_CHECKS
     func checkHeaderLanguagePicker(in document: DocumentWindow) throws {
         guard let controlPanel else { throw CocoaError(.featureUnsupported) }
         try controlPanel.checkHeaderLanguagePicker(in: document)
     }
+
+#endif
 
     func showLanguageModes(in document: DocumentWindow) {
         showControl(.languages, in: document)
@@ -1074,6 +1080,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         app.helpMenu = help
     }
 
+#if EDIT_AGENT_CHECKS
     private func checkOnly(_ arguments: ArraySlice<String>, in document: DocumentWindow) async throws {
         guard let scope = arguments.first, arguments.count <= 2 else { throw CheckError.unknownScope }
         let screenshot = arguments.dropFirst().first
@@ -1092,6 +1099,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             } else {
                 try JJInlineDiffCheck.run(in: document)
             }
+            try JJEditorCheck.run(in: makeDocument())
         case "files" where screenshot == nil:
             _ = try await FilesCheck.run(in: self)
             try await FilesCheck.checkFilePreview(in: self)
@@ -1162,6 +1170,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             }
         }
     }
+#endif
 }
 
 private extension NSMenu {

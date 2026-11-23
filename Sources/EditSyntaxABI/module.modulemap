@@ -1,0 +1,4 @@
+module EditSyntaxABI [system] {
+    header "EditSyntaxABI.h"
+    export *
+}

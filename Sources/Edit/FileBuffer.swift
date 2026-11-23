@@ -185,8 +185,6 @@ struct FileBuffer: Sendable {
     ) throws -> SaveResult {
         guard url.isFileURL else { throw FileBufferError.invalidPath(url) }
         let url = canonicalURL(url)
-        let parent = url.deletingLastPathComponent()
-
         let encoding = format.encoding
         var bytes = format.hasBOM ? Data(encoding.bom) : Data()
         if encoding == .utf8 {
@@ -199,6 +197,29 @@ struct FileBuffer: Sendable {
             }
             bytes.append(encoded)
         }
+
+        if try expected == .missing || (expected == nil && fileStatus(at: url) == nil) {
+            return try publish(bytes, text: text, to: url, format: format, expected: .missing)
+        }
+
+        // Keep version validation and replacement in the same coordinator access. The
+        // revision check also protects against earlier changes by uncoordinated writers.
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var outcome: Result<SaveResult, Error>?
+        var coordinationError: NSError?
+        coordinator.coordinate(writingItemAt: url, options: .forReplacing, error: &coordinationError) { target in
+            outcome = Result { try publish(bytes, text: text, to: target, format: format, expected: expected) }
+        }
+        if let outcome { return try outcome.get() }
+        if let coordinationError { throw coordinationError }
+        throw CocoaError(.fileWriteUnknown)
+    }
+
+    private static func publish(
+        _ bytes: Data, text: String, to url: URL, format: FileFormat, expected: FileRevision?
+    ) throws -> SaveResult {
+        let parent = url.deletingLastPathComponent()
+        let encoding = format.encoding
         let revision = FileRevision(bytes: bytes)
         let temporary = parent.appendingPathComponent(".edit-\(UUID().uuidString).tmp", isDirectory: false)
         let descriptor = try withPath(temporary) { open($0, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o666) }

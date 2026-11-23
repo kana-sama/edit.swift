@@ -20,6 +20,7 @@ final class BracketNavigation {
     func setLanguage(_ language: SyntaxLanguage) {
         guard self.language != language else { return }
         self.language = language
+        if let editor { editor.syntaxAnalysis.cancelIfChanged(to: editor.string, language: language) }
         reset()
         editor?.requestLineRefresh()
     }
@@ -100,9 +101,16 @@ final class BracketNavigation {
         let scope = scope
         indexing = Task { [weak self, weak editor] in
             if !immediate { try? await Task.sleep(for: .milliseconds(50)) }
-            guard !Task.isCancelled, let source = editor?.string else { return }
+            guard !Task.isCancelled, let analysis = editor?.syntaxAnalysis, let source = editor?.string else { return }
+            let context: BracketSyntax.Context
+            if language == .plainText {
+                context = .empty
+            } else {
+                let job = analysis.request(in: source, language: language)
+                context = await job.task.value?.brackets ?? .empty
+            }
+            guard !Task.isCancelled else { return }
             let work = Task.detached(priority: .userInitiated) {
-                let context = BracketSyntax.context(in: source, language: language)
                 return BracketMatching(text: Task.isCancelled ? "" : source, language: language,
                                        ignoredRanges: context.ignoredRanges, scope: scope,
                                        embeddedLanguages: context.embeddedLanguages.map { ($0.range, $0.language) })
