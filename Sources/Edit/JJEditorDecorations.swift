@@ -82,7 +82,7 @@ final class JJEditorDecorations {
         }
         let gutterInEditor = editor.convert(gutterFrame, from: scroll)
         if gutter.frame != gutterInEditor { gutter.frame = gutterInEditor }
-        gutter.needsDisplay = true
+        invalidateGutter()
 
         let scroller = scroll.verticalScroller
         let style = scroll.scrollerStyle
@@ -102,6 +102,10 @@ final class JJEditorDecorations {
         if track.frame != frame { track.frame = frame }
         if frame.size != trackSize { updateTrackMarks() }
         if style != .overlay { track.needsDisplay = true }
+    }
+
+    func invalidateGutter() {
+        gutter.needsDisplay = true
     }
 
     func hitTest(in scroll: NSScrollView, at point: NSPoint, nativeHit: NSView) -> NSView? {
@@ -213,8 +217,9 @@ final class JJEditorDecorations {
 
     private func drawGutter(in dirtyRect: NSRect) {
         guard let editor, let layout = editor.textLayoutManager else { return }
-        NSColor.textBackgroundColor.setFill()
+        editor.backgroundColor.setFill()
         dirtyRect.fill()
+        editor.drawCurrentLine(in: dirtyRect, relativeTo: gutter)
         let viewport = layout.textViewportLayoutController.viewportRange.map { editor.charRange($0, in: layout) }
         guard viewport != nil || lineStarts.isEmpty else { return }
         let firstLine = max(0, lineIndex(at: viewport?.lowerBound ?? 0) - 1)

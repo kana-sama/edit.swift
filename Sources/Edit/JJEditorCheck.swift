@@ -113,6 +113,43 @@ enum JJEditorCheck {
 
         try checkTrackAfterResize(in: document)
         try checkGutterUnderTitlebar(in: document)
+        try checkCurrentLineThroughGutter(in: document)
+    }
+
+    private static func checkCurrentLineThroughGutter(in document: DocumentWindow) throws {
+        let editor = document.editor
+        let scroll = document.scrollView
+        let row = String(repeating: "long test line ", count: 24) + "\n"
+        let starts = [0, 1] + (0..<80).map { 2 + $0 * row.utf16.count }
+        editor.string = "\n\n" + String(repeating: row, count: 80)
+        document.window.layoutIfNeeded()
+        editor.setJJLineMarks([JJLineMark(kind: .insertion, lines: 0..<1)], lineStarts: starts)
+
+        func pixel(x: CGFloat, at offset: Int) throws -> NSColor {
+            guard let line = editor.lineBounds(at: offset) else { throw Failure("lay out the current line") }
+            let sample = NSRect(x: scroll.safeAreaRect.minX + x, y: scroll.convert(line, from: editor).midY,
+                                width: 1, height: 1)
+            guard let color = try capture(scroll, in: sample).colorAt(x: 0, y: 0) else {
+                throw Failure("sample the current-line background")
+            }
+            return color
+        }
+
+        for horizontalOffset: CGFloat in [0, 55] {
+            for activeLine in [0, 1] {
+                editor.setSelectedRange(NSRange(location: activeLine, length: 0))
+                scroll.scrollToVisibleContentOrigin(NSPoint(x: horizontalOffset, y: 0))
+                editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+                editor.refreshCurrentLine()
+                let active = try pixel(x: 25, at: activeLine)
+                let inactive = try pixel(x: 25, at: 1 - activeLine)
+                guard active != inactive, try pixel(x: 1, at: activeLine) == active,
+                      try pixel(x: 1, at: 1 - activeLine) == inactive,
+                      try pixel(x: 3, at: 0) != (activeLine == 0 ? active : inactive) else {
+                    throw Failure("extend the current-line background through the gutter while keeping the marker visible")
+                }
+            }
+        }
     }
 
     private static func checkGutterUnderTitlebar(in document: DocumentWindow) throws {
