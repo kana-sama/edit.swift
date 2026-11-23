@@ -6,6 +6,8 @@ Up and Down wrap through results. Unmodified Return and row clicks open the sele
 
 Swift Edit uses [autosave](../autosave/spec.md) when Control takes focus and when it opens a file. An edited untitled draft gets the save or discard prompt before replacement. Cancel returns to the current buffer.
 
+Control supports [search in both keyboard layouts](../control-keyboard-layouts/spec.md).
+
 ## Folder search
 
 The recursive search skips directories whose names start with a dot, plus `node_modules`, `bower_components`, `venv`, `__pycache__`, `DerivedData`, and `zig-out`. Skip `target` next to a `Cargo.toml`. Package contents and symbolic directory links are skipped during the recursive walk.

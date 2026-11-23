@@ -627,6 +627,26 @@ enum FilesCheck {
         try expect(ControlMatching.rank(entries, query: "docs Meeting\\ Notes").first?.entry.id == "space",
                    "a backslash escapes a literal space")
         try expect(ControlMatching.rank(entries, query: "src missing").isEmpty, "all terms must match")
+
+        let alternateCharacters: [Character: Character] = ["ы": "s", "ф": "a", "м": "v", "у": "e"]
+        let layoutEntries = [
+            ControlEntry(id: "alternate", title: "save"),
+            ControlEntry(id: "typed-fuzzy", title: "ы_ф_м_у"),
+            ControlEntry(id: "typed-exact", title: "Long menu name: ыфму"),
+            ControlEntry(id: "both", title: "ыфму save"),
+        ]
+        let bothLayouts = ControlMatching.rank(layoutEntries, query: "ыфму", alternateCharacters: alternateCharacters)
+        try expect(bothLayouts.map(\.entry.id) == ["typed-exact", "alternate", "both", "typed-fuzzy"],
+                   "Control ranks an exact typed match first and still prefers a strong alternate to a weak match")
+        try expect(bothLayouts[2].titleCharacters == [0, 1, 2, 3],
+                   "Control shows one row and highlights the better match when both queries match")
+        let comparable = [ControlEntry(id: "alternate", title: "save.md"), ControlEntry(id: "typed", title: "ыфму.md")]
+        try expect(ControlMatching.rank(comparable, query: "ыфму", alternateCharacters: alternateCharacters)
+            .map(\.entry.id) == ["typed", "alternate"], "Control favors an equally strong match in the typed layout")
+        let escaped = [ControlEntry(id: "space", title: "sa ve.txt"), ControlEntry(id: "joined", title: "save.txt")]
+        let escapedMatches = ControlMatching.rank(escaped, query: "ыф\\ му", alternateCharacters: alternateCharacters)
+        try expect(escapedMatches.map(\.entry.id) == ["space"] && escapedMatches.first?.titleCharacters == [0, 1, 2, 3, 4],
+                   "Control preserves escaped spaces and highlights translated terms")
     }
 
     private static func checkEncodings(in app: Edit, directory: URL) async throws {

@@ -28,12 +28,25 @@ struct ControlMatch: Sendable {
 }
 
 enum ControlMatching {
-    static func rankFiles(_ entries: [ControlEntry], query: String) -> [ControlMatch] {
+    private struct QueryVariant {
+        let name: String
+        let terms: [[String]]
+
+        init(_ parts: [String]) {
+            name = parts.joined(separator: " ")
+            terms = parts.map { $0.map { String($0).lowercased() } }
+        }
+    }
+
+    private static let alternateLayoutPenalty = 8
+
+    static func rankFiles(_ entries: [ControlEntry], query: String,
+                          alternateCharacters: [Character: Character] = [:]) -> [ControlMatch] {
         if query.allSatisfy(\.isWhitespace) {
             let recent = entries.filter { $0.openedAt != nil }.sorted { fileOrder($0, $1) == .orderedAscending }
             return rank(recent, query: query)
         }
-        return rank(entries, query: query, preferRecentFiles: true)
+        return rank(entries, query: query, alternateCharacters: alternateCharacters, preferRecentFiles: true)
     }
 
     private static func fileOrder(_ lhs: ControlEntry, _ rhs: ControlEntry) -> ComparisonResult {
@@ -43,54 +56,36 @@ enum ControlMatching {
         return lhs.title.localizedStandardCompare(rhs.title)
     }
 
-    static func rank(_ entries: [ControlEntry], query: String, preferShorterTitles: Bool = false,
+    static func rank(_ entries: [ControlEntry], query: String, alternateCharacters: [Character: Character] = [:],
+                     preferShorterTitles: Bool = false,
                      preferRecentFiles: Bool = false) -> [ControlMatch] {
         let parts = terms(in: query)
-        let queryName = parts.joined(separator: " ")
-        let terms = parts.map {
-            $0.map { String($0).lowercased() }
-        }
-        if terms.isEmpty {
+        if parts.isEmpty {
             return entries.map { ControlMatch(entry: $0, titleCharacters: [], detailCharacters: []) }
         }
-        var matches: [(score: Int, titleLength: Int, index: Int, match: ControlMatch)] = []
+        let typedQuery = QueryVariant(parts)
+        var alternateQuery: QueryVariant?
+        if !alternateCharacters.isEmpty {
+            let converted = QueryVariant(parts.map { String($0.map { alternateCharacters[$0] ?? $0 }) })
+            if converted.terms != typedQuery.terms { alternateQuery = converted }
+        }
+
+        var matches: [(score: Int, typedExact: Bool, titleLength: Int, index: Int, match: ControlMatch)] = []
         for (index, entry) in entries.enumerated() {
             if Task.isCancelled { return [] }
-            let title = Array(entry.title)
-            let detail = Array(entry.detail ?? "")
-            let prefix = detail.isEmpty ? [] : detail + ["/"]
-            let path = prefix + title
-            var score = 0
-            var titleCharacters: Set<Int> = []
-            var detailCharacters: Set<Int> = []
-            var found = 0
-            for term in terms {
-                if let titleMatch = best(term, in: title) {
-                    score += titleMatch.score + 70
-                    titleCharacters.formUnion(titleMatch.indices)
-                    found += 1
-                } else if let pathMatch = best(term, in: path) {
-                    score += pathMatch.score
-                    for character in pathMatch.indices {
-                        if character < detail.count {
-                            detailCharacters.insert(character)
-                        } else if character >= prefix.count {
-                            titleCharacters.insert(character - prefix.count)
-                        }
-                    }
-                    found += 1
-                } else {
-                    break
-                }
+            let candidate = Candidate(entry)
+            let typed = candidate.match(typedQuery)
+            let typedExact = typed?.exact == true
+            if !typedExact, let alternateQuery, let alternate = candidate.match(alternateQuery),
+               alternate.score - alternateLayoutPenalty > typed?.score ?? Int.min {
+                matches.append((alternate.score - alternateLayoutPenalty, false, candidate.title.count, index,
+                                alternate.result))
+            } else if let typed {
+                matches.append((typed.score, typedExact, candidate.title.count, index, typed.result))
             }
-            guard found == terms.count else { continue }
-            let label = entry.title.split(separator: ":", maxSplits: 1).last?.trimmingCharacters(in: .whitespaces)
-            if entry.title.compare(queryName, options: .caseInsensitive) == .orderedSame ||
-                label?.compare(queryName, options: .caseInsensitive) == .orderedSame { score += 150 }
-            matches.append((score, title.count, index, ControlMatch(entry: entry, titleCharacters: titleCharacters,
-                                                                    detailCharacters: detailCharacters)))
         }
         return matches.sorted {
+            if alternateQuery != nil, $0.typedExact != $1.typedExact { return $0.typedExact }
             if $0.score != $1.score { return $0.score > $1.score }
             if preferRecentFiles {
                 let order = fileOrder($0.match.entry, $1.match.entry)
@@ -99,6 +94,57 @@ enum ControlMatching {
             if preferShorterTitles, $0.titleLength != $1.titleLength { return $0.titleLength < $1.titleLength }
             return $0.index < $1.index
         }.map(\.match)
+    }
+
+    private struct Candidate {
+        let entry: ControlEntry
+        let title: [Character]
+        let foldedTitle: [String]
+        let path: [Character]
+        let foldedPath: [String]
+        let detailLength: Int
+        let prefixLength: Int
+
+        init(_ entry: ControlEntry) {
+            self.entry = entry
+            title = Array(entry.title)
+            foldedTitle = title.map { String($0).lowercased() }
+            let detail = Array(entry.detail ?? "")
+            let prefix = detail.isEmpty ? [] : detail + ["/"]
+            path = prefix + title
+            foldedPath = prefix.map { String($0).lowercased() } + foldedTitle
+            detailLength = detail.count
+            prefixLength = prefix.count
+        }
+
+        func match(_ query: QueryVariant) -> (score: Int, exact: Bool, result: ControlMatch)? {
+            var score = 0
+            var titleCharacters: Set<Int> = []
+            var detailCharacters: Set<Int> = []
+            for term in query.terms {
+                if let titleMatch = best(term, in: title, folded: foldedTitle) {
+                    score += titleMatch.score + 70
+                    titleCharacters.formUnion(titleMatch.indices)
+                } else if let pathMatch = best(term, in: path, folded: foldedPath) {
+                    score += pathMatch.score
+                    for character in pathMatch.indices {
+                        if character < detailLength {
+                            detailCharacters.insert(character)
+                        } else if character >= prefixLength {
+                            titleCharacters.insert(character - prefixLength)
+                        }
+                    }
+                } else {
+                    return nil
+                }
+            }
+            let label = entry.title.split(separator: ":", maxSplits: 1).last?.trimmingCharacters(in: .whitespaces)
+            let exact = entry.title.compare(query.name, options: .caseInsensitive) == .orderedSame ||
+                label?.compare(query.name, options: .caseInsensitive) == .orderedSame
+            if exact { score += 150 }
+            return (score, exact, ControlMatch(entry: entry, titleCharacters: titleCharacters,
+                                              detailCharacters: detailCharacters))
+        }
     }
 
     private static func terms(in query: String) -> [String] {
@@ -122,9 +168,8 @@ enum ControlMatching {
         return terms
     }
 
-    private static func best(_ term: [String], in field: [Character]) -> (score: Int, indices: [Int])? {
+    private static func best(_ term: [String], in field: [Character], folded: [String]) -> (score: Int, indices: [Int])? {
         guard field.count >= term.count else { return nil }
-        let folded = field.map { String($0).lowercased() }
         var best: (score: Int, indices: [Int])?
         for start in field.indices where folded[start] == term[0] {
             var indices = [start]

@@ -41,8 +41,8 @@ enum FolderFileSearch {
         fileprivate let files: [ControlEntry]
         fileprivate let recentScope: RecentScope
 
-        func rank(_ recent: [ControlEntry], query: String, pinnedFiles: [ControlEntry] = [],
-                  scratches: [ControlEntry] = []) -> [ControlMatch] {
+        func rank(_ recent: [ControlEntry], query: String, alternateCharacters: [Character: Character],
+                  pinnedFiles: [ControlEntry], scratches: [ControlEntry]) -> [ControlMatch] {
             let eligible: [ControlEntry]
             switch recentScope {
             case .project(var exclusions):
@@ -50,8 +50,8 @@ enum FolderFileSearch {
             case .listedFiles(let paths):
                 eligible = recent.filter { $0.recent.map { paths.contains($0.canonicalURL.path) } == true }
             }
-            return FolderFileSearch.rank(eligible, folderFiles: files, pinnedFiles: pinnedFiles,
-                                         scratches: scratches, query: query)
+            return FolderFileSearch.rank(eligible, folderFiles: files, pinnedFiles: pinnedFiles, scratches: scratches,
+                                         query: query, alternateCharacters: alternateCharacters)
         }
     }
 
@@ -136,9 +136,10 @@ enum FolderFileSearch {
     }
 
     private static func rank(_ recent: [ControlEntry], folderFiles: [ControlEntry], pinnedFiles: [ControlEntry],
-                             scratches: [ControlEntry], query: String) -> [ControlMatch] {
+                             scratches: [ControlEntry], query: String,
+                             alternateCharacters: [Character: Character]) -> [ControlMatch] {
         let matches = ControlMatching.rank(recent + scratches + folderFiles + pinnedFiles, query: query,
-                                           preferRecentFiles: true)
+                                           alternateCharacters: alternateCharacters, preferRecentFiles: true)
 
         // Rank both paths before merging. A recent may use an alias while the query matches the real name.
         let matchingRecents = matches.compactMap { $0.entry.recent }

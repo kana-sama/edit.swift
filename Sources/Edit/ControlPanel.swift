@@ -37,6 +37,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     private weak var originalFocus: NSResponder?
     private var monitor: Any?
     private var entries: [ControlMatch] = []
+    private var keyboardLayouts = ControlKeyboardLayouts()
     private var request: Task<Void, Never>?
     private var folderScan: (scope: FolderFileSearch.Scope, task: Task<FolderFileSearch.Index, Never>)?
     private var scratchLoad: Task<[ScratchFile], Error>?
@@ -96,6 +97,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let source = searchesFolder ? [] : sourceEntries()
         let pinnedFiles = mode == .files && !searchesFolder ? pinnedFileEntries(reusing: source) : []
         let rows = searchesFolder ? [] : ControlMatching.rank(includingPins(pinnedFiles, in: source), query: query,
+                                                               alternateCharacters: alternateCharacters(for: query),
                                                                preferShorterTitles: mode == .commands)
         apply(searchesFolder ? [] : orderedRows(rows, pinnedFiles: pinnedFiles, query: query),
               selected: retry?.id ?? initialID, error: retry?.message)
@@ -519,6 +521,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let scan = scanFolder(query.allSatisfy(\.isWhitespace) ? nil : scope)
         let load = mode == .files && path == nil ? loadScratches() : nil
         let filter = path?.filter ?? query
+        let alternateCharacters = alternateCharacters(for: filter)
         let searchablePins = path == nil ? pinnedFiles : []
         let rowsWithPins = folder == nil ? includingPins(pinnedFiles, in: rows) : rows
         let isFileSearch = mode == .files
@@ -543,13 +546,16 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
                 let results: [ControlMatch]
                 if let scan {
                     let index = await scan.value
-                    results = index.rank(rows, query: filter, pinnedFiles: searchablePins, scratches: scratches)
+                    results = index.rank(rows, query: filter, alternateCharacters: alternateCharacters,
+                                         pinnedFiles: searchablePins, scratches: scratches)
                 } else if let folder {
                     results = FolderFileSearch.recentMatches(rows, scratches: scratches, in: folder)
                 } else if isFileSearch {
-                    results = ControlMatching.rankFiles(rowsWithPins + scratches, query: query)
+                    results = ControlMatching.rankFiles(rowsWithPins + scratches, query: query,
+                                                        alternateCharacters: alternateCharacters)
                 } else {
-                    results = ControlMatching.rank(rowsWithPins, query: query, preferShorterTitles: isCommandSearch)
+                    results = ControlMatching.rank(rowsWithPins, query: query, alternateCharacters: alternateCharacters,
+                                                   preferShorterTitles: isCommandSearch)
                 }
                 return (results, scratches, scratchError)
             }
@@ -576,6 +582,11 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             let orderedPins = scratches.isEmpty ? pinnedFiles : pinnedFileEntries(reusing: rows, scratches: scratches)
             apply(orderedRows(results, pinnedFiles: orderedPins, query: query), selected: id, error: error ?? scratchError)
         }
+    }
+
+    private func alternateCharacters(for query: String) -> [Character: Character] {
+        guard !query.allSatisfy(\.isWhitespace) else { return [:] }
+        return keyboardLayouts.alternatives(for: query)
     }
 
     @objc private func clearQuery() {
@@ -864,7 +875,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     @objc private func activateClickedRow() { _ = activate(row: table.clickedRow) }
 
     #if EDIT_AGENT_CHECKS
-    func checkHidden(in document: DocumentWindow) throws {
+    func checkHidden(in document: DocumentWindow) async throws {
         guard app.isAgentCheck else { return }
         show(in: document)
         defer { dismiss(restoreFocus: false) }
@@ -923,7 +934,43 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         guard field.string.isEmpty, clearButton.isHidden, input.currentEditor() === field else {
             throw CheckFailure.invalidSearchField
         }
+        if let wrongLayout = checkQueryInOtherLayout("save") {
+            field.insertText(wrongLayout, replacementRange: field.selectedRange())
+            while pending { await request?.value }
+            let saveRows = entries.indices.filter { entries[$0].entry.title == "File: Save" }
+            guard field.string == wrongLayout, table.numberOfRows == entries.count,
+                  let row = saveRows.first, saveRows.count == 1,
+                  entries[row].titleCharacters == [6, 7, 8, 9] else {
+                throw CheckFailure.invalidSearchField
+            }
+        }
+        configure(.languages)
+        if let wrongLayout = checkQueryInOtherLayout("Swift") {
+            input.stringValue = wrongLayout
+            search()
+            while pending { await request?.value }
+            guard entries.contains(where: { $0.entry.title == "Swift" && $0.titleCharacters == [0, 1, 2, 3, 4] }) else {
+                throw CheckFailure.invalidSearchField
+            }
+        }
+        configure(.files)
+        if let recent = files.first?.entry, let wrongLayout = checkQueryInOtherLayout(recent.title) {
+            input.stringValue = wrongLayout
+            search()
+            while pending { await request?.value }
+            guard entries.filter({ $0.entry.id == recent.id }).count == 1 else {
+                throw CheckFailure.invalidSearchField
+            }
+        }
         try checkKeyboardRouting()
+    }
+
+    private func checkQueryInOtherLayout(_ text: String) -> String? {
+        let alternate = alternateCharacters(for: text)
+        let converted = String(text.map { alternate[$0] ?? $0 })
+        let reverse = alternateCharacters(for: converted)
+        guard converted != text, String(converted.map { reverse[$0] ?? $0 }) == text else { return nil }
+        return converted
     }
 
     func checkFolder(in document: DocumentWindow, file: URL) async throws {
@@ -961,6 +1008,17 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let matchingFiles = entries.filter { ($0.entry.recent?.canonicalURL ?? $0.entry.folderFileURL)?.path == file.path }
         guard matchingFiles.count == 1, matchingFiles.first?.entry.recent != nil else {
             throw CheckFailure.invalidFolderResults("recent file deduplication")
+        }
+        if let folder, let directory = FolderFileSearch.relativeDirectory(of: file, in: folder), !directory.isEmpty,
+           let wrongLayout = checkQueryInOtherLayout(file.lastPathComponent), !wrongLayout.contains("/") {
+            input.stringValue = directory + "/" + wrongLayout
+            search()
+            while pending { await request?.value }
+            let matching = entries.filter { ($0.entry.recent?.canonicalURL ?? $0.entry.folderFileURL) == file }
+            guard matching.count == 1, folderScan?.scope.components == directory.split(separator: "/").map(String.init),
+                  matching.first?.titleCharacters == Set(0..<file.lastPathComponent.count) else {
+                throw CheckFailure.invalidFolderResults("alternate layout inside an explicit directory")
+            }
         }
     }
 

@@ -140,7 +140,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try await TerminalCheck.run(in: self)
                     print("Edit passed its native terminal checks without activation.")
                     let sample = try await FilesCheck.run(in: self)
-                    try ControlPanel(app: self).checkHidden(in: sample)
+                    try await ControlPanel(app: self).checkHidden(in: sample)
                     try await ControlPanel(app: self).checkPins(in: sample)
                     try await SyntaxCheck.run(in: self)
                     try await BracketCheck.run(in: self)
