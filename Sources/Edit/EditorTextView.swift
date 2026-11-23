@@ -142,16 +142,20 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
         guard focusSession == nil || focusEditsAllowed || replacementString == nil else { return false }
+        guard replacementString == nil || allowsProjectedChange(in: affectedCharRange) else { return false }
         return super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
     }
 
     override func shouldChangeText(inRanges affectedRanges: [NSValue], replacementStrings: [String]?) -> Bool {
         guard focusSession == nil || focusEditsAllowed || replacementStrings == nil else { return false }
+        guard replacementStrings == nil || affectedRanges.allSatisfy({ allowsProjectedChange(in: $0.rangeValue) }) else { return false }
         return super.shouldChangeText(inRanges: affectedRanges, replacementStrings: replacementStrings)
     }
 
     override func selectAll(_ sender: Any?) {
-        if !selectFocusedText() { super.selectAll(sender) }
+        if !selectFocusedText(), jjInlineDiff?.handleSelectionCommand(#selector(selectAll(_:))) != true {
+            super.selectAll(sender)
+        }
     }
 
     override func becomeFirstResponder() -> Bool {
@@ -173,6 +177,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func insertTab(_ sender: Any?) {
+        guard prepareProjectedLineCommand() else { return }
         if editMultipleLines(.tab) { return }
         guard !hasMarkedText(), let text = textStorage?.mutableString else {
             super.insertTab(sender)
@@ -195,6 +200,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func insertNewline(_ sender: Any?) {
+        guard prepareProjectedLineCommand() else { return }
         if editMultipleLines(.newline) { return }
         guard !hasMarkedText(), let text = textStorage?.mutableString else {
             super.insertNewline(sender)
@@ -213,42 +219,49 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     @objc func indentLines(_ sender: Any?) {
+        guard prepareProjectedLineCommand() else { return }
         if editMultipleLines(.indent(outdent: false)) { return }
         guard let text = textStorage?.mutableString else { return }
         apply(LineEditing.indent(text, selection: selectedRange(), outdent: false))
     }
 
     @objc func outdentLines(_ sender: Any?) {
+        guard prepareProjectedLineCommand() else { return }
         if editMultipleLines(.indent(outdent: true)) { return }
         guard let text = textStorage?.mutableString else { return }
         apply(LineEditing.indent(text, selection: selectedRange(), outdent: true))
     }
 
     @objc func moveLinesUp(_ sender: Any?) {
+        guard prepareProjectedLineCommand() else { return }
         if editMultipleLines(.move(up: true)) { return }
         guard let text = textStorage?.mutableString else { return }
         apply(LineEditing.moveLines(text, selection: selectedRange(), up: true))
     }
 
     @objc func moveLinesDown(_ sender: Any?) {
+        guard prepareProjectedLineCommand() else { return }
         if editMultipleLines(.move(up: false)) { return }
         guard let text = textStorage?.mutableString else { return }
         apply(LineEditing.moveLines(text, selection: selectedRange(), up: false))
     }
 
     @objc func insertLineAbove(_ sender: Any?) {
+        guard prepareProjectedLineCommand() else { return }
         if editMultipleLines(.insert(above: true)) { return }
         guard let text = textStorage?.mutableString else { return }
         apply(LineEditing.insertLine(text, selection: selectedRange(), above: true))
     }
 
     @objc func insertLineBelow(_ sender: Any?) {
+        guard prepareProjectedLineCommand() else { return }
         if editMultipleLines(.insert(above: false)) { return }
         guard let text = textStorage?.mutableString else { return }
         apply(LineEditing.insertLine(text, selection: selectedRange(), above: false))
     }
 
     override func copy(_ sender: Any?) {
+        if jjInlineDiff?.copyProjectedSelection(to: .general, cutting: false) == true { return }
         if copySelections(to: .general, cutting: false) { return }
         if selectedRange().length > 0 {
             super.copy(sender)
@@ -258,6 +271,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func cut(_ sender: Any?) {
+        if jjInlineDiff?.copyProjectedSelection(to: .general, cutting: true) == true { return }
         if copySelections(to: .general, cutting: true) { return }
         if selectedRange().length > 0 {
             super.cut(sender)
@@ -267,9 +281,23 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func paste(_ sender: Any?) {
+        if jjInlineDiff?.projectedEditRange != nil {
+            _ = replaceProjectedSelection(with: NSPasteboard.general.string(forType: .string))
+            return
+        }
         if !pasteAtCarets(from: .general) && !pasteLine(from: .general) {
             super.paste(sender)
         }
+    }
+
+    override func pasteAsPlainText(_ sender: Any?) {
+        if jjInlineDiff?.projectedEditRange != nil { paste(sender) }
+        else { super.pasteAsPlainText(sender) }
+    }
+
+    override func pasteAsRichText(_ sender: Any?) {
+        if jjInlineDiff?.projectedEditRange != nil { paste(sender) }
+        else { super.pasteAsRichText(sender) }
     }
 
     func copyLine(to pasteboard: NSPasteboard, cutting: Bool) {
@@ -304,6 +332,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func deleteToBeginningOfLine(_ sender: Any?) {
+        if replaceProjectedSelection(with: "") { return }
         if editMultipleLines(.deleteLineBoundary(backward: true)) { return }
         guard !hasMarkedText(), let text = textStorage?.mutableString else {
             super.deleteToBeginningOfLine(sender)
@@ -318,6 +347,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func deleteToEndOfLine(_ sender: Any?) {
+        if replaceProjectedSelection(with: "") { return }
         if editMultipleLines(.deleteLineBoundary(backward: false)) { return }
         guard !hasMarkedText(), let text = textStorage?.mutableString else {
             super.deleteToEndOfLine(sender)
@@ -339,6 +369,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         }
         if addCaret(at: event) { return }
         multiCaret.pendingSkip = false
+        if jjInlineDiff?.handleMouseDown(event) == true { return }
+        jjInlineDiff?.clearProjectedSelection()
         super.mouseDown(with: event)
         if focusSession == nil && hasSecondarySelections { keepPrimarySelection(nil) }
     }
@@ -346,6 +378,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     override func insertText(_ string: Any, replacementRange: NSRange) {
         if updatingComposition {
             super.insertText(string, replacementRange: replacementRange)
+            return
+        }
+        if jjInlineDiff?.projectedEditRange != nil {
+            _ = replaceProjectedSelection(with: (string as? String) ?? (string as? NSAttributedString)?.string)
             return
         }
         if let composition = multiCaretComposition {
@@ -382,6 +418,12 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             return
         }
         let preview = (string as? String) ?? (string as? NSAttributedString)?.string
+        if let diff = jjInlineDiff, let projected = diff.projectedEditRange {
+            guard isEditable, projected.length > 0, focusAllowsEdits([projected]), preview?.isEmpty == false else { return }
+            diff.clearProjectedSelection()
+            setMarkedText(string, selectedRange: selectedRange, replacementRange: projected)
+            return
+        }
         if preview?.isEmpty == true, multiCaretComposition != nil {
             discardMultiCaretComposition()
             return
@@ -499,30 +541,41 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func uppercaseWord(_ sender: Any?) {
+        if transformProjectedSelection({ $0.uppercased() }) { return }
         if !transformFocusedSelections({ $0.uppercased() }) { super.uppercaseWord(sender) }
     }
 
     override func lowercaseWord(_ sender: Any?) {
+        if transformProjectedSelection({ $0.lowercased() }) { return }
         if !transformFocusedSelections({ $0.lowercased() }) { super.lowercaseWord(sender) }
     }
 
     override func capitalizeWord(_ sender: Any?) {
+        if transformProjectedSelection({ $0.capitalized }) { return }
         if !transformFocusedSelections({ $0.capitalized }) { super.capitalizeWord(sender) }
     }
 
+    override func delete(_ sender: Any?) {
+        if !replaceProjectedSelection(with: "") { super.delete(sender) }
+    }
+
     override func deleteBackward(_ sender: Any?) {
+        if replaceProjectedSelection(with: "") { return }
         if !deleteAtCarets(backward: true, word: false) { super.deleteBackward(sender) }
     }
 
     override func deleteForward(_ sender: Any?) {
+        if replaceProjectedSelection(with: "") { return }
         if !deleteAtCarets(backward: false, word: false) { super.deleteForward(sender) }
     }
 
     override func deleteWordBackward(_ sender: Any?) {
+        if replaceProjectedSelection(with: "") { return }
         if !deleteAtCarets(backward: true, word: true) { super.deleteWordBackward(sender) }
     }
 
     override func deleteWordForward(_ sender: Any?) {
+        if replaceProjectedSelection(with: "") { return }
         if !deleteAtCarets(backward: false, word: true) { super.deleteWordForward(sender) }
     }
 
@@ -546,11 +599,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func doCommand(by selector: Selector) {
-        if focusSession == nil, caretSelections.count == 1, selectedRange().length == 0, !hasMarkedText(),
-           selector == #selector(moveUp(_:)) || selector == #selector(moveDown(_:)),
-           jjInlineDiff?.moveFromSource(forward: selector == #selector(moveDown(_:))) == true {
-            return
-        }
+        if jjInlineDiff?.handleSelectionCommand(selector) == true { return }
         let before = selectedRange()
         if !moveSecondarySelections(command: selector) {
             super.doCommand(by: selector)
@@ -616,9 +665,9 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
         switch item.action {
         case #selector(copy(_:)):
-            return isSelectable && (textStorage?.length ?? 0) > 0
+            return isSelectable && (jjInlineDiff?.projectedEditRange != nil || (textStorage?.length ?? 0) > 0)
         case #selector(cut(_:)):
-            return isEditable && (textStorage?.length ?? 0) > 0
+            return isEditable && (jjInlineDiff?.projectedEditRange?.length ?? textStorage?.length ?? 0) > 0
         case #selector(increaseTextSize(_:)):
             return fontSize < 72
         case #selector(decreaseTextSize(_:)):
@@ -821,7 +870,36 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     func replaceFoundText(in range: NSRange, with replacement: String) -> Bool {
         guard !hasMarkedText() else { return false }
+        jjInlineDiff?.clearProjectedSelection()
         return replace(range, with: replacement)
+    }
+
+    private func allowsProjectedChange(in range: NSRange) -> Bool {
+        guard let editable = jjInlineDiff?.projectedEditRange else { return true }
+        return editable.length > 0 && range.location >= editable.location && range.location <= editable.upperBound
+            && range.length >= 0 && range.length <= editable.upperBound - range.location
+    }
+
+    private func prepareProjectedLineCommand() -> Bool {
+        guard let diff = jjInlineDiff, let editable = diff.projectedEditRange else { return true }
+        guard isEditable, editable.length > 0, focusAllowsEdits([editable]) else { return false }
+        diff.clearProjectedSelection()
+        return true
+    }
+
+    private func replaceProjectedSelection(with replacement: String?) -> Bool {
+        guard let diff = jjInlineDiff, let editable = diff.projectedEditRange else { return false }
+        guard let replacement, isEditable, editable.length > 0, !hasMarkedText(), focusAllowsEdits([editable]) else { return true }
+        diff.clearProjectedSelection()
+        let caret = NSRange(location: editable.location + replacement.utf16.count, length: 0)
+        applyMultiEdits([.init(range: editable, text: replacement)], selections: [caret])
+        return true
+    }
+
+    private func transformProjectedSelection(_ transform: (String) -> String) -> Bool {
+        guard let editable = jjInlineDiff?.projectedEditRange else { return false }
+        guard let storage = textStorage, editable.length > 0, editable.upperBound <= storage.length else { return true }
+        return replaceProjectedSelection(with: transform(storage.attributedSubstring(from: editable).string))
     }
 
     @discardableResult
@@ -848,6 +926,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func textDidChange(_ notification: Notification) {
+        jjInlineDiff?.sourceTextChanged()
         guard !updatingComposition else {
             onJJCompositionChange?()
             occurrenceHighlighting.reset()

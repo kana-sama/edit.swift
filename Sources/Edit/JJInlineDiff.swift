@@ -4,6 +4,7 @@ import AppKit
 final class JJInlineDiff: NSResponder {
     private weak var editor: EditorTextView?
     private let display: JJInlineDiffLayout
+    private let interaction: JJInlineDiffInteraction
     private var hunks: [JJDiffHunk] = []
     private var expandableMarks: Set<JJLineMark> = []
     private var expanded: Set<NSRange> = []
@@ -20,18 +21,38 @@ final class JJInlineDiff: NSResponder {
 
     init(editor: EditorTextView) {
         self.editor = editor
-        display = JJInlineDiffLayout(editor: editor)
+        let display = JJInlineDiffLayout(editor: editor)
+        self.display = display
+        interaction = JJInlineDiffInteraction(editor: editor, layout: display)
         super.init()
         display.onSelectionChange = { [weak self] in
             guard let self, self.display.hunk(for: self.editor?.window?.firstResponder) != nil else { return }
             selectionChanged()
         }
         display.onCancel = { [weak self] in self?.collapseAll() == true }
+        display.onMouseDown = { [weak self] in self?.handleMouseDown($0) == true }
     }
 
     required init?(coder: NSCoder) { fatalError("Inline diff is programmatically constructed") }
 
     var hasExpandedHunks: Bool { !expanded.isEmpty }
+    var projectedEditRange: NSRange? { interaction.projectedEditRange }
+    var hasProjectedCaret: Bool { interaction.hasProjectedCaret }
+    var isMirroringProjectedSelection: Bool { interaction.isMirroringProjectedSelection }
+
+    func handleMouseDown(_ event: NSEvent) -> Bool { interaction.mouseDown(with: event) }
+    func handleSelectionCommand(_ selector: Selector) -> Bool { interaction.handleSelectionCommand(selector) }
+    func clearProjectedSelection() { interaction.clear() }
+    func sourceTextChanged() { interaction.sourceTextChanged() }
+
+    func copyProjectedSelection(to pasteboard: NSPasteboard, cutting: Bool) -> Bool {
+        interaction.copy(to: pasteboard, cutting: cutting)
+    }
+
+    @discardableResult
+    func select(from anchor: JJInlineDiffSelection.Position, to head: JJInlineDiffSelection.Position) -> Bool {
+        interaction.select(from: anchor, to: head)
+    }
 
     func update(_ updated: [JJDiffHunk], normalizeCRLF: Bool) {
         let sameHunks = updated == hunks
@@ -40,7 +61,14 @@ final class JJInlineDiff: NSResponder {
         if !sameHunks {
             hunks = updated
             expandableMarks = Set(updated.map(\.mark))
-            expanded.formIntersection(updated.map(\.baseRange))
+            let previouslyExpanded = expanded
+            expanded = Set(updated.lazy.map(\.baseRange).filter { range in
+                previouslyExpanded.contains(range) || previouslyExpanded.contains { previous in
+                    if previous.length == 0 { return NSLocationInRange(previous.location, range) }
+                    if range.length == 0 { return NSLocationInRange(range.location, previous) }
+                    return NSIntersectionRange(previous, range).length > 0
+                }
+            })
             applyExpansion()
         } else if hasExpandedHunks {
             refreshControls()
@@ -75,21 +103,19 @@ final class JJInlineDiff: NSResponder {
     }
 
     func selectionChanged() {
+        interaction.selectionChanged()
         editor?.requestLineRefresh()
     }
 
     func layout() {
         guard hasExpandedHunks else { return }
         display.layout()
+        interaction.updatePresentation()
         refreshControls()
     }
 
     func drawBackground(in rect: NSRect) {
         if hasExpandedHunks { display.drawBackground(in: rect) }
-    }
-
-    func moveFromSource(forward: Bool) -> Bool {
-        hasExpandedHunks && display.moveFromSource(forward: forward)
     }
 
     func expandedRegion(for mark: JJLineMark) -> NSRect? {
@@ -146,6 +172,7 @@ final class JJInlineDiff: NSResponder {
             }
             overviewRevision &+= 1
             display.display(next)
+            interaction.display(next)
         }
         guard let scroll = editor?.enclosingScrollView else { return }
         if next.isEmpty {
@@ -183,6 +210,9 @@ final class JJInlineDiff: NSResponder {
         }
         guard responder === editor, let selection = editor.caretSelections.last else { return nil }
         lastTextResponder = editor
+        if case .removed(let key, _) = interaction.head {
+            return visibleHunks.first { $0.baseRange == key }
+        }
         let caret = editor.activeEnd(of: selection)
         return visibleHunks.first { hunk in
             let range = hunk.currentRange
@@ -291,6 +321,7 @@ final class JJInlineDiff: NSResponder {
             return
         }
         editor.window?.makeFirstResponder(editor)
+        interaction.clear()
         let restored = normalizeCRLF
             ? hunk.removedText.replacingOccurrences(of: "\r\n", with: "\n", options: .literal)
                 .replacingOccurrences(of: "\n", with: editor.preferredLineEnding, options: .literal)

@@ -25,6 +25,9 @@ final class JJInlineDiffLayout: NSObject, NSTextLayoutManagerDelegate {
     private var lineHeight: CGFloat = 18
     private var emptyEditorInset: NSSize?
     private var layingOut = false
+    private var removedSelections: [NSRange: NSRange] = [:]
+    private var removedCaret: JJInlineDiffSelection.Position?
+    var onMouseDown: ((NSEvent) -> Bool)?
     var onSelectionChange: (() -> Void)?
     var onCancel: (() -> Bool)?
 
@@ -100,6 +103,7 @@ final class JJInlineDiffLayout: NSObject, NSTextLayoutManagerDelegate {
                                paragraph: editor.defaultParagraphStyle ?? .default,
                                textX: editor.textContainerOrigin.x - removed.minX,
                                padding: editor.textContainer?.lineFragmentPadding ?? 0)
+                updateSelection(in: rows, for: hunk.baseRange)
             } else if let rows = entries[index].removedRows, editor.window?.firstResponder !== rows.textView {
                 rows.isHidden = true
             }
@@ -131,31 +135,81 @@ final class JJInlineDiffLayout: NSObject, NSTextLayoutManagerDelegate {
         return entries.first { $0.removedRows?.textView === responder }?.hunk
     }
 
-    func moveFromSource(forward: Bool) -> Bool {
-        guard let editor, let window = editor.window, window.firstResponder === editor,
-              let source = editor.textStorage?.mutableString else { return false }
-        let caret = editor.selectedRange()
-        guard caret.length == 0, caret.location <= source.length else { return false }
-        let line = LineEditing.line(at: caret.location, in: source)
-        if forward, line.end == source.length, line.contentEnd < line.end { return false }
-        let boundary = forward ? line.end : line.start
-        guard let hunk = entries.first(where: {
-            $0.removedLineCount > 0 && $0.hunk.currentRange.location == boundary
-        })?.hunk, forward || boundary < source.length || source.length == 0 else { return false }
+    func removedPosition(at point: NSPoint) -> JJInlineDiffSelection.Position? {
+        guard let editor else { return nil }
+        for entry in entries where entry.removedRect?.contains(point) == true {
+            guard let rows = entry.removedRows, !rows.isHidden else { continue }
+            let textView = rows.textView
+            let offset = textView.characterIndexForInsertion(at: textView.convert(point, from: editor))
+            guard offset != NSNotFound else { return nil }
+            return .removed(key: entry.hunk.baseRange, offset: min(offset, textView.string.utf16.count))
+        }
+        return nil
+    }
 
-        if entries.first(where: { $0.hunk == hunk })?.removedRows?.isHidden != false {
-            reveal(hunk)
+    func showSelection(_ range: NSRange?, caret: JJInlineDiffSelection.Position?, in projection: JJInlineDiffSelection?) {
+        removedCaret = caret
+        removedSelections.removeAll(keepingCapacity: true)
+        for entry in entries {
+            let key = entry.hunk.baseRange
+            if let range, let block = projection?.displayRange(forRemoved: key) {
+                let selected = NSIntersectionRange(range, block)
+                if selected.length > 0 {
+                    removedSelections[key] = NSRange(location: selected.location - block.location, length: selected.length)
+                }
+            }
+            if let rows = entry.removedRows { updateSelection(in: rows, for: key) }
+        }
+    }
+
+    private func updateSelection(in rows: JJRemovedRows, for key: NSRange) {
+        let active = editor.map { $0.window?.firstResponder === $0 && $0.window?.isKeyWindow == true } ?? false
+        let offset: Int?
+        if case .removed(let caretKey, let caretOffset) = removedCaret, caretKey == key {
+            offset = caretOffset
+        } else {
+            offset = nil
+        }
+        rows.textView.showSelection(removedSelections[key], caret: offset, active: active)
+    }
+
+    func revealCaret(at position: JJInlineDiffSelection.Position) {
+        guard case .removed(let key, let offset) = position, let editor, let scroll = editor.enclosingScrollView,
+              let index = entries.firstIndex(where: { $0.hunk.baseRange == key }) else { return }
+        if entries[index].removedRect == nil { reveal(entries[index].hunk) }
+        guard let block = entries[index].removedRect else { return }
+        let source = entries[index].hunk.removedText as NSString
+        let end = min(offset, max(0, source.length - 1))
+        let lineStart = LineEditing.line(at: end, in: source).start
+        var start = 0
+        var line = 0
+        while start < lineStart {
+            start = NSMaxRange(source.lineRange(for: NSRange(location: start, length: 0)))
+            line += 1
+        }
+        let y = block.minY + CGFloat(line) * lineHeight
+        let visible = scroll.documentVisibleRect
+        var origin = scroll.visibleContentOrigin
+        let insets = scroll.contentInsets
+        if y < visible.minY + insets.top {
+            origin.y += y - visible.minY - insets.top
+        } else if y + lineHeight > visible.maxY - insets.bottom {
+            origin.y += y + lineHeight - visible.maxY + insets.bottom
+        }
+        if scroll.scrollToVisibleContentOrigin(origin) {
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
             layout()
         }
-        guard let rows = entries.first(where: { $0.hunk == hunk })?.removedRows,
-              window.makeFirstResponder(rows.textView) else { return false }
-        let removed = rows.textView.string as NSString
-        let destination = LineEditing.line(at: forward ? 0 : max(0, removed.length - 1), in: removed)
-        let offset = Self.offset(in: destination, column: caret.location - line.start, source: removed)
-        let selection = NSRange(location: offset, length: 0)
-        rows.textView.setSelectedRange(selection)
-        rows.textView.scrollRangeToVisible(selection)
-        return true
+        guard let textView = entries[index].removedRows?.textView, let caret = textView.caretRect(at: offset) else { return }
+        let x = textView.convert(caret, to: editor).minX
+        let exposed = scroll.documentVisibleRect
+        let left = exposed.minX + insets.left
+        let right = exposed.maxX - insets.right
+        guard left < right else { return }
+        origin = scroll.visibleContentOrigin
+        if x < left { origin.x += x - left - editor.textContainerInset.width }
+        if x > right { origin.x += x - right + editor.textContainerInset.width }
+        if scroll.scrollToVisibleContentOrigin(origin) { layout() }
     }
 
     func reveal(_ hunk: JJDiffHunk) {
@@ -296,6 +350,7 @@ final class JJInlineDiffLayout: NSObject, NSTextLayoutManagerDelegate {
 
     private func makeRemovedRows(in editor: EditorTextView) -> JJRemovedRows {
         let rows = JJRemovedRows()
+        rows.textView.onMouseDown = { [weak self] in self?.onMouseDown?($0) ?? false }
         rows.textView.onCancel = { [weak self] in self?.onCancel?() ?? false }
         rows.textView.onSelectionChange = { [weak self] in self?.onSelectionChange?() }
         rows.textView.onLeave = { [weak self, weak rows] forward in
@@ -423,9 +478,75 @@ private final class JJRemovedRows: NSView {
 
 @MainActor
 private final class JJRemovedTextView: NSTextView, NSTextViewDelegate {
+    var onMouseDown: ((NSEvent) -> Bool)?
     var onCancel: (() -> Bool)?
     var onLeave: ((Bool) -> Bool)?
     var onSelectionChange: (() -> Void)?
+    private var projectedSelection: NSRange?
+    private var selectionIsActive = false
+    private var caretOffset: Int?
+    private var caretView: CaretIndicatorGroup?
+
+    override func mouseDown(with event: NSEvent) {
+        if onMouseDown?(event) != true { super.mouseDown(with: event) }
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(visibleRect, cursor: .iBeam)
+    }
+
+    override func drawBackground(in dirtyRect: NSRect) {
+        super.drawBackground(in: dirtyRect)
+        guard let selection = projectedSelection, let layout = textLayoutManager,
+              let start = layout.location(layout.documentRange.location, offsetBy: selection.location),
+              let end = layout.location(start, offsetBy: selection.length),
+              let range = NSTextRange(location: start, end: end) else { return }
+        (selectionIsActive ? NSColor.selectedTextBackgroundColor : .unemphasizedSelectedTextBackgroundColor).setFill()
+        let origin = textContainerOrigin
+        layout.enumerateTextSegments(in: range, type: .selection, options: .rangeNotRequired) { _, rect, _, _ in
+            rect.offsetBy(dx: origin.x, dy: origin.y).intersection(dirtyRect).fill()
+            return true
+        }
+    }
+
+    func showSelection(_ selection: NSRange?, caret: Int?, active: Bool) {
+        if projectedSelection != selection || selectionIsActive != active {
+            projectedSelection = selection
+            selectionIsActive = active
+            needsDisplay = true
+        }
+        let restartBlink = caret != caretOffset
+        caretOffset = caret
+        let viewport = visibleRect
+        guard let caret, let rect = caretRect(at: caret), !viewport.isEmpty else {
+            caretView?.removeFromSuperview()
+            caretView = nil
+            return
+        }
+        let group = caretView ?? CaretIndicatorGroup()
+        if caretView == nil {
+            group.wantsLayer = true
+            group.clipsToBounds = true
+            addSubview(group)
+            caretView = group
+        }
+        group.isHidden = !active
+        group.update([rect], viewport: viewport, color: .textColor, restartBlink: restartBlink)
+    }
+
+    func caretRect(at offset: Int) -> NSRect? {
+        guard let window else { return nil }
+        let source = string as NSString
+        let offset = min(offset, source.length)
+        // TextKit gives a block ending with a newline an extra insertion line.
+        // A caret with trailing affinity to this block belongs on its last visible row.
+        let location = offset == source.length && offset > 0
+            ? LineEditing.line(at: offset - 1, in: source).contentEnd : offset
+        let screenRect = firstRect(forCharacterRange: NSRange(location: location, length: 0), actualRange: nil)
+        guard screenRect.height > 0 else { return nil }
+        return convert(window.convertFromScreen(screenRect), from: nil)
+    }
 
     override func becomeFirstResponder() -> Bool {
         let focused = super.becomeFirstResponder()

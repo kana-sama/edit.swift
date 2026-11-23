@@ -103,16 +103,18 @@ enum JJInlineDiffCheck {
               removed.textStorage?.attribute(.backgroundColor, at: highlight.location, effectiveRange: nil) != nil else {
             throw Failure("highlight the changed words in the removed text")
         }
-        let removedSelection = NSRange(location: 1, length: 4)
         editor.setCaretSelections([NSRange(location: replacement.currentRange.location, length: 0)], record: false)
         editor.doCommand(by: #selector(NSResponder.moveUp(_:)))
-        guard window.firstResponder === removed else { throw Failure("navigate into the removed rows from the source") }
-        guard window.makeFirstResponder(removed) else { throw Failure("focus the removed text") }
-        removed.setSelectedRange(removedSelection)
-        guard removed.selectedRange() == removedSelection else { throw Failure("select removed text") }
+        guard window.firstResponder === editor, controller.hasProjectedCaret else {
+            throw Failure("move the editor caret into removed rows")
+        }
         let firstRemovedLine = (replacement.removedText as NSString).lineRange(for: NSRange(location: 0, length: 0))
-        removed.setSelectedRange(NSRange(location: NSMaxRange(firstRemovedLine), length: 0))
-        removed.moveDown(nil)
+        let lastRemovedStart = JJInlineDiffSelection.Position.removed(key: replacement.baseRange,
+                                                                      offset: NSMaxRange(firstRemovedLine))
+        guard controller.select(from: lastRemovedStart, to: lastRemovedStart) else {
+            throw Failure("place the caret in the last removed row")
+        }
+        editor.doCommand(by: #selector(NSResponder.moveDown(_:)))
         guard window.firstResponder === editor, editor.selectedRange().location == replacement.currentRange.location else {
             throw Failure("navigate from the last removed row into the live source")
         }
@@ -217,6 +219,123 @@ enum JJInlineDiffCheck {
         guard editor.string == restored else { throw Failure("redo Restore") }
 
         try checkMouseNavigation(in: document, controller: controller)
+        try checkMixedSelection(in: document, controller: controller, undo: undo)
+    }
+
+    private static func checkMixedSelection(in document: DocumentWindow, controller: JJInlineDiff, undo: UndoManager) throws {
+        let window = document.window
+        let editor = document.editor
+        let base = "line 1\nline 2\nline 3\n"
+        let current = "line 3\n"
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+
+        func refresh(_ text: String) throws -> JJDiffHunk {
+            let analysis = JJLineDiff.analyze(base: base, current: text, isConflicted: false, recordedConflict: nil)
+            guard analysis.hunks.count == 1, let hunk = analysis.hunks.first else {
+                throw Failure("make a single diff hunk for the mixed selection example")
+            }
+            editor.setJJLineMarks(analysis.marks, lineStarts: analysis.lineStarts, hunks: analysis.hunks)
+            return hunk
+        }
+
+        func openExample() throws -> JJDiffHunk {
+            controller.collapseAll()
+            editor.string = current
+            window.makeFirstResponder(editor)
+            editor.setCaretSelections([NSRange(location: 0, length: 0)], record: false)
+            let hunk = try refresh(current)
+            controller.toggle(hunk.mark)
+            return hunk
+        }
+
+        func checkCopy(_ expected: String) throws {
+            pasteboard.clearContents()
+            guard controller.copyProjectedSelection(to: pasteboard, cutting: false),
+                  pasteboard.string(forType: .string) == expected else {
+                throw Failure("copy the mixed selection in visual order")
+            }
+        }
+
+        var deletion = try openExample()
+        let live = JJInlineDiffSelection.Position.live(2)
+        let editableRange = NSRange(location: 0, length: 2)
+        var removed = JJInlineDiffSelection.Position.removed(key: deletion.baseRange, offset: 12)
+        guard controller.select(from: removed, to: live), controller.projectedEditRange == editableRange else {
+            throw Failure("select from the removed second line to the live third line")
+        }
+        try checkCopy("2\nli")
+        undo.beginUndoGrouping()
+        editor.deleteBackward(nil)
+        undo.endUndoGrouping()
+        guard editor.string == "ne 3\n" else { throw Failure("Delete only removes the selected live characters") }
+        undo.undo()
+        guard editor.string == current else { throw Failure("undo a mixed selection edit in one step") }
+
+        deletion = try openExample()
+        removed = .removed(key: deletion.baseRange, offset: 12)
+        guard controller.select(from: live, to: removed), controller.projectedEditRange == editableRange else {
+            throw Failure("select from the live third line to the removed second line")
+        }
+        try checkCopy("2\nli")
+        undo.beginUndoGrouping()
+        editor.insertText("X", replacementRange: NSRange(location: NSNotFound, length: 0))
+        undo.endUndoGrouping()
+        guard editor.string == "Xne 3\n" else { throw Failure("typing replaces only the selected live characters") }
+        let replacement = try refresh(editor.string)
+        guard replacement.mark.kind == .replacement, controller.expandedRegion(for: replacement.mark) != nil,
+              descendant(of: editor, matching: { (view: NSTextView) in
+                  view.string == base && !view.isHiddenOrHasHiddenAncestor && !view.isEditable
+              }) != nil else {
+            throw Failure("the updated open comparison contains all three original red lines")
+        }
+
+        deletion = try openExample()
+        editor.setCaretSelections([NSRange(location: 2, length: 0)], record: false)
+        for _ in 0..<4 { editor.doCommand(by: #selector(NSResponder.moveLeftAndModifySelection(_:))) }
+        guard controller.projectedEditRange == editableRange else {
+            throw Failure("extend the selection with Shift-Left from live text into the removed row")
+        }
+        try checkCopy("2\nli")
+
+        let redView = try require(descendant(of: editor) { (view: NSTextView) in
+            view.string == deletion.removedText && !view.isHiddenOrHasHiddenAncestor
+        }, "lay out the removed rows for a mouse drag")
+        func caretPoint(in view: NSTextView, at offset: Int) throws -> NSPoint {
+            let rect = view.firstRect(forCharacterRange: NSRange(location: offset, length: 0), actualRange: nil)
+            guard rect.height > 0 else { throw Failure("locate the text caret for a mouse drag") }
+            return window.convertPoint(fromScreen: NSPoint(x: rect.minX, y: rect.midY))
+        }
+        let startPoint = try caretPoint(in: editor, at: 2)
+        let endPoint = try caretPoint(in: redView, at: 12)
+        for (view, start, end) in [(editor as NSTextView, startPoint, endPoint), (redView, endPoint, startPoint)] {
+            NSApp.postEvent(try mouse(.leftMouseUp, at: end, in: window), atStart: true)
+            NSApp.postEvent(try mouse(.leftMouseDragged, at: end, in: window), atStart: true)
+            view.mouseDown(with: try mouse(.leftMouseDown, at: start, in: window))
+            guard controller.projectedEditRange == editableRange else {
+                throw Failure("drag across the live and removed rows as one selection in both directions")
+            }
+            try checkCopy("2\nli")
+        }
+        editor.selectAll(nil)
+        try checkCopy(base)
+
+        let redCaret = JJInlineDiffSelection.Position.removed(key: deletion.baseRange, offset: 12)
+        guard controller.select(from: redCaret, to: redCaret), controller.hasProjectedCaret else {
+            throw Failure("place the projected caret inside a read-only row")
+        }
+        editor.insertText("X", replacementRange: NSRange(location: NSNotFound, length: 0))
+        editor.deleteBackward(nil)
+        guard editor.string == current, controller.hasProjectedCaret else {
+            throw Failure("typing and Delete leave a caret in a read-only row and leave the live text intact")
+        }
+
+        let finalLine = JJLineDiff.analyze(base: "old", current: "new", isConflicted: false, recordedConflict: nil)
+        let projection = JJInlineDiffSelection(source: "new", hunks: finalLine.hunks)
+        guard projection.string == "old\nnew", projection.liveRange(for: NSRange(location: 2, length: 4)) ==
+                NSRange(location: 0, length: 2) else {
+            throw Failure("keep an unterminated removed line visually separate from its live replacement")
+        }
     }
 
     private static func checkMouseNavigation(in document: DocumentWindow, controller: JJInlineDiff) throws {
@@ -276,9 +395,10 @@ enum JJInlineDiffCheck {
     }
 
     private static func mouse(_ type: NSEvent.EventType, at point: NSPoint, in window: NSWindow) throws -> NSEvent {
-        try require(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0,
-                                      windowNumber: window.windowNumber, context: nil, eventNumber: 0,
-                                      clickCount: type == .leftMouseDown ? 1 : 0, pressure: 0), "synthesize a mouse event")
+        try require(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                      timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                      context: nil, eventNumber: 1, clickCount: type == .mouseMoved ? 0 : 1,
+                                      pressure: type == .leftMouseUp ? 0 : 1), "synthesize a mouse event")
     }
 
     private static func button(_ identifier: String, in view: NSView) throws -> NSButton {

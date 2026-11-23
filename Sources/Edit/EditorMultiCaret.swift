@@ -87,6 +87,7 @@ extension EditorTextView {
     ) {
         let selections = MultiCaretEditing.merged(ranges)
         guard let primary = selections.last else { return }
+        if let diff = jjInlineDiff, !diff.isMirroringProjectedSelection { diff.clearProjectedSelection() }
         let previous = caretSelections
         if record, previous != selections { multiCaret.remember(previous) }
 
@@ -344,10 +345,8 @@ extension EditorTextView {
         return (NSUnionRange(charRange(first, in: layout), charRange(last, in: layout)), selection)
     }
 
-    func moveSecondarySelections(command: Selector) -> Bool {
-        let primary = selectedRange()
-        let hasBackwardSelection = primary.length > 0 && multiCaret.navigation[primary]?.affinity == .upstream
-        guard (hasSecondarySelections || focusRanges != nil || hasBackwardSelection), !hasMarkedText() else { return false }
+    func selectionMovement(for command: Selector) -> (direction: NSTextSelectionNavigation.Direction,
+        destination: NSTextSelectionNavigation.Destination, extending: Bool, steps: Int)? {
         typealias Direction = NSTextSelectionNavigation.Direction
         typealias Destination = NSTextSelectionNavigation.Destination
         let movement: (Direction, Destination, Bool)
@@ -395,7 +394,7 @@ extension EditorTextView {
         case #selector(pageDown(_:)): movement = (.down, .character, false)
         case #selector(pageUpAndModifySelection(_:)): movement = (.up, .character, true)
         case #selector(pageDownAndModifySelection(_:)): movement = (.down, .character, true)
-        default: return false
+        default: return nil
         }
         switch command {
         case #selector(pageUp(_:)), #selector(pageDown(_:)),
@@ -405,16 +404,26 @@ extension EditorTextView {
         default:
             steps = 1
         }
+        return (movement.0, movement.1, movement.2, steps)
+    }
+
+    func moveSecondarySelections(command: Selector) -> Bool {
+        let primary = selectedRange()
+        let hasBackwardSelection = primary.length > 0 && multiCaret.navigation[primary]?.affinity == .upstream
+        guard (hasSecondarySelections || focusRanges != nil || hasBackwardSelection), !hasMarkedText(),
+              let movement = selectionMovement(for: command) else { return false }
         if focusRanges != nil {
-            moveFocusedSelections(direction: movement.0, destination: movement.1, extending: movement.2, steps: steps) {
-                navigate(NSRange(location: $0, length: 0), direction: movement.0, destination: movement.1)?.location
+            moveFocusedSelections(direction: movement.direction, destination: movement.destination,
+                                  extending: movement.extending, steps: movement.steps) {
+                navigate(NSRange(location: $0, length: 0), direction: movement.direction,
+                         destination: movement.destination)?.location
             }
             return true
         }
         var navigation: [NSRange: NSTextSelection] = [:]
         let ranges = caretSelections.map { range in
-            guard let result = navigationResult(range, direction: movement.0, destination: movement.1,
-                                                extending: movement.2, steps: steps) else { return range }
+            guard let result = navigationResult(range, direction: movement.direction, destination: movement.destination,
+                                                extending: movement.extending, steps: movement.steps) else { return range }
             navigation[result.range] = result.selection
             return result.range
         }
@@ -425,7 +434,8 @@ extension EditorTextView {
 
     func refreshCaretDecorations() {
         let selections = caretSelections
-        let showCarets = isEditable && !hasMarkedText() && window?.isKeyWindow == true
+        let hidesLiveCaret = jjInlineDiff?.projectedEditRange?.length == 0
+        let showCarets = !hidesLiveCaret && isEditable && !hasMarkedText() && window?.isKeyWindow == true
             && window?.firstResponder === self
         let old = multiCaret.highlights
         var highlights: [NSRect] = []
@@ -473,7 +483,8 @@ extension EditorTextView {
         }
         guard showCarets, selections.contains(where: { $0.length == 0 }),
               !carets.isEmpty || multiCaret.indicatorGroup != nil else {
-            hideSharedCarets()
+            hideSharedCarets(restoringNativeCaret: !hidesLiveCaret)
+            if hidesLiveCaret { hideNativeCaret() }
             return
         }
         let group = multiCaret.indicatorGroup ?? CaretIndicatorGroup()
@@ -483,11 +494,7 @@ extension EditorTextView {
             group.clipsToBounds = true
             addSubview(group)
         }
-        if multiCaret.nativeCaretColor == nil {
-            // TextKit still owns text input and selection. The editor draws the caret.
-            multiCaret.nativeCaretColor = insertionPointColor
-            insertionPointColor = .clear
-        }
+        hideNativeCaret()
         group.update(carets, viewport: viewportRect, color: multiCaret.nativeCaretColor ?? .textColor,
                      restartBlink: multiCaret.restartBlink)
         multiCaret.restartBlink = false
@@ -507,8 +514,16 @@ extension EditorTextView {
         for rect in multiCaret.highlights { setNeedsDisplay(rect.intersection(visibleRect)) }
     }
 
-    private func hideSharedCarets() {
-        if let color = multiCaret.nativeCaretColor {
+    private func hideNativeCaret() {
+        if multiCaret.nativeCaretColor == nil {
+            // TextKit still owns text input and selection. The editor draws the caret.
+            multiCaret.nativeCaretColor = insertionPointColor
+            insertionPointColor = .clear
+        }
+    }
+
+    private func hideSharedCarets(restoringNativeCaret: Bool = true) {
+        if restoringNativeCaret, let color = multiCaret.nativeCaretColor {
             insertionPointColor = color
             multiCaret.nativeCaretColor = nil
         }

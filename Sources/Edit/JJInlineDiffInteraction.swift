@@ -1,0 +1,268 @@
+import AppKit
+
+@MainActor
+final class JJInlineDiffInteraction {
+    typealias Position = JJInlineDiffSelection.Position
+
+    private struct Selection {
+        let anchor: Position
+        let head: Position
+
+        func offsets(in projection: JJInlineDiffSelection) -> (anchor: Int, head: Int)? {
+            guard let anchor = projection.displayOffset(for: anchor),
+                  let head = projection.displayOffset(for: head) else { return nil }
+            return (anchor, head)
+        }
+    }
+
+    private weak var editor: EditorTextView?
+    private let layout: JJInlineDiffLayout
+    private var hunks: [JJDiffHunk] = []
+    private var projection: JJInlineDiffSelection?
+    private var selection: Selection?
+    private var navigationSelection: NSTextSelection?
+    private var navigationNeedsText = true
+    private var navigationFont: NSFont?
+    private lazy var navigationView: NSTextView = {
+        let view = NSTextView(usingTextLayoutManager: true)
+        view.frame = NSRect(x: 0, y: 0, width: 720, height: 480)
+        view.textContainer?.widthTracksTextView = false
+        view.textContainer?.heightTracksTextView = false
+        view.textContainer?.size = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        if let layout = view.textLayoutManager {
+            layout.textSelectionNavigation = EditorWordNavigation(dataSource: layout)
+        }
+        return view
+    }()
+    private(set) var isMirroringProjectedSelection = false
+
+    init(editor: EditorTextView, layout: JJInlineDiffLayout) {
+        self.editor = editor
+        self.layout = layout
+    }
+
+    var hasProjectedCaret: Bool {
+        guard case .removed = selection?.head, let projection else { return false }
+        return selectedRange(in: projection)?.length == 0
+    }
+
+    var head: Position? { selection?.head }
+
+    var projectedEditRange: NSRange? {
+        guard let projection, let range = selectedRange(in: projection),
+              let live = projection.liveRange(for: range), hasProjectedCaret || live.length < range.length else { return nil }
+        return live
+    }
+
+    func display(_ hunks: [JJDiffHunk]) {
+        let removed = hunks.filter { !$0.removedText.isEmpty }
+        guard self.hunks != removed else { return }
+        self.hunks = removed
+        sourceTextChanged()
+    }
+
+    func sourceTextChanged() {
+        clear()
+        projection = nil
+        navigationNeedsText = true
+    }
+
+    func clear() {
+        guard selection != nil else { return }
+        selection = nil
+        navigationSelection = nil
+        updatePresentation()
+        editor?.refreshCaretDecorations()
+    }
+
+    func selectionChanged() {
+        guard !isMirroringProjectedSelection, let editor, let projection, let range = selectedRange(in: projection),
+              projection.liveRange(for: range) != editor.selectedRange() || editor.hasSecondarySelections else { return }
+        clear()
+    }
+
+    func updatePresentation() {
+        let caret = hasProjectedCaret ? selection?.head : nil
+        layout.showSelection(projection.flatMap { selectedRange(in: $0) }, caret: caret, in: projection)
+    }
+
+    @discardableResult
+    func select(from anchor: Position, to head: Position) -> Bool {
+        guard let editor, let projection = currentProjection() else { return false }
+        let next = Selection(anchor: anchor, head: head)
+        guard let offsets = next.offsets(in: projection),
+              let live = projection.liveRange(for: Self.range(offsets.anchor, offsets.head)),
+              editor.focusAllowsEdits([live]) else { return false }
+        selection = next
+        navigationSelection = nil
+        isMirroringProjectedSelection = true
+        editor.setCaretSelections([live], record: false,
+                                  primaryAffinity: offsets.head < offsets.anchor ? .upstream : .downstream)
+        isMirroringProjectedSelection = false
+        updatePresentation()
+        editor.refreshCaretDecorations()
+        return true
+    }
+
+    func copy(to pasteboard: NSPasteboard, cutting: Bool) -> Bool {
+        guard let editor, let projection, var range = selectedRange(in: projection),
+              let live = projectedEditRange else { return false }
+        if range.length == 0, case .removed(let key, _) = selection?.head,
+           let block = projection.displayRange(forRemoved: key) {
+            let line = LineEditing.line(at: min(range.location, NSMaxRange(block) - 1), in: projection.string as NSString)
+            range = NSIntersectionRange(block, NSRange(location: line.start, length: line.end - line.start))
+        }
+        guard let text = projection.text(in: range), !text.isEmpty else { return true }
+        pasteboard.declareTypes([.string], owner: nil)
+        pasteboard.setString(text, forType: .string)
+        if cutting, live.length > 0, editor.isEditable, editor.focusAllowsEdits([live]) {
+            clear()
+            let edit = MultiCaretEditing.Replacement(range: live, text: "")
+            editor.applyMultiEdits([edit], selections: [NSRange(location: live.location, length: 0)])
+        }
+        return true
+    }
+
+    func mouseDown(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .option, .shift, .control])
+        guard modifiers.isEmpty || modifiers == .shift,
+              let editor, let window = editor.window, editor.isSelectable, !editor.hasMarkedText(),
+              let projection = currentProjection(), let hit = position(at: event, in: editor),
+              let offset = projection.displayOffset(for: hit) else { return false }
+        if modifiers.isEmpty, event.clickCount == 1, projectedEditRange == nil,
+           case .live(let location) = hit, NSLocationInRange(location, editor.selectedRange()) {
+            return false
+        }
+        guard window.makeFirstResponder(editor) else { return false }
+        let previous = currentSelection(in: editor)
+        if case .removed = hit { editor.onFindEditorInteraction?() }
+
+        let granularity: NSSelectionGranularity = event.clickCount >= 3 ? .selectByParagraph
+            : event.clickCount == 2 ? .selectByWord : .selectByCharacter
+        let initial = selectionRange(at: offset, granularity: granularity, editor: editor, projection: projection)
+        if modifiers == .shift {
+            _ = select(from: previous.anchor, to: hit)
+        } else if initial.length > 0, let start = projection.position(at: initial.location),
+                  let end = projection.position(at: NSMaxRange(initial), preferPrevious: true) {
+            _ = select(from: start, to: end)
+        } else {
+            _ = select(from: hit, to: hit)
+        }
+        let pressed = hit
+        var drag: NSEvent?
+        window.trackEvents(matching: [.leftMouseUp, .leftMouseDragged], timeout: 0.05, mode: .eventTracking) { event, stop in
+            if event?.type == .leftMouseUp { stop.pointee = true }
+            guard editor.window === window, self.projection != nil else { stop.pointee = true; return }
+            if event?.type == .leftMouseDragged { drag = event }
+            guard drag != nil, let location = event ?? drag else { return }
+            if editor.autoscroll(with: location) { self.layout.layout() }
+            guard let hit = self.position(at: location, in: editor), let end = projection.displayOffset(for: hit) else { return }
+            if modifiers == .shift {
+                _ = self.select(from: previous.anchor, to: hit)
+            } else if granularity == .selectByCharacter {
+                _ = self.select(from: pressed, to: hit)
+            } else {
+                let range = self.selectionRange(at: end, granularity: granularity, editor: editor, projection: projection)
+                let backwards = end < initial.location
+                let anchor = backwards ? NSMaxRange(initial) : initial.location
+                let head = backwards ? range.location : NSMaxRange(range)
+                if let start = projection.position(at: anchor, preferPrevious: backwards),
+                   let end = projection.position(at: head, preferPrevious: !backwards) {
+                    _ = self.select(from: start, to: end)
+                }
+            }
+        }
+        return true
+    }
+
+    func handleSelectionCommand(_ command: Selector) -> Bool {
+        guard let editor, editor.isSelectable, editor.focusSession == nil, !editor.hasSecondarySelections,
+              !editor.hasMarkedText(), let projection = currentProjection() else { return false }
+        if command == #selector(NSResponder.selectAll(_:)) {
+            guard let start = projection.position(at: 0), let end = projection.position(at: projection.length) else { return false }
+            return select(from: start, to: end)
+        }
+        guard let movement = editor.selectionMovement(for: command) else { return false }
+        let old = currentSelection(in: editor)
+        guard let offsets = old.offsets(in: projection), let textLayout = prepareNavigation(for: editor, projection: projection),
+              let textRange = editor.textRange(Self.range(offsets.anchor, offsets.head), in: textLayout) else { return false }
+        var result = navigationSelection ?? NSTextSelection(
+            range: textRange, affinity: offsets.head < offsets.anchor ? .upstream : .downstream, granularity: .character
+        )
+        for _ in 0..<movement.steps {
+            guard let next = textLayout.textSelectionNavigation.destinationSelection(
+                for: result, direction: movement.direction, destination: movement.destination,
+                extending: movement.extending, confined: false
+            ) else { break }
+            result = next
+        }
+        guard let first = result.textRanges.first, let last = result.textRanges.last else { return true }
+        let range = NSUnionRange(editor.charRange(first, in: textLayout), editor.charRange(last, in: textLayout))
+        let end = movement.extending && offsets.anchor == NSMaxRange(range) ? range.location : NSMaxRange(range)
+        guard let head = projection.position(at: end) else { return false }
+        if projectedEditRange == nil, case .live = head {
+            let travel = Self.range(offsets.head, end)
+            // Live-only movement can use the source editor's native selection history and geometry.
+            if projection.liveRange(for: travel)?.length == travel.length { return false }
+        }
+        guard select(from: movement.extending ? old.anchor : head, to: head) else { return true }
+        navigationSelection = result
+        switch head {
+        case .live(let offset): editor.scrollRangeToVisible(NSRange(location: offset, length: 0))
+        case .removed: layout.revealCaret(at: head)
+        }
+        return true
+    }
+
+    private func currentProjection() -> JJInlineDiffSelection? {
+        guard !hunks.isEmpty, let editor else { return nil }
+        if let projection { return projection }
+        let updated = JJInlineDiffSelection(source: editor.string, hunks: hunks, lineEnding: editor.preferredLineEnding)
+        projection = updated
+        return updated
+    }
+
+    private func currentSelection(in editor: EditorTextView) -> Selection {
+        if let selection { return selection }
+        let live = editor.selectedRange()
+        let head = editor.activeEnd(of: live)
+        return Selection(anchor: .live(head == live.location ? NSMaxRange(live) : live.location), head: .live(head))
+    }
+
+    private func selectedRange(in projection: JJInlineDiffSelection) -> NSRange? {
+        selection?.offsets(in: projection).map { Self.range($0.anchor, $0.head) }
+    }
+
+    private func position(at event: NSEvent, in editor: EditorTextView) -> Position? {
+        let point = editor.convert(event.locationInWindow, from: nil)
+        if let removed = layout.removedPosition(at: point) { return removed }
+        let offset = editor.characterIndexForInsertion(at: point)
+        guard offset != NSNotFound else { return nil }
+        return .live(offset)
+    }
+
+    private func selectionRange(at offset: Int, granularity: NSSelectionGranularity,
+                                editor: EditorTextView, projection: JJInlineDiffSelection) -> NSRange {
+        let caret = NSRange(location: offset, length: 0)
+        guard granularity != .selectByCharacter, prepareNavigation(for: editor, projection: projection) != nil else { return caret }
+        return navigationView.selectionRange(forProposedRange: caret, granularity: granularity)
+    }
+
+    private func prepareNavigation(for editor: EditorTextView, projection: JJInlineDiffSelection) -> NSTextLayoutManager? {
+        let font = editor.font ?? EditorTextView.defaultFont
+        if navigationNeedsText || navigationFont != font {
+            let paragraph = editor.defaultParagraphStyle ?? .default
+            navigationView.textStorage?.setAttributedString(NSAttributedString(
+                string: projection.string, attributes: [.font: font, .paragraphStyle: paragraph]
+            ))
+            navigationView.defaultParagraphStyle = paragraph
+            navigationFont = font
+            navigationNeedsText = false
+        }
+        return navigationView.textLayoutManager
+    }
+
+    private static func range(_ a: Int, _ b: Int) -> NSRange {
+        NSRange(location: min(a, b), length: abs(a - b))
+    }
+}
