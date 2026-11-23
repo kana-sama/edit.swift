@@ -6,13 +6,11 @@ struct FindOptions: Codable, Equatable, Sendable {
     var regularExpression = false
 }
 
-struct FindSettings: Codable, Equatable, Sendable {
-    var visible = false
+struct FindSettings: Equatable, Sendable {
     var showsReplacement = false
     var query = ""
     var replacement = ""
     var options = FindOptions()
-    var width: Double = 280
 }
 
 // Foundation produces immutable regular-expression results. Keeping the result preserves named captures.

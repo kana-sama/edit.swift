@@ -50,11 +50,11 @@ enum ScratchCheck {
         try await ControlPanel(app: app).checkScratchRecency(in: document, scratch: scratch, older: source, newer: newer)
         try await ControlPanel(app: app).checkScratches(in: document, scratch: scratch, global: global)
         document.toggleSidebarFocus(.scratches)
-        try expect(document.sidebarMode == .scratches && document.findSettings.visible, "show Scratches in a folder window")
+        try expect(document.sidebarMode == .scratches && document.isSidebarVisible, "show Scratches in a folder window")
         folderless.toggleSidebarFocus(.scratches)
         folderless.performFind(.toggleSidebar)
         folderless.performFind(.toggleSidebar)
-        try expect(folderless.sidebarMode == .scratches && folderless.findSettings.visible,
+        try expect(folderless.sidebarMode == .scratches && folderless.isSidebarVisible,
                    "remember Scratches when toggling the sidebar without a folder")
 
         let nestedPath = try resolve(ScratchStore.folderPath(for: nested))
@@ -84,7 +84,7 @@ enum ScratchCheck {
         await app.restore(EditorSession(documents: [record], activeIndex: 0, lastWindow: nil), reusing: reopened)
         try expect(reopened.scratchFile?.id == scratch.id && reopened.scratchFile?.folderPath == nestedPath &&
                    reopened.editor.string == document.editor.string && reopened.window.isDocumentEdited &&
-                   reopened.sidebarMode == .scratches && reopened.findSettings.visible,
+                   reopened.sidebarMode == .scratches && reopened.isSidebarVisible,
                    "session restoration recovers the scratch draft, moved category, and sidebar")
 
         let exported = project.appending(path: "Exported.txt")
@@ -112,7 +112,7 @@ enum ScratchCheck {
         }
         try expect(folderless.showsEmptyFolder && !folderless.isBusy && folderless.scratchFile == nil
                    && folderless.window.representedURL == nil && folderless.sidebarMode == .scratches
-                   && folderless.findSettings.visible && app.documents.contains { $0 === folderless },
+                   && folderless.isSidebarVisible && app.documents.contains { $0 === folderless },
                    "closing a scratch leaves its folder and Scratches sidebar open")
         try expect(try FileBuffer.read(scratchPath).text == textAtClose, "closing a scratch flushes its edits")
         try expect(await app.recentFiles.lastFile(in: project) == rememberedFile,

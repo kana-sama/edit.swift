@@ -30,13 +30,12 @@ enum OccurrenceCheck {
         document.findSettings.options.wholeWord = true
         try await waitFor("selected text using Whole Word") { state.selectionRanges == ranges([4, 8]) }
 
-        document.sidebarMode = .search
-        document.findSettings.visible = true
+        document.performFind(.find)
         document.findSettings.query = "foo"
         try await waitFor("the active literal Find query to take precedence") { state.selectionRanges.isEmpty }
-        document.sidebarMode = .scratches
+        document.toggleSidebarFocus(.scratches)
         try await waitFor("selection matches when Find is no longer visible") { state.selectionRanges == ranges([4, 8]) }
-        document.findSettings.visible = false
+        document.performFind(.toggleSidebar)
         document.findSettings.options.wholeWord = false
         document.findSettings.options.regularExpression = true
         let literal = (source as NSString).range(of: "f.o")

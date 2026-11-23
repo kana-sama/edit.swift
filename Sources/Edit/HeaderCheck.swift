@@ -43,7 +43,7 @@ enum HeaderCheck {
         document.window.layoutIfNeeded()
         try expect(fileIcon(in: document)?.image != nil, "an untitled buffer has a visible language icon")
         for sidebarVisible in [false, true, false] {
-            if document.findSettings.visible != sidebarVisible { document.performFind(.toggleSidebar) }
+            if document.isSidebarVisible != sidebarVisible { document.performFind(.toggleSidebar) }
             document.window.layoutIfNeeded()
             guard let icon = fileIcon(in: document), let title = fileTitle(in: document.window) else {
                 throw Failure("an untitled window has a document title")
@@ -143,7 +143,7 @@ enum HeaderCheck {
 
         document.performFind(.toggleSidebar)
         document.window.layoutIfNeeded()
-        try expect(!document.findSettings.visible && folderStack(in: document.window)?.edgeInsets.left == 8,
+        try expect(!document.isSidebarVisible && folderStack(in: document.window)?.edgeInsets.left == 8,
                    "closing the sidebar keeps the folder title inset")
         document.performFind(.toggleSidebar)
 

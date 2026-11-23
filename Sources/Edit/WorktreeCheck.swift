@@ -237,7 +237,7 @@ enum WorktreeCheck {
         defer { restored.window.close() }
         restored.setFolder(root)
         restored.restoreSidebar(document.sessionDocument())
-        try expect(restored.worktreeSidebar?.showsHidden == true && restored.findSettings.visible,
+        try expect(restored.worktreeSidebar?.showsHidden == true && restored.isSidebarVisible,
                    "restore Worktree and its Show Hidden Files setting in that window's session")
 
         let empty = temporary.appending(path: "Empty", directoryHint: .isDirectory)

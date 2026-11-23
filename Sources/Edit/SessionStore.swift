@@ -55,6 +55,32 @@ struct DocumentTerminalState: Codable, Sendable {
     let wasFocused: Bool
 }
 
+// Keep the existing session fields while search and sidebar state are managed separately at runtime.
+struct SessionFindSettings: Codable, Equatable, Sendable {
+    static let defaultWidth: Double = 280
+    static let empty = Self(search: FindSettings(), sidebarVisible: false, sidebarWidth: defaultWidth)
+
+    var visible: Bool
+    var showsReplacement: Bool
+    var query: String
+    var replacement: String
+    var options: FindOptions
+    var width: Double
+
+    init(search: FindSettings, sidebarVisible: Bool, sidebarWidth: Double) {
+        visible = sidebarVisible
+        showsReplacement = search.showsReplacement
+        query = search.query
+        replacement = search.replacement
+        options = search.options
+        width = sidebarWidth
+    }
+
+    var search: FindSettings {
+        FindSettings(showsReplacement: showsReplacement, query: query, replacement: replacement, options: options)
+    }
+}
+
 struct SessionDocument: Codable, Sendable {
     var path: String?
     var draft: String?
@@ -63,7 +89,7 @@ struct SessionDocument: Codable, Sendable {
     var placement: WindowPlacement
     var syntaxLanguage: String? = nil
     var folderPath: String? = nil
-    var findSettings: FindSettings? = nil
+    var findSettings: SessionFindSettings? = nil
     var editorPosition: EditorPosition? = nil
     var sidebarMode: SidebarMode? = nil
     var worktreeShowsHidden: Bool? = nil

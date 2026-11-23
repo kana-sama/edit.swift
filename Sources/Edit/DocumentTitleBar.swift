@@ -21,7 +21,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     private weak var fileItem: NSToolbarItem?
     private weak var folderWidth: NSLayoutConstraint?
     private weak var fileWidth: NSLayoutConstraint?
-    private weak var sidebar: FindSidebar?
+    private weak var sidebar: DocumentSidebar?
     private var sidebarHeaderVisible = false
     private var terminalHeaderVisible = false
     private var terminalDocked = false
@@ -48,7 +48,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         return toolbar
     }
 
-    func installSidebar(_ sidebar: FindSidebar) {
+    func installSidebar(_ sidebar: DocumentSidebar) {
         self.sidebar = sidebar
         guard !toolbar.items.contains(where: { $0.itemIdentifier == .sidebarTrackingSeparator }) else { return }
         toolbar.insertItem(withItemIdentifier: .sidebarTrackingSeparator, at: 0)

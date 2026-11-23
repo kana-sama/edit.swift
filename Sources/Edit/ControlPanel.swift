@@ -1309,9 +1309,9 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             throw CheckFailure.shortcutEscaped
         }
 
-        guard !probe.findSettings.visible,
-              intercept(key("b", 11, .command)) == nil, probe.findSettings.visible, document === probe,
-              intercept(key("b", 11, .command)) == nil, !probe.findSettings.visible, document === probe else {
+        guard !probe.isSidebarVisible,
+              intercept(key("b", 11, .command)) == nil, probe.isSidebarVisible, document === probe,
+              intercept(key("b", 11, .command)) == nil, !probe.isSidebarVisible, document === probe else {
             throw CheckFailure.shortcutEscaped
         }
 
@@ -1341,7 +1341,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
 
         show(in: probe, mode: .commands)
         guard intercept(key("W", 13, [.command, .shift])) == nil, document == nil,
-              let outline = probe.scratchOutline, probe.sidebarMode == .scratches && probe.findSettings.visible,
+              let outline = probe.scratchOutline, probe.sidebarMode == .scratches && probe.isSidebarVisible,
               probe.window.firstResponder === outline else {
             throw CheckFailure.shortcutEscaped
         }

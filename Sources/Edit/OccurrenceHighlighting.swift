@@ -12,7 +12,8 @@ final class OccurrenceHighlighting {
 
     private weak var editor: EditorTextView?
     private var language = SyntaxLanguage.plainText
-    private var findSettings = FindSettings()
+    private var findOptions = FindOptions()
+    private var activeFindQuery: String?
     private var occurrenceSession: Session?
     private var textSnapshot: String?
     private var wordTask: Task<Void, Never>?
@@ -82,11 +83,10 @@ final class OccurrenceHighlighting {
         layout()
     }
 
-    func update(findSettings: FindSettings) {
-        let previous = self.findSettings
-        self.findSettings = findSettings
-        guard previous.visible != findSettings.visible || previous.options != findSettings.options
-                || (findSettings.visible && previous.query != findSettings.query) else { return }
+    func updateFind(options: FindOptions, activeQuery: String?) {
+        guard options != findOptions || activeQuery != activeFindQuery else { return }
+        findOptions = options
+        activeFindQuery = activeQuery
         refreshSelection(input())
     }
 
@@ -145,13 +145,14 @@ final class OccurrenceHighlighting {
             return
         }
         let generation = selectionGeneration
-        let find = findSettings
+        let options = findOptions
+        let activeQuery = activeFindQuery
         let session = occurrenceSession?.search
         selectionTask = Task.detached(priority: .userInitiated) { [weak self] in
             if delay > .zero {
                 do { try await Task.sleep(for: delay) } catch { return }
             }
-            let ranges = input.selectionMatches(find: find, session: session)
+            let ranges = input.selectionMatches(options: options, activeFindQuery: activeQuery, session: session)
             if !Task.isCancelled { await self?.applySelection(ranges, generation: generation) }
         }
     }

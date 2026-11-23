@@ -54,11 +54,11 @@ enum OccurrenceSearch {
             return matches(query, in: source)
         }
 
-        func selectionMatches(find: FindSettings, session: Query?) -> [NSRange] {
+        func selectionMatches(options: FindOptions, activeFindQuery: String?, session: Query?) -> [NSRange] {
             let source = text as NSString
             guard let group = selections.last, let primary = singleLineSelection(group, in: source) else { return [] }
             let query = session ?? Query(text: source.substring(with: primary),
-                                        caseSensitive: find.options.caseSensitive, wholeWord: find.options.wholeWord)
+                                        caseSensitive: options.caseSensitive, wholeWord: options.wholeWord)
             guard !query.text.isEmpty, query.text.utf16.count <= 200,
                   !query.text.utf16.allSatisfy({ $0 == 32 || $0 == 9 }),
                   !query.text.utf16.contains(10), !query.text.utf16.contains(13) else { return [] }
@@ -68,8 +68,8 @@ enum OccurrenceSearch {
                           query.hasSameText(as: source.substring(with: range)) else { return [] }
                 }
             }
-            if find.visible && !find.options.regularExpression && query.caseSensitive == find.options.caseSensitive
-                && query.wholeWord == find.options.wholeWord && query.hasSameText(as: find.query) {
+            if let activeFindQuery, !options.regularExpression, query.caseSensitive == options.caseSensitive,
+               query.wholeWord == options.wholeWord, query.hasSameText(as: activeFindQuery) {
                 return []
             }
             guard !sourceIsTooLarge(source) else { return [] }

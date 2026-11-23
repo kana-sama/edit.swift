@@ -162,7 +162,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             if wasFocused { focusContent() }
         }
         updateTitle()
-        findPanel?.folderChanged()
+        sidebar.folderChanged()
     }
 
     private var detectedSyntaxLanguage: SyntaxLanguage = .plainText
@@ -183,22 +183,16 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var writingGeneration: UInt?
     private var autosaveFailure: (generation: UInt, detail: String, reported: Bool)?
     private var syntaxHighlighting: SyntaxHighlighting?
-    private var findPanel: FindSidebar?
+    private(set) lazy var sidebar = DocumentSidebar(document: self, app: app)
     var findSettings = FindSettings() {
         didSet { updateOccurrenceFindSettings() }
     }
-    private var lastSidebarMode: SidebarMode?
-    var sidebarMode: SidebarMode {
-        get { lastSidebarMode ?? (folderURL == nil ? .scratches : .search) }
-        set {
-            lastSidebarMode = newValue
-            updateOccurrenceFindSettings()
-        }
-    }
-    var worktreeShowsHidden = false
-    var worktreeSidebar: SidebarFileTree? { findPanel?.worktree }
+    var sidebarMode: SidebarMode { sidebar.mode }
+    var isSidebarVisible: Bool { sidebar.isVisible }
+    var isSearchSidebarVisible: Bool { sidebar.isSearchVisible }
+    var worktreeSidebar: SidebarFileTree? { sidebar.worktree }
     private var jjDocumentChanges: JJDocumentChanges?
-    var scratchOutline: NSOutlineView? { findPanel?.scratchOutline }
+    var scratchOutline: NSOutlineView? { sidebar.scratchOutline }
     private var appearanceObservation: NSKeyValueObservation?
     private(set) var manualSyntaxLanguage: SyntaxLanguage?
 
@@ -218,7 +212,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     var canReplaceBuffer: Bool { !isBusy && window.attachedSheet == nil }
     var canRequestOpen: Bool { window.attachedSheet == nil && (!isBusy || openReplacementWaiters != nil) }
     var canRestoreSession: Bool {
-        folderURL == nil && displayedFileURL == nil && findPanel == nil && terminalPanel == nil && pendingTerminalRestore == nil &&
+        folderURL == nil && displayedFileURL == nil && !sidebar.hasContent && terminalPanel == nil && pendingTerminalRestore == nil &&
             !window.isDocumentEdited && editGeneration == 0 && openRequestGeneration == 0 &&
             !editor.hasMarkedText() && canReplaceBuffer
     }
@@ -265,7 +259,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.onTextChange = { [weak self] in self?.textDidChange() }
         editor.onFocusScopeChange = { [weak self] in
             guard let self else { return }
-            self.findPanel?.bufferReplaced()
+            self.sidebar.editorBufferReplaced()
             self.editor.occurrenceHighlighting.reset()
             self.editor.occurrenceHighlighting.selectionChanged()
         }
@@ -562,53 +556,32 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     func canPerformFind(_ command: FindCommand) -> Bool {
         guard window.attachedSheet == nil else { return false }
         if !hasTextDocument { return command == .toggleSidebar }
-        if let findPanel { return findPanel.canPerform(command) }
-        switch command {
-        case .find, .replace, .toggleSidebar: return true
-        case .next, .previous: return !findSettings.query.isEmpty
-        default: return false
-        }
+        return sidebar.canPerformFind(command)
     }
 
     func performFind(_ command: FindCommand) {
         guard !app.isQuitting, window.attachedSheet == nil, canPerformFind(command) else { return }
-        searchPanel().perform(command)
+        sidebar.performFind(command)
     }
 
     func toggleSidebarFocus(_ mode: SidebarMode) {
         guard !app.isQuitting, window.attachedSheet == nil,
               mode != .worktree || folderURL != nil, mode != .search || hasTextDocument else { return }
-        searchPanel().toggleFocus(of: mode)
+        sidebar.toggleFocus(of: mode)
     }
 
-    func restoreFindSettings(_ settings: FindSettings) {
-        findSettings = settings
-        if settings.visible {
-            searchPanel().restoreVisibility()
-        }
-    }
-
-    private func updateOccurrenceFindSettings() {
-        var settings = findSettings
-        settings.visible = settings.visible && sidebarMode == .search
-        editor.occurrenceHighlighting.update(findSettings: settings)
+    func updateOccurrenceFindSettings() {
+        editor.occurrenceHighlighting.updateFind(options: findSettings.options,
+                                                 activeQuery: sidebar.isSearchVisible ? findSettings.query : nil)
     }
 
     func restoreSidebar(_ record: SessionDocument) {
         // Older sessions omitted the mode for Search even when they saved its sidebar state.
-        lastSidebarMode = record.sidebarMode ?? (record.findSettings == nil ? nil : .search)
-        if lastSidebarMode == .worktree && folderURL == nil { lastSidebarMode = .search }
-        worktreeShowsHidden = record.worktreeShowsHidden ?? false
-        if let settings = record.findSettings { restoreFindSettings(settings) }
-    }
-
-    private func searchPanel() -> FindSidebar {
-        if let findPanel { return findPanel }
-        let panel = FindSidebar(document: self, app: app)
-        findPanel = panel
-        editor.onFindEditorInteraction = { [weak panel] in panel?.editorInteracted() }
-        editor.onFindViewportChange = { [weak panel] in panel?.viewportChanged() }
-        return panel
+        let saved = record.findSettings
+        if let saved { findSettings = saved.search }
+        sidebar.restore(mode: record.sidebarMode ?? (saved == nil ? nil : .search),
+                        width: saved?.width ?? SessionFindSettings.defaultWidth, visible: saved?.visible ?? false,
+                        showsHidden: record.worktreeShowsHidden ?? false)
     }
 
     func present() {
@@ -800,7 +773,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func sessionDocument() -> SessionDocument {
-        SessionDocument(
+        let savedFind = SessionFindSettings(search: findSettings, sidebarVisible: sidebar.isVisible, sidebarWidth: sidebar.width)
+        return SessionDocument(
             path: displayedFileURL?.path,
             draft: window.isDocumentEdited ? editor.string : nil,
             format: fileURL == nil ? nil : format,
@@ -808,10 +782,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             placement: placement,
             syntaxLanguage: manualSyntaxLanguage?.rawValue,
             folderPath: folderURL?.path,
-            findSettings: findSettings == FindSettings() ? nil : findSettings,
+            findSettings: savedFind == .empty ? nil : savedFind,
             editorPosition: hasTextDocument ? editor.capturePosition() : nil,
-            sidebarMode: lastSidebarMode,
-            worktreeShowsHidden: (worktreeSidebar?.showsHidden ?? worktreeShowsHidden) ? true : nil,
+            sidebarMode: sidebar.rememberedMode,
+            worktreeShowsHidden: sidebar.worktreeShowsHidden ? true : nil,
             isFilePreview: isShowingFilePreview ? true : nil,
             showsEmptyFolder: folderURL != nil && displayedFileURL == nil ? showsEmptyFolder : nil,
             terminal: terminalSessionState()
@@ -1273,7 +1247,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         defer {
             editor.isEditable = hasTextDocument && wasEditable
             promptingToClose = false
-            if folderURL != previousFolder { findPanel?.folderChanged() }
+            if folderURL != previousFolder { sidebar.folderChanged() }
             startRequestedAutosave()
         }
 
@@ -1376,7 +1350,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                                          shouldOpen: shouldOpen) != nil else { return false }
             if focusEditor {
                 focusContent()
-                findPanel?.revealCurrentScratch()
+                sidebar.revealCurrentScratch()
             }
             return true
         } catch {
@@ -1411,7 +1385,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if resolvedSyntaxLanguage != previousLanguage { refreshSyntax(immediate: true) }
     }
 
-    func reloadScratches() { findPanel?.reloadScratches() }
+    func reloadScratches() { sidebar.reloadScratches() }
 
     private func confirmNamedClose() async -> CloseChoice {
         let alert = NSAlert()
@@ -1522,7 +1496,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.undoManager?.removeAllActions()
         updateTitle(revealInWorktree: revealInWorktree)
         updateEditedState()
-        findPanel?.bufferReplaced()
+        sidebar.editorBufferReplaced()
         jjDocumentChanges?.bufferReplaced()
     }
 
@@ -1545,8 +1519,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             window.title = displayName
         }
         titleBar.update()
-        findPanel?.updateName()
-        findPanel?.updateCurrentFile(reveal: revealInWorktree)
+        sidebar.documentTitleChanged(reveal: revealInWorktree)
         updateJJContext()
     }
 
