@@ -190,6 +190,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         let rootChanged = root?.path != folderPath
         if rootChanged {
             restoredSelection.removeAll()
+            pendingOpen = nil
             selectionRevision &+= 1
             if let nameEdit { finishNameEdit(nameEdit) }
             for request in requests.values { request.cancel() }
@@ -739,8 +740,9 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
                         self.isActive && (self.pendingOpen == nil || self.pendingOpen == url)
                     }
                 } else {
+                    let folder = document.folderURL
                     await app.openFiles([url], in: document, focusEditor: false) {
-                        self.pendingOpen == nil || self.pendingOpen == url
+                        self.isActive && self.document.folderURL == folder && (self.pendingOpen == nil || self.pendingOpen == url)
                     }
                 }
             }
@@ -1150,6 +1152,10 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     func setRecycleForCheck(_ recycle: @escaping ([URL]) async throws -> WorktreeFileOperations.TransferResult) {
         actions.recycleForCheck = recycle
+    }
+
+    func fileReplaced(_ previous: FileIdentity, with current: FileIdentity) {
+        actions.fileReplaced(previous, with: current)
     }
 
     func copySelection() {

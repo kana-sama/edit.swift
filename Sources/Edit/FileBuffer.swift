@@ -87,6 +87,7 @@ enum FileRevision: Codable, Sendable, Equatable {
 
 enum FileBufferError: LocalizedError {
     case changedOnDisk
+    case multipleHardLinks
     case invalidPath(URL)
     case notRegularFile(URL)
     case notDirectory(URL)
@@ -97,6 +98,8 @@ enum FileBufferError: LocalizedError {
         switch self {
         case .changedOnDisk:
             "The file changed on disk."
+        case .multipleHardLinks:
+            "This file has multiple hard links. Use Save As with a different name to keep the linked file intact."
         case .invalidPath(let url):
             "The path “\(url.path)” could not be used."
         case .notRegularFile(let url):
@@ -112,6 +115,16 @@ enum FileBufferError: LocalizedError {
 }
 
 struct FileBuffer: Sendable {
+    struct SaveResult: Sendable {
+        let file: FileBuffer
+        let replacedIdentity: FileIdentity?
+    }
+
+    private struct DiskFile {
+        let handle: FileHandle
+        let status: stat
+    }
+
     let url: URL
     let text: String
     let format: FileFormat
@@ -169,7 +182,7 @@ struct FileBuffer: Sendable {
         to url: URL,
         format: FileFormat,
         expected: FileRevision?
-    ) throws -> FileBuffer {
+    ) throws -> SaveResult {
         guard url.isFileURL else { throw FileBufferError.invalidPath(url) }
         let url = canonicalURL(url)
         let parent = url.deletingLastPathComponent()
@@ -197,6 +210,28 @@ struct FileBuffer: Sendable {
             _ = try? withPath(temporary) { unlink($0) }
         }
         try handle.write(contentsOf: bytes)
+
+        let original: DiskFile?
+        if expected == .missing {
+            original = nil
+            guard try fileStatus(at: url) == nil else { throw FileBufferError.changedOnDisk }
+        } else {
+            original = try openFile(at: url, access: expected == nil ? O_WRONLY : O_RDWR)
+        }
+        defer { try? original?.handle.close() }
+        if let original {
+            guard original.status.st_nlink == 1 else { throw FileBufferError.multipleHardLinks }
+            if let expected {
+                let current = try original.handle.readToEnd() ?? Data()
+                guard FileRevision(bytes: current) == expected else { throw FileBufferError.changedOnDisk }
+            }
+            guard fcopyfile(original.handle.fileDescriptor, descriptor, nil, UInt32(COPYFILE_XATTR)) == 0 else {
+                throw fileError(errno, url)
+            }
+        } else if expected != nil && expected != .missing {
+            throw FileBufferError.changedOnDisk
+        }
+
         let ambiguousBOM = encoding == .utf16LE && bytes.starts(with: FileTextEncoding.utf32LE.bom)
         if encoding != .utf8 && (!format.hasBOM || ambiguousBOM) {
             // The macOS encoding hint lets ambiguous text reopen without guessing.
@@ -205,46 +240,43 @@ struct FileBuffer: Sendable {
                 fsetxattr(descriptor, encodingAttribute, $0.baseAddress, $0.count, 0, 0)
             }
             if result != 0 { throw fileError(errno, url) }
+        } else if fremovexattr(descriptor, encodingAttribute, 0) != 0, errno != ENOATTR, errno != ENOTSUP {
+            throw fileError(errno, url)
         }
 
-        let status = try fileStatus(at: url)
-        if status != nil && expected != .missing { try requireWritableFile(url) }
-        if let status, fchmod(descriptor, status.st_mode & 0o777) != 0 {
-            throw fileError(errno, temporary)
+        if let original {
+            guard fchmod(descriptor, original.status.st_mode & 0o777) == 0,
+                  fcopyfile(original.handle.fileDescriptor, descriptor, nil, UInt32(COPYFILE_ACL)) == 0 else {
+                throw fileError(errno, temporary)
+            }
         }
         var outputStatus = stat()
         guard fstat(descriptor, &outputStatus) == 0 else { throw fileError(errno, temporary) }
         try handle.synchronize()
         try handle.close()
 
-        // Compare again after staging so a long write cannot overwrite a change
-        // that happened while the replacement was being prepared.
-        if let expected {
-            if expected == .missing {
-                guard try fileStatus(at: url) == nil else { throw FileBufferError.changedOnDisk }
-            } else {
-                guard let current = try diskContents(at: url), FileRevision(bytes: current.bytes) == expected else {
-                    throw FileBufferError.changedOnDisk
-                }
-            }
-        }
         try withPath(temporary) { source in
             try withPath(url) { destination in
-                if expected == .missing {
+                if let original {
+                    // Check that the name still points to the file whose bytes and metadata were staged.
+                    guard let current = try fileStatus(at: url), sameVersion(original.status, current) else {
+                        throw FileBufferError.changedOnDisk
+                    }
+                    guard rename(source, destination) == 0 else { throw fileError(errno, url) }
+                } else {
                     guard renamex_np(source, destination, UInt32(RENAME_EXCL)) == 0 else {
                         let code = errno
                         if code == EEXIST { throw FileBufferError.changedOnDisk }
                         throw fileError(code, url)
                     }
-                } else if rename(source, destination) != 0 {
-                    throw fileError(errno, url)
                 }
             }
         }
 
         var savedFormat = format
         savedFormat.lineEnding = dominantLineEnding(in: text) ?? format.lineEnding
-        return FileBuffer(url: url, text: text, format: savedFormat, revision: revision, identity: FileIdentity(outputStatus))
+        let file = FileBuffer(url: url, text: text, format: savedFormat, revision: revision, identity: FileIdentity(outputStatus))
+        return SaveResult(file: file, replacedIdentity: original.map { FileIdentity($0.status) })
     }
 
     private static func resolvedURL(_ url: URL) -> URL? {
@@ -258,34 +290,48 @@ struct FileBuffer: Sendable {
     private static func diskContents(
         at url: URL, readEncoding: Bool = false
     ) throws -> (bytes: Data, encoding: FileTextEncoding?, identity: FileIdentity)? {
+        guard let file = try openFile(at: url, access: O_RDONLY) else { return nil }
+        let handle = file.handle
+        defer { try? handle.close() }
+        let data = try handle.readToEnd() ?? Data()
+        let encoding = readEncoding ? encodingHint(from: handle.fileDescriptor) : nil
+
+        var after = stat()
+        guard fstat(handle.fileDescriptor, &after) == 0 else { throw fileError(errno, url) }
+        guard sameVersion(file.status, after) else { throw FileBufferError.changedOnDisk }
+        return (data, encoding, FileIdentity(after))
+    }
+
+    private static func openFile(at url: URL, access: Int32) throws -> DiskFile? {
         guard try fileStatus(at: url) != nil else { return nil }
 
         // Nonblocking open keeps a concurrent replacement with a FIFO from blocking.
-        let descriptor = try withPath(url) { open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
+        let descriptor = try withPath(url) { open($0, access | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
         guard descriptor >= 0 else {
             let code = errno
             if code == ENOENT { return nil }
             throw fileError(code, url)
         }
-        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-        defer { try? handle.close() }
-
-        var before = stat()
-        guard fstat(descriptor, &before) == 0 else { throw fileError(errno, url) }
-        guard before.st_mode & S_IFMT == S_IFREG else { throw FileBufferError.notRegularFile(url) }
-        let data = try handle.readToEnd() ?? Data()
-        let encoding = readEncoding ? encodingHint(from: descriptor) : nil
-
-        var after = stat()
-        guard fstat(descriptor, &after) == 0 else { throw fileError(errno, url) }
-        guard before.st_size == after.st_size,
-              before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
-              before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
-              before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
-              before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec else {
-            throw FileBufferError.changedOnDisk
+        var status = stat()
+        guard fstat(descriptor, &status) == 0 else {
+            let code = errno
+            close(descriptor)
+            throw fileError(code, url)
         }
-        return (data, encoding, FileIdentity(after))
+        guard status.st_mode & S_IFMT == S_IFREG else {
+            close(descriptor)
+            throw FileBufferError.notRegularFile(url)
+        }
+        return DiskFile(handle: FileHandle(fileDescriptor: descriptor, closeOnDealloc: true), status: status)
+    }
+
+    private static func sameVersion(_ before: stat, _ after: stat) -> Bool {
+        FileIdentity(before) == FileIdentity(after) && before.st_size == after.st_size &&
+            before.st_nlink == after.st_nlink &&
+            before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec &&
+            before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec &&
+            before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec &&
+            before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec
     }
 
     private static func encodingHint(from descriptor: Int32) -> FileTextEncoding? {
@@ -309,13 +355,6 @@ struct FileBuffer: Sendable {
         }
         guard status.st_mode & S_IFMT == S_IFREG else { throw FileBufferError.notRegularFile(url) }
         return status
-    }
-
-    private static func requireWritableFile(_ url: URL) throws {
-        // A rename can replace a read-only file when the directory is writable.
-        let descriptor = try withPath(url) { open($0, O_WRONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW) }
-        guard descriptor >= 0 else { throw fileError(errno, url) }
-        close(descriptor)
     }
 
     private static func requireDirectory(_ url: URL) throws {

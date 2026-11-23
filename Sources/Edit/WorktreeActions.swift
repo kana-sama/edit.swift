@@ -14,10 +14,33 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         case renamed(WorktreeFileOperations.Transfer)
     }
 
+    private final class HistoryItem {
+        let url: URL
+        var identity: FileIdentity
+
+        init(_ url: URL, identity: FileIdentity) {
+            self.url = url
+            self.identity = identity
+        }
+    }
+
+    private struct Restoration {
+        let original: URL
+        let trashed: HistoryItem
+    }
+
     private enum FileChange {
-        case rename(WorktreeFileOperations.Transfer)
-        case trash([URL], selectingOnRestore: [URL])
-        case restore([WorktreeFileOperations.Transfer], selecting: [URL])
+        case rename(from: HistoryItem, to: URL)
+        case trash([HistoryItem], selectingOnRestore: [URL])
+        case restore([Restoration], selecting: [URL])
+
+        var items: [HistoryItem] {
+            switch self {
+            case .rename(let item, _): [item]
+            case .trash(let items, _): items
+            case .restore(let moves, _): moves.map(\.trashed)
+            }
+        }
 
         var name: String {
             switch self {
@@ -228,10 +251,10 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
                 try WorktreeFileOperations.create(name, in: parent, root: root, isDirectory: directory)
             }.value
         case .rename(let item):
-            guard let move = try await rename(item, to: name, within: root) else {
+            guard let (move, identity) = try await rename(item, to: name, within: root) else {
                 return item
             }
-            recordUndo(.rename(.init(source: move.destination, destination: move.source)), in: root)
+            recordUndo(.rename(from: HistoryItem(move.destination, identity: identity), to: move.source), in: root)
             return move.destination
         }
     }
@@ -244,7 +267,7 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
     func trash(_ items: [URL], within root: URL, updateSelection: @escaping (SelectionChange) -> Void) {
         guard canTrash(items, in: root) else { return }
         run("Could Not Move Items to Trash", within: root) { _ in
-            let result = try await self.execute(.trash(items, selectingOnRestore: items), within: root)
+            let result = try await self.moveToTrash(items, selectingOnRestore: items, within: root)
             if let inverse = result.inverse { self.recordUndo(inverse, in: root) }
             if let selection = result.selection { updateSelection(selection) }
             if let failure = result.failure { throw TransferError(detail: failure) }
@@ -287,63 +310,105 @@ final class WorktreeActions: NSObject, NSMenuDelegate {
         historyByFolder[key]?.redo.removeAll()
     }
 
+    func fileReplaced(_ previous: FileIdentity, with current: FileIdentity) {
+        // An atomic save by Edit replaces the inode of the same document.
+        for history in historyByFolder.values {
+            for change in history.undo + history.redo {
+                for item in change.items where item.identity == previous { item.identity = current }
+            }
+        }
+    }
+
     private func rename(
-        _ item: URL, to name: String, within root: URL, revealInWorktree: Bool = true
-    ) async throws -> WorktreeFileOperations.Transfer? {
+        _ item: URL, to name: String, within root: URL, expected: HistoryItem? = nil
+    ) async throws -> (transfer: WorktreeFileOperations.Transfer, identity: FileIdentity)? {
         let destination = item.deletingLastPathComponent().appending(path: name)
         return try await app.performWorktreeMutation(affecting: [item, destination]) {
+            let identity = expected?.identity
             let result = try await Task.detached(priority: .userInitiated) {
-                try WorktreeFileOperations.rename(item, to: name, within: root)
+                try WorktreeFileOperations.rename(item, to: name, within: root, expected: identity)
             }.value
-            if let result { retarget(result, revealInWorktree: revealInWorktree) }
+            if let result { retarget(result.transfer, revealInWorktree: expected == nil) }
             return result
         }
     }
 
     private func execute(_ change: FileChange, within root: URL) async throws -> ChangeResult {
         switch change {
-        case .rename(let move):
-            let completed = try await rename(
-                move.source, to: move.destination.lastPathComponent, within: root, revealInWorktree: false
-            )
+        case .rename(let item, let destination):
+            let completed = try await rename(item.url, to: destination.lastPathComponent, within: root, expected: item)
             return ChangeResult(
-                inverse: completed.map { .rename(.init(source: $0.destination, destination: $0.source)) },
-                selection: completed.map(SelectionChange.renamed)
+                inverse: completed.map {
+                    .rename(from: HistoryItem($0.transfer.destination, identity: $0.identity), to: $0.transfer.source)
+                },
+                selection: completed.map { .renamed($0.transfer) }
             )
         case .trash(let items, let selection):
-            let targets = try await Task.detached(priority: .userInitiated) {
-                try WorktreeFileOperations.trashTargets(items, within: root)
-            }.value
-            let result = try await app.performWorktreeMutation(affecting: targets) {
-                let result = try await recycle(targets)
-                for move in result.completed {
-                    for document in app.documents { document.detachTrashedFile(at: move.source) }
-                }
-                return result
-            }
-            let removed = result.completed.map(\.source)
-            let completed = Set(removed.map(WorktreeFileOperations.path))
-            let remaining = targets.filter { !completed.contains(WorktreeFileOperations.path($0)) }
-            let (restoredSelection, remainingSelection) = splitSelection(selection, within: removed)
-            return ChangeResult(
-                inverse: removed.isEmpty ? nil : .restore(result.completed, selecting: restoredSelection),
-                remaining: remaining.isEmpty ? nil : .trash(remaining, selectingOnRestore: remainingSelection),
-                failure: result.failure, selection: removed.isEmpty ? nil : .removed(removed)
-            )
+            return try await moveToTrash(items.map(\.url), selectingOnRestore: selection, within: root, expected: items)
         case .restore(let moves, let selection):
-            let result = try await app.performWorktreeMutation(affecting: moves.map(\.source)) {
-                await Task.detached(priority: .userInitiated) {
-                    WorktreeFileOperations.restoreTrashed(moves, within: root)
+            let result = try await app.performWorktreeMutation(affecting: moves.flatMap { [$0.original, $0.trashed.url] }) {
+                let transfers = moves.map {
+                    (transfer: WorktreeFileOperations.Transfer(source: $0.original, destination: $0.trashed.url),
+                     identity: $0.trashed.identity)
+                }
+                return await Task.detached(priority: .userInitiated) {
+                    WorktreeFileOperations.restoreTrashed(transfers, within: root)
                 }.value
             }
             let restored = result.completed.map(\.source)
             let completed = Set(restored)
-            let remaining = moves.filter { !completed.contains($0.source) }
+            let remaining = moves.filter { !completed.contains($0.original) }
+            let restoredItems = moves.filter { completed.contains($0.original) }.map {
+                HistoryItem($0.original, identity: $0.trashed.identity)
+            }
             let (restoredSelection, remainingSelection) = splitSelection(selection, within: restored)
             return ChangeResult(
-                inverse: restored.isEmpty ? nil : .trash(restored, selectingOnRestore: restoredSelection),
+                inverse: restoredItems.isEmpty ? nil : .trash(restoredItems, selectingOnRestore: restoredSelection),
                 remaining: remaining.isEmpty ? nil : .restore(remaining, selecting: remainingSelection),
                 failure: result.failure, selection: restoredSelection.isEmpty ? nil : .restored(restoredSelection)
+            )
+        }
+    }
+
+    private func moveToTrash(
+        _ items: [URL], selectingOnRestore selection: [URL], within root: URL, expected: [HistoryItem] = []
+    ) async throws -> ChangeResult {
+        let targets = try await Task.detached(priority: .userInitiated) {
+            try WorktreeFileOperations.trashTargets(items, within: root)
+        }.value
+        return try await app.performWorktreeMutation(affecting: targets) {
+            let known = Dictionary(uniqueKeysWithValues: expected.map { (WorktreeFileOperations.path($0.url), $0.identity) })
+            let verified = try await Task.detached(priority: .userInitiated) {
+                try targets.map { target in
+                    let identity = try WorktreeFileOperations.itemIdentity(at: target, expected: known[WorktreeFileOperations.path(target)])
+                    return (url: target, identity: identity)
+                }
+            }.value
+            let result = try await recycle(targets)
+            for move in result.completed {
+                for document in app.documents { document.detachTrashedFile(at: move.source) }
+            }
+            let identities = Dictionary(uniqueKeysWithValues: verified.map { ($0.url, $0.identity) })
+            let recoverable = await Task.detached(priority: .userInitiated) {
+                result.completed.compactMap { move -> (WorktreeFileOperations.Transfer, FileIdentity)? in
+                    guard let original = identities[move.source],
+                          let trashed = try? WorktreeFileOperations.itemIdentity(at: move.destination),
+                          trashed == original || trashed.device != original.device else { return nil }
+                    return (move, trashed)
+                }
+            }.value
+            let restorations = recoverable.map { move, identity in
+                Restoration(original: move.source, trashed: HistoryItem(move.destination, identity: identity))
+            }
+            let removed = result.completed.map(\.source)
+            let completed = Set(removed)
+            let remaining = verified.filter { !completed.contains($0.url) }.map { HistoryItem($0.url, identity: $0.identity) }
+            let (restoredSelection, remainingSelection) = splitSelection(selection, within: removed)
+            let failure = result.failure ?? (restorations.count == removed.count ? nil : "Some items moved to the Trash could not be identified for Undo.")
+            return ChangeResult(
+                inverse: restorations.isEmpty ? nil : .restore(restorations, selecting: restoredSelection),
+                remaining: remaining.isEmpty ? nil : .trash(remaining, selectingOnRestore: remainingSelection),
+                failure: failure, selection: removed.isEmpty ? nil : .removed(removed)
             )
         }
     }

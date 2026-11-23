@@ -61,7 +61,8 @@ enum WorktreeFileOperations {
         }
     }
 
-    static func rename(_ item: URL, to name: String, within root: URL) throws -> Transfer? {
+    static func rename(_ item: URL, to name: String, within root: URL, expected: FileIdentity? = nil)
+        throws -> (transfer: Transfer, identity: FileIdentity)? {
         guard contains(item, in: root), item.standardizedFileURL.path != root.standardizedFileURL.path else {
             throw outside(item)
         }
@@ -72,8 +73,9 @@ enum WorktreeFileOperations {
         let destination = parent.appending(path: name)
         guard source.path != destination.path else { return nil }
 
+        let identity = try itemIdentity(at: source, expected: expected)
         try moveExclusively(from: source, to: destination)
-        return Transfer(source: source, destination: destination)
+        return (Transfer(source: source, destination: destination), identity)
     }
 
     static func canTrash(_ item: URL, within root: URL) -> Bool {
@@ -88,23 +90,18 @@ enum WorktreeFileOperations {
             let target = parent.appending(path: item.lastPathComponent)
             return paths.insert(target.path).inserted ? target : nil
         }
-        let roots = targets.filter { !containsSelectedParent(of: $0, in: paths) }
-        for target in roots {
-            guard try itemStatus(at: target) != nil else {
-                throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: target.path])
-            }
-        }
-        return roots
+        return targets.filter { !containsSelectedParent(of: $0, in: paths) }
     }
 
-    static func restoreTrashed(_ transfers: [Transfer], within root: URL) -> TransferResult {
+    static func restoreTrashed(_ moves: [(transfer: Transfer, identity: FileIdentity)], within root: URL) -> TransferResult {
         var completed: [Transfer] = []
         var failure: String?
-        for transfer in transfers {
+        for (transfer, identity) in moves {
             do {
                 guard canTrash(transfer.source, within: root) else { throw outside(transfer.source) }
                 let parent = try writableDirectory(transfer.source.deletingLastPathComponent(), within: root)
                 let original = parent.appending(path: transfer.source.lastPathComponent)
+                _ = try itemIdentity(at: transfer.destination, expected: identity)
                 try moveExclusively(from: transfer.destination, to: original)
                 completed.append(transfer)
             } catch {
@@ -112,6 +109,16 @@ enum WorktreeFileOperations {
             }
         }
         return TransferResult(completed: completed, failure: failure)
+    }
+
+    static func itemIdentity(at url: URL, expected: FileIdentity? = nil) throws -> FileIdentity {
+        if let status = try itemStatus(at: url) {
+            let identity = FileIdentity(status)
+            if expected == nil || identity == expected { return identity }
+        } else if expected == nil {
+            throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: url.path])
+        }
+        throw WorktreeError.itemChanged(url)
     }
 
     private static func moveExclusively(from source: URL, to destination: URL) throws {
@@ -241,12 +248,14 @@ enum WorktreeFileOperations {
         case invalidName
         case outside(String)
         case recursiveTransfer
+        case itemChanged(URL)
 
         var errorDescription: String? {
             switch self {
             case .invalidName: return "Enter a valid name or relative path."
             case .outside(let name): return "“\(name)” is outside the open folder."
             case .recursiveTransfer: return "A folder can’t be placed inside itself."
+            case .itemChanged(let url): return "The original item at “\(url.lastPathComponent)” was moved or replaced."
             }
         }
     }

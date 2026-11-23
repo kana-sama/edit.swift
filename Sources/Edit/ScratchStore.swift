@@ -114,7 +114,7 @@ actor ScratchStore {
         try manager.createDirectory(at: root, withIntermediateDirectories: true)
         try manager.createDirectory(at: directory, withIntermediateDirectories: false)
         do {
-            return try FileBuffer.save(text, to: target, format: format, expected: .missing)
+            return try FileBuffer.save(text, to: target, format: format, expected: .missing).file
         } catch {
             removeUnpublishedFile(file)
             throw error

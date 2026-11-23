@@ -12,6 +12,8 @@ The context menu reveals items in Finder, copies items or their paths, pastes fi
 
 Drag files and folders between folders in Edit, or use Option to copy them. Drops from other apps copy items into the target folder. Drag out of Edit to share standard file URLs with other apps. Existing destination items are protected from being overwritten.
 
+Undo and Redo check that the operation still refers to the same file, folder, or symbolic link. An item that has taken the original item's place stays where it is, and Worktree reports the conflict. A file saved by Edit after a rename remains associated with that rename in history.
+
 ## Acceptance
 
 Open a project with files and no remembered document, then focus Worktree. Verify that its first visible row is highlighted as the list loads, with **No File Open** still in the editor. Select another row without opening it and refocus Worktree to check that it keeps the selection. Focus Worktree in an empty folder and verify it has focus and an empty selection.

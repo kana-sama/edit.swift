@@ -96,9 +96,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     enum CloseDestination {
         case window
-        case buffer(FileBuffer?, focusEditor: Bool = true, scratch: ScratchFile? = nil)
-        case preview(OpenFilePreview, focusEditor: Bool)
-        case emptyFolder(focusContent: Bool)
+        case buffer(FileBuffer?, focusEditor: Bool = true, scratch: ScratchFile? = nil, folder: URL? = nil)
+        case preview(OpenFilePreview, focusEditor: Bool, folder: URL? = nil)
+        case emptyFolder(focusContent: Bool, folder: URL? = nil)
     }
 
     private struct AutosaveRequest {
@@ -137,7 +137,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var filePreview: OpenFilePreview?
     private var filePreviewView: FilePreviewView?
     private var emptyFolderView: EmptyFolderView?
-    var openRequestGeneration: UInt64 = 0
+    private(set) var openRequestGeneration: UInt64 = 0
+    private var openReplacementWaiters: [CheckedContinuation<Void, Never>]?
     var isShowingFilePreview: Bool { filePreview != nil }
     var showsEmptyFolder: Bool { emptyFolderView != nil }
     var hasTextDocument: Bool { !isShowingFilePreview && !showsEmptyFolder }
@@ -215,9 +216,16 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     var isBusy: Bool { saving || promptingToClose || worktreeMutation }
     var canReplaceBuffer: Bool { !isBusy && window.attachedSheet == nil }
-    var isReusable: Bool {
+    var canRequestOpen: Bool { window.attachedSheet == nil && (!isBusy || openReplacementWaiters != nil) }
+    var canRestoreSession: Bool {
         folderURL == nil && displayedFileURL == nil && findPanel == nil && terminalPanel == nil && pendingTerminalRestore == nil &&
-            !window.isDocumentEdited && canReplaceBuffer
+            !window.isDocumentEdited && editGeneration == 0 && openRequestGeneration == 0 &&
+            !editor.hasMarkedText() && canReplaceBuffer
+    }
+
+    func beginOpenRequest() -> UInt64 {
+        openRequestGeneration &+= 1
+        return openRequestGeneration
     }
 
     init(app: Edit, placement: WindowPlacement? = nil) {
@@ -957,10 +965,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func write(_ text: String, to target: URL, format: FileFormat, expected: FileRevision?) async throws {
-        let file = try await Task.detached {
+        let result = try await Task.detached {
             try FileBuffer.save(text, to: target, format: format, expected: expected)
         }.value
-        adoptSavedFile(file)
+        if let previous = result.replacedIdentity, let current = result.file.identity {
+            for document in app.documents { document.worktreeSidebar?.fileReplaced(previous, with: current) }
+        }
+        adoptSavedFile(result.file)
     }
 
     private func adoptSavedFile(_ file: FileBuffer, scratch: ScratchFile? = nil) {
@@ -1235,44 +1246,50 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     func newBuffer() async {
         guard canReplaceBuffer, !app.isQuitting else { return }
         openRequestGeneration &+= 1
-        await replaceBuffer(with: nil)
+        promptingToClose = true
+        await closeBuffer(destination: .buffer(nil))
+    }
+
+    func open(_ destination: CloseDestination, while isCurrent: () -> Bool) async -> Bool {
+        if openReplacementWaiters != nil {
+            await withCheckedContinuation { openReplacementWaiters?.append($0) }
+        }
+        guard canReplaceBuffer, isCurrent() else { return false }
+        switch destination {
+        case .buffer(let file, _, _, let folder?) where file?.url == displayedFileURL:
+            setFolder(folder)
+            return true
+        case .preview(let preview, _, let folder?) where preview.url == displayedFileURL:
+            setFolder(folder)
+            return true
+        default:
+            break
+        }
+        promptingToClose = true
+        openReplacementWaiters = []
+        defer {
+            let waiters = openReplacementWaiters ?? []
+            openReplacementWaiters = nil
+            for waiter in waiters { waiter.resume() }
+        }
+        return await closeBuffer(destination: destination, while: isCurrent)
     }
 
     @discardableResult
-    func replaceBuffer(
-        with file: FileBuffer?, focusEditor: Bool = true, scratch: ScratchFile? = nil
-    ) async -> Bool {
-        guard canReplaceBuffer, !app.isQuitting else { return false }
-        promptingToClose = true
-        return await closeBuffer(destination: .buffer(file, focusEditor: focusEditor, scratch: scratch))
-    }
-
-    func replaceBuffer(withPreview preview: OpenFilePreview, focusEditor: Bool) async -> Bool {
-        guard canReplaceBuffer, !app.isQuitting else { return false }
-        promptingToClose = true
-        return await closeBuffer(destination: .preview(preview, focusEditor: focusEditor))
-    }
-
-    func replaceBuffer(withEmptyFolder folder: URL, focusContent: Bool) async -> Bool {
-        guard canReplaceBuffer, !app.isQuitting else { return false }
-        promptingToClose = true
-        guard await closeBuffer(destination: .emptyFolder(focusContent: focusContent)) else { return false }
-        setFolder(folder)
-        return true
-    }
-
-    @discardableResult
-    private func closeBuffer(destination: CloseDestination) async -> Bool {
+    private func closeBuffer(destination: CloseDestination, while isCurrent: () -> Bool = { true }) async -> Bool {
         if editor.hasMarkedText() { editor.unmarkText() }
+        let previousFolder = folderURL
         let wasEditable = !hasTextDocument || editor.isEditable
         editor.isEditable = false
         defer {
             editor.isEditable = hasTextDocument && wasEditable
             promptingToClose = false
+            if folderURL != previousFolder { findPanel?.folderChanged() }
             startRequestedAutosave()
         }
 
         await flushAutosave()
+        guard isCurrent(), !Task.isCancelled else { return false }
         let choice: CloseChoice
         if !window.isDocumentEdited {
             choice = .discard
@@ -1288,16 +1305,20 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             case .cancel:
                 choice = .cancel
             case .scratch(let name, let encoding):
+                guard isCurrent(), !Task.isCancelled else { return false }
                 choice = await saveScratchFromPanel(name: name, encoding: encoding) ? .discard : .cancel
             }
         } else {
             choice = await confirmNamedClose()
         }
-        return await finishClose(choice, destination: destination)
+        return await finishClose(choice, destination: destination, while: isCurrent)
     }
 
     @discardableResult
-    func finishClose(_ choice: CloseChoice, destination: CloseDestination = .window) async -> Bool {
+    func finishClose(
+        _ choice: CloseChoice, destination: CloseDestination = .window, while isCurrent: () -> Bool = { true }
+    ) async -> Bool {
+        guard isCurrent(), !Task.isCancelled else { return false }
         switch choice {
         case .save(let url):
             guard await save(to: url), !window.isDocumentEdited else { return false }
@@ -1306,10 +1327,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         case .cancel:
             return false
         }
+        guard isCurrent(), !Task.isCancelled else { return false }
 
         switch destination {
-        case .buffer(let file, let focusEditor, let scratch):
-            autosaveFailure = nil
+        case .buffer(let file, let focusEditor, let scratch, let folder):
             let restoreFocus = focusEditor || contentHasFocus
             editor.breakUndoCoalescing()
             var position: EditorPosition?
@@ -1318,28 +1339,36 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 if file.url != fileURL {
                     rememberFilePosition()
                     position = await app.recentFiles.position(for: file.url, identity: file.identity)
+                    guard isCurrent(), !Task.isCancelled else { return false }
                     let preparedSyntax = await prepareOpeningSyntax(file, position: position, scratch: scratch)
-                    guard !Task.isCancelled else { return false }
-                    load(file, preparedSyntax: preparedSyntax, scratch: scratch)
+                    guard isCurrent(), !Task.isCancelled else { return false }
+                    installContent(in: folder) {
+                        load(file, preparedSyntax: preparedSyntax, scratch: scratch)
+                    }
+                } else if let folder {
+                    setFolder(folder)
                 }
             } else {
                 rememberFilePosition()
-                removeFilePreview()
-                removeEmptyFolder()
-                resetDocument()
+                installContent(in: folder) {
+                    removeFilePreview()
+                    removeEmptyFolder()
+                    resetDocument()
+                }
             }
+            autosaveFailure = nil
             if restoreFocus { focusContent() }
             restoreEditorPosition(position)
-        case .preview(let preview, let focusEditor):
+        case .preview(let preview, let focusEditor, let folder):
             let restoreFocus = focusEditor || contentHasFocus
             autosaveFailure = nil
             rememberFilePosition()
-            loadPreview(preview)
+            installContent(in: folder) { loadPreview(preview) }
             if restoreFocus { focusContent() }
-        case .emptyFolder(let focus):
+        case .emptyFolder(let focus, let folder):
             let restoreFocus = focus || contentHasFocus
             rememberFilePosition()
-            loadEmptyFolder()
+            installContent(in: folder) { loadEmptyFolder() }
             if restoreFocus { focusContent() }
         case .window:
             window.close()
@@ -1347,7 +1376,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         return true
     }
 
-    func openScratch(_ file: ScratchFile, focusEditor: Bool = true, shouldOpen: () -> Bool = { true }) async -> Bool {
+    private func installContent(in folder: URL?, _ install: () -> Void) {
+        if let folder { folderURL = folder }
+        install()
+    }
+
+    func openScratch(_ file: ScratchFile, focusEditor: Bool = true, shouldOpen: @escaping () -> Bool = { true }) async -> Bool {
         do {
             guard try await app.openFile(app.scratchStore.url(for: file), in: self, focusEditor: focusEditor,
                                          shouldOpen: shouldOpen) != nil else { return false }

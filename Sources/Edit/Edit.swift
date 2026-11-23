@@ -27,12 +27,12 @@ private enum OpenedFile: Sendable {
     }
 
     @MainActor
-    func replaceBuffer(in document: DocumentWindow, focusEditor: Bool, scratch: ScratchFile? = nil) async -> Bool {
+    func destination(focusEditor: Bool, scratch: ScratchFile? = nil, folder: URL? = nil) -> DocumentWindow.CloseDestination {
         switch self {
         case .text(let file):
-            await document.replaceBuffer(with: file, focusEditor: focusEditor, scratch: scratch)
+            .buffer(file, focusEditor: focusEditor, scratch: scratch, folder: folder)
         case .preview(let preview):
-            await document.replaceBuffer(withPreview: preview, focusEditor: focusEditor)
+            .preview(preview, focusEditor: focusEditor, folder: folder)
         }
     }
 }
@@ -40,6 +40,13 @@ private enum OpenedFile: Sendable {
 @main
 @MainActor
 final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, NSMenuDelegate {
+    private struct OpenRequest {
+        let document: DocumentWindow
+        let generation: UInt64
+        let mutationGeneration: UInt64
+        let isWanted: () -> Bool
+    }
+
     let isAgentCheck = CommandLine.arguments.dropFirst().first == "--agent-check"
     private lazy var sessionStore = SessionStore.application()
     lazy var syntaxOverrides = SyntaxLanguageOverrides(defaults: isAgentCheck ? nil : .standard)
@@ -592,7 +599,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         saveTargets.removeValue(forKey: url)
     }
 
-    func performWorktreeMutation<T: Sendable>(
+    func performWorktreeMutation<T>(
         affecting sources: [URL], operation: @MainActor () async throws -> T
     ) async throws -> T {
         let affected = documents.filter { $0.worktreeMutationAffects(sources) }
@@ -658,20 +665,34 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             } else {
                 opened = nil
             }
-            let document = restored.isEmpty && documents.contains(where: { $0 === placeholder }) && placeholder.isReusable
-                ? placeholder : makeDocument()
-            document.restorePlacement(record.placement)
-            if let path = record.folderPath { document.setFolder(URL(filePath: path, directoryHint: .isDirectory)) }
-            if let draft = record.draft {
-                let identity = await Task.detached {
+            let folder = record.folderPath.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            let identity: FileIdentity?
+            let syntax: SyntaxSnapshot?
+            if record.draft != nil {
+                identity = await Task.detached {
                     record.path.flatMap { FileIdentity.at(URL(fileURLWithPath: $0)) }
                 }.value
+                syntax = nil
+            } else {
+                identity = nil
+                if case .text(let file) = opened, folder == nil || file.identity != nil {
+                    syntax = await placeholder.prepareOpeningSyntax(file, position: record.editorPosition,
+                                                                    storedSyntaxLanguage: record.syntaxLanguage, scratch: scratch)
+                } else {
+                    syntax = nil
+                }
+            }
+
+            // Reserve the placeholder only once the restored state can be installed without suspending.
+            let document = restored.isEmpty && documents.contains(where: { $0 === placeholder }) && placeholder.canRestoreSession
+                ? placeholder : makeDocument()
+            document.restorePlacement(record.placement)
+            if let folder { document.setFolder(folder) }
+            if let draft = record.draft {
                 document.restoreDraft(record, text: draft, identity: identity, scratch: scratch)
             } else if let opened, document.folderURL == nil || opened.identity != nil {
                 switch opened {
                 case .text(let file):
-                    let syntax = await document.prepareOpeningSyntax(file, position: record.editorPosition,
-                                                                     storedSyntaxLanguage: record.syntaxLanguage, scratch: scratch)
                     document.load(file, storedSyntaxLanguage: record.syntaxLanguage, preparedSyntax: syntax, scratch: scratch)
                 case .preview(let preview):
                     document.loadPreview(preview)
@@ -690,13 +711,19 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             restored.append((index, document))
         }
 
-        if restored.isEmpty && placeholder.isReusable, let placement = previous.lastWindow {
+        if restored.isEmpty && documents.contains(where: { $0 === placeholder }) &&
+            placeholder.canRestoreSession, let placement = previous.lastWindow {
             placeholder.restorePlacement(placement)
         }
         if !isAgentCheck && !isQuitting {
-            let preferred = restored.first { $0.index == previous.activeIndex }?.document ?? restored.last?.document
+            let active = activeDocument.flatMap { document in
+                document.window.isKeyWindow && !document.canRestoreSession && !restored.contains { $0.document === document }
+                    ? document : nil
+            }
+            let preferred = active ?? restored.first { $0.index == previous.activeIndex }?.document ?? restored.last?.document
             for entry in restored where entry.document !== preferred { entry.document.present() }
-            (preferred ?? placeholder).present()
+            if let preferred { preferred.present() }
+            else if documents.contains(where: { $0 === placeholder }) { placeholder.present() }
             if !warnings.isEmpty {
                 let detail = warnings.joined(separator: "\n")
                 Task { await activeDocument?.showError("Could Not Reopen Some Files", detail: detail) }
@@ -706,18 +733,19 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     func openFiles(
         _ urls: [URL], allowMissing: Bool = false, in sourceDocument: DocumentWindow? = nil,
-        focusEditor: Bool = true, shouldOpen: () -> Bool = { true }
+        focusEditor: Bool = true, shouldOpen: @escaping () -> Bool = { true }
     ) async {
-        guard let document = sourceDocument ?? activeDocument else { return }
-        for url in urls where !isQuitting {
+        guard !urls.isEmpty, let request = beginOpening(in: sourceDocument, while: shouldOpen) else { return }
+        let document = request.document
+        for url in urls {
             do {
-                guard try await openFile(url, allowMissing: allowMissing, in: document, focusEditor: focusEditor,
-                                         shouldOpen: shouldOpen) != nil else { break }
+                guard try await openFile(url, allowMissing: allowMissing, request: request, focusEditor: focusEditor) != nil
+                else { break }
             } catch is CancellationError {
                 break
             } catch {
                 await recentFiles.removeIfMissing(url)
-                if !isAgentCheck && !isQuitting && document.canReplaceBuffer && documents.contains(where: { $0 === document }) {
+                if !isAgentCheck && isCurrent(request, at: url) && document.canReplaceBuffer {
                     await document.showError("Could Not Open “\(url.lastPathComponent)”", detail: error.localizedDescription)
                 }
             }
@@ -727,18 +755,30 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     @discardableResult
     func openFile(
         _ url: URL, allowMissing: Bool = false, in sourceDocument: DocumentWindow? = nil,
-        focusEditor: Bool = true, shouldOpen: () -> Bool = { true }
+        focusEditor: Bool = true, shouldOpen: @escaping () -> Bool = { true }
     ) async throws -> DocumentWindow? {
-        guard !isQuitting, !Task.isCancelled, let document = sourceDocument ?? activeDocument, document.canReplaceBuffer,
-              documents.contains(where: { $0 === document }), !isWorktreeMutationPath(url), shouldOpen() else { return nil }
-        document.openRequestGeneration &+= 1
-        let openGeneration = document.openRequestGeneration
-        let mutationGeneration = worktreeMutationGeneration
-        func isCurrentRequest(at target: URL) -> Bool {
-            !isQuitting && !Task.isCancelled && document.canReplaceBuffer &&
-            document.openRequestGeneration == openGeneration && mutationGeneration == worktreeMutationGeneration &&
-            documents.contains(where: { $0 === document }) && !isWorktreeMutationPath(target) && shouldOpen()
-        }
+        guard let request = beginOpening(in: sourceDocument, while: shouldOpen) else { return nil }
+        return try await openFile(url, allowMissing: allowMissing, request: request, focusEditor: focusEditor)
+    }
+
+    private func beginOpening(in source: DocumentWindow?, while isWanted: @escaping () -> Bool) -> OpenRequest? {
+        guard !isQuitting, !Task.isCancelled, let document = source ?? activeDocument, document.canRequestOpen,
+              documents.contains(where: { $0 === document }), isWanted() else { return nil }
+        return OpenRequest(document: document, generation: document.beginOpenRequest(),
+                           mutationGeneration: worktreeMutationGeneration, isWanted: isWanted)
+    }
+
+    private func isCurrent(_ request: OpenRequest, at target: URL) -> Bool {
+        !isQuitting && !Task.isCancelled && request.generation == request.document.openRequestGeneration &&
+            request.mutationGeneration == worktreeMutationGeneration && documents.contains { $0 === request.document } &&
+            !isWorktreeMutationPath(target) && request.isWanted()
+    }
+
+    private func openFile(
+        _ url: URL, allowMissing: Bool, request: OpenRequest, focusEditor: Bool
+    ) async throws -> DocumentWindow? {
+        guard isCurrent(request, at: url) else { return nil }
+        let document = request.document
 
         let (canonical, identity, isFolder) = await Task.detached {
             let path = FileBuffer.canonicalURL(url)
@@ -747,11 +787,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             if identity == nil { _ = FileManager.default.fileExists(atPath: path.path, isDirectory: &isDirectory) }
             return (path, identity, isDirectory.boolValue)
         }.value
-        guard isCurrentRequest(at: canonical) else { return nil }
+        guard isCurrent(request, at: canonical) else { return nil }
         if isFolder {
             let folder = URL(filePath: canonical.path, directoryHint: .isDirectory)
-            return await openFolder(url, canonical: folder, in: document,
-                                    focusEditor: focusEditor, isCurrentRequest: isCurrentRequest)
+            return await openFolder(url, canonical: folder, request: request, focusEditor: focusEditor)
         }
         let isScratch = scratchStore.identifiesScratch(at: canonical)
         if document.hasTextDocument &&
@@ -761,14 +800,23 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             return document
         }
 
-        let scratch = isScratch ? try await scratchStore.file(at: canonical) : nil
-        let opened = try await Self.readForOpening(canonical, allowMissing: allowMissing && !isScratch, allowsPreview: !isScratch)
-        guard isCurrentRequest(at: canonical),
-              await opened.replaceBuffer(in: document, focusEditor: focusEditor, scratch: scratch) else { return nil }
+        let scratch: ScratchFile?
+        let opened: OpenedFile
+        do {
+            scratch = isScratch ? try await scratchStore.file(at: canonical) : nil
+            opened = try await Self.readForOpening(canonical, allowMissing: allowMissing && !isScratch, allowsPreview: !isScratch)
+        } catch {
+            guard isCurrent(request, at: canonical) else { return nil }
+            throw error
+        }
+        guard await document.open(opened.destination(focusEditor: focusEditor, scratch: scratch), while: {
+            self.isCurrent(request, at: canonical)
+        }) else { return nil }
+        let folder = document.folderURL
         if let scratch {
             if let current = await recordScratchOpen(scratch) { document.updateScratch(current) }
         } else if !isScratch, opened.identity != nil {
-            await recentFiles.record(url, in: document.folderURL)
+            await recentFiles.record(url, in: folder)
         } else if case .preview = opened {
             await recentFiles.removeIfMissing(url)
         }
@@ -776,24 +824,21 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     private func openFolder(
-        _ url: URL, canonical folder: URL, in document: DocumentWindow,
-        focusEditor: Bool, isCurrentRequest: (URL) -> Bool
+        _ url: URL, canonical folder: URL, request: OpenRequest, focusEditor: Bool
     ) async -> DocumentWindow? {
         var opened: OpenedFile?
         if let last = await recentFiles.lastFile(in: folder),
            let candidate = try? await Self.readForOpening(last, within: folder), candidate.identity != nil {
             opened = candidate
         }
-        guard isCurrentRequest(opened?.url ?? folder) else { return nil }
+        let document = request.document
         let previousFolder = document.folderURL
-        if let opened {
-            if opened.url != document.displayedFileURL {
-                guard await opened.replaceBuffer(in: document, focusEditor: focusEditor) else { return nil }
-            }
-            document.setFolder(folder)
-        } else {
-            guard await document.replaceBuffer(withEmptyFolder: folder, focusContent: focusEditor) else { return nil }
-        }
+        let destination = opened?.destination(focusEditor: focusEditor, folder: folder)
+            ?? .emptyFolder(focusContent: focusEditor, folder: folder)
+        let file = opened?.url ?? folder
+        guard await document.open(destination, while: {
+            self.isCurrent(request, at: folder) && !self.isWorktreeMutationPath(file)
+        }) else { return nil }
         if previousFolder != folder {
             controlPanel?.folderDidChange(in: document)
         }
@@ -977,6 +1022,11 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             } else {
                 try JJInlineDiffCheck.run(in: document)
             }
+        case "files" where screenshot == nil:
+            _ = try await FilesCheck.run(in: self)
+            try await FilesCheck.checkFilePreview(in: self)
+        case "worktree" where screenshot == nil:
+            try await WorktreeCheck.run(in: self)
         default:
             throw CheckError.unknownScope
         }

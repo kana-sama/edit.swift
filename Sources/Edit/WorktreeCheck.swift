@@ -21,6 +21,7 @@ enum WorktreeCheck {
         try await checkFolderAnimation(in: app, under: temporary)
         try await checkKeyboardFolders(in: app, under: temporary)
         try await checkTrash(in: app, under: temporary)
+        try await checkStaleRenameHistory(in: app, under: temporary)
 
         let document = app.makeDocument()
         defer { document.window.close() }
@@ -345,7 +346,10 @@ enum WorktreeCheck {
         }
         try expect(window.attachedSheet == nil && !NSApp.isActive, "inline edits stay in the quiet Worktree window")
 
-        document.editor.insertText("unsaved", replacementRange: NSRange(location: 0, length: 0))
+        document.editor.insertText("saved", replacementRange: NSRange(location: 0, length: 0))
+        let saved = await document.save()
+        try expect(saved, "save the renamed file before testing its Undo")
+        document.editor.insertText("un", replacementRange: NSRange(location: 0, length: 0))
         try performHistoryAction(in: tree, redo: false, title: "Undo Rename")
         try await waitFor("undo rename selects the original name in the focused tree") {
             let original = row(named: "File.swift", in: tree)
@@ -391,6 +395,39 @@ enum WorktreeCheck {
         try await waitFor("redo renames the folder while leaving newer editor focus alone") {
             row(named: "MovedSources", in: tree) != nil && window.firstResponder === document.editor
         }
+    }
+
+    private static func checkStaleRenameHistory(in app: Edit, under temporary: URL) async throws {
+        let root = temporary.appending(path: "Stale rename", directoryHint: .isDirectory)
+        let files = FileManager.default
+        try files.createDirectory(at: root, withIntermediateDirectories: true)
+        let original = root.appending(path: "Original.txt")
+        let savedElsewhere = root.appending(path: "Elsewhere.txt")
+        try Data("original".utf8).write(to: original)
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        document.setFolder(root)
+        let actions = WorktreeActions(document: document, app: app, refresh: {}, isHidden: { _ in false },
+                                      toggleHidden: { _ in }, editName: { _, _ in })
+        let renamed = try await actions.commitName("Renamed.txt", for: .rename(original), in: root)
+        try files.moveItem(at: renamed, to: savedElsewhere)
+        try Data("new occupant".utf8).write(to: renamed)
+
+        var selectionChanged = false
+        actions.undo(in: root, redo: false) { _ in selectionChanged = true }
+        try await waitFor("a refused undo keeps the original action available") {
+            selectionChanged || actions.undoActionName(in: root, redo: false) == "Rename"
+        }
+        let newOccupant = try String(contentsOf: renamed, encoding: .utf8)
+        try expect(!selectionChanged && !files.fileExists(atPath: original.path) && newOccupant == "new occupant",
+                   "Undo Rename leaves a different file at the renamed path intact")
+
+        try files.removeItem(at: renamed)
+        try files.moveItem(at: savedElsewhere, to: renamed)
+        actions.undo(in: root, redo: false) { _ in selectionChanged = true }
+        try await waitFor("the original item can still be moved back") { selectionChanged }
+        let restored = try String(contentsOf: original, encoding: .utf8)
+        try expect(restored == "original", "Undo Rename recovers the original file when it returns")
     }
 
     private static func checkTrash(in app: Edit, under temporary: URL) async throws {

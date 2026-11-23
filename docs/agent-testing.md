@@ -19,6 +19,8 @@ Use separate fresh directories via `EDIT_BUILD_DIR` and `EDIT_SDK_CACHE_DIR` to 
 
 - `./script/check --only editor [screenshot-path]` checks editing, multiple carets, viewport resizing, zoom, and active-line painting. The optional PNG captures the initial editor fixture.
 - `./script/check --only inline-diff [screenshot-path]` checks the inline diff, Escape priority, sidebar geometry, and overscroll. The optional PNG captures the viewport at the final right overscroll position, or the viewport where the geometry check failed.
+- `./script/check --only files` checks file and folder opening, saves, autosave, session restoration, and previews.
+- `./script/check --only worktree` checks the outline and its file operations, including Undo and Redo.
 
 These commands use the same hidden agent app and disposable profile as the full check. Reuse the build directory so repeated checks of the same code launch the existing bundle. On a timing-sensitive regression, capture the failing state during the focused run. Run the full suite on the final patch.
 

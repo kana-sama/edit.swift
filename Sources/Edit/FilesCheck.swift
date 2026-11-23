@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 
 @MainActor
 enum FilesCheck {
@@ -122,8 +123,10 @@ enum FilesCheck {
                    "Save writes an untitled draft to the chosen path")
 
         try await checkOpeningInPlace(in: app, directory: directory)
+        try await checkSupersededOpen(in: app, directory: directory)
         try await checkRecentFiles(in: app, directory: directory)
         try await checkEncodings(in: app, directory: directory)
+        try checkSaveMetadata(in: directory)
         try await checkAutosaveAndNewBuffer(in: app, directory: directory)
         try await checkRememberedPosition(in: app, directory: directory)
 
@@ -340,6 +343,40 @@ enum FilesCheck {
         second.window.close()
     }
 
+    private static func checkSupersededOpen(in app: Edit, directory: URL) async throws {
+        let incoming = directory.appending(path: "Superseded.md")
+        let current = directory.appending(path: "Keep.txt")
+        try Data("# Superseded".utf8).write(to: incoming)
+        try Data("Keep the current buffer".utf8).write(to: current)
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        _ = try await app.openFile(current, in: document)
+
+        let session = document.sessionDocument()
+        var reachedReplacement = false
+        let opened = try await app.openFile(incoming, in: document) {
+            reachedReplacement = document.isBusy
+            return !reachedReplacement
+        }
+        try expect(opened == nil && reachedReplacement && document.displayedFileURL?.lastPathComponent == current.lastPathComponent &&
+                   document.editor.string == "Keep the current buffer" && document.editor.isEditable,
+                   "a request superseded during replacement leaves the current buffer editable")
+
+        let placeholder = app.makeDocument()
+        let undo = placeholder.editor.editorUndoManager
+        undo.groupsByEvent = false
+        undo.beginUndoGrouping()
+        placeholder.editor.insertText("Keep startup input", replacementRange: NSRange(location: 0, length: 0))
+        undo.endUndoGrouping()
+        let count = app.documents.count
+        await app.restore(EditorSession(documents: [session], activeIndex: 0, lastWindow: nil), reusing: placeholder)
+        try expect(app.documents.count == count + 1 && placeholder.editor.string == "Keep startup input" &&
+                   placeholder.window.isDocumentEdited && app.documents.last?.displayedFileURL == document.displayedFileURL,
+                   "restoration keeps text in a used placeholder and restores the previous file separately")
+        app.documents.last?.window.close()
+        placeholder.window.close()
+    }
+
     private static func checkRememberedPosition(in app: Edit, directory: URL) async throws {
         let source = directory.appending(path: "Remembered Position.txt")
         let alias = directory.appending(path: "Remembered Position Alias.txt")
@@ -540,6 +577,46 @@ enum FilesCheck {
         }
     }
 
+    private static func checkSaveMetadata(in directory: URL) throws {
+        let url = directory.appending(path: "Save metadata.txt")
+        let alias = directory.appending(path: "Save metadata alias.txt")
+        let format = FileFormat().using(.windowsCP1251)
+        let original = try FileBuffer.save("Привет", to: url, format: format, expected: .missing).file
+        let attribute = "dev.edit.check-metadata"
+        let value = Data("keep me".utf8)
+        let source = try FileHandle(forWritingTo: url)
+        try expect(value.withUnsafeBytes {
+            fsetxattr(source.fileDescriptor, attribute, $0.baseAddress, $0.count, 0, 0) == 0
+        }, "set a disposable file attribute")
+        try expect(fchmod(source.fileDescriptor, 0o640) == 0, "set disposable file permissions")
+        try source.close()
+
+        let saved = try FileBuffer.save("Привет снова", to: url, format: FileFormat(), expected: original.revision)
+        let reopened = try FileBuffer.read(url)
+        try expect(saved.replacedIdentity == original.identity && reopened.text == "Привет снова" && reopened.format.encoding == .utf8,
+                   "replace the expected revision and remove its old encoding hint")
+        let output = try FileHandle(forReadingFrom: url)
+        defer { try? output.close() }
+        var copied = Data(count: value.count)
+        let copiedCount = copied.withUnsafeMutableBytes {
+            fgetxattr(output.fileDescriptor, attribute, $0.baseAddress, $0.count, 0, 0)
+        }
+        var status = stat()
+        try expect(copiedCount == value.count && copied == value &&
+                   fstat(output.fileDescriptor, &status) == 0 && status.st_mode & 0o777 == 0o640,
+                   "safe replacement preserves extended attributes and permissions")
+
+        try FileManager.default.linkItem(at: url, to: alias)
+        do {
+            _ = try FileBuffer.save("replacement", to: url, format: reopened.format, expected: reopened.revision)
+            throw Failure("expected a hard-link conflict")
+        } catch FileBufferError.multipleHardLinks {
+            let retained = try FileBuffer.read(alias)
+            try expect(retained.identity == FileIdentity.at(url) && retained.text == reopened.text,
+                       "a rejected save keeps both hard links and their original bytes")
+        }
+    }
+
     private static func checkAutosaveAndNewBuffer(in app: Edit, directory: URL) async throws {
         let file = directory.appendingPathComponent("Autosave.txt")
         let original = "\u{feff}Existing\r\n"
@@ -548,14 +625,26 @@ enum FilesCheck {
         let document = try resolve(app.documents.last)
         let editor = document.editor
         let window = document.window
+        let undo = editor.editorUndoManager
+        let groupsByEvent = undo.groupsByEvent
+        undo.groupsByEvent = false
+        defer { undo.groupsByEvent = groupsByEvent }
 
-        editor.insertText("Idle\r\n", replacementRange: editor.selectedRange())
+        func insert(_ text: String) {
+            // This quiet check does not deliver key events to AppKit.
+            undo.beginUndoGrouping()
+            editor.insertText(text, replacementRange: editor.selectedRange())
+            editor.breakUndoCoalescing()
+            undo.endUndoGrouping()
+        }
+
+        insert("Idle\r\n")
         try expect(try Data(contentsOf: file) == Data(original.utf8), "typing waits for the idle timer")
         try await waitFor("the idle timer saves without a focus change", timeout: .seconds(3)) { !window.isDocumentEdited }
         try expect(try Data(contentsOf: file) == Data("\u{feff}Idle\r\nExisting\r\n".utf8),
                    "idle autosave preserves BOM and CRLF")
 
-        editor.insertText("Blur\r\n", replacementRange: editor.selectedRange())
+        insert("Blur\r\n")
         try expect(window.makeFirstResponder(nil), "the editor gives up focus")
         try await waitFor("resigning editor focus writes before the idle timer") {
             !window.isDocumentEdited
@@ -569,34 +658,24 @@ enum FilesCheck {
         try expect(newWindow.keyEquivalent == "n" && newWindow.keyEquivalentModifierMask == [.command, .shift],
                    "New Window uses Shift-Command-N")
 
-        editor.insertText("Menu\r\n", replacementRange: editor.selectedRange())
+        insert("Menu\r\n")
         app.menuWillOpen(fileMenu)
         try await waitFor("opening the menu autosaves") { !window.isDocumentEdited }
 
         // A manual save must drain an earlier request and write the current text.
-        editor.insertText("Earlier\r\n", replacementRange: editor.selectedRange())
+        insert("Earlier\r\n")
         document.requestAutosave()
         await Task.yield()
-        editor.insertText("Latest\r\n", replacementRange: editor.selectedRange())
+        insert("Latest\r\n")
         let didSave = await document.save()
         try expect(didSave && !window.isDocumentEdited, "manual Save completes with the latest revision")
         try expect(try Data(contentsOf: file) == Data(("\u{feff}" + editor.string).utf8),
                    "an earlier autosave cannot overwrite a manual save")
 
-        let undo = try resolve(editor.undoManager)
-        let groupsByEvent = undo.groupsByEvent
-        editor.breakUndoCoalescing()
-        while undo.groupingLevel > 0 { undo.endUndoGrouping() }
-        // This quiet check has no key event to delimit the edit's undo group.
-        undo.groupsByEvent = false
-        undo.beginUndoGrouping()
         let beforeUndo = editor.string
-        editor.insertText("Undo this\r\n", replacementRange: editor.selectedRange())
-        editor.breakUndoCoalescing()
-        undo.endUndoGrouping()
+        insert("Undo this\r\n")
         let savedBeforeUndo = await document.save()
         undo.undo()
-        undo.groupsByEvent = groupsByEvent
         try expect(savedBeforeUndo && editor.string == beforeUndo && window.isDocumentEdited,
                    "native Undo marks the buffer edited")
         document.requestAutosave()
@@ -604,16 +683,16 @@ enum FilesCheck {
         try expect(try Data(contentsOf: file) == Data(("\u{feff}" + beforeUndo).utf8),
                    "autosave writes the exact text after Undo")
 
-        editor.insertText("Queued snapshot\r\n", replacementRange: editor.selectedRange())
+        insert("Queued snapshot\r\n")
         let requested = Data(("\u{feff}" + editor.string).utf8)
         document.requestAutosave()
-        editor.insertText("Later edit\r\n", replacementRange: editor.selectedRange())
+        insert("Later edit\r\n")
         try await waitFor("autosave writes the requested snapshot") {
             (try? Data(contentsOf: file)) == requested
         }
         try expect(window.isDocumentEdited, "newer edits stay marked after a queued autosave")
 
-        editor.insertText("Before replacing\r\n", replacementRange: editor.selectedRange())
+        insert("Before replacing\r\n")
         let lastText = editor.string
         let frame = window.frame
         let count = app.documents.count
@@ -627,7 +706,7 @@ enum FilesCheck {
         try expect(editor.string.isEmpty && window.title == "Untitled" && !window.isDocumentEdited
                    && editor.undoManager?.canUndo != true, "New clears text, identity, and undo")
 
-        editor.insertText("Keep this draft", replacementRange: editor.selectedRange())
+        insert("Keep this draft")
         await document.newBuffer()
         try expect(editor.string == "Keep this draft" && window.isDocumentEdited,
                    "cancelling the untitled sheet preserves the draft")
@@ -640,7 +719,7 @@ enum FilesCheck {
 
         await app.openFiles([file])
         try expect(app.documents.last === document, "the blank replacement buffer can open a file")
-        editor.insertText("Local text\r\n", replacementRange: editor.selectedRange())
+        insert("Local text\r\n")
         let localText = editor.string
         let external = Data("External version\n".utf8)
         try external.write(to: file)
