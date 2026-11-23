@@ -14,9 +14,9 @@ Use system appearance, semantic colors, text styles, control metrics, and SF Sym
 
 ## Pointer cursor
 
-Show the pointing hand as soon as the pointer enters any part of the clickable area of an enabled button, a selectable row in a list or tree, or another explicit click target. Use the foreground control's click area when it overlaps the editor. Include controls in the window titlebar and controls that appear beneath the pointer during hover. Disabled actions and empty areas use the default cursor. Selectable text keeps its text cursor, including during inline renaming. Dragging and resizing use the corresponding system cursors.
+Show the pointing hand as soon as the pointer enters any part of the clickable area of an enabled button, a selectable row in a list or tree, or another explicit click target. Use the foreground control's click area when it overlaps the editor. Include controls in the window titlebar and controls that appear beneath the pointer during hover. Use the arrow over disabled actions and empty chrome, including where text scrolls beneath the titlebar. Selectable text keeps its text cursor, including during inline renaming. Use the system resize cursor across the whole divider grip.
 
-Keep the pointer image steady while moving between targets that use the same cursor or updating the content under a stationary pointer.
+Keep the pointer image steady while clicking, moving between targets that use the same cursor, or updating the content under a stationary pointer. Active drags use their system cursors.
 
 ## Asynchronous updates
 

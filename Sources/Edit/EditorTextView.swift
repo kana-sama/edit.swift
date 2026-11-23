@@ -1029,6 +1029,12 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         return caret.compare(viewport.location) != .orderedAscending && caret.compare(viewport.endLocation) != .orderedDescending
     }
 
+    override func cursorUpdate(with event: NSEvent) {
+        // Native tracking can come straight to the text view, even beneath window chrome.
+        if let window, (NSApp as? EditApplication)?.updatePointerCursor(in: window) == true { return }
+        super.cursorUpdate(with: event)
+    }
+
     override func drawBackground(in dirtyRect: NSRect) {
         super.drawBackground(in: dirtyRect)
         jjInlineDiff?.drawBackground(in: dirtyRect)

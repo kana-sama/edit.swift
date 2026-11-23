@@ -67,6 +67,16 @@ final class EditApplication: NSApplication {
         }
     }
 
+    @discardableResult
+    func updatePointerCursor(in window: NSWindow) -> Bool {
+        guard isActive, window.isVisible else { return false }
+        guard let cursor = Self.clickCursor(in: window, at: window.mouseLocationOutsideOfEventStream) else {
+            clickCursorTracking.end(restoreImage: false)
+            return false
+        }
+        return clickCursorTracking.update(cursor, in: window)
+    }
+
     static func cursorWindow(for event: NSEvent, at screenPoint: NSPoint,
                              windowAt: (NSPoint) -> NSWindow?) -> NSWindow? {
         // Mouse movement can arrive with no AppKit window, including over window chrome.
@@ -107,11 +117,15 @@ final class EditApplication: NSApplication {
                       resolve: () -> NSCursor?, send: () -> Void) {
             let cursor = resolve()
             if type == .cursorUpdate {
-                if !update(cursor, in: window) { send() }
+                if let cursor {
+                    update(cursor, in: window)
+                } else {
+                    end(restoreImage: false)
+                    send()
+                }
                 return
             }
-            // Keep native cursor rectangles from competing with the foreground target.
-            // Publish the image only after dispatch, which can show or move a control.
+            // AppKit can show or move a control during dispatch. Resolve its cursor afterward.
             prepare(cursor, in: window)
             send()
             update(resolve(), in: window)
@@ -124,7 +138,9 @@ final class EditApplication: NSApplication {
                 self.window = window
                 originalCursor = currentCursor()
             }
-            if window.areCursorRectsEnabled {
+            // Document views use native tracking callbacks too. Disabling their rectangles
+            // makes AppKit show the default arrow during an internal cursor refresh.
+            if !(window is EditorDocumentWindow), window.areCursorRectsEnabled {
                 window.disableCursorRects()
                 restoresCursorRects = true
             }
@@ -149,26 +165,33 @@ final class EditApplication: NSApplication {
     static func clickCursor(in window: NSWindow, at location: NSPoint) -> NSCursor? {
         guard let content = window.contentView, let root = content.superview,
               root.bounds.contains(root.convert(location, from: nil)) else { return nil }
+        // Full-size content can draw behind the titlebar. That text does not own its cursor.
+        let titlebar = window.styleMask.contains(.titled) && location.y >= window.contentLayoutRect.maxY
+        let background: NSCursor? = titlebar ? .arrow : nil
         let frameHit = root.hitTest(root.superview?.convert(location, from: nil) ?? location)
         // A full-size content view can offer click targets at the window frame's edge.
-        var view = frameHit === root ? content.hitTest(root.convert(location, from: nil)) : frameHit
+        let foregroundHit = frameHit === root && !titlebar ? content.hitTest(root.convert(location, from: nil)) : frameHit
+        var view = foregroundHit
         while let hit = view {
             switch hit {
             case let button as NSButton:
                 return button.isEnabled ? .pointingHand : .arrow
+            case let split as NSSplitView where hit === foregroundHit:
+                return split.dividerResizeCursor ?? background
             case is ClickTarget:
                 return .pointingHand
             case is JJInlineDiffControls:
                 // Disabled buttons can yield hit testing to the panel's background.
                 return .arrow
             case let field as NSTextField where field.isEditable || field.isSelectable:
-                return nil
+                return background
             case is NSTextView:
-                return nil
+                return background
             case let table as NSTableView:
+                if titlebar { return .arrow }
                 let point = table.convert(location, from: nil)
                 let row = table.row(at: point)
-                guard row >= 0, table.rect(ofRow: row).contains(point) else { return nil }
+                guard row >= 0, table.rect(ofRow: row).contains(point) else { return .arrow }
                 // AppKit can report the row hit while its shared field editor is in front.
                 if let editor = window.firstResponder as? NSTextView, editor.isFieldEditor,
                    editor.visibleRect.contains(editor.convert(location, from: nil)) { return nil }
@@ -178,6 +201,6 @@ final class EditApplication: NSApplication {
                 view = hit.superview
             }
         }
-        return nil
+        return background
     }
 }

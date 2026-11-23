@@ -1280,6 +1280,7 @@ private final class WorktreeOutline: NSOutlineView, NSMenuItemValidation {
     private static let contentInset: CGFloat = 10
 
     private var disclosureActions: [NSUserInterfaceItemIdentifier: Selector] = [:]
+    private var pointerTrackingArea: NSTrackingArea?
     weak var owner: WorktreeSidebar?
     private(set) var isPlainPrimaryClick = false
     var didStartDrag = false
@@ -1288,6 +1289,21 @@ private final class WorktreeOutline: NSOutlineView, NSMenuItemValidation {
         guard super.becomeFirstResponder() else { return false }
         owner?.selectFirstRowIfNeeded()
         return true
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        guard pointerTrackingArea == nil else { return }
+        // AppKit refreshes tracking-area cursors inside native control tracking as well.
+        let area = NSTrackingArea(rect: .zero, options: [.cursorUpdate, .activeInKeyWindow, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        pointerTrackingArea = area
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if let window, (NSApp as? EditApplication)?.updatePointerCursor(in: window) == true { return }
+        super.cursorUpdate(with: event)
     }
 
     override func mouseDown(with event: NSEvent) {

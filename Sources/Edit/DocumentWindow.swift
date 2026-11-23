@@ -32,7 +32,42 @@ enum PanelLayout {
 }
 
 @MainActor
-private final class EditorDocumentWindow: NSWindow {
+final class EditorDocumentWindow: NSWindow {
+    private weak var titlebarTrackingView: NSView?
+    private var titlebarTrackingArea: NSTrackingArea?
+    private var titlebarLayoutObservation: NSKeyValueObservation?
+
+    func trackTitlebarPointer() {
+        titlebarLayoutObservation = observe(\.contentLayoutRect, options: [.initial]) { window, _ in
+            MainActor.assumeIsolated { window.updateTitlebarTrackingArea() }
+        }
+    }
+
+    override func becomeKey() {
+        updateTitlebarTrackingArea()
+        super.becomeKey()
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if (NSApp as? EditApplication)?.updatePointerCursor(in: self) == true { return }
+        super.cursorUpdate(with: event)
+    }
+
+    private func updateTitlebarTrackingArea() {
+        guard let view = contentView?.superview else { return }
+        let top = contentLayoutRect.maxY
+        let titlebar = NSRect(x: 0, y: top, width: frame.width, height: max(0, frame.height - top))
+        let rect = view.convert(titlebar, from: nil).intersection(view.bounds)
+        if titlebarTrackingView === view, titlebarTrackingArea?.rect == rect { return }
+        if let area = titlebarTrackingArea { titlebarTrackingView?.removeTrackingArea(area) }
+        titlebarTrackingView = view
+        titlebarTrackingArea = nil
+        guard !rect.isEmpty else { return }
+        let area = NSTrackingArea(rect: rect, options: [.cursorUpdate, .activeInActiveApp], owner: self, userInfo: nil)
+        view.addTrackingArea(area)
+        titlebarTrackingArea = area
+    }
+
     // Focused controls get Escape before it reaches these window-level fallbacks.
     override func cancelOperation(_ sender: Any?) {
         guard !isFullScreenEscape(NSApp.currentEvent) else { return }
@@ -71,7 +106,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         let text: String
     }
 
-    let window: NSWindow
+    let window: EditorDocumentWindow
     let editor: EditorTextView
     let scrollView: NSScrollView
     let editorContentView: NSView
@@ -216,6 +251,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         pinToEditorContent(scrollView)
         window.toolbarStyle = .unifiedCompact
         window.toolbar = titleBar.makeToolbar(delegate: titleBar)
+        window.trackTitlebarPointer()
         window.initialFirstResponder = editor
         window.makeFirstResponder(editor)
         editor.onTextChange = { [weak self] in self?.textDidChange() }

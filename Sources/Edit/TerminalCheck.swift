@@ -36,6 +36,9 @@ enum TerminalCheck {
         try expect(abs(panelFrame.minY - editorFrame.minY) < 1 && panelFrame.maxY < editorFrame.maxY,
                    "dock over the bottom of the buffer")
         try checkBottomGlass(in: document, panel: panel)
+        let bottomDock = try require(view("Edit.Terminal.Dock", in: window.contentView) as? NSSplitView,
+                                     "find the bottom dock divider")
+        try checkDividerCursor(bottomDock, index: 0, grip: 1.5)
         try expect(terminal.backgroundOpacity == 0, "show glass through the terminal's default background")
         try await checkShell(in: terminal)
         try await checkScrollAndClear(in: document, terminal: terminal,
@@ -122,6 +125,14 @@ enum TerminalCheck {
         try expect(sidebarSplit.splitViewItems.count == 3 && sidebarItem.behavior == .sidebar && sidebar.bounds.width > 0 &&
                    windowPosition(of: sidebar).maxX < windowPosition(of: panel).minX && document.isTerminalVisible,
                    "keep the right-docked terminal beside the native left sidebar")
+        let inspector = try require(sidebarSplit.splitViewItems.last?.viewController.view, "find the trailing sidebar")
+        let windowSplit = sidebarSplit.splitView
+        let halfDivider = windowSplit.dividerThickness / 2
+        // The editor draws under the sidebars. Use the visible sidebar edges here.
+        try checkDividerCursor(windowSplit, index: 0, grip: 1.5,
+                               center: windowSplit.convert(sidebar.bounds, from: sidebar).maxX + halfDivider)
+        try checkDividerCursor(windowSplit, index: 1, grip: 1.5,
+                               center: windowSplit.convert(inspector.bounds, from: inspector).minX - halfDivider)
         try checkLeftHeader(in: window, sidebar: sidebar)
         try checkLeftHeaderAfterFullScreen(in: document, sidebar: sidebar)
         try checkRightSidebarFullScreenRoundTrip(in: document, panel: panel, leftSidebar: sidebar)
@@ -289,16 +300,33 @@ enum TerminalCheck {
                     point == screenPoint ? window : nil
                 }
                 try expect(hover.window == nil && target === window, "resolve windowless hover over the titlebar")
-                var nativeRectsEnabled = true
+                var nativeRectsEnabled = false
                 tracking.dispatch(hover.type, in: window, resolve: {
                     EditApplication.clickCursor(in: window, at: location)
                 }) {
                     nativeRectsEnabled = window.areCursorRectsEnabled
                 }
-                try expect(!nativeRectsEnabled && cursorImages == [.pointingHand],
+                try expect(nativeRectsEnabled && cursorImages == [.pointingHand],
                            "show one pointing hand on first hover and keep it across titlebar buttons")
             }
         }
+        let splitDown = try require(view("Edit.Terminal.SplitDown", in: header), "find the terminal split control")
+        let options = try require(view("Edit.Terminal.Options", in: header), "find the terminal options control")
+        let splitFrame = windowPosition(of: splitDown)
+        let freeHeader = NSPoint(x: (splitFrame.maxX + windowPosition(of: options).minX) / 2, y: splitFrame.midY)
+        try expect(freeHeader.y > window.contentLayoutRect.maxY, "sample uncovered titlebar above the terminal")
+        let outer = try require(window.contentView?.superview, "find the titlebar tracking host")
+        try expect(outer.trackingAreas.contains { area in
+            area.owner === window && area.options.contains(.cursorUpdate) &&
+                area.rect.contains(outer.convert(freeHeader, from: nil)) &&
+                !area.rect.contains(outer.convert(NSPoint(x: freeHeader.x, y: window.contentLayoutRect.midY), from: nil))
+        }, "use native tracking over the titlebar and leave ordinary terminal text to AppKit")
+        for type in [NSEvent.EventType.mouseMoved, .cursorUpdate, .mouseMoved] {
+            tracking.dispatch(type, in: window, resolve: {
+                EditApplication.clickCursor(in: window, at: freeHeader)
+            }) {}
+        }
+        try expect(cursorImages == [.pointingHand, .arrow], "switch from a titlebar button to a steady arrow on empty chrome")
     }
 
     private static func checkDockPicker(in app: Edit) throws {
@@ -465,6 +493,42 @@ enum TerminalCheck {
         try expect(abs(width - 1) < 0.5 && split.dividerThickness == 1, "give adjacent panes one shared one-point edge")
         let effective = split.delegate?.splitView?(split, effectiveRect: drawn, forDrawnRect: drawn, ofDividerAt: 0) ?? drawn
         try expect(effective.contains(NSPoint(x: drawn.midX, y: drawn.midY)), "resize panes at their shared edge")
+        try checkDividerCursor(split, index: 0, grip: 3.5)
+    }
+
+    private static func checkDividerCursor(_ split: NSSplitView, index: Int, grip: CGFloat,
+                                           center explicitCenter: CGFloat? = nil) throws {
+        let window = try require(split.window, "attach the split view to its window")
+        let root = try require(window.contentView?.superview, "find the window's mouse hit root")
+        let first = split.arrangedSubviews[index].frame
+        let second = split.arrangedSubviews[index + 1].frame
+        let center = explicitCenter ?? (split.isVertical ? (first.maxX + second.minX) / 2 : (first.maxY + second.minY) / 2)
+        let expected: NSCursor = split.isVertical ? .columnResize : .rowResize
+        var cursorImages: [NSCursor] = []
+        let tracking = EditApplication.ClickCursorTracking(currentCursor: { cursorImages.last ?? .iBeam },
+                                                            setCursor: { cursorImages.append($0) })
+        defer { tracking.end() }
+
+        for offset in [-grip, 0, grip] {
+            let point = split.isVertical ? NSPoint(x: center + offset, y: split.bounds.midY)
+                                         : NSPoint(x: split.bounds.midX, y: center + offset)
+            let location = split.convert(point, to: nil)
+            let resolve = { EditApplication.clickCursor(in: window, at: location) }
+            let native = split.hitTest(split.convert(point, to: split.superview))
+            let foreground = root.hitTest(root.superview?.convert(location, from: nil) ?? location)
+            let target = "\(split.identifier?.rawValue ?? String(describing: type(of: split))) divider \(index) at offset \(offset)"
+            try expect(native === split && resolve() === expected,
+                       "show the resize cursor across \(target), in window \(location) with native hit \(native.map { type(of: $0) } as Any), foreground \(foreground.map { type(of: $0) } as Any), cursor \(resolve() as Any), panes \(first), \(second)")
+            tracking.dispatch(.mouseMoved, in: window, resolve: resolve) {}
+            var nativeCursorUpdate = false
+            tracking.dispatch(.cursorUpdate, in: window, resolve: resolve) { nativeCursorUpdate = true }
+            try expect(!nativeCursorUpdate && cursorImages == [expected],
+                       "keep one resize cursor while moving within the divider grip")
+        }
+        let outside = split.isVertical ? NSPoint(x: center + 8, y: split.bounds.midY)
+                                       : NSPoint(x: split.bounds.midX, y: center + 8)
+        try expect(EditApplication.clickCursor(in: window, at: split.convert(outside, to: nil)) !== expected,
+                   "leave the adjacent pane's cursor outside the divider grip")
     }
 
     private static func checkBottomGlass(in document: DocumentWindow, panel: NSView) throws {

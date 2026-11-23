@@ -58,22 +58,26 @@ enum WorktreeCheck {
                 let point = tree.convert(NSPoint(x: x, y: frame.midY), to: nil)
                 let cursor = EditApplication.clickCursor(in: document.window, at: point)
                 try expect(cursor === NSCursor.pointingHand && cursorTracking.update(cursor, in: document.window) &&
-                           !document.window.areCursorRectsEnabled, "own the pointing hand across Worktree rows")
+                           document.window.areCursorRectsEnabled, "keep native pointer updates across Worktree rows")
             }
         }
         let disclose = try disclosure(at: sources, in: tree)
         let disclosurePoint = disclose.convert(NSPoint(x: disclose.bounds.midX, y: disclose.bounds.midY), to: nil)
-        document.window.enableCursorRects()
-        let disclosureCursor = EditApplication.clickCursor(in: document.window, at: disclosurePoint)
-        try expect(disclosureCursor === NSCursor.pointingHand && cursorTracking.update(disclosureCursor, in: document.window) &&
-                   !document.window.areCursorRectsEnabled, "keep ownership of the cursor over a disclosure button after a native reset")
-        try expect(cursorImages == [.pointingHand], "moving between row targets keeps one cursor image")
+        var nativeTrackingAvailable = false
+        cursorTracking.dispatch(.leftMouseDown, in: document.window, resolve: {
+            EditApplication.clickCursor(in: document.window, at: disclosurePoint)
+        }) { nativeTrackingAvailable = document.window.areCursorRectsEnabled }
+        try expect(nativeTrackingAvailable && cursorImages == [.pointingHand],
+                   "native tracking stays available during a disclosure press with one pointing-hand image")
         let lastRow = tree.rect(ofRow: tree.numberOfRows - 1)
         let belowRows = tree.convert(NSPoint(x: lastRow.midX, y: lastRow.maxY + 5), to: nil)
-        let blankCursor = EditApplication.clickCursor(in: document.window, at: belowRows)
-        try expect(blankCursor == nil && !cursorTracking.update(blankCursor, in: document.window) &&
-                   document.window.areCursorRectsEnabled && cursorImages == [.pointingHand, .arrow],
-                   "restore the native cursor and its tracking over the empty Worktree area")
+        cursorTracking.dispatch(.cursorUpdate, in: document.window, resolve: {
+            EditApplication.clickCursor(in: document.window, at: belowRows)
+        }) {
+            if cursorImages.last !== NSCursor.arrow { cursorImages.append(.arrow) }
+        }
+        try expect(document.window.areCursorRectsEnabled && cursorImages == [.pointingHand, .arrow],
+                   "show the default cursor over the empty Worktree area")
         try checkDisclosureStyle(disclose)
         try checkDisclosureContrast(disclose, in: document.window)
         try checkSelectionShape(in: tree, window: document.window)
@@ -690,6 +694,22 @@ enum WorktreeCheck {
         window.layoutIfNeeded()
         let item = try require(tree.item(atRow: 0), "animation folder")
         let clip = try require(tree.enclosingScrollView?.contentView, "Worktree clip view")
+        tree.updateTrackingAreas()
+        try expect(tree.trackingAreas.contains {
+            $0.owner === tree && $0.options.contains([.cursorUpdate, .activeInKeyWindow, .inVisibleRect])
+        }, "native cursor refreshes reach the outline while it tracks the disclosure click")
+        let hoveredDisclosure = try disclosure(at: 0, in: tree)
+        let hover = hoveredDisclosure.convert(NSPoint(x: hoveredDisclosure.bounds.midX, y: hoveredDisclosure.bounds.midY), to: nil)
+        var cursorImages: [NSCursor] = []
+        let cursorTracking = EditApplication.ClickCursorTracking(currentCursor: { cursorImages.last ?? .arrow },
+                                                                setCursor: { cursorImages.append($0) })
+        defer { cursorTracking.end() }
+        var cursorUsesNativeFallback = false
+        func sampleDisclosureCursor() {
+            cursorTracking.dispatch(.cursorUpdate, in: window, resolve: {
+                EditApplication.clickCursor(in: window, at: hover)
+            }) { cursorUsesNativeFallback = true }
+        }
         func checkViewportWidth() throws {
             let viewport = clip.bounds
             let proposed = clip.constrainBoundsRect(viewport.offsetBy(dx: viewport.width, dy: 0))
@@ -728,13 +748,16 @@ enum WorktreeCheck {
         }
 
         try await waitFor("render the collapsed rows") { abs((displayedY() ?? -1) - collapsedY) < 0.5 }
+        sampleDisclosureCursor()
         try clickChevron()
         try await waitFor("the first mouse expansion slides the children and sibling together") {
-            tree.isItemExpanded(item) && childrenMoveWithSibling(tree.rowView(atRow: childCount, makeIfNecessary: false))
+            sampleDisclosureCursor()
+            return tree.isItemExpanded(item) && childrenMoveWithSibling(tree.rowView(atRow: childCount, makeIfNecessary: false))
         }
         try checkViewportWidth()
         try await waitFor("the expanded rows settle") {
-            abs((displayedY() ?? -1) - expandedY) < 0.5 && siblingRow()?.layer?.animationKeys()?.isEmpty != false
+            sampleDisclosureCursor()
+            return abs((displayedY() ?? -1) - expandedY) < 0.5 && siblingRow()?.layer?.animationKeys()?.isEmpty != false
         }
 
         try checkViewportWidth()
@@ -751,11 +774,15 @@ enum WorktreeCheck {
         let lastChild = try require(tree.rowView(atRow: childCount, makeIfNecessary: false), "last expanded child")
         try clickChevron()
         try await waitFor("mouse collapse slides the children and sibling together") {
-            !tree.isItemExpanded(item) && childrenMoveWithSibling(lastChild)
+            sampleDisclosureCursor()
+            return !tree.isItemExpanded(item) && childrenMoveWithSibling(lastChild)
         }
         try await waitFor("the collapsed rows settle") {
-            abs((displayedY() ?? -1) - collapsedY) < 0.5 && siblingRow()?.layer?.animationKeys()?.isEmpty != false
+            sampleDisclosureCursor()
+            return abs((displayedY() ?? -1) - collapsedY) < 0.5 && siblingRow()?.layer?.animationKeys()?.isEmpty != false
         }
+        try expect(cursorImages == [.pointingHand] && !cursorUsesNativeFallback,
+                   "stationary disclosure hover keeps one cursor through two native click animations")
 
         tree.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         window.makeFirstResponder(tree)
