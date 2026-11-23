@@ -368,6 +368,13 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         for item in expandedDirectories(from: root) { load(item, force: true) }
     }
 
+    fileprivate func selectFirstRowIfNeeded() {
+        guard mode == .worktree, document.displayedFileURL == nil, nameEdit == nil,
+              tree.selectedRow == -1, tree.numberOfRows > 0 else { return }
+        selectRows(IndexSet(integer: 0))
+        tree.scrollRowToVisible(0)
+    }
+
     private func startMonitoring() {
         monitor = nil
         guard mode == .worktree, isActive, let root else { return }
@@ -449,7 +456,9 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         // Keep the AppKit field editor attached to its row while filesystem updates arrive.
         guard nameEdit == nil else { return }
         if item === root {
+            let hadRows = tree.numberOfRows > 0
             reloadTree()
+            if !hadRows, isActive, document.window.firstResponder === tree { selectFirstRowIfNeeded() }
             return
         }
         updateVisibleChildren(of: item)
@@ -1274,6 +1283,12 @@ private final class WorktreeOutline: NSOutlineView, NSMenuItemValidation {
     weak var owner: WorktreeSidebar?
     private(set) var isPlainPrimaryClick = false
     var didStartDrag = false
+
+    override func becomeFirstResponder() -> Bool {
+        guard super.becomeFirstResponder() else { return false }
+        owner?.selectFirstRowIfNeeded()
+        return true
+    }
 
     override func mouseDown(with event: NSEvent) {
         isPlainPrimaryClick = event.modifierFlags.intersection([.command, .shift, .control, .option]).isEmpty

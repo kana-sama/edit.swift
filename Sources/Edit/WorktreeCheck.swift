@@ -17,6 +17,7 @@ enum WorktreeCheck {
         let external = temporary.appending(path: "External.txt")
         for file in [readme, ignored, nested, external] { try Data("Sample\n".utf8).write(to: file) }
         try Data("*.log\n".utf8).write(to: project.appending(path: ".gitignore"))
+        try await checkInitialSelection(in: app, under: temporary)
         try await checkFolderAnimation(in: app, under: temporary)
         try await checkKeyboardFolders(in: app, under: temporary)
         try await checkTrash(in: app, under: temporary)
@@ -211,6 +212,40 @@ enum WorktreeCheck {
         try checkRootContextMenu(in: emptyTree)
         try await checkInlineNames(in: restored, tree: emptyTree, directory: empty)
 
+    }
+
+    private static func checkInitialSelection(in app: Edit, under temporary: URL) async throws {
+        let folder = temporary.appending(path: "Unopened Project", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let files = [folder.appending(path: "A.txt"), folder.appending(path: "B.txt")]
+        for file in files { try Data("Sample\n".utf8).write(to: file) }
+
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        _ = try await app.openFile(folder, in: document)
+        document.toggleSidebarFocus(.worktree)
+        let sidebar = try require(document.worktreeSidebar, "open the Worktree for a project without an open file")
+        let tree = sidebar.outline
+        try await waitFor("select the first file when the focused Worktree finishes loading") {
+            tree.numberOfRows == 2 && tree.selectedRow == 0
+        }
+        try expect(row(named: "A.txt", in: tree) == tree.selectedRow && document.window.firstResponder === tree &&
+                   document.showsEmptyFolder, "highlight the first row and keep the project open without opening the file")
+
+        document.focusContent()
+        tree.deselectAll(nil)
+        document.toggleSidebarFocus(.worktree)
+        try expect(tree.selectedRow == 0, "select the first row immediately when refocusing an already loaded tree")
+        tree.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        document.focusContent()
+        document.toggleSidebarFocus(.worktree)
+        try expect(tree.selectedRow == 1 && document.window.firstResponder === tree,
+                   "keep an existing selection when refocusing the Worktree without an open file")
+        for file in files { try FileManager.default.removeItem(at: file) }
+        sidebar.refresh()
+        try await waitFor("keep the focus and clear the selection as the last rows disappear") {
+            tree.numberOfRows == 0 && tree.selectedRow == -1 && document.window.firstResponder === tree
+        }
     }
 
     private static func checkInlineNames(in document: DocumentWindow, tree: NSOutlineView, directory: URL) async throws {
