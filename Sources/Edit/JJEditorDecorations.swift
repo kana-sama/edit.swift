@@ -44,6 +44,7 @@ final class JJEditorDecorations {
     private var trackSize = NSSize.zero
     private var trackOverviewRevision: UInt = 0
     private var trackMarks: [PositionedMark] = []
+    private static var restingOverlaySlots: [NSControl.ControlSize: NSRect] = [:]
     private let gutterWidth: CGFloat = 7
     private let gutter = JJEditorMarkerView()
     private let track = JJEditorMarkerView()
@@ -100,7 +101,8 @@ final class JJEditorDecorations {
 
         let scroller = scroll.verticalScroller
         let style = scroll.scrollerStyle
-        if track.superview !== scroll || scroller !== nativeScroller || style != scrollerStyle {
+        let styleChanged = style != scrollerStyle
+        if track.superview !== scroll || scroller !== nativeScroller || styleChanged {
             track.removeFromSuperview()
             // An overlay scroller is transparent when it fades. A legacy track has an
             // opaque background, so draw above it and clip the marks around the knob.
@@ -114,7 +116,7 @@ final class JJEditorDecorations {
         }
         let frame = trackFrame(in: scroll, scroller: scroller)
         if track.frame != frame { track.frame = frame }
-        if frame.size != trackSize || trackOverviewRevision != (editor.jjInlineDiff?.overviewRevision ?? 0) {
+        if styleChanged || frame.size != trackSize || trackOverviewRevision != (editor.jjInlineDiff?.overviewRevision ?? 0) {
             updateTrackMarks()
         }
         if style != .overlay { track.needsDisplay = true }
@@ -142,14 +144,37 @@ final class JJEditorDecorations {
 
     private func trackFrame(in scroll: NSScrollView, scroller: NSScroller?) -> NSRect {
         let clip = scroll.contentView.frame
-        let width = NSScroller.scrollerWidth(for: scroller?.controlSize ?? .regular, scrollerStyle: scroll.scrollerStyle)
+        let size = scroller?.controlSize ?? .regular
+        let width = NSScroller.scrollerWidth(for: size, scrollerStyle: scroll.scrollerStyle)
         // The scroll view extends under the docked sidebars. The scroller follows the exposed pane.
         let edge = NSRect(x: scroll.safeAreaRect.maxX - width, y: clip.minY, width: width, height: clip.height)
+        var slot = edge
+        var rightEdge = edge.maxX
+        if let scroller, scroller.superview === scroll, hasVerticalScrollRange(in: scroll) {
+            let frame = scroll.convert(scroller.bounds, from: scroller)
+            let nativeSlot = scroll.convert(scroller.rect(for: .knobSlot), from: scroller).intersection(scroll.bounds)
+            // AppKit can retain the old scroller frame while a sidebar is moving.
+            if abs(frame.maxX - rightEdge) < 1, !nativeSlot.isEmpty {
+                slot = nativeSlot
+                rightEdge = frame.maxX
+            }
+        }
+        guard scroll.scrollerStyle == .overlay else { return slot }
 
-        guard let scroller, scroller.superview === scroll, hasVerticalScrollRange(in: scroll) else { return edge }
-        let slot = scroll.convert(scroller.rect(for: .knobSlot), from: scroller).intersection(scroll.bounds)
-        // AppKit can retain the scroller's old frame while the editor pane is resizing.
-        guard !slot.isEmpty, slot.minX >= edge.minX else { return edge }
+        let resting = Self.restingOverlaySlot(for: size, width: width)
+        return NSRect(x: rightEdge - width + resting.minX, y: slot.minY, width: resting.width, height: slot.height)
+    }
+
+    private static func restingOverlaySlot(for size: NSControl.ControlSize, width: CGFloat) -> NSRect {
+        if let slot = restingOverlaySlots[size] { return slot }
+        // A detached scroller provides AppKit's unexpanded geometry without hover or fade state.
+        let scroller = NSScroller(frame: NSRect(x: 0, y: 0, width: width, height: width * 8))
+        scroller.controlSize = size
+        scroller.scrollerStyle = .overlay
+        scroller.knobProportion = 0.5
+        let slot = scroller.rect(for: .knobSlot)
+        if slot.isEmpty { return scroller.bounds }
+        restingOverlaySlots[size] = slot
         return slot
     }
 
@@ -162,7 +187,8 @@ final class JJEditorDecorations {
         let diff = editor?.jjInlineDiff
         trackOverviewRevision = diff?.overviewRevision ?? 0
         let height = trackSize.height
-        let width = min(6, trackSize.width)
+        let sideClearance: CGFloat = scrollerStyle == .overlay ? 2 : 0
+        let width = min(4, max(0, trackSize.width - sideClearance))
         let minimumHeight = min(3, height)
         let rowCount = CGFloat(max(1, diff?.overviewRow(lineStarts.count, includingRemovedAtBoundary: true) ?? lineStarts.count))
         trackMarks = marks.map { mark in
@@ -179,10 +205,14 @@ final class JJEditorDecorations {
     }
 
     private func trackMark(at point: NSPoint) -> JJLineMark? {
-        guard track.bounds.contains(point) else { return nil }
+        if !track.bounds.contains(point) {
+            // Retain click slop in the native slot when an overlay expands beyond its resting lane.
+            guard scrollerStyle == .overlay, let scroller = nativeScroller,
+                  track.convert(scroller.rect(for: .knobSlot), from: scroller).contains(point) else { return nil }
+        }
         // Choose visible paint before hit slop so the visible priority always wins collisions.
         return trackMarks.reversed().first { $0.rect.contains(point) }?.mark
-            ?? trackMarks.reversed().first { $0.rect.insetBy(dx: -2, dy: -1).contains(point) }?.mark
+            ?? trackMarks.reversed().first { $0.rect.insetBy(dx: -3, dy: -1).contains(point) }?.mark
     }
 
     private func clickTrack(_ event: NSEvent) {

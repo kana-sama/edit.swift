@@ -254,17 +254,23 @@ enum JJEditorCheck {
                   rightEdge + 100 < scroll.bounds.maxX, editor.frame.height <= clip.bounds.height else {
                 throw Failure("put the scrollbar at the exposed edge of a split editor with a short document")
             }
-            let width = NSScroller.scrollerWidth(for: scroll.verticalScroller?.controlSize ?? .regular, scrollerStyle: .overlay)
+            let size = scroll.verticalScroller?.controlSize ?? .regular
+            let width = NSScroller.scrollerWidth(for: size, scrollerStyle: .overlay)
+            let idle = NSScroller(frame: NSRect(x: 0, y: 0, width: width, height: 120))
+            idle.controlSize = size
+            idle.scrollerStyle = .overlay
+            idle.knobProportion = 0.5
+            let center = rightEdge - width + idle.rect(for: .knob).midX
             let y = scroll.isFlipped ? clip.frame.minY + clip.frame.height * 0.375 : clip.frame.maxY - clip.frame.height * 0.375
-            let edge = NSRect(x: rightEdge - width / 2, y: y, width: 1, height: 1)
-            let oldEdge = edge.offsetBy(dx: previousEdge - rightEdge, dy: 0)
-            let paintedEdge = try capture(scroll, in: edge).colorAt(x: 0, y: 0)
+            let strip = NSRect(x: center - 5, y: y, width: 10, height: 1)
+            let oldEdge = NSRect(x: center + previousEdge - rightEdge, y: y, width: 1, height: 1)
+            let painted = try capture(scroll, in: strip)
             let paintedBody = try capture(scroll, in: oldEdge).colorAt(x: 0, y: 0)
             editor.setJJLineMarks([])
-            guard let paintedEdge, let paintedBody,
-                  try capture(scroll, in: edge).colorAt(x: 0, y: 0) != paintedEdge,
+            try checkCenteredMark(painted: painted, bare: capture(scroll, in: strip), strip: strip)
+            guard let paintedBody,
                   try capture(scroll, in: oldEdge).colorAt(x: 0, y: 0) == paintedBody else {
-                throw Failure("paint a short document's marks at the exposed edge after the split changes")
+                throw Failure("clear the short document's previous scrollbar position after the split changes")
             }
         }
         try checkShortTrack(previousEdge: undockedEdge)
@@ -290,18 +296,28 @@ enum JJEditorCheck {
         let knob = scroller.rect(for: .knob)
         let fraction = 0.75
         let markY = scroller.isFlipped ? slot.minY + slot.height * fraction : slot.maxY - slot.height * fraction
-        let point = NSPoint(x: slot.midX, y: markY)
+        let point = NSPoint(x: knob.midX, y: markY)
         guard slot.contains(point), !knob.contains(point) else {
             throw Failure("sample the overlay track outside its thumb")
         }
         let origin = scroll.convert(point, from: scroller)
-        let probe = NSRect(x: origin.x, y: origin.y, width: 1, height: 1)
-        let bareTrack = try capture(scroll, in: probe).colorAt(x: 0, y: 0)
+        let strip = NSRect(x: origin.x - 5, y: origin.y, width: 10, height: 1)
+        let bareTrack = try capture(scroll, in: strip)
         editor.setJJLineMarks([JJLineMark(kind: .insertion, lines: 174..<186)],
                              lineStarts: (0..<240).map { $0 * row.utf16.count })
-        guard let bareTrack, let paintedTrack = try capture(scroll, in: probe).colorAt(x: 0, y: 0),
-              paintedTrack != bareTrack else {
-            throw Failure("paint an offscreen change through the visible overlay scroller beside Terminal")
+        try checkCenteredMark(painted: capture(scroll, in: strip), bare: bareTrack, strip: strip)
+    }
+
+    private static func checkCenteredMark(painted: NSBitmapImageRep, bare: NSBitmapImageRep, strip: NSRect) throws {
+        let pixels = (0..<painted.pixelsWide).filter { x in
+            painted.colorAt(x: x, y: 0) != bare.colorAt(x: x, y: 0)
+        }
+        guard let first = pixels.first, let last = pixels.last else { throw Failure("paint the scrollbar mark") }
+        let scale = CGFloat(painted.pixelsWide) / strip.width
+        let width = CGFloat(last + 1 - first) / scale
+        let center = CGFloat(first + last + 1) / (2 * scale)
+        guard abs(width - 4) <= 0.5, abs(center - strip.width / 2) <= 0.5 else {
+            throw Failure("paint a four-point mark centered on the resting scrollbar (width \(width), center \(center))")
         }
     }
 
