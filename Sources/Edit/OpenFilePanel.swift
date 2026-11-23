@@ -164,7 +164,7 @@ final class OpenFilePanel {
 }
 
 @MainActor
-final class OpenFilePanelHelper: NSObject, NSApplicationDelegate {
+final class OpenFilePanelHelper: NSObject, NSApplicationDelegate, NSOpenSavePanelDelegate {
     private static let flag = "--edit-open-panel-helper"
     private static let parentKey = "EDIT_OPEN_PANEL_PARENT"
     private let parent: pid_t
@@ -172,6 +172,8 @@ final class OpenFilePanelHelper: NSObject, NSApplicationDelegate {
     private let probe: Bool
     private var panel: NSOpenPanel?
     private var announcedVisibility = false
+    private var promptShowsNewWindow: Bool?
+    private var acceptedInAnotherWindow: Bool?
 
     static func process(directory: URL?, probe: Bool = false) -> Process? {
         guard let executable = Bundle.main.executableURL else { return nil }
@@ -220,14 +222,8 @@ final class OpenFilePanelHelper: NSObject, NSApplicationDelegate {
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.directoryURL = directory
-        let anotherWindow = NSButton(checkboxWithTitle: "Open in Another Window", target: nil, action: nil)
-        anotherWindow.sizeToFit()
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: anotherWindow.frame.height + 16))
-        anotherWindow.setFrameOrigin(NSPoint(x: accessory.bounds.maxX - anotherWindow.frame.width, y: 8))
-        anotherWindow.autoresizingMask = [.minXMargin, .minYMargin, .maxYMargin]
-        accessory.addSubview(anotherWindow)
-        panel.accessoryView = accessory
-        panel.isAccessoryViewDisclosed = true
+        panel.delegate = self
+        updatePrompt(in: panel)
         self.panel = panel
         if probe {
             send(.visible)
@@ -239,6 +235,7 @@ final class OpenFilePanelHelper: NSObject, NSApplicationDelegate {
                                                name: NSWindow.didBecomeKeyNotification, object: panel)
         send(.initialized)
         panel.begin { [self] response in
+            let inAnotherWindow = acceptedInAnotherWindow ?? NSEvent.modifierFlags.contains(.option)
             if NSApp.isActive, let editor = NSRunningApplication(processIdentifier: parent) {
                 NSApp.yieldActivation(to: editor)
                 _ = editor.activate(from: .current, options: [])
@@ -246,23 +243,33 @@ final class OpenFilePanelHelper: NSObject, NSApplicationDelegate {
             if response == .OK, let url = panel.url {
                 // An implicit bookmark carries the user-selected file grant to the editor process.
                 let bookmark = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
-                send(.selected(url, bookmark: bookmark, inAnotherWindow: anotherWindow.state == .on))
+                send(.selected(url, bookmark: bookmark, inAnotherWindow: inAnotherWindow))
             } else {
                 send(.cancelled)
             }
             exit(EXIT_SUCCESS)
         }
 
-        // A panel can be visible in the background without becoming key.
+        // The system panel can be visible without becoming key and may receive Option events in its own process.
         Task { [weak self] in
-            while let self, !announcedVisibility {
-                if panel.isVisible {
-                    reportVisibility()
-                    break
-                }
-                try? await Task.sleep(for: .milliseconds(50))
+            while let self {
+                if !announcedVisibility, panel.isVisible { reportVisibility() }
+                updatePrompt(in: panel)
+                try? await Task.sleep(for: .milliseconds(33))
             }
         }
+    }
+
+    func panel(_ sender: Any, validate url: URL) throws {
+        // Remember Option before the system returns the selection and hands focus back to Edit.
+        acceptedInAnotherWindow = NSEvent.modifierFlags.contains(.option)
+    }
+
+    private func updatePrompt(in panel: NSOpenPanel) {
+        let inAnotherWindow = NSEvent.modifierFlags.contains(.option)
+        guard inAnotherWindow != promptShowsNewWindow else { return }
+        promptShowsNewWindow = inAnotherWindow
+        panel.prompt = inAnotherWindow ? "Open in New Window" : "Open in This Window"
     }
 
     @objc private func panelBecameKey(_ notification: Notification) { reportVisibility() }
