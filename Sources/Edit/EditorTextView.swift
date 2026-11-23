@@ -31,7 +31,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     private static let defaultFontSize: CGFloat = 12
     static let defaultFont = codeFont(ofSize: defaultFontSize)
     private var fontSize = EditorTextView.defaultFontSize
-    private var currentLine = NSRect.zero
+    private let currentLineHighlight = CurrentLineHighlight()
     private var lineRefreshPending = false
     let multiCaret = MultiCaretState()
     private weak var multiCaretWindow: NSWindow?
@@ -95,6 +95,9 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         editor.smartInsertDeleteEnabled = false
         editor.backgroundColor = .textBackgroundColor
         editor.textColor = .textColor
+        editor.currentLineHighlight.wantsLayer = true
+        editor.currentLineHighlight.setAccessibilityElement(false)
+        editor.addSubview(editor.currentLineHighlight, positioned: .below, relativeTo: nil)
         // Keep AppKit’s selection background and leave syntax colors on the glyphs.
         editor.selectedTextAttributes.removeValue(forKey: .foregroundColor)
         editor.insertionPointColor = .textColor
@@ -901,18 +904,26 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         let location = selectedRange().location
         var newLine = NSRect.zero
         if window != nil, caretIsNearViewport(location) {
-            if let line = lineBounds(at: location) {
+            if let line = currentLineBounds(at: location) {
                 newLine = NSRect(x: bounds.minX, y: line.minY, width: bounds.width, height: line.height)
             } else if textStorage?.length == 0, let paragraph = defaultParagraphStyle {
                 newLine = NSRect(x: bounds.minX, y: textContainerOrigin.y, width: bounds.width,
                                  height: paragraph.minimumLineHeight)
             }
         }
-        if newLine != currentLine {
-            setNeedsDisplay(currentLine.intersection(visibleRect))
-            currentLine = newLine
-            setNeedsDisplay(currentLine.intersection(visibleRect))
-        }
+        // Moving one layer keeps old line backgrounds out of the text view's scrolling tiles.
+        if currentLineHighlight.frame != newLine { currentLineHighlight.frame = newLine }
+    }
+
+    private func currentLineBounds(at offset: Int) -> NSRect? {
+        if let bounds = lineBounds(at: offset) { return bounds }
+        // The caret rect can be unavailable when the row is visible but the caret is offscreen horizontally.
+        guard let layout = textLayoutManager,
+              let location = layout.location(layout.documentRange.location, offsetBy: offset),
+              let fragment = layout.textLayoutFragment(for: location), fragment.state == .layoutAvailable,
+              let line = fragment.textLineFragment(for: location, isUpstreamAffinity: false) else { return nil }
+        let frame = fragment.layoutFragmentFrame
+        return line.typographicBounds.offsetBy(dx: frame.minX + textContainerOrigin.x, dy: frame.minY + textContainerOrigin.y)
     }
 
     private func caretIsNearViewport(_ offset: Int) -> Bool {
@@ -924,16 +935,27 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     override func drawBackground(in dirtyRect: NSRect) {
         super.drawBackground(in: dirtyRect)
-        let stripe = dirtyRect.intersection(currentLine)
-        if !stripe.isEmpty {
-            NSColor.labelColor.withAlphaComponent(0.06).setFill()
-            stripe.fill()
-        }
         occurrenceHighlighting.draw(in: dirtyRect)
         bracketNavigation.draw(in: dirtyRect)
         onDrawFindHighlights?(dirtyRect)
         drawSecondarySelections(in: dirtyRect)
     }
+}
+
+@MainActor
+private final class CurrentLineHighlight: NSView {
+    override var wantsUpdateLayer: Bool { true }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func updateLayer() {
+        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 @MainActor

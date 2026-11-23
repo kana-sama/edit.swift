@@ -263,26 +263,104 @@ enum EditorCheck {
         }
     }
 
-    private static func checkTextPaint(in clip: NSClipView, after action: String) async throws {
-        // Let Core Animation commit the frame. Do not force layout or display while inspecting it.
-        try await Task.sleep(for: .milliseconds(80))
+    static func checkCurrentLinePaint(in document: DocumentWindow) async throws {
+        let window = document.window
+        let editor = document.editor
+        let scroll = document.scrollView
+        let clip = scroll.contentView
+        defer { window.close() }
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
+        window.orderBack(nil)
+        try expect(window.isVisible && !NSApp.isActive, "quiet live active-line check")
+
+        let wideLine = String(repeating: " ", count: 240) + "x\n"
+        editor.string = String(repeating: wideLine, count: 25)
+        window.layoutIfNeeded()
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+
+        let activeRows = [1, 3, 5]
+        let referenceRow = 8
+        let rowBounds = try Dictionary(uniqueKeysWithValues: (activeRows + [referenceRow]).map { row in
+            guard let line = editor.lineBounds(at: wideLine.utf16.count * row) else {
+                throw Failure("lay out row \(row) for the active-line check")
+            }
+            return (row, line)
+        })
+
+        func paint(_ row: Int, in frame: NSBitmapImageRep) throws -> [NSColor] {
+            guard let line = rowBounds[row] else { throw Failure("find the row to sample") }
+            let y = Int(clip.convert(line, from: editor).midY - clip.bounds.minY)
+            return try stride(from: 2, to: frame.pixelsWide - 18, by: 4).map { x in
+                guard let sample = frame.colorAt(x: x, y: y) else { throw Failure("sample active-line paint") }
+                return sample
+            }
+        }
+
+        func checkFrame(active row: Int, at x: CGFloat) async throws {
+            try await Task.sleep(for: .milliseconds(65))
+            try expect(abs(scroll.visibleContentOrigin.x - x) < 1, "active-line check keeps horizontal position \(x)")
+            let frame = try liveViewportBitmap(in: clip)
+            let plain = try paint(referenceRow, in: frame)
+            let active = try paint(row, in: frame)
+            try expect(Set(active).count == 1 && zip(active, plain).allSatisfy { $0.0 != $0.1 },
+                       "paint active row \(row) across the viewport at horizontal offset \(x)")
+            for other in activeRows where other != row {
+                let old = try paint(other, in: frame)
+                try expect(old == plain, "clear old active row \(other) at horizontal offset \(x)")
+            }
+        }
+
+        func selectRow(_ row: Int) {
+            editor.setSelectedRange(NSRange(location: wideLine.utf16.count * row + 76, length: 0))
+        }
+        selectRow(1)
+        scroll.scrollToVisibleContentOrigin(NSPoint(x: 460, y: 0))
+        try await checkFrame(active: 1, at: 460)
+        scroll.scrollToVisibleContentOrigin(.zero)
+        try await checkFrame(active: 1, at: 0)
+        selectRow(3)
+        try await checkFrame(active: 3, at: 0)
+        scroll.scrollToVisibleContentOrigin(NSPoint(x: 460, y: 0))
+        try await checkFrame(active: 3, at: 460)
+        selectRow(5)
+        try await checkFrame(active: 5, at: 460)
+        scroll.scrollToVisibleContentOrigin(.zero)
+        try await checkFrame(active: 5, at: 0)
+        scroll.scrollToVisibleContentOrigin(NSPoint(x: 900, y: 0))
+        try await checkFrame(active: 5, at: 900)
+        selectRow(1)
+        try await checkFrame(active: 1, at: 900)
+        scroll.scrollToVisibleContentOrigin(.zero)
+        try await checkFrame(active: 1, at: 0)
+    }
+
+    private static func liveViewportBitmap(in clip: NSClipView) throws -> NSBitmapImageRep {
         let bounds = clip.bounds
         guard let layer = clip.layer,
               let bitmap = NSBitmapImageRep(
                 bitmapDataPlanes: nil, pixelsWide: Int(bounds.width), pixelsHigh: Int(bounds.height),
                 bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                 colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
-              ),
-              let bytes = bitmap.bitmapData else { throw Failure("capturing the live zoom viewport") }
+              ) else { throw Failure("capturing the live viewport") }
         bitmap.size = bounds.size
-        guard let graphics = NSGraphicsContext(bitmapImageRep: bitmap) else { throw Failure("zoom graphics context") }
+        guard let graphics = NSGraphicsContext(bitmapImageRep: bitmap) else { throw Failure("viewport graphics context") }
         let rendered = layer.presentation() ?? layer
         let context = graphics.cgContext
         context.translateBy(x: 0, y: bounds.height)
         context.scaleBy(x: 1, y: -1)
         context.translateBy(x: -rendered.bounds.minX, y: -rendered.bounds.minY)
         rendered.render(in: context)
+        return bitmap
+    }
 
+    private static func checkTextPaint(in clip: NSClipView, after action: String) async throws {
+        // Let Core Animation commit the frame. Do not force layout or display while inspecting it.
+        try await Task.sleep(for: .milliseconds(80))
+        let bitmap = try liveViewportBitmap(in: clip)
+        guard let bytes = bitmap.bitmapData else { throw Failure("read live viewport pixels") }
         var blankHeight = 0
         for y in stride(from: 52, to: bitmap.pixelsHigh - 12, by: 2) {
             let hasText = stride(from: 8, to: min(bitmap.pixelsWide - 18, 385), by: 2).contains { x in

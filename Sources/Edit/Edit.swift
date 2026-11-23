@@ -129,6 +129,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try checkWindow(sample.window, screenshot: CommandLine.arguments.dropFirst(2).first)
                     try MultiCaretCheck.runComposition(in: sample.editor)
                     try await EditorCheck.checkViewportResize(in: makeDocument())
+                    try await EditorCheck.checkCurrentLinePaint(in: makeDocument())
                     try await EditorCheck.checkScrolledZoom(in: makeDocument())
                     receivedInitialSession = true
                     let folderWindow = try await FolderCheck.run(in: self)
