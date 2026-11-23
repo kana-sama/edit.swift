@@ -47,6 +47,12 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         let isWanted: () -> Bool
     }
 
+    private struct ClosedFile {
+        let url: URL
+        let folder: URL?
+        weak var document: DocumentWindow?
+    }
+
     let isAgentCheck = CommandLine.arguments.dropFirst().first == "--agent-check"
     private lazy var sessionStore = SessionStore.application()
     lazy var syntaxOverrides = SyntaxLanguageOverrides(defaults: isAgentCheck ? nil : .standard)
@@ -71,6 +77,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     private var startup: Task<Void, Never>?
     private var receivedInitialSession = false
     private var pendingFiles: [(urls: [URL], allowMissing: Bool, document: DocumentWindow?)] = []
+    private var closedFiles: [ClosedFile] = []
+    private var reopeningClosedFile = false
     private var saveTargets: [URL: FileIdentity?] = [:]
     private var worktreeMutationPaths: [URL] = []
     private var worktreeMutationGeneration: UInt64 = 0
@@ -376,9 +384,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         }
     }
 
-    func openInAnotherWindow(_ url: URL) async throws -> DocumentWindow? {
+    func openInAnotherWindow(_ url: URL, folder: URL? = nil) async throws -> DocumentWindow? {
         guard !isQuitting, !Task.isCancelled else { return nil }
         let document = makeDocument()
+        if let folder { document.setFolder(folder) }
         var opened = false
         defer {
             if !opened { document.window.close() }
@@ -387,6 +396,37 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         opened = true
         if !isAgentCheck { document.present() }
         return document
+    }
+
+    private var canReopenClosedFile: Bool {
+        !isQuitting && !reopeningClosedFile && !closedFiles.isEmpty && activeDocument?.window.attachedSheet == nil
+    }
+
+    @objc func reopenClosedFile(_ sender: Any?) {
+        guard canReopenClosedFile, let entry = closedFiles.last else { return }
+        let index = closedFiles.count - 1
+        reopeningClosedFile = true
+        Task {
+            defer { reopeningClosedFile = false }
+            do {
+                if let document = entry.document, documents.contains(where: { $0 === document }),
+                   document.folderURL == entry.folder, document.showsEmptyFolder, document.canReplaceBuffer {
+                    guard try await openFile(entry.url, in: document, shouldOpen: {
+                        document.showsEmptyFolder && document.folderURL == entry.folder
+                    }) != nil else { return }
+                    if !isAgentCheck && !isQuitting { document.present() }
+                } else {
+                    guard try await openInAnotherWindow(entry.url, folder: entry.folder) != nil else { return }
+                }
+                // New closes can append entries while the reopen is preparing the file.
+                closedFiles.remove(at: index)
+            } catch {
+                if !isQuitting {
+                    await activeDocument?.showError("Could Not Reopen “\(entry.url.lastPathComponent)”",
+                                                    detail: error.localizedDescription)
+                }
+            }
+        }
     }
 
     @objc func saveDocument(_ sender: Any?) {
@@ -461,6 +501,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             return openFilePanel?.isOpening == true || activeDocument?.canReplaceBuffer == true
         case #selector(openRecentDocument(_:)):
             return activeDocument?.canReplaceBuffer ?? false
+        case #selector(reopenClosedFile(_:)): return canReopenClosedFile
         case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)), #selector(saveDocumentAsScratch(_:)):
             return activeDocument.map { $0.hasTextDocument && !$0.isBusy && $0.window.attachedSheet == nil } ?? false
         case #selector(openFind(_:)): return activeDocument?.canPerformFind(.find) ?? false
@@ -573,7 +614,13 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         }
     }
 
+    func recordClosedFile(in document: DocumentWindow) {
+        guard !isQuitting, let url = document.displayedFileURL else { return }
+        closedFiles.append(ClosedFile(url: url, folder: document.folderURL, document: document))
+    }
+
     func didClose(_ document: DocumentWindow) {
+        recordClosedFile(in: document)
         if openPanelDocument === document { openFilePanel?.cancel() }
         lastPlacement = document.placement
         pendingFullScreen.removeAll { $0 === document }
@@ -939,6 +986,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         file.addCommand("Save As…", #selector(saveDocumentAs(_:)), "s", [.command, .shift]).target = self
         file.addCommand("Save as Scratch…", #selector(saveDocumentAsScratch(_:))).target = self
         file.addCommand("Close", #selector(NSWindow.performClose(_:)), "w")
+        file.addCommand("Reopen Closed File", #selector(reopenClosedFile(_:)), "t", [.command, .shift]).target = self
 
         let edit = addMenu("Edit")
         edit.addCommand("Undo", Selector(("undo:")), "z")

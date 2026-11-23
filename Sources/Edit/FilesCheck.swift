@@ -8,6 +8,7 @@ enum FilesCheck {
             .map { URL(fileURLWithPath: $0, isDirectory: true) } ?? FileManager.default.temporaryDirectory
         let directory = temporaryRoot.appendingPathComponent("files-check-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try await checkReopeningClosedFiles(in: app, directory: directory)
         let file = directory.appendingPathComponent("Notes.txt")
         let other = directory.appendingPathComponent("Reference.txt")
         let initialText = "first line\r\nsecond line\r\n"
@@ -147,6 +148,67 @@ enum FilesCheck {
         sample.editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         sample.editor.refreshCurrentLine()
         return sample
+    }
+
+    private static func checkReopeningClosedFiles(in app: Edit, directory: URL) async throws {
+        let originalWindows = app.documents
+        defer {
+            for document in app.documents where !originalWindows.contains(where: { $0 === document }) {
+                document.window.close()
+            }
+        }
+        let folder = directory.appending(path: "Reopen Project", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let first = folder.appending(path: "First.txt")
+        let replacement = folder.appending(path: "Replacement.txt")
+        let standaloneFile = directory.appending(path: "Standalone.txt")
+        for file in [first, replacement, standaloneFile] { try Data("Test file\n".utf8).write(to: file) }
+        let firstPath = FileBuffer.canonicalURL(first)
+        let replacementPath = FileBuffer.canonicalURL(replacement)
+        let standalonePath = FileBuffer.canonicalURL(standaloneFile)
+
+        let project = app.makeDocument()
+        let standalone = app.makeDocument()
+        let menu = try resolve(NSApp.mainMenu)
+        let fileMenu = try resolve(menu.item(withTitle: "File")?.submenu)
+        let command = try resolve(ControlCommand.fromMenu(menu).first { $0.title == "File: Reopen Closed File" })
+        try expect(command.result.shortcut == "⇧⌘T" && !command.isAvailable(in: project, focus: nil),
+                   "Reopen Closed File appears in Command Mode and starts unavailable")
+        let shortcut = try resolve(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .shift],
+                                                    timestamp: 0, windowNumber: project.window.windowNumber, context: nil,
+                                                    characters: "T", charactersIgnoringModifiers: "t", isARepeat: false, keyCode: 17))
+
+        project.setFolder(folder)
+        _ = try await app.openFile(first, in: project)
+        _ = try await app.openFile(standaloneFile, in: standalone)
+        standalone.window.performClose(nil)
+        try expect(!app.documents.contains { $0 === standalone }, "closing a standalone file closes its window")
+        let selection = NSRange(location: 1, length: 3)
+        project.editor.setSelectedRange(selection)
+        project.window.performClose(nil)
+        try await waitFor("closing a project file leaves the project window empty") { project.showsEmptyFolder && !project.isBusy }
+        let windowCount = app.documents.count
+        try expect(fileMenu.performKeyEquivalent(with: shortcut), "Shift-Command-T invokes Reopen Closed File through the File menu")
+        try await waitFor("the shortcut reopens the last closed file in its project and restores focus and selection") {
+            project.fileURL == firstPath && app.documents.count == windowCount &&
+                project.window.firstResponder === project.editor && project.editor.selectedRange() == selection &&
+                command.isAvailable(in: project, focus: nil)
+        }
+
+        project.window.performClose(nil)
+        try await waitFor("the restored file can be closed again") { project.showsEmptyFolder && !project.isBusy }
+        _ = try await app.openFile(replacement, in: project)
+        command.run(in: project)
+        try await waitFor("Command Mode reopens a project file in a separate window when its old window is occupied") {
+            project.fileURL == replacementPath && app.documents.count == windowCount + 1 &&
+                app.documents.last?.fileURL == firstPath && app.documents.last?.folderURL == project.folderURL &&
+                command.isAvailable(in: project, focus: nil)
+        }
+        try expect(fileMenu.performKeyEquivalent(with: shortcut), "Shift-Command-T can step further back through the close history")
+        try await waitFor("the older standalone file reopens and consumes the last history entry") {
+            app.documents.count == windowCount + 2 && app.documents.last?.fileURL == standalonePath &&
+                app.documents.last?.folderURL == nil && !command.isAvailable(in: project, focus: nil)
+        }
     }
 
     static func checkFilePreview(in app: Edit) async throws {

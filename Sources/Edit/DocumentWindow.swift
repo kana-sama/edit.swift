@@ -1331,6 +1331,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         case .emptyFolder(let focus, let folder):
             let restoreFocus = focus || contentHasFocus
             rememberFilePosition()
+            if folder == nil { app.recordClosedFile(in: self) }
             installContent(in: folder) { loadEmptyFolder() }
             if restoreFocus { focusContent() }
         case .window:
