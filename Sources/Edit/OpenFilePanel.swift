@@ -4,12 +4,17 @@ import Darwin
 enum OpenPanelMessage: Codable {
     case initialized
     case visible
-    case selected(URL, bookmark: Data? = nil)
+    case selected(URL, bookmark: Data? = nil, inAnotherWindow: Bool = false)
     case cancelled
 }
 
 @MainActor
 final class OpenFilePanel {
+    struct Selection {
+        let url: URL
+        let inAnotherWindow: Bool
+    }
+
     enum Failure: LocalizedError {
         case unavailable
         case startupTimedOut
@@ -25,13 +30,13 @@ final class OpenFilePanel {
     private final class Request {
         let process: Process
         let keepAlive: FileHandle
-        let completion: (Result<URL?, Error>) -> Void
+        let completion: (Result<Selection?, Error>) -> Void
         var reader: Task<Void, Never>?
         var deadline: Task<Void, Never>?
         var initialized = false
         var visible = false
 
-        init(process: Process, keepAlive: FileHandle, completion: @escaping (Result<URL?, Error>) -> Void) {
+        init(process: Process, keepAlive: FileHandle, completion: @escaping (Result<Selection?, Error>) -> Void) {
             self.process = process
             self.keepAlive = keepAlive
             self.completion = completion
@@ -47,7 +52,7 @@ final class OpenFilePanel {
         for url in panelAccess.values { url.stopAccessingSecurityScopedResource() }
     }
 
-    func open(in directory: URL?, completion: @escaping (Result<URL?, Error>) -> Void) {
+    func open(in directory: URL?, completion: @escaping (Result<Selection?, Error>) -> Void) {
         guard !isOpening else {
             bringForward()
             return
@@ -61,7 +66,7 @@ final class OpenFilePanel {
 
     @discardableResult
     func start(_ process: Process, startupTimeout: Duration = .seconds(6),
-               completion: @escaping (Result<URL?, Error>) -> Void) -> Bool {
+               completion: @escaping (Result<Selection?, Error>) -> Void) -> Bool {
         guard !isOpening else { return false }
 
         let output = Pipe()
@@ -120,7 +125,7 @@ final class OpenFilePanel {
         case .visible:
             request.visible = true
             request.deadline?.cancel()
-        case .selected(let url, let bookmark):
+        case .selected(let url, let bookmark, let inAnotherWindow):
             guard url.isFileURL, url.path.hasPrefix("/") else {
                 finish(request, with: .failure(Failure.unavailable))
                 return
@@ -140,13 +145,13 @@ final class OpenFilePanel {
                 let previous = panelAccess.updateValue(scoped, forKey: scoped.standardizedFileURL)
                 previous?.stopAccessingSecurityScopedResource()
             }
-            finish(request, with: .success(scoped ?? url))
+            finish(request, with: .success(Selection(url: scoped ?? url, inAnotherWindow: inAnotherWindow)))
         case .cancelled:
             finish(request, with: request.visible ? .success(nil) : .failure(Failure.unavailable))
         }
     }
 
-    private func finish(_ request: Request, with result: Result<URL?, Error>) {
+    private func finish(_ request: Request, with result: Result<Selection?, Error>) {
         guard self.request === request else { return }
         self.request = nil
         request.reader?.cancel()
@@ -215,6 +220,14 @@ final class OpenFilePanelHelper: NSObject, NSApplicationDelegate {
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.directoryURL = directory
+        let anotherWindow = NSButton(checkboxWithTitle: "Open in Another Window", target: nil, action: nil)
+        anotherWindow.sizeToFit()
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: anotherWindow.frame.height + 16))
+        anotherWindow.setFrameOrigin(NSPoint(x: accessory.bounds.maxX - anotherWindow.frame.width, y: 8))
+        anotherWindow.autoresizingMask = [.minXMargin, .minYMargin, .maxYMargin]
+        accessory.addSubview(anotherWindow)
+        panel.accessoryView = accessory
+        panel.isAccessoryViewDisclosed = true
         self.panel = panel
         if probe {
             send(.visible)
@@ -233,7 +246,7 @@ final class OpenFilePanelHelper: NSObject, NSApplicationDelegate {
             if response == .OK, let url = panel.url {
                 // An implicit bookmark carries the user-selected file grant to the editor process.
                 let bookmark = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
-                send(.selected(url, bookmark: bookmark))
+                send(.selected(url, bookmark: bookmark, inAnotherWindow: anotherWindow.state == .on))
             } else {
                 send(.cancelled)
             }

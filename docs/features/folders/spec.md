@@ -1,6 +1,6 @@
 # Folder context
 
-File → Open… (⌘O) accepts folders and files. The terminal launchers `edit [path ...]` and `./script/run [path ...]` accept both. A folder opens in the current editor window through the usual autosave and draft confirmation. Cancel keeps its current folder and buffer. A window can have one document and one folder context. Opening another folder replaces its context. Opening a file or creating a new buffer keeps the context. File → New Window starts without a folder.
+File → Open… (⌘O) accepts folders and files. The terminal launchers `edit [path ...]` and `./script/run [path ...]` accept both. By default, a folder opens in the current editor window through the usual autosave and draft confirmation. Use [Open in Another Window](../open-in-another-window/spec.md) to open it in a new window. Cancel keeps the current folder and buffer. A window can have one document and one folder context. Opening another folder in that window replaces its context. Opening a file or creating a new buffer keeps the context. File → New Window starts without a folder.
 
 Open the last file opened within the folder if it is readable. Otherwise show **No File Open** in the center of the document area with **Press ⌘P to open a file.** and **Press ⌘W to close the folder.** The screen has no editable document. The owner can open a file from it or create an untitled document with ⌘N. Opening or first saving a file inside the folder updates its remembered file. An outside file leaves it alone.
 

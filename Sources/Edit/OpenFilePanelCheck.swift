@@ -2,12 +2,12 @@ import AppKit
 
 @MainActor
 enum OpenFilePanelCheck {
-    static func run() async throws {
+    static func run(in app: Edit) async throws {
         let panel = OpenFilePanel()
         let stalled = Process()
         stalled.executableURL = URL(filePath: "/bin/sleep")
         stalled.arguments = ["30"]
-        var outcome: Result<URL?, Error>?
+        var outcome: Result<OpenFilePanel.Selection?, Error>?
         defer { panel.cancel() }
 
         try expect(panel.start(stalled, startupTimeout: .milliseconds(240)) { outcome = $0 },
@@ -27,17 +27,19 @@ enum OpenFilePanelCheck {
         let picked = URL(filePath: "/tmp/Edit Open check/space & line\nbreak.swift")
         let lateSelection = try scripted([.initialized, .visible], then: .selected(picked))
         let selected = try await complete(panel, with: lateSelection, timeout: .milliseconds(400)).get()
-        try expect(selected == picked, "accept a native file URL after the startup deadline once the dialog is visible")
+        try expect(selected?.url == picked && selected?.inAnotherWindow == false,
+                   "accept a current-window file URL after the startup deadline once the dialog is visible")
 
         let folder = FileManager.default.temporaryDirectory.appending(path: "Open panel check \(UUID())",
                                                                      directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
         let bookmark = try folder.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
-        let folderSelection = try scripted([.visible, .selected(folder, bookmark: bookmark)])
+        let folderSelection = try scripted([.visible, .selected(folder, bookmark: bookmark, inAnotherWindow: true)])
         let selectedFolder = try await complete(panel, with: folderSelection).get()
-        try expect(selectedFolder?.standardizedFileURL.path == folder.standardizedFileURL.path,
-                   "receive a folder and its access bookmark from the picker process")
+        try expect(selectedFolder?.url.standardizedFileURL.path == folder.standardizedFileURL.path &&
+                   selectedFolder?.inAnotherWindow == true, "receive a folder and its new-window choice with its access bookmark")
+        try await checkOpeningAnotherWindow(in: app, folder: folder)
 
         let cancelled = try scripted([.visible, .cancelled])
         let cancellation = try await complete(panel, with: cancelled).get()
@@ -60,9 +62,30 @@ enum OpenFilePanelCheck {
                    "initialize a real NSOpenPanel in a separate process without activating either app")
     }
 
+    private static func checkOpeningAnotherWindow(in app: Edit, folder: URL) async throws {
+        let file = folder.appending(path: "Notes.txt")
+        try Data("Notes from another window".utf8).write(to: file)
+        let original = app.makeDocument()
+        defer { original.window.close() }
+        original.editor.insertText("Keep this draft", replacementRange: NSRange(location: 0, length: 0))
+        let count = app.documents.count
+
+        guard let project = try await app.openInAnotherWindow(folder) else { throw Failure("open a project in a new window") }
+        defer { project.window.close() }
+        try expect(project.folderURL?.path == FileBuffer.canonicalURL(folder).path && project.showsEmptyFolder,
+                   "open the project with its own folder context")
+
+        guard let notes = try await app.openInAnotherWindow(file) else { throw Failure("open a file in a new window") }
+        defer { notes.window.close() }
+        try expect(notes.fileURL == FileBuffer.canonicalURL(file) && notes.editor.string == "Notes from another window",
+                   "load the selected file in a separate window")
+        try expect(app.documents.count == count + 2 && original.fileURL == nil && original.editor.string == "Keep this draft",
+                   "preserve the originating window and its unsaved buffer")
+    }
+
     private static func complete(_ panel: OpenFilePanel, with process: Process,
-                                 timeout: Duration = .seconds(6)) async throws -> Result<URL?, Error> {
-        var outcome: Result<URL?, Error>?
+                                 timeout: Duration = .seconds(6)) async throws -> Result<OpenFilePanel.Selection?, Error> {
+        var outcome: Result<OpenFilePanel.Selection?, Error>?
         try expect(panel.start(process, startupTimeout: timeout) { outcome = $0 }, "start the next picker")
         try await waitUntil("receive the next picker result") { outcome != nil }
         guard let outcome else { throw Failure("receive the next picker result") }

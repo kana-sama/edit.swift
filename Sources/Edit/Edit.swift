@@ -117,7 +117,6 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     makeDocument()
                     try await TerminalCheck.run(in: self)
                     print("Edit passed its native terminal checks without activation.")
-                    try await OpenFilePanelCheck.run()
                     let sample = try await FilesCheck.run(in: self)
                     try ControlPanel(app: self).checkHidden(in: sample)
                     try await ControlPanel(app: self).checkPins(in: sample)
@@ -141,6 +140,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try await ScratchCheck.run(in: self)
                     try await ScratchTreeCheck.run(in: self)
                     try MultiCaretCheck.checkBlink()
+                    try await OpenFilePanelCheck.run(in: self)
                     print("Edit passed its native editing and file-session checks without activation.")
                     exit(EXIT_SUCCESS)
                 } catch {
@@ -339,12 +339,39 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             openPanelDocument = nil
             guard !isQuitting, let document, documents.contains(where: { $0 === document }) else { return }
             switch result {
-            case .success(let url):
-                if let url { requestOpen([url], in: document) }
+            case .success(.some(let selection)):
+                if selection.inAnotherWindow {
+                    Task {
+                        do {
+                            _ = try await openInAnotherWindow(selection.url)
+                        } catch {
+                            if !isQuitting && documents.contains(where: { $0 === document }) {
+                                await document.showError("Could Not Open “\(selection.url.lastPathComponent)”",
+                                                         detail: error.localizedDescription)
+                            }
+                        }
+                    }
+                } else {
+                    requestOpen([selection.url], in: document)
+                }
+            case .success(nil): break
             case .failure(let error):
                 Task { await document.showError("Could Not Open", detail: error.localizedDescription) }
             }
         }
+    }
+
+    func openInAnotherWindow(_ url: URL) async throws -> DocumentWindow? {
+        guard !isQuitting, !Task.isCancelled else { return nil }
+        let document = makeDocument()
+        var opened = false
+        defer {
+            if !opened { document.window.close() }
+        }
+        guard try await openFile(url, in: document) != nil, !isQuitting, !Task.isCancelled else { return nil }
+        opened = true
+        if !isAgentCheck { document.present() }
+        return document
     }
 
     @objc func saveDocument(_ sender: Any?) {
