@@ -8,31 +8,24 @@ final class SourceControlRevsetCode: NSObject, @MainActor NSTextContentStorageDe
 
     let scroll: NSScrollView
     let editor: EditorTextView
-    private let viewportHeight: NSLayoutConstraint
     private var highlightedSource: String?
     private var tokens: [(NSRange, SyntaxColor)] = []
 
     init(height: CGFloat) {
         (scroll, editor) = EditorTextView.scrollingEditor(in: NSRect(x: 0, y: 0, width: 372, height: height))
-        viewportHeight = scroll.heightAnchor.constraint(equalToConstant: height)
         super.init()
         scroll.hasHorizontalScroller = false
         scroll.automaticallyAdjustsContentInsets = false
         scroll.wantsLayer = true
         scroll.layer?.cornerRadius = 8
         scroll.layer?.masksToBounds = true
-        viewportHeight.isActive = true
+        scroll.heightAnchor.constraint(equalToConstant: height).isActive = true
         editor.isHorizontallyResizable = false
         editor.textContainer?.widthTracksTextView = true
         editor.textContainerInset = NSSize(width: 8, height: 8)
         editor.minSize.height = height
         editor.setAccessibilityLabel("Revset Expression")
         (editor.textLayoutManager?.textContentManager as? NSTextContentStorage)?.delegate = self
-    }
-
-    func resizeViewport(to height: CGFloat) {
-        viewportHeight.constant = height
-        editor.minSize.height = height
     }
 
     func install(_ expression: String, editable: Bool) {
@@ -62,7 +55,7 @@ final class SourceControlRevsetCode: NSObject, @MainActor NSTextContentStorageDe
         return NSTextParagraph(attributedString: paragraph)
     }
 
-    static func colors(in expression: String) -> [(NSRange, SyntaxColor)] {
+    private static func colors(in expression: String) -> [(NSRange, SyntaxColor)] {
         let range = NSRange(expression.startIndex..<expression.endIndex, in: expression)
         return tokenPattern.matches(in: expression, range: range).compactMap { token in
             let groups: [SyntaxColor] = [.string, .function, .type, .keyword]

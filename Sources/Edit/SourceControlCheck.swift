@@ -210,42 +210,72 @@ enum SourceControlCheck {
             }
             return table
         }
-        func choose(_ id: String) throws {
-            let list = try table()
-            guard let row = picker.entriesForCheck.firstIndex(where: { $0.id == id }),
-                  let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
-                                               windowNumber: list.window?.windowNumber ?? 0, context: nil,
-                                               characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36) else {
-                throw Failure("select \(id) with the keyboard")
+        func key(_ characters: String, code: UInt16, in list: NSTableView) throws {
+            guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                              windowNumber: list.window?.windowNumber ?? 0, context: nil,
+                                              characters: characters, charactersIgnoringModifiers: characters,
+                                              isARepeat: false, keyCode: code) else {
+                throw Failure("dispatch a revset picker key")
             }
-            list.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             list.keyDown(with: event)
         }
-        func editor() throws -> EditorTextView {
-            guard let editor = descendant(of: content, where: { (_: EditorTextView) in true }) else {
-                throw Failure("find the multiline revset editor")
+        func row(_ id: String) throws -> Int {
+            guard let row = picker.entriesForCheck.firstIndex(where: { $0.id == id }) else {
+                throw Failure("find revset \(id)")
             }
-            return editor
+            return row
         }
-
+        func choose(_ id: String) throws {
+            let list = try table()
+            list.selectRowIndexes(IndexSet(integer: try row(id)), byExtendingSelection: false)
+            try key("\r", code: 36, in: list)
+        }
+        func hover(_ id: String) throws {
+            let list = try table()
+            let rect = list.rect(ofRow: try row(id))
+            let point = list.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+            guard let event = NSEvent.mouseEvent(with: .mouseMoved, location: point, modifierFlags: [], timestamp: 0,
+                                                windowNumber: list.window?.windowNumber ?? 0, context: nil,
+                                                eventNumber: 0, clickCount: 0, pressure: 0) else {
+                throw Failure("dispatch a pointer move over a revset row")
+            }
+            list.mouseMoved(with: event)
+        }
         try await showPicker()
+        guard let field = descendant(of: content, where: { (_: EditorTextView) in true }),
+              let codeScroll = field.enclosingScrollView else { throw Failure("find the shared revset code area") }
         try expect(picker.currentIDForCheck == SourceControlRevset.defaultLog.id, "start with the configured log")
-        try press("Preview Default Log")
-        try await waitFor("show the configured default expression in the preview") {
-            guard let code = try? editor() else { return false }
-            return !code.isEditable && !code.string.isEmpty
+        try await waitFor("show the configured default expression on opening") {
+            !field.isEditable && !field.string.isEmpty
         }
-        try press("Back to Revsets")
-        try press("Preview All Changes")
-        let all = try editor()
-        try expect(all.string == "all()" && !all.isEditable, "show all() as a built-in expression")
-        try press("Back to Revsets")
+        let defaultExpression = field.string
+        let normalSize = content.bounds.size
+        try expect(normalSize.width <= 318 && codeScroll.frame.height > 55, "make room for several lines in a compact popover")
+        try hover(SourceControlRevset.allChanges.id)
+        try await waitFor("preview a row on hover") { field.string == "all()" }
+        try expect(!field.isEditable && content.bounds.size == normalSize &&
+                   picker.currentIDForCheck == SourceControlRevset.defaultLog.id,
+                   "preview all() without changing the active graph or resizing the popover")
+        let initialTable = try table()
+        let defaultCell = initialTable.view(atColumn: 0, row: try row(SourceControlRevset.defaultLog.id), makeIfNecessary: true)
+        let hoveredCell = initialTable.view(atColumn: 0, row: try row(SourceControlRevset.allChanges.id), makeIfNecessary: true)
+        try expect(defaultCell?.accessibilityLabel() == "Default Log, current revset" &&
+                   hoveredCell?.accessibilityLabel() == "All Changes",
+                   "mark the applied revset independently of the hover highlight")
+        try key("\u{f700}", code: 126, in: initialTable)
+        try expect(field.string == defaultExpression && picker.currentIDForCheck == SourceControlRevset.defaultLog.id,
+                   "preview the previous row on Up")
+        try key("\u{f701}", code: 125, in: initialTable)
+        try expect(field.string == "all()" && picker.currentIDForCheck == SourceControlRevset.defaultLog.id,
+                   "preview the next row on Down")
         try press("Edit All Changes")
-        guard let builtInName = descendant(of: content, where: { (field: NSTextField) in field.placeholderString == "My changes" }),
-              let removeBuiltIn = button(in: content, where: { $0.title == "Delete Revset" }) else {
+        guard let builtInName = descendant(of: content, where: { (field: NSTextField) in field.placeholderString == "Revset name" }) else {
             throw Failure("find the built-in revset editor")
         }
-        try expect(!(try editor()).isEditable && removeBuiltIn.isHiddenOrHasHiddenAncestor, "protect the built-in expression")
+        let removeBuiltIn = button(in: content, where: { $0.title == "Delete" })
+        try expect(builtInName.isDescendant(of: initialTable) && !field.isEditable &&
+                   removeBuiltIn?.isHiddenOrHasHiddenAncestor != false,
+                   "rename a built-in in its row while protecting the expression")
         builtInName.stringValue = "Everything"
         try press("Save")
         try await waitFor("rename a built-in without changing its expression or selecting it") {
@@ -259,11 +289,11 @@ enum SourceControlCheck {
         }
 
         try await showPicker()
-        try press("New Revset")
-        guard let name = descendant(of: content, where: { (field: NSTextField) in field.placeholderString == "My changes" }),
+        try press("New Revset…")
+        guard let name = descendant(of: content, where: { (field: NSTextField) in field.placeholderString == "Revset name" }),
               let save = button(in: content, where: { $0.title == "Save" }) else { throw Failure("find the revset form") }
-        let field = try editor()
-        try expect(!save.isEnabled, "require both a name and an expression")
+        try expect(!save.isEnabled && field.isEditable && field.enclosingScrollView === codeScroll,
+                   "edit in the preview area and require both a name and an expression")
         let newName = "Repository root with a deliberately long display name"
         name.stringValue = newName
         field.insertText("all(", replacementRange: NSRange(location: 0, length: 0))
@@ -294,15 +324,16 @@ enum SourceControlCheck {
         }
         try expect(editPositions.allSatisfy { abs($0 - editPositions[0]) < 1 && $0 > content.bounds.maxX - 65 },
                    "align the edit buttons in a fixed trailing column")
-        try press("Preview \(newName)")
-        let code = try editor()
-        guard let layout = code.textLayoutManager else { throw Failure("use TextKit for the revset preview") }
+        try hover(SourceControlRevset.allChanges.id)
+        try await waitFor("browse another revset after creating one") { field.string == "all()" }
+        try hover(custom.id)
+        try await waitFor("show the new multiline expression on hover") { field.string == multiline }
+        guard let layout = field.textLayoutManager else { throw Failure("use TextKit for the revset preview") }
         layout.ensureLayout(for: layout.documentRange)
         let firstLine = layout.textLayoutFragment(for: layout.documentRange.location)?.textElement as? NSTextParagraph
         let functionColor = firstLine?.attributedString.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
-        try expect(code.string == multiline && !code.isEditable && functionColor == SyntaxColor.function.nativeColor,
+        try expect(field.string == multiline && !field.isEditable && functionColor == SyntaxColor.function.nativeColor,
                    "show the complete highlighted and selectable expression")
-        try press("Back to Revsets")
 
         let list = try table()
         let pasteboard = NSPasteboard.withUniqueName()
@@ -333,7 +364,15 @@ enum SourceControlCheck {
         try choose(SourceControlRevset.allChanges.id)
         try await showPicker()
         try press("Edit \(newName)")
-        try expect(name.stringValue == newName && field.string == multiline, "edit a row without selecting its graph")
+        try expect(name.isDescendant(of: list) && name.stringValue == newName && field.string == multiline && field.isEditable,
+                   "edit the name in its row and the expression in its preview")
+        try hover(SourceControlRevset.allChanges.id)
+        try expect(field.string == multiline && picker.currentIDForCheck == SourceControlRevset.allChanges.id,
+                   "leave the inline draft alone while hovering another row")
+        name.stringValue = "Discard this draft"
+        try press("Cancel")
+        try expect(!field.isEditable && picker.entriesForCheck.first?.name == newName, "cancel editing without saving the name")
+        try press("Edit \(newName)")
         name.stringValue = "Repository Root"
         save.performClick(nil)
         try await waitFor("keep the other revset selected after editing") {
@@ -363,7 +402,7 @@ enum SourceControlCheck {
         }
         try await showPicker()
         try press("Edit Repository Root")
-        try press("Delete Revset")
+        try press("Delete")
         try await waitFor("return to the configured log after deleting the active revset") {
             !picker.entriesForCheck.contains { $0.id == custom.id } && picker.currentIDForCheck == SourceControlRevset.defaultLog.id &&
                 panel.graphView.table.isEnabled && panel.detail?.files.count == 2
