@@ -8,6 +8,7 @@ enum JJInlineDiffCheck {
     }
 
     static func run(in document: DocumentWindow) throws {
+        guard NSApp is EditApplication else { throw Failure("launch with the shared click cursor handler") }
         let window = document.window
         let editor = document.editor
         let scroll = document.scrollView
@@ -70,17 +71,16 @@ enum JJInlineDiffCheck {
         let gutterY = scroll.convert(initialLine, from: editor).midY
         for x in [0.5, 4.0, 8.0, 11.5] {
             let location = scroll.convert(NSPoint(x: gutterX + x, y: gutterY), to: nil)
-            let tracked = gutter.trackingAreas.contains {
-                $0.options.contains(.cursorUpdate) && $0.rect.contains(gutter.convert(location, from: nil))
-            }
             guard scroll.hitTest(parent.convert(location, from: nil)) === gutter,
-                  editor.usesJJGutterCursor(at: location), tracked else {
+                  EditApplication.clickCursor(in: window, at: location) === NSCursor.pointingHand else {
                 throw Failure("use the pointing hand across the clickable gutter at x=\(x)")
             }
         }
         let outsideGutter = scroll.convert(NSPoint(x: gutterX + 12.5, y: gutterY), to: nil)
         guard scroll.hitTest(parent.convert(outsideGutter, from: nil)) !== gutter,
-              !editor.usesJJGutterCursor(at: outsideGutter) else { throw Failure("leave the text cursor outside the hit area") }
+              EditApplication.clickCursor(in: window, at: outsideGutter) == nil else {
+            throw Failure("leave the text cursor outside the hit area")
+        }
         gutter.mouseDown(with: try mouse(.leftMouseDown, at: clickPoint, in: window))
 
         guard controller.hasExpandedHunks,
@@ -125,7 +125,19 @@ enum JJInlineDiffCheck {
         let hoverPanel = try require(panels(in: scroll).first, "show a panel on mouse hover")
         let next = try button("Edit.Diff.Next", in: hoverPanel)
         let previous = try button("Edit.Diff.Previous", in: hoverPanel)
-        _ = try button("Edit.Diff.Restore", in: hoverPanel)
+        let hoverRestore = try button("Edit.Diff.Restore", in: hoverPanel)
+        window.layoutIfNeeded()
+        for control in [hoverRestore, next, previous] {
+            for x in [control.bounds.minX + 1, control.bounds.midX, control.bounds.maxX - 1] {
+                let location = control.convert(NSPoint(x: x, y: control.bounds.midY), to: nil)
+                guard EditApplication.clickCursor(in: window, at: location) === NSCursor.pointingHand else {
+                    throw Failure("use the pointing hand across the floating button \(control.identifier?.rawValue ?? "")")
+                }
+            }
+        }
+        guard EditApplication.clickCursor(in: window, at: hoverPoint) == nil else {
+            throw Failure("keep the text cursor over removed text beside the floating buttons")
+        }
         next.performClick(nil)
         guard controller.expandedRegion(for: replacement.mark) != nil,
               controller.expandedRegion(for: deletion.mark) != nil else {
@@ -185,7 +197,12 @@ enum JJInlineDiffCheck {
         let restore = try button("Edit.Diff.Restore", in: scroll)
         editor.suspendJJMarkerNavigation()
         restore.performClick(nil)
-        guard !restore.isEnabled, editor.string == current else { throw Failure("keep stale diff actions passive") }
+        window.layoutIfNeeded()
+        let restorePoint = restore.convert(NSPoint(x: restore.bounds.midX, y: restore.bounds.midY), to: nil)
+        guard !restore.isEnabled, editor.string == current,
+              EditApplication.clickCursor(in: window, at: restorePoint) === NSCursor.arrow else {
+            throw Failure("keep stale diff actions passive with an arrow cursor")
+        }
         editor.setJJLineMarks(analysis.marks, lineStarts: analysis.lineStarts, hunks: analysis.hunks)
         let restored = (current as NSString).replacingCharacters(in: replacement.currentRange, with: replacement.removedText)
         undo.beginUndoGrouping()

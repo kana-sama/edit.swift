@@ -46,6 +46,19 @@ enum WorktreeCheck {
         let firstRow = tree.convert(tree.rect(ofRow: sources), to: clip)
         try expect(abs(firstRow.minY - clip.bounds.minY) < 0.5,
                    "the first Worktree row starts at the top of its scroll area")
+        for row in [sources, log] {
+            let frame = tree.rect(ofRow: row)
+            // The split view owns the resize grip at the inside edge of the sidebar.
+            for x in [frame.minX + 2, frame.midX, frame.maxX - 12] {
+                let point = tree.convert(NSPoint(x: x, y: frame.midY), to: nil)
+                try expect(EditApplication.clickCursor(in: document.window, at: point) === NSCursor.pointingHand,
+                           "use the pointing hand across a Worktree row")
+            }
+        }
+        let lastRow = tree.rect(ofRow: tree.numberOfRows - 1)
+        let belowRows = tree.convert(NSPoint(x: lastRow.midX, y: lastRow.maxY + 5), to: nil)
+        try expect(EditApplication.clickCursor(in: document.window, at: belowRows) == nil,
+                   "leave the empty Worktree area with its native cursor")
         let disclose = try disclosure(at: sources, in: tree)
         try checkDisclosureStyle(disclose)
         try checkDisclosureContrast(disclose, in: document.window)
@@ -101,6 +114,11 @@ enum WorktreeCheck {
         let rename = try fieldEditor(in: document.window)
         try expect(rename.string == "Build.log" && rename.selectedRange() == NSRange(location: 0, length: 5),
                    "Return edits the selected name in place and selects its stem")
+        document.window.layoutIfNeeded()
+        let nameArea = rename.visibleRect
+        let namePoint = rename.convert(NSPoint(x: nameArea.midX, y: nameArea.midY), to: nil)
+        try expect(!nameArea.isEmpty && EditApplication.clickCursor(in: document.window, at: namePoint) == nil,
+                   "keep the text cursor while editing a name in a Worktree row")
         try pressNameKey(53, characters: "\u{1B}", in: document.window)
         try expect(document.window.firstResponder === tree && tree.selectedRow == log &&
                    document.fileURL?.lastPathComponent == "Build.log",

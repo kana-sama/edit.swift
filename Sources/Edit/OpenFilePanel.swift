@@ -202,7 +202,7 @@ final class OpenFilePanelHelper: NSObject, NSApplicationDelegate, NSOpenSavePane
         let helper = OpenFilePanelHelper(parent: parent,
                                        directory: path.isEmpty ? nil : URL(filePath: path, directoryHint: .isDirectory),
                                        probe: probe)
-        let app = NSApplication.shared
+        let app = EditApplication.shared
         app.setActivationPolicy(probe ? .prohibited : .accessory)
         app.delegate = helper
         withExtendedLifetime(helper) { app.run() }

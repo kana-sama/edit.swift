@@ -85,7 +85,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     static func main() {
         if OpenFilePanelHelper.runIfRequested() { return }
-        let app = NSApplication.shared
+        let app = EditApplication.shared
         let delegate = Edit()
         app.delegate = delegate
         app.setActivationPolicy(delegate.isAgentCheck ? .prohibited : .regular)

@@ -22,7 +22,7 @@ extension JJLineMark.Kind {
 
 @MainActor
 final class JJEditorDecorations {
-    private struct PositionedMark: Equatable {
+    private struct PositionedMark {
         let mark: JJLineMark
         let rect: NSRect
     }
@@ -32,11 +32,7 @@ final class JJEditorDecorations {
     private var scrollerStyle: NSScroller.Style?
     private var lineStarts: [Int] = []
     private(set) var marks: [JJLineMark] = []
-    var allowsNavigation = true {
-        didSet {
-            if allowsNavigation != oldValue { refreshGutterCursorAreas() }
-        }
-    }
+    var allowsNavigation = true
     private var lastMarkLines: [Int] = []
     private var trackSize = NSSize.zero
     private var trackOverviewRevision: UInt = 0
@@ -78,7 +74,6 @@ final class JJEditorDecorations {
             track.removeFromSuperview()
             trackMarks.removeAll()
             gutterMarks.removeAll()
-            refreshGutterCursorAreas()
         } else if let scroll = editor?.enclosingScrollView {
             layout(in: scroll)
             updateTrackMarks()
@@ -246,19 +241,7 @@ final class JJEditorDecorations {
             }
             index += 1
         }
-        if positions != gutterMarks {
-            gutterMarks = positions
-        }
-        refreshGutterCursorAreas()
-    }
-
-    func usesGutterCursor(at locationInWindow: NSPoint) -> Bool {
-        guard gutter.window != nil else { return false }
-        return gutterMark(at: gutter.convert(locationInWindow, from: nil)) != nil
-    }
-
-    private func refreshGutterCursorAreas() {
-        gutter.setCursorAreas(actionableGutterMarks.map { gutterHitArea(around: $0.rect) }.filter { !$0.isEmpty })
+        gutterMarks = positions
     }
 
     private var actionableGutterMarks: [PositionedMark] {
@@ -386,11 +369,10 @@ final class JJEditorDecorations {
 }
 
 @MainActor
-private final class JJEditorMarkerView: NSView {
+private final class JJEditorMarkerView: NSView, ClickTarget {
     var drawMarks: ((NSRect) -> Void)?
     var onClick: ((NSEvent) -> Void)?
     var acceptsClick: ((NSPoint) -> Bool)?
-    private var cursorAreas: [NSTrackingArea] = []
 
     override var isFlipped: Bool { true }
 
@@ -404,28 +386,6 @@ private final class JJEditorMarkerView: NSView {
         return bounds.contains(local) && acceptsClick?(local) == true ? self : nil
     }
 
-    func setCursorAreas(_ rects: [NSRect]) {
-        guard cursorAreas.map(\.rect) != rects else { return }
-        for area in cursorAreas { removeTrackingArea(area) }
-        cursorAreas = rects.map {
-            NSTrackingArea(rect: $0, options: [.cursorUpdate, .mouseMoved, .activeInKeyWindow], owner: self)
-        }
-        for area in cursorAreas { addTrackingArea(area) }
-    }
-
-    override func cursorUpdate(with event: NSEvent) {
-        if !applyGutterCursor(for: event) { super.cursorUpdate(with: event) }
-    }
-
-    override func mouseMoved(with event: NSEvent) {
-        if !applyGutterCursor(for: event) { super.mouseMoved(with: event) }
-    }
-
-    private func applyGutterCursor(for event: NSEvent) -> Bool {
-        guard acceptsClick?(convert(event.locationInWindow, from: nil)) == true else { return false }
-        NSCursor.pointingHand.set()
-        return true
-    }
     override func draw(_ dirtyRect: NSRect) { drawMarks?(dirtyRect) }
     override func mouseDown(with event: NSEvent) { onClick?(event) }
 }
