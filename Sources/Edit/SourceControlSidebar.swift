@@ -25,9 +25,21 @@ final class SourceControlSidebar: NSObject {
     private let fileHeading = NSTextField(labelWithString: "Changed Files")
     private let fileMessage = NSTextField(wrappingLabelWithString: "")
     private lazy var descriptionPopover = SourceControlDescriptionPopover(anchor: detailTitle) { [weak self] in self?.saveDescription($0) }
-    private lazy var revsetEditor = SourceControlRevsetEditor(anchor: revsetButton) { [weak self] name, expression, id in
-        try await self?.saveRevset(name: name, expression: expression, replacing: id)
-    }
+    private lazy var revsetPicker = SourceControlRevsetPicker(
+        anchor: revsetButton,
+        onSelect: { [weak self] id in
+            guard let self, revsets.selected.id != id else { return }
+            try updateRevsets { try $0.select(id) }
+        },
+        onSave: { [weak self] name, expression, id in try await self?.saveRevset(name: name, expression: expression, replacing: id) },
+        onDelete: { [weak self] id in try self?.updateRevsets { $0.remove(id) } },
+        onMove: { [weak self] id, next in try self?.updateRevsets { try $0.move(id, before: next) } },
+        readDefault: { [weak self] in
+            guard let workspace = await self?.workspace else { throw PanelError.noWorkspace }
+            return try await JJSourceControlRepository.read(workspace, arguments: ["config", "get", "revsets.log"])
+                .trimmingCharacters(in: .newlines)
+        }
+    )
     private lazy var operations = SourceControlOperationPopover(
         anchor: operationsButton,
         prepare: { [weak self] direction in
@@ -69,8 +81,7 @@ final class SourceControlSidebar: NSObject {
 #if EDIT_AGENT_CHECKS
     var operationsViewForCheck: NSView { operations.checkView }
     var descriptionViewForCheck: NSView { descriptionPopover.checkView }
-    var revsetEditorViewForCheck: NSView { revsetEditor.checkView }
-    func revsetMenuForCheck() -> NSMenu { makeRevsetMenu() }
+    var revsetPickerForCheck: SourceControlRevsetPicker { revsetPicker }
 #endif
 
     private enum PanelError: LocalizedError {
@@ -142,7 +153,7 @@ final class SourceControlSidebar: NSObject {
         app.jjChanges.unsubscribe(subscription)
         subscription = nil
         operations.close()
-        revsetEditor.close()
+        revsetPicker.close()
         descriptionPopover.close()
     }
 
@@ -624,57 +635,17 @@ final class SourceControlSidebar: NSObject {
 
     @objc private func showOperations(_ sender: Any?) { operations.show() }
 
-    @objc private func showRevsets(_ sender: NSButton) {
+    @objc private func showRevsets() {
         guard let workspace else { return }
         if let settings = try? app.sourceControlRevsets.read(for: workspace) { installRevsets(settings) }
-        let menu = makeRevsetMenu()
-        let bounds = sender.bounds
-        let x = sender.userInterfaceLayoutDirection == .rightToLeft ? bounds.maxX - menu.size.width : bounds.minX
-        menu.popUp(positioning: nil, at: NSPoint(x: x, y: sender.isFlipped ? bounds.maxY : bounds.minY), in: sender)
-    }
-
-    private func makeRevsetMenu() -> NSMenu {
-        let menu = NSMenu(title: "Revsets")
-        let selectedID = revsets.selected.id
-        for entry in revsets.entries {
-            let item = NSMenuItem(title: entry.name, action: #selector(chooseRevset(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = entry.id
-            item.state = entry.id == selectedID ? .on : .off
-            item.toolTip = entry.expression ?? "The repository’s configured jj log"
-            menu.addItem(item)
-        }
-        menu.addItem(.separator())
-        for (title, action) in [("New Revset…", #selector(newRevset))] +
-            (revsets.canEditSelected ? [("Edit Revset…", #selector(editRevset)), ("Remove Revset", #selector(removeRevset))] : []) {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-            item.target = self
-            menu.addItem(item)
-        }
-        return menu
-    }
-
-    @objc private func chooseRevset(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String, id != revsets.selected.id else { return }
-        updateRevsets { try $0.select(id) }
-    }
-
-    @objc private func newRevset() { revsetEditor.show(editing: nil) }
-
-    @objc private func editRevset() {
-        guard revsets.canEditSelected else { return }
-        revsetEditor.show(editing: revsets.selected)
-    }
-
-    @objc private func removeRevset() {
-        guard revsets.canEditSelected else { return }
-        let id = revsets.selected.id
-        updateRevsets { $0.remove(id) }
+        revsetPicker.show()
     }
 
     private func saveRevset(name: String, expression: String, replacing id: String?) async throws {
         guard let workspace else { throw PanelError.noWorkspace }
-        try await JJSourceControlRepository.validateRevset(expression, in: workspace)
+        if revsets.entries.first(where: { $0.id == id })?.isBuiltIn != true {
+            try await JJSourceControlRepository.validateRevset(expression, in: workspace)
+        }
         try Task.checkCancellation()
         guard active, self.workspace == workspace else { throw PanelError.noWorkspace }
         let settings = try app.sourceControlRevsets.update(for: workspace) {
@@ -683,20 +654,17 @@ final class SourceControlSidebar: NSObject {
         installRevsets(settings)
     }
 
-    private func updateRevsets(_ change: (inout SourceControlRevsets) throws -> Void) {
-        guard let workspace else { return }
-        do {
-            installRevsets(try app.sourceControlRevsets.update(for: workspace, change))
-        } catch {
-            Task { await document.showError("Could Not Save Revsets", detail: error.localizedDescription) }
-        }
+    private func updateRevsets(_ change: (inout SourceControlRevsets) throws -> Void) throws {
+        guard let workspace else { throw PanelError.noWorkspace }
+        installRevsets(try app.sourceControlRevsets.update(for: workspace, change))
     }
 
     private func installRevsets(_ settings: SourceControlRevsets) {
-        let changed = revsets.selected != settings.selected
+        let old = revsets.selected
+        let next = settings.selected
         revsets = settings
         updateRevsetButton()
-        if changed {
+        if old.id != next.id || old.expression != next.expression {
             includeWorkingCopy = false
             revealWorkingCopy = false
             requestGraph()
@@ -705,9 +673,10 @@ final class SourceControlSidebar: NSObject {
 
     private func updateRevsetButton() {
         let selected = revsets.selected
-        revsetButton.title = selected.id == SourceControlRevset.defaultLog.id ? "Log" : selected.name
+        revsetButton.title = selected == .defaultLog ? "Log" : selected.name
         revsetButton.toolTip = "Revsets · \(selected.name)"
         revsetButton.setAccessibilityLabel("Revsets, \(selected.name)")
+        revsetPicker.update(revsets)
     }
 
     private func configure() {
@@ -720,7 +689,7 @@ final class SourceControlSidebar: NSObject {
             button.font = .systemFont(ofSize: 12, weight: .semibold)
             button.contentTintColor = .secondaryLabelColor
         }
-        configure(revsetButton, title: "Log", action: #selector(showRevsets(_:)), symbol: "chevron.down")
+        configure(revsetButton, title: "Log", action: #selector(showRevsets), symbol: "chevron.down")
         revsetButton.identifier = NSUserInterfaceItemIdentifier("JujutsuRevsets")
         revsetButton.imageHugsTitle = true
         revsetButton.lineBreakMode = .byTruncatingTail

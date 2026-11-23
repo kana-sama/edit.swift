@@ -7,15 +7,27 @@ struct SourceControlRevset: Identifiable, Codable, Equatable, Sendable {
 
     static let defaultLog = Self(id: "default", name: "Default Log", expression: nil)
     static let allChanges = Self(id: "all", name: "All Changes", expression: "all()")
+
+    var isBuiltIn: Bool { id == Self.defaultLog.id || id == Self.allChanges.id }
 }
 
 struct SourceControlRevsets: Codable, Sendable {
     private(set) var custom: [SourceControlRevset] = []
     private var selectedID = SourceControlRevset.defaultLog.id
+    private var order: [String]? = nil
+    private var builtInNames: [String: String]? = nil
 
-    var entries: [SourceControlRevset] { [.defaultLog, .allChanges] + custom }
+    var entries: [SourceControlRevset] {
+        let builtIns: [SourceControlRevset] = [.defaultLog, .allChanges]
+        let all = builtIns.map { entry in
+            SourceControlRevset(id: entry.id, name: builtInNames?[entry.id] ?? entry.name, expression: entry.expression)
+        } + custom
+        guard let order else { return all }
+        var remaining = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let ordered = order.compactMap { remaining.removeValue(forKey: $0) }
+        return ordered + all.filter { remaining[$0.id] != nil }
+    }
     var selected: SourceControlRevset { entries.first { $0.id == selectedID } ?? .defaultLog }
-    var canEditSelected: Bool { custom.contains { $0.id == selected.id } }
 
     private enum Failure: LocalizedError {
         case missing, duplicateName
@@ -38,9 +50,14 @@ struct SourceControlRevsets: Codable, Sendable {
             throw Failure.duplicateName
         }
         if let id {
-            guard let index = custom.firstIndex(where: { $0.id == id }) else { throw Failure.missing }
-            custom[index] = SourceControlRevset(id: id, name: name, expression: expression)
-            selectedID = id
+            guard let entry = entries.first(where: { $0.id == id }) else { throw Failure.missing }
+            if entry.isBuiltIn {
+                var names = builtInNames ?? [:]
+                names[id] = name
+                builtInNames = names
+            } else if let index = custom.firstIndex(where: { $0.id == id }) {
+                custom[index] = SourceControlRevset(id: id, name: name, expression: expression)
+            }
         } else {
             let entry = SourceControlRevset(id: UUID().uuidString, name: name, expression: expression)
             custom.append(entry)
@@ -49,8 +66,24 @@ struct SourceControlRevsets: Codable, Sendable {
     }
 
     mutating func remove(_ id: String) {
+        guard custom.contains(where: { $0.id == id }) else { return }
         custom.removeAll { $0.id == id }
+        order?.removeAll { $0 == id }
         if selectedID == id { selectedID = SourceControlRevset.defaultLog.id }
+    }
+
+    mutating func move(_ id: String, before next: String?) throws {
+        var ids = entries.map(\.id)
+        guard id != next else { return }
+        guard let source = ids.firstIndex(of: id) else { throw Failure.missing }
+        ids.remove(at: source)
+        if let next {
+            guard let target = ids.firstIndex(of: next) else { throw Failure.missing }
+            ids.insert(id, at: target)
+        } else {
+            ids.append(id)
+        }
+        order = ids
     }
 }
 

@@ -248,12 +248,12 @@ final class SyntaxHighlighting {
     }
 }
 
-private extension SyntaxColor {
-    static let colors = Dictionary(uniqueKeysWithValues: allCases.map { ($0, $0.makeNativeColor()) })
+extension SyntaxColor {
+    private static let colors = Dictionary(uniqueKeysWithValues: allCases.map { ($0, $0.makeNativeColor()) })
 
     var nativeColor: NSColor { Self.colors[self] ?? .textColor }
 
-    func makeNativeColor() -> NSColor {
+    private func makeNativeColor() -> NSColor {
         let pair: (dark: UInt32, light: UInt32)
         switch self {
         case .keyword: pair = (0x569CD6, 0x0000FF)

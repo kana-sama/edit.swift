@@ -176,80 +176,173 @@ enum SourceControlCheck {
     }
 
     private static func checkRevsets(in document: DocumentWindow, panel: SourceControlSidebar, workspace: JJWorkspace, app: Edit) async throws {
-        func choose(_ title: String) throws {
-            guard let item = panel.revsetMenuForCheck().item(withTitle: title),
-                  let action = item.action, NSApp.sendAction(action, to: item.target, from: item) else {
-                throw Failure("activate \(title) from the revset menu")
-            }
+        let picker = panel.revsetPickerForCheck
+        let content = picker.checkView
+        guard let open = button(in: panel.view, where: { $0.identifier?.rawValue == "JujutsuRevsets" }),
+              let workingCopy = button(in: panel.view, where: { $0.toolTip == "Go to Working Copy" }),
+              let sidebar = document.documentSplitView.arrangedSubviews.first else {
+            throw Failure("find the revset and working-copy controls")
         }
-        let menu = panel.revsetMenuForCheck()
-        try expect(menu.item(withTitle: "Default Log")?.state == .on && menu.item(withTitle: "All Changes")?.toolTip == "all()",
-                   "start with the configured log and provide all() as a built-in revset")
-        try choose("All Changes")
-        try await waitFor("show all() in the graph") {
-            panel.graphView.table.isEnabled && panel.graphView.revisions.contains(where: \.isWorkingCopy)
-        }
-        try expect(panel.revsetMenuForCheck().item(withTitle: "All Changes")?.state == .on, "mark the selected revset in the menu")
-
         let window = document.window
         let frame = window.frame
         window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
         window.orderBack(nil)
         defer {
+            picker.close()
             window.orderOut(nil)
             window.setFrame(frame, display: false)
         }
         try expect(window.alphaValue == 0 && window.ignoresMouseEvents && !NSApp.isActive, "keep the revset check in the background")
-        let editor = panel.revsetEditorViewForCheck
-        guard let name = descendant(of: editor, where: { (field: NSTextField) in field.placeholderString == "My changes" }),
-              let expression = descendant(of: editor, where: { (field: NSTextField) in field.placeholderString == "mutable()" }),
-              let save = button(in: editor, where: { $0.title == "Save" }),
-              let picker = button(in: panel.view, where: { $0.identifier?.rawValue == "JujutsuRevsets" }),
-              let workingCopy = button(in: panel.view, where: { $0.toolTip == "Go to Working Copy" }),
-              let sidebar = document.documentSplitView.arrangedSubviews.first else {
-            throw Failure("find the revset editor and graph controls")
+        func showPicker() async throws {
+            try await waitFor("finish closing the revset picker") { !picker.isShownForCheck }
+            open.performClick(nil)
+            try await waitFor("open the native revset picker") { content.window?.isVisible == true }
         }
-        try choose("New Revset…")
+        func press(_ title: String) throws {
+            guard let control = button(in: content, where: { $0.title == title || $0.accessibilityLabel() == title }),
+                  !control.isHiddenOrHasHiddenAncestor, control.isEnabled else { throw Failure("find \(title) in the revset picker") }
+            control.performClick(nil)
+        }
+        func table() throws -> NSTableView {
+            content.layoutSubtreeIfNeeded()
+            guard let table = descendant(of: content, where: { (view: NSTableView) in view.accessibilityLabel() == "Revsets" }) else {
+                throw Failure("find the revset table")
+            }
+            return table
+        }
+        func choose(_ id: String) throws {
+            let list = try table()
+            guard let row = picker.entriesForCheck.firstIndex(where: { $0.id == id }),
+                  let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                               windowNumber: list.window?.windowNumber ?? 0, context: nil,
+                                               characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36) else {
+                throw Failure("select \(id) with the keyboard")
+            }
+            list.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            list.keyDown(with: event)
+        }
+        func editor() throws -> EditorTextView {
+            guard let editor = descendant(of: content, where: { (_: EditorTextView) in true }) else {
+                throw Failure("find the multiline revset editor")
+            }
+            return editor
+        }
+
+        try await showPicker()
+        try expect(picker.currentIDForCheck == SourceControlRevset.defaultLog.id, "start with the configured log")
+        try press("Preview Default Log")
+        try await waitFor("show the configured default expression in the preview") {
+            guard let code = try? editor() else { return false }
+            return !code.isEditable && !code.string.isEmpty
+        }
+        try press("Back to Revsets")
+        try press("Preview All Changes")
+        let all = try editor()
+        try expect(all.string == "all()" && !all.isEditable, "show all() as a built-in expression")
+        try press("Back to Revsets")
+        try press("Edit All Changes")
+        guard let builtInName = descendant(of: content, where: { (field: NSTextField) in field.placeholderString == "My changes" }),
+              let removeBuiltIn = button(in: content, where: { $0.title == "Delete Revset" }) else {
+            throw Failure("find the built-in revset editor")
+        }
+        try expect(!(try editor()).isEditable && removeBuiltIn.isHiddenOrHasHiddenAncestor, "protect the built-in expression")
+        builtInName.stringValue = "Everything"
+        try press("Save")
+        try await waitFor("rename a built-in without changing its expression or selecting it") {
+            picker.entriesForCheck.contains { $0.name == "Everything" && $0.expression == "all()" } &&
+                picker.currentIDForCheck == SourceControlRevset.defaultLog.id
+        }
+        try choose(SourceControlRevset.allChanges.id)
+        try await waitFor("show all() in the graph") {
+            picker.currentIDForCheck == SourceControlRevset.allChanges.id &&
+                panel.graphView.table.isEnabled && panel.graphView.revisions.contains(where: \.isWorkingCopy)
+        }
+
+        try await showPicker()
+        try press("New Revset")
+        guard let name = descendant(of: content, where: { (field: NSTextField) in field.placeholderString == "My changes" }),
+              let save = button(in: content, where: { $0.title == "Save" }) else { throw Failure("find the revset form") }
+        let field = try editor()
         try expect(!save.isEnabled, "require both a name and an expression")
         let newName = "Repository root with a deliberately long display name"
         name.stringValue = newName
-        expression.stringValue = "all("
-        expression.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: expression))
+        field.insertText("all(", replacementRange: NSRange(location: 0, length: 0))
         save.performClick(nil)
         try await waitFor("keep an invalid revset in the editor with an error") {
-            save.isEnabled && descendant(of: editor, where: { (field: NSTextField) in
+            save.isEnabled && descendant(of: content, where: { (field: NSTextField) in
                 !field.isHidden && field.stringValue.contains("Error:")
             }) != nil
         }
-        try expect(panel.revsetMenuForCheck().item(withTitle: newName) == nil, "keep invalid revsets out of the list")
-        expression.stringValue = "root()"
-        expression.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: expression))
+        try expect(!picker.entriesForCheck.contains { $0.name == newName }, "keep invalid revsets out of the list")
+        let multiline = "root() &\n  all()"
+        field.insertText(multiline, replacementRange: NSRange(location: 0, length: field.string.utf16.count))
         save.performClick(nil)
-        try await waitFor("apply the new revset to the real graph") {
+        try await waitFor("apply the new multiline revset to the real graph") {
             panel.graphView.table.isEnabled && panel.graphView.revisions.count == 1 &&
                 panel.graphView.revisions.first?.isWorkingCopy == false
         }
+        guard let custom = picker.entriesForCheck.first(where: { $0.name == newName }) else {
+            throw Failure("find the saved multiline revset")
+        }
+
+        _ = try table()
+        let editPositions = try ["Default Log", "Everything", newName].map { title in
+            guard let edit = button(in: content, where: { $0.accessibilityLabel() == "Edit \(title)" }) else {
+                throw Failure("find each row’s edit action")
+            }
+            return content.convert(edit.bounds, from: edit).maxX
+        }
+        try expect(editPositions.allSatisfy { abs($0 - editPositions[0]) < 1 && $0 > content.bounds.maxX - 65 },
+                   "align the edit buttons in a fixed trailing column")
+        try press("Preview \(newName)")
+        let code = try editor()
+        guard let layout = code.textLayoutManager else { throw Failure("use TextKit for the revset preview") }
+        layout.ensureLayout(for: layout.documentRange)
+        let firstLine = layout.textLayoutFragment(for: layout.documentRange.location)?.textElement as? NSTextParagraph
+        let functionColor = firstLine?.attributedString.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        try expect(code.string == multiline && !code.isEditable && functionColor == SyntaxColor.function.nativeColor,
+                   "show the complete highlighted and selectable expression")
+        try press("Back to Revsets")
+
+        let list = try table()
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        guard let from = picker.entriesForCheck.firstIndex(where: { $0.id == custom.id }),
+              let item = picker.tableView(list, pasteboardWriterForRow: from),
+              pasteboard.writeObjects([item]) else { throw Failure("drag the custom revset") }
+        let drag = ControlPinDragCheck(table: list, location: .zero, pasteboard: pasteboard)
+        try expect(picker.tableView(list, validateDrop: drag, proposedRow: 0, proposedDropOperation: .above) == .move &&
+                   picker.tableView(list, acceptDrop: drag, row: 0, dropOperation: .above) &&
+                   picker.entriesForCheck.first?.id == custom.id && picker.currentIDForCheck == custom.id,
+                   "reorder the rows without changing the graph selection")
+
         let width = sidebar.frame.width
         PanelLayout.withoutAnimation {
             document.documentSplitView.setPosition(211, ofDividerAt: 0)
             window.layoutIfNeeded()
         }
-        let pickerFrame = panel.view.convert(picker.bounds, from: picker)
+        let pickerFrame = panel.view.convert(open.bounds, from: open)
         let jumpFrame = panel.view.convert(workingCopy.bounds, from: workingCopy)
-        let fits = !picker.isHiddenOrHasHiddenAncestor && pickerFrame.maxX <= jumpFrame.minX && pickerFrame.width > 20
+        let fits = !open.isHiddenOrHasHiddenAncestor && pickerFrame.maxX <= jumpFrame.minX && pickerFrame.width > 20
         PanelLayout.withoutAnimation {
             document.documentSplitView.setPosition(width, ofDividerAt: 0)
             window.layoutIfNeeded()
         }
-        try expect(fits && picker.toolTip?.contains(newName) == true, "fit a long revset name alongside the graph actions")
-        try choose("Edit Revset…")
-        try expect(name.stringValue == newName && expression.stringValue == "root()", "open the selected revset for editing")
+        try expect(fits && open.toolTip?.contains(newName) == true, "fit a long revset name alongside the graph actions")
+
+        try choose(SourceControlRevset.allChanges.id)
+        try await showPicker()
+        try press("Edit \(newName)")
+        try expect(name.stringValue == newName && field.string == multiline, "edit a row without selecting its graph")
         name.stringValue = "Repository Root"
         save.performClick(nil)
-        try await waitFor("save the edited name and keep it selected") {
-            panel.revsetMenuForCheck().item(withTitle: "Repository Root")?.state == .on
+        try await waitFor("keep the other revset selected after editing") {
+            picker.entriesForCheck.first?.name == "Repository Root" && picker.currentIDForCheck == SourceControlRevset.allChanges.id
         }
-
+        try choose(custom.id)
+        try await waitFor("apply the reordered revset") {
+            picker.currentIDForCheck == custom.id && panel.graphView.table.isEnabled && panel.graphView.revisions.count == 1
+        }
         let otherProject = JJWorkspace(root: workspace.root.deletingLastPathComponent(), repository: workspace.repository)
         let otherSettings = try SourceControlRevsetStore(url: app.sourceControlRevsets.url).read(for: otherProject)
         try expect(otherSettings.selected == .defaultLog && otherSettings.custom.isEmpty, "scope saved revsets to the workspace root")
@@ -258,19 +351,21 @@ enum SourceControlCheck {
         _ = try await app.openFile(workspace.root, in: reopened)
         reopened.toggleSidebarFocus(.sourceControl)
         guard let restored = reopened.sourceControlSidebar else { throw Failure("reopen Jujutsu from the workspace root") }
-        try await waitFor("restore the selected revset in a newly opened project window") {
-            restored.revsetMenuForCheck().item(withTitle: "Repository Root")?.state == .on &&
+        try await waitFor("restore the selected revset and the reordered list") {
+            restored.revsetPickerForCheck.entriesForCheck.first?.id == custom.id &&
+                restored.revsetPickerForCheck.currentIDForCheck == custom.id &&
                 restored.graphView.revisions.count == 1 && restored.graphView.revisions.first?.isWorkingCopy == false
         }
+
         workingCopy.performClick(nil)
-        try await waitFor("reveal the working copy within a revset that excludes it") {
-            panel.selection?.isWorkingCopy == true && panel.graphView.table.isEnabled
+        try await waitFor("reveal the working copy without changing the revset") {
+            picker.currentIDForCheck == custom.id && panel.selection?.isWorkingCopy == true && panel.graphView.table.isEnabled
         }
-        try expect(panel.revsetMenuForCheck().item(withTitle: "Repository Root")?.state == .on, "leave the selected revset set after revealing the working copy")
-        try choose("Remove Revset")
-        try await waitFor("return to the configured log after removing the active revset") {
-            panel.revsetMenuForCheck().item(withTitle: "Repository Root") == nil &&
-                panel.revsetMenuForCheck().item(withTitle: "Default Log")?.state == .on &&
+        try await showPicker()
+        try press("Edit Repository Root")
+        try press("Delete Revset")
+        try await waitFor("return to the configured log after deleting the active revset") {
+            !picker.entriesForCheck.contains { $0.id == custom.id } && picker.currentIDForCheck == SourceControlRevset.defaultLog.id &&
                 panel.graphView.table.isEnabled && panel.detail?.files.count == 2
         }
     }
