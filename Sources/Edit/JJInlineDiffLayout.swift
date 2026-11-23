@@ -83,7 +83,7 @@ final class JJInlineDiffLayout: NSObject, NSTextLayoutManagerDelegate {
             let oldBand = entries[index].insertedRect
             let oldHighlights = entries[index].insertedHighlightRects
             let inserted = insertedRects(for: hunk, sourceLength: source.length, in: manager, editor: editor,
-                                         visibleRange: visible, viewport: viewport)
+                                         visibleRange: visible)
             entries[index].insertedRect = inserted.band
             entries[index].insertedHighlightRects = inserted.highlights
             if oldBand != inserted.band || oldHighlights != inserted.highlights {
@@ -91,18 +91,14 @@ final class JJInlineDiffLayout: NSObject, NSTextLayoutManagerDelegate {
                 if let band = inserted.band { invalidated = invalidated.union(band) }
             }
 
-            let removed = removedRect(for: entries[index], source: source, editor: editor,
-                                      manager: manager, viewport: viewport)
+            let removed = removedRect(for: entries[index], source: source, editor: editor, manager: manager)
             entries[index].removedRect = removed
             if let removed, removed.intersects(viewport) {
                 let rows = entries[index].removedRows ?? makeRemovedRows(in: editor)
                 entries[index].removedRows = rows
                 rows.isHidden = false
                 if rows.frame != removed { rows.frame = removed }
-                rows.configure(hunk: hunk, font: editor.font ?? EditorTextView.defaultFont,
-                               paragraph: editor.defaultParagraphStyle ?? .default,
-                               textX: editor.textContainerOrigin.x - removed.minX,
-                               padding: editor.textContainer?.lineFragmentPadding ?? 0)
+                rows.configure(hunk: hunk, editor: editor)
                 updateSelection(in: rows, for: hunk.baseRange)
             } else if let rows = entries[index].removedRows, editor.window?.firstResponder !== rows.textView {
                 rows.isHidden = true
@@ -126,8 +122,14 @@ final class JJInlineDiffLayout: NSObject, NSTextLayoutManagerDelegate {
 
     func rect(for hunk: JJDiffHunk) -> NSRect? {
         guard let entry = entries.first(where: { $0.hunk == hunk }) else { return nil }
-        if let removed = entry.removedRect, let inserted = entry.insertedRect { return removed.union(inserted) }
-        return entry.removedRect ?? entry.insertedRect
+        guard var region = entry.removedRect ?? entry.insertedRect else { return nil }
+        if let inserted = entry.insertedRect { region = region.union(inserted) }
+        // The gutter and hovering controls use the visible span, even when a painted row is wider.
+        if let viewport = editor?.enclosingScrollView?.documentVisibleRect {
+            region.origin.x = viewport.minX
+            region.size.width = viewport.width
+        }
+        return region
     }
 
     func hunk(for responder: NSResponder?) -> JJDiffHunk? {
@@ -294,12 +296,14 @@ final class JJInlineDiffLayout: NSObject, NSTextLayoutManagerDelegate {
         }
     }
 
-    private func removedRect(for entry: Entry, source: NSString, editor: EditorTextView, manager: NSTextLayoutManager,
-                             viewport: NSRect) -> NSRect? {
+    private func removedRect(for entry: Entry, source: NSString, editor: EditorTextView,
+                             manager: NSTextLayoutManager) -> NSRect? {
         guard entry.removedLineCount > 0 else { return nil }
         let height = CGFloat(entry.removedLineCount) * lineHeight
+        var rows = NSRect(x: editor.bounds.minX, y: 0, width: editor.bounds.width, height: height)
         if let emptyEditorInset {
-            return NSRect(x: viewport.minX, y: emptyEditorInset.height, width: viewport.width, height: height)
+            rows.origin.y = emptyEditorInset.height
+            return rows
         }
         let boundary = min(entry.hunk.currentRange.location, source.length)
         let endsDocument = boundary == source.length
@@ -310,12 +314,12 @@ final class JJInlineDiffLayout: NSObject, NSTextLayoutManagerDelegate {
               fragment.state == .layoutAvailable else { return nil }
         let frame = fragment.layoutFragmentFrame
         let top = endsDocument ? frame.maxY : frame.minY + fragment.topMargin
-        return NSRect(x: viewport.minX, y: top + editor.textContainerOrigin.y - height,
-                      width: viewport.width, height: height)
+        rows.origin.y = top + editor.textContainerOrigin.y - height
+        return rows
     }
 
     private func insertedRects(for hunk: JJDiffHunk, sourceLength: Int, in manager: NSTextLayoutManager,
-                               editor: EditorTextView, visibleRange: NSRange?, viewport: NSRect)
+                               editor: EditorTextView, visibleRange: NSRange?)
         -> (band: NSRect?, highlights: [NSRect]) {
         guard let visibleRange, hunk.currentRange.length > 0, NSMaxRange(hunk.currentRange) <= sourceLength else {
             return (nil, [])
@@ -325,7 +329,7 @@ final class JJInlineDiffLayout: NSObject, NSTextLayoutManagerDelegate {
               let first = lineRect(at: visible.location, in: manager),
               let last = lineRect(at: NSMaxRange(visible) - 1, in: manager) else { return (nil, []) }
         let origin = editor.textContainerOrigin
-        let band = NSRect(x: viewport.minX, y: first.minY + origin.y, width: viewport.width,
+        let band = NSRect(x: editor.bounds.minX, y: first.minY + origin.y, width: editor.bounds.width,
                           height: last.maxY - first.minY)
         var highlights: [NSRect] = []
         for changed in hunk.insertedHighlights {
@@ -417,7 +421,9 @@ private final class JJRemovedRows: NSView {
     init() {
         super.init(frame: .zero)
         clipsToBounds = true
+        autoresizingMask = [.width]
         textView.clipsToBounds = true
+        textView.autoresizingMask = [.width]
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = false
@@ -430,6 +436,7 @@ private final class JJRemovedRows: NSView {
         textView.textContainer?.widthTracksTextView = false
         textView.textContainer?.heightTracksTextView = false
         textView.textContainer?.size = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainerInset = .zero
         textView.delegate = textView
         textView.setAccessibilityLabel("Removed text")
         addSubview(textView)
@@ -449,13 +456,15 @@ private final class JJRemovedRows: NSView {
         needsDisplay = true
     }
 
-    func configure(hunk: JJDiffHunk, font: NSFont, paragraph: NSParagraphStyle, textX: CGFloat, padding: CGFloat) {
-        let left = min(0, textX)
-        let frame = NSRect(x: left, y: 0, width: bounds.width - left, height: bounds.height)
+    func configure(hunk: JJDiffHunk, editor: EditorTextView) {
+        // Anchor both text containers in the document's coordinates. The clip view scrolls them together.
+        let textX = convert(editor.textContainerOrigin, from: editor).x
+        let frame = NSRect(x: textX, y: 0, width: max(0, bounds.maxX - textX), height: bounds.height)
         if textView.frame != frame { textView.frame = frame }
-        let inset = NSSize(width: textX - left, height: 0)
-        if textView.textContainerInset != inset { textView.textContainerInset = inset }
+        let padding = editor.textContainer?.lineFragmentPadding ?? 0
         if textView.textContainer?.lineFragmentPadding != padding { textView.textContainer?.lineFragmentPadding = padding }
+        let font = editor.font ?? EditorTextView.defaultFont
+        let paragraph = editor.defaultParagraphStyle ?? .default
         guard text != hunk.removedText || highlights != hunk.removedHighlights || font != self.font || paragraph != self.paragraph else { return }
         let oldSelection = textView.selectedRange()
         text = hunk.removedText

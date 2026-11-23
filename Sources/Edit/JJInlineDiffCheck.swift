@@ -220,6 +220,78 @@ enum JJInlineDiffCheck {
 
         try checkMouseNavigation(in: document, controller: controller)
         try checkMixedSelection(in: document, controller: controller, undo: undo)
+        try checkSidebarGeometry(in: document, controller: controller)
+    }
+
+    private static func checkSidebarGeometry(in document: DocumentWindow, controller: JJInlineDiff) throws {
+        let window = document.window
+        let editor = document.editor
+        let scroll = document.scrollView
+        let prefix = "    let value = "
+        let suffix = String(repeating: " wide text for scrolling", count: 12)
+        let base = "header\n" + prefix + "old" + suffix + "\nfooter\n"
+        let current = "header\n" + prefix + "new" + suffix + "\nfooter\n"
+        let analysis = JJLineDiff.analyze(base: base, current: current, isConflicted: false, recordedConflict: nil)
+        let hunk = try require(analysis.hunks.first, "make a long changed line")
+        controller.collapseAll()
+        editor.string = current
+        window.makeFirstResponder(editor)
+        editor.setCaretSelections([NSRange(location: 0, length: 0)], record: false)
+        editor.setJJLineMarks(analysis.marks, lineStarts: analysis.lineStarts, hunks: analysis.hunks)
+        controller.toggle(hunk.mark)
+
+        func checkAlignment(_ state: String) throws {
+            window.layoutIfNeeded()
+            scroll.layoutSubtreeIfNeeded()
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            let font = editor.font ?? EditorTextView.defaultFont
+            let characterWidth = ("0" as NSString).size(withAttributes: [.font: font]).width
+            let offset = max(0, Int((scroll.visibleContentOrigin.x + 32 - editor.textContainerOrigin.x) / characterWidth))
+            for phase in ["on resize", "after relayout"] {
+                let removed = try require(descendant(of: editor) { (view: NSTextView) in
+                    view.string == hunk.removedText && !view.isHiddenOrHasHiddenAncestor
+                }, "show the removed line \(state) \(phase)")
+                let row = try require(removed.superview, "find the removed row background")
+                let background = row.convert(row.bounds, to: editor)
+                let exposed = scroll.documentVisibleRect.intersection(editor.bounds)
+                guard background.minX <= exposed.minX + 1, background.maxX >= exposed.maxX - 1 else {
+                    throw Failure("keep the removed row visible across the editor \(state) \(phase)")
+                }
+                let oldGlyph = removed.firstRect(forCharacterRange: NSRange(location: offset, length: 1), actualRange: nil)
+                let newGlyph = editor.firstRect(forCharacterRange: NSRange(location: hunk.currentRange.location + offset,
+                                                                           length: 1), actualRange: nil)
+                guard oldGlyph.height > 0, newGlyph.height > 0, abs(oldGlyph.minX - newGlyph.minX) < 1,
+                      oldGlyph.midY > newGlyph.midY else {
+                    throw Failure("align red and live columns \(state) \(phase) (\(oldGlyph), \(newGlyph))")
+                }
+                if phase == "on resize" { controller.layout() }
+            }
+        }
+
+        try checkAlignment("before opening a sidebar")
+        var position = scroll.visibleContentOrigin
+        position.x += 100
+        guard scroll.scrollToVisibleContentOrigin(position) else { throw Failure("scroll the long line horizontally") }
+        try checkAlignment("after horizontal scrolling")
+
+        let panel = TerminalPanelState(dock: .right, spaces: [], selectedSpace: nil, nextSpaceNumber: 1)
+        document.restoreTerminal(DocumentTerminalState(panel: panel, sizes: TerminalDockSizes(),
+                                                       isVisible: false, wasFocused: false))
+        document.showTerminal()
+        guard document.isTerminalDockedRight else { throw Failure("open the right terminal sidebar") }
+        try checkAlignment("with the right terminal open")
+
+        document.performFind(.toggleSidebar)
+        try checkAlignment("with both sidebars open")
+        document.performFind(.toggleSidebar)
+        try checkAlignment("after closing the left sidebar")
+        document.toggleTerminal()
+        try checkAlignment("after closing the right terminal")
+
+        position = scroll.visibleContentOrigin
+        position.x = 0
+        scroll.scrollToVisibleContentOrigin(position)
+        try checkAlignment("after returning to the first column")
     }
 
     private static func checkMixedSelection(in document: DocumentWindow, controller: JJInlineDiff, undo: UndoManager) throws {
