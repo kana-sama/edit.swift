@@ -11,7 +11,7 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
 
     private weak var anchor: NSView?
     private let prepare: (Direction) async throws -> Preview
-    private let apply: (Preview) async throws -> Bool
+    private let apply: (Preview) async throws -> Void
     private let popover = NSPopover()
     private let layout = NSStackView()
     private let directionControl = NSSegmentedControl()
@@ -30,7 +30,7 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
     private var diskList: NSStackView?
     private weak var filesToggle: NSButton?
 
-    init(anchor: NSView, prepare: @escaping (Direction) async throws -> Preview, apply: @escaping (Preview) async throws -> Bool) {
+    init(anchor: NSView, prepare: @escaping (Direction) async throws -> Preview, apply: @escaping (Preview) async throws -> Void) {
         self.anchor = anchor
         self.prepare = prepare
         self.apply = apply
@@ -205,10 +205,9 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
         updateButtons()
         Task {
             do {
-                let ran = try await apply(preview)
+                try await apply(preview)
                 applying = false
                 guard popover.isShown else { return }
-                if ran { direction = preview.direction == .undo ? .redo : .undo }
                 refresh()
             } catch {
                 applying = false
@@ -339,12 +338,14 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
     @objc private func dismissPopover() { close() }
 
 #if EDIT_AGENT_CHECKS
+    var checkView: NSView { popover.contentViewController!.view }
+
     func viewForCheck(_ preview: Preview) -> NSView {
         direction = preview.direction
         self.preview = preview
         updateButtons()
         render(preview)
-        return popover.contentViewController!.view
+        return checkView
     }
 #endif
 }

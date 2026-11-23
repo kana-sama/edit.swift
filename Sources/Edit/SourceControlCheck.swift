@@ -126,12 +126,7 @@ enum SourceControlCheck {
         let undo = try await JJSourceControlOperations.preview(.undo, in: workspace)
         try expect(undo.fileEffects.isEmpty && !undo.revisionEffects.isEmpty, "preview a description-only operation as a graph change")
         try expect(try await JJRepository.operation(in: workspace) == changedHead, "leave the operation head unchanged while previewing Undo")
-        try await JJSourceControlOperations.apply(undo, in: workspace)
-        try await waitFor("show the applied Undo") { panel.graph?.workingCopy.subject == "Working change" }
-        let redo = try await JJSourceControlOperations.preview(.redo, in: workspace)
-        try expect(redo.fileEffects.isEmpty && !redo.revisionEffects.isEmpty, "preview Redo after Undo")
-        try await JJSourceControlOperations.apply(redo, in: workspace)
-        try await waitFor("show the applied Redo") { panel.graph?.workingCopy.subject == "Renamed at the terminal" }
+        try await checkOperationDirection(in: document.window, panel: panel)
 
         guard let currentRow = panel.graphView.revisions.firstIndex(where: \.isWorkingCopy) else {
             throw Failure("find the working copy after Redo")
@@ -176,6 +171,46 @@ enum SourceControlCheck {
                    "restore the Find Previous shortcut outside the workspace")
         app.focusJujutsu(nil)
         try expect(document.sidebarMode == .worktree, "ignore a direct focus command outside a workspace")
+    }
+
+    private static func checkOperationDirection(in window: NSWindow, panel: SourceControlSidebar) async throws {
+        let operations = panel.operationsViewForCheck
+        guard let open = button(in: panel.view, where: { $0.toolTip == "Repository Operations" }),
+              let apply = button(in: operations, where: { $0.title == "Undo Operation" }),
+              let directions = descendant(of: operations, where: { (_: NSSegmentedControl) in true }) else {
+            throw Failure("find the operation popover controls")
+        }
+        let origin = window.frame.origin
+        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
+        window.orderBack(nil)
+        defer {
+            if operations.window?.isVisible == true { open.performClick(nil) }
+            window.orderOut(nil)
+            window.setFrameOrigin(origin)
+        }
+        try expect(window.alphaValue == 0 && window.ignoresMouseEvents && !NSApp.isActive, "keep the operation check in the background")
+        open.performClick(nil)
+        try await waitFor("preview Undo in the popover") { apply.isEnabled && directions.selectedSegment == 0 }
+        apply.performClick(nil)
+        try await waitFor("show the applied Undo") {
+            directions.isEnabled && panel.graph?.workingCopy.subject == "Working change"
+        }
+        try expect(directions.selectedSegment == 0 && apply.title == "Undo Operation", "keep Undo selected after applying it")
+        try await waitFor("preview the previous operation in the same Undo tab") { apply.isEnabled }
+
+        directions.selectedSegment = 1
+        _ = directions.sendAction(directions.action, to: directions.target)
+        try await waitFor("preview Redo in the popover") { apply.isEnabled && apply.title == "Redo Operation" }
+        apply.performClick(nil)
+        try await waitFor("show the applied Redo") {
+            directions.isEnabled && panel.graph?.workingCopy.subject == "Renamed at the terminal"
+        }
+        try expect(directions.selectedSegment == 1 && apply.title == "Redo Operation", "keep Redo selected after applying it")
+        try await waitFor("show the end of Redo history in the same tab") {
+            !apply.isEnabled && descendant(of: operations, where: { (field: NSTextField) in
+                field.stringValue == "There is no operation to redo."
+            }) != nil
+        }
     }
 
     private static func row(named name: String, in outline: NSOutlineView) -> Int? {
@@ -250,9 +285,13 @@ enum SourceControlCheck {
     }
 
     private static func button(in view: NSView, where test: (NSButton) -> Bool) -> NSButton? {
-        if let button = view as? NSButton, test(button) { return button }
+        descendant(of: view, where: test)
+    }
+
+    private static func descendant<T: NSView>(of view: NSView, where test: (T) -> Bool) -> T? {
+        if let candidate = view as? T, test(candidate) { return candidate }
         for subview in view.subviews {
-            if let match = button(in: subview, where: test) { return match }
+            if let match = descendant(of: subview, where: test) { return match }
         }
         return nil
     }

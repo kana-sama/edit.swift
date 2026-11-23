@@ -34,7 +34,7 @@ final class SourceControlSidebar: NSObject {
             guard let self else { throw PanelError.noWorkspace }
             return try await preview(direction)
         },
-        apply: { [weak self] preview in try await self?.apply(preview) ?? false }
+        apply: { [weak self] preview in try await self?.apply(preview) }
     )
 
     private var folder: URL?
@@ -67,6 +67,10 @@ final class SourceControlSidebar: NSObject {
     var focusResponder: NSView {
         graphView.table.isEnabled && !graphView.table.isHiddenOrHasHiddenAncestor ? graphView.table : view
     }
+
+#if EDIT_AGENT_CHECKS
+    var operationsViewForCheck: NSView { operations.checkView }
+#endif
 
     private enum PanelError: LocalizedError {
         case noWorkspace
@@ -408,8 +412,8 @@ final class SourceControlSidebar: NSObject {
         return try await JJSourceControlOperations.preview(direction, in: workspace)
     }
 
-    private func apply(_ preview: JJSourceControlOperations.Preview) async throws -> Bool {
-        guard !busy, let workspace else { return false }
+    private func apply(_ preview: JJSourceControlOperations.Preview) async throws {
+        guard !busy, let workspace else { return }
         busy = true
         updateControls()
         defer {
@@ -417,7 +421,7 @@ final class SourceControlSidebar: NSObject {
             updateControls()
             requestGraph()
         }
-        return try await document.performSourceControlMutation(in: workspace) {
+        try await document.performSourceControlMutation(in: workspace) {
             try await JJSourceControlOperations.apply(preview, in: workspace)
         }
     }

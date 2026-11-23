@@ -30,7 +30,7 @@ enum SourceControlPopoverCheck {
                    abs(minX(error, in: filterView) - minX(filterTitle, in: filterView)) < 1,
                    "Wrap revset errors while preserving leading alignment")
 
-        let operations = SourceControlOperationPopover(anchor: anchor, prepare: { _ in preview }, apply: { _ in false })
+        let operations = SourceControlOperationPopover(anchor: anchor, prepare: { _ in preview }, apply: { _ in })
         let operationView = operations.viewForCheck(preview)
         operationView.layoutSubtreeIfNeeded()
         let operationTitle = try label("Repository Operations", in: operationView)
