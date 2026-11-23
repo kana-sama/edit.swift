@@ -197,17 +197,24 @@ enum JJRepository {
         // jj has no working-copy operation template. This command reports the actual local
         // checkout, which can predate the repository's head when another workspace advances.
         let output = try await readCommand(["debug", "working-copy"], in: workspace, at: operationID)
-        guard let localID = String(data: output, encoding: .utf8)?.split(separator: "\n").compactMap({ line -> String? in
-            let prefix = #"Current operation: OperationId(""#
-            let suffix = #"")"#
-            guard line.hasPrefix(prefix), line.hasSuffix(suffix) else { return nil }
-            return String(line.dropFirst(prefix.count).dropLast(suffix.count))
-        }).first, isOperationID(localID) else { throw Failure.invalidResponse }
+        let localID = try workingCopyOperation(in: output)
         if localID != operationID {
             guard try await workspaceCommit(in: workspace, at: localID) == commitID else {
                 throw Failure.staleWorkspace
             }
         }
+    }
+
+    private static func workingCopyOperation(in output: Data) throws -> String {
+        let prefix = #"Current operation: OperationId(""#
+        let suffix = #"")"#
+        guard let lines = String(data: output, encoding: .utf8)?.split(whereSeparator: \.isNewline),
+              let line = lines.first(where: { $0.hasPrefix(prefix) }), line.hasSuffix(suffix) else {
+            throw Failure.invalidResponse
+        }
+        let id = String(line.dropFirst(prefix.count).dropLast(suffix.count))
+        guard isOperationID(id) else { throw Failure.invalidResponse }
+        return id
     }
 
     private static func workspaceCommit(in workspace: JJWorkspace, at operationID: String) async throws -> String {

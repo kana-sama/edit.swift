@@ -65,6 +65,27 @@ enum JJIndicatorCheck {
         }
         try await checkPresentationDeadline(in: app, tracked: tracked)
         try await checkSnapshotCadence(executable, in: folder, tracked: tracked)
+        try await checkRefreshDuringSnapshot(executable, in: folder)
+    }
+
+    private static func checkRefreshDuringSnapshot(_ executable: URL, in folder: URL) async throws {
+        guard let workspace = await JJRepository.discover(at: folder) else { throw Failure("resolve workspace for slow snapshot") }
+        var writing: CheckedContinuation<Void, Never>?
+        var displayedOperation: String?
+        let monitor = JJChangeMonitor(checkInterval: .milliseconds(40), snapshotInterval: .milliseconds(150)) { _ in
+            await withCheckedContinuation { writing = $0 }
+        }
+        let subscription = monitor.subscribe(to: workspace, updated: { displayedOperation = $0?.repository.operationID })
+        defer {
+            monitor.unsubscribe(subscription)
+            writing?.resume()
+        }
+        try await waitFor("begin a scheduled snapshot") { writing != nil }
+        let before = try await JJRepository.operation(in: workspace)
+        try await command(executable, in: folder, ["describe", "-m", "Read during snapshot"])
+        let after = try await JJRepository.operation(in: workspace)
+        try expect(before != after, "the external command publishes a new operation")
+        try await waitFor("refresh status while the scheduled snapshot is still waiting") { displayedOperation == after }
     }
 
     private static func checkPresentationDeadline(in app: Edit, tracked: URL) async throws {

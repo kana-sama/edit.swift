@@ -143,13 +143,16 @@ final class JJChangeMonitor {
     private let clock = ContinuousClock()
     private let checkInterval: Duration
     private let snapshotInterval: Duration
+    private let writeSnapshot: @MainActor (JJWorkspace) async throws -> Void
     private var workspaces: [JJWorkspace: Workspace] = [:]
     private var suspendedDeadlines: [JJWorkspace: (next: ContinuousClock.Instant, expires: ContinuousClock.Instant)] = [:]
     private var snapshotting: Set<URL> = []
 
-    init(checkInterval: Duration = .seconds(2), snapshotInterval: Duration = .seconds(180)) {
+    init(checkInterval: Duration = .seconds(2), snapshotInterval: Duration = .seconds(180),
+         writeSnapshot: @escaping @MainActor (JJWorkspace) async throws -> Void = JJRepository.snapshot) {
         self.checkInterval = checkInterval
         self.snapshotInterval = snapshotInterval
+        self.writeSnapshot = writeSnapshot
     }
 
     func subscribe(
@@ -205,18 +208,10 @@ final class JJChangeMonitor {
 
     private func refresh(_ workspace: Workspace) async {
         let location = workspace.location
+        scheduleSnapshot(for: workspace)
         do {
-            var operation = try await JJRepository.operation(in: location)
+            let operation = try await JJRepository.operation(in: location)
             try Task.checkCancellation()
-            if workspace.mayNeedSnapshot, clock.now >= workspace.nextSnapshot,
-               snapshotting.insert(location.repository).inserted {
-                defer { snapshotting.remove(location.repository) }
-                let generation = workspace.diskGeneration
-                workspace.nextSnapshot = clock.now.advanced(by: snapshotInterval)
-                try await JJRepository.snapshot(location)
-                if generation == workspace.diskGeneration { workspace.mayNeedSnapshot = workspace.paths == nil }
-                operation = try await JJRepository.operation(in: location)
-            }
             guard workspace.contents?.repository.operationID != operation else { return }
             let state = try await JJRepository.read(location, at: operation)
             let contents = try await JJWorkspaceContents.prepare(state)
@@ -225,7 +220,24 @@ final class JJChangeMonitor {
                   !Task.isCancelled, workspaces[location] === workspace else { return }
             install(contents, for: workspace)
         } catch {
-            if !Task.isCancelled, workspace.contents != nil { install(nil, for: workspace) }
+            if !Task.isCancelled, !snapshotting.contains(location.repository), workspace.contents != nil {
+                install(nil, for: workspace)
+            }
+        }
+    }
+
+    private func scheduleSnapshot(for workspace: Workspace) {
+        let location = workspace.location
+        guard workspace.mayNeedSnapshot, clock.now >= workspace.nextSnapshot,
+              snapshotting.insert(location.repository).inserted else { return }
+        let generation = workspace.diskGeneration
+        workspace.nextSnapshot = clock.now.advanced(by: snapshotInterval)
+        // Let an in-flight repository write finish even if its last observer closes.
+        Task { [weak self, weak workspace, writeSnapshot] in
+            defer { self?.snapshotting.remove(location.repository) }
+            do { try await writeSnapshot(location) }
+            catch { return }
+            if let workspace, generation == workspace.diskGeneration { workspace.mayNeedSnapshot = workspace.paths == nil }
         }
     }
 
