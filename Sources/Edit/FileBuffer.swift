@@ -187,12 +187,19 @@ struct FileBuffer: Sendable {
             return FileBuffer(url: url, text: "", format: FileFormat(), revision: .missing, diskStamp: nil)
         }
 
-        let taggedBOM = disk.encoding.flatMap { encoding in
-            !encoding.bom.isEmpty && disk.bytes.starts(with: encoding.bom) ? encoding : nil
+        let (text, format) = try decode(disk.bytes, from: url, taggedEncoding: disk.encoding)
+        return FileBuffer(url: url, text: text, format: format, revision: FileRevision(bytes: disk.bytes), diskStamp: disk.stamp)
+    }
+
+    static func decode(
+        _ bytes: Data, from url: URL, taggedEncoding: FileTextEncoding? = nil
+    ) throws -> (String, FileFormat) {
+        let taggedBOM = taggedEncoding.flatMap { encoding in
+            !encoding.bom.isEmpty && bytes.starts(with: encoding.bom) ? encoding : nil
         }
-        let bomEncoding = taggedBOM ?? FileTextEncoding.fromBOM(in: disk.bytes)
-        let encoding = bomEncoding ?? disk.encoding ?? .utf8
-        let contents = disk.bytes.dropFirst(bomEncoding?.bom.count ?? 0)
+        let bomEncoding = taggedBOM ?? FileTextEncoding.fromBOM(in: bytes)
+        let encoding = bomEncoding ?? taggedEncoding ?? .utf8
+        let contents = bytes.dropFirst(bomEncoding?.bom.count ?? 0)
         let decoded = encoding == .utf8
             ? String(validating: contents, as: UTF8.self)
             : String(data: contents, encoding: encoding.foundation)
@@ -200,7 +207,7 @@ struct FileBuffer: Sendable {
 
         let format = FileFormat(hasBOM: bomEncoding != nil, lineEnding: dominantLineEnding(in: text) ?? "\n",
                                 storedEncoding: encoding == .utf8 ? nil : encoding)
-        return FileBuffer(url: url, text: text, format: format, revision: FileRevision(bytes: disk.bytes), diskStamp: disk.stamp)
+        return (text, format)
     }
 
     static func save(

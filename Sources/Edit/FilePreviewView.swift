@@ -3,6 +3,8 @@ import AppKit
 @MainActor
 final class FilePreviewView: NSView {
     private let url: URL
+    private let mediaBacking: FilePreviewMediaBacking?
+    private let allowsReveal: Bool
     private let scrollView = NSScrollView()
     private let document = PreviewScrollDocument()
     private let content = NSStackView()
@@ -16,6 +18,8 @@ final class FilePreviewView: NSView {
 
     init(preview: OpenFilePreview) {
         url = preview.url
+        mediaBacking = preview.mediaBacking
+        allowsReveal = preview.allowsReveal
         super.init(frame: .zero)
         configure(reason: preview.reason)
         show(preview.details)
@@ -113,7 +117,7 @@ final class FilePreviewView: NSView {
 
     private func show(_ details: FilePreviewDetails) {
         if details.playableVideo {
-            let player = FileVideoPreviewView(url: url, poster: details.image)
+            let player = FileVideoPreviewView(url: mediaBacking?.url ?? url, poster: details.image)
             video = player
             addMedia(player, width: details.width ?? 16, height: details.height ?? 9)
         } else if let image = details.image {
@@ -145,7 +149,7 @@ final class FilePreviewView: NSView {
             addMetadata("Modified", modified.formatted(date: .abbreviated, time: .shortened))
         }
         addMetadata("Path", url.path(percentEncoded: false))
-        revealButton.isHidden = details.size == nil && details.modified == nil
+        revealButton.isHidden = !allowsReveal || (details.size == nil && details.modified == nil)
         needsLayout = true
     }
 

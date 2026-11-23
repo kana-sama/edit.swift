@@ -95,6 +95,16 @@ final class JJInlineDiff: NSResponder {
         return true
     }
 
+    @discardableResult
+    func expandAll() -> Bool {
+        guard current, !hunks.isEmpty else { return false }
+        let everything = Set(hunks.map(\.baseRange))
+        guard everything != expanded else { return true }
+        expanded = everything
+        applyExpansion()
+        return true
+    }
+
     func selectionChanged() {
         interaction.selectionChanged()
         editor?.requestLineRefresh()

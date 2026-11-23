@@ -24,8 +24,8 @@ final class DocumentActivity {
         return openGeneration
     }
 
-    func beginSave() -> Bool {
-        guard !isSaving, editabilityBeforeMutation == nil else { return false }
+    func beginSave(duringWorkspaceMutation: Bool = false) -> Bool {
+        guard !isSaving, duringWorkspaceMutation || editabilityBeforeMutation == nil else { return false }
         // The close sheet can save before completing its replacement.
         isSaving = true
         return true

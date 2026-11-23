@@ -6,9 +6,11 @@ struct OpenFilePreview: Sendable {
     let identity: FileIdentity?
     let reason: String
     let details: FilePreviewDetails
+    var mediaBacking: FilePreviewMediaBacking? = nil
+    var allowsReveal = true
 }
 
-private enum OpenedFile: Sendable {
+enum OpenedFile: Sendable {
     case text(FileBuffer)
     case preview(OpenFilePreview)
 
@@ -530,7 +532,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             return activeDocument?.canReplaceBuffer ?? false
         case #selector(reopenClosedFile(_:)): return canReopenClosedFile
         case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)), #selector(saveDocumentAsScratch(_:)):
-            return activeDocument.map { $0.hasTextDocument && !$0.isBusy && $0.window.attachedSheet == nil } ?? false
+            return activeDocument.map { $0.hasEditableTextDocument && !$0.isBusy && $0.window.attachedSheet == nil } ?? false
         case #selector(openFind(_:)): return activeDocument?.canPerformFind(.find) ?? false
         case #selector(openReplace(_:)): return activeDocument?.canPerformFind(.replace) ?? false
         case #selector(toggleSidebar(_:)), #selector(focusScratches(_:)), #selector(toggleTerminal(_:)):
@@ -606,7 +608,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             } catch {
                 isQuitting = false
                 for document in documents {
-                    document.editor.isEditable = document.hasTextDocument
+                    document.editor.isEditable = document.hasEditableTextDocument
                     if !document.window.isVisible { document.window.orderFront(nil) }
                 }
                 let document = activeDocument ?? makeDocument(placement: lastPlacement)
@@ -656,10 +658,12 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         documents.removeAll { $0 === document }
     }
 
-    func reserveSave(to url: URL, identity: FileIdentity?, for document: DocumentWindow) -> Bool {
+    func reserveSave(
+        to url: URL, identity: FileIdentity?, for document: DocumentWindow, duringWorkspaceMutation: Bool = false
+    ) -> Bool {
         // Buffers already associated with a path compare their revisions before writing.
         // Save As must not claim a path owned by another window.
-        guard !isWorktreeMutationPath(url) else { return false }
+        guard !isWorktreeMutationPath(url) || (duringWorkspaceMutation && url == document.fileURL) else { return false }
         guard url == document.fileURL || !documents.contains(where: {
             $0 !== document && ($0.fileURL == url || (identity != nil && $0.fileURL != nil && $0.fileIdentity == identity))
         }) else { return false }
@@ -926,7 +930,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     @concurrent
-    private nonisolated static func readForOpening(
+    nonisolated static func readForOpening(
         _ url: URL, allowMissing: Bool = false, within folder: URL? = nil, allowsPreview: Bool = true
     ) async throws -> OpenedFile {
         try Task.checkCancellation()
@@ -1109,6 +1113,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             try await FilesCheck.checkFilePreview(in: self)
         case "jj":
             try await checkJJ(screenshot: screenshot)
+        case "source-control":
+            try await checkSourceControl(screenshot: screenshot)
         case "worktree" where screenshot == nil:
             try await WorktreeCheck.run(in: self)
         default:
@@ -1132,7 +1138,17 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 try checkWindow(window, screenshot: name == .darkAqua ? screenshot : nil)
             }
         }
+        try await checkSourceControl()
         print("Edit passed its native Jujutsu indicator checks without activation.")
+    }
+
+    private func checkSourceControl(screenshot: String? = nil) async throws {
+        try await SourceControlCheck.run(in: self) { window in
+            for name: NSAppearance.Name in [.aqua, .darkAqua] {
+                window.appearance = NSAppearance(named: name)
+                try checkWindow(window, screenshot: name == .aqua ? screenshot : nil)
+            }
+        }
     }
 
     private func checkWindow(_ window: NSWindow, screenshot: String?) throws {

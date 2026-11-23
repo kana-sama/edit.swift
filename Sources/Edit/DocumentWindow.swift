@@ -103,6 +103,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         case window
         case buffer(FileBuffer?, focusEditor: Bool = true, scratch: ScratchFile? = nil, folder: URL? = nil)
         case preview(OpenFilePreview, focusEditor: Bool, folder: URL? = nil)
+        case sourceControlPreview(SourceControlRevisionPreview)
         case emptyFolder(focusContent: Bool, folder: URL? = nil)
     }
 
@@ -138,12 +139,18 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var filePreview: OpenFilePreview?
     private var filePreviewView: FilePreviewView?
     private var emptyFolderView: EmptyFolderView?
+    private var sourceControlRevision: SourceControlRevisionPreview?
+    private(set) var sourceControlRevisionBanner: SourceControlRevisionBanner?
+    private var editorTopConstraint: NSLayoutConstraint?
+    private var filePreviewTopConstraint: NSLayoutConstraint?
+    private var previewTopConstraint: NSLayoutConstraint?
     var isShowingFilePreview: Bool { filePreview != nil }
     var showsEmptyFolder: Bool { emptyFolderView != nil }
     var hasTextDocument: Bool { !isShowingFilePreview && !showsEmptyFolder }
-    var displayedFileURL: URL? { filePreview?.url ?? fileURL }
-    var fileIconURL: URL? { scratchFile?.filenameURL ?? displayedFileURL }
-    var displayName: String { scratchFile?.name ?? displayedFileURL?.lastPathComponent ?? "Untitled" }
+    var hasEditableTextDocument: Bool { hasTextDocument && sourceControlRevision == nil }
+    var displayedFileURL: URL? { sourceControlRevision == nil ? filePreview?.url ?? fileURL : nil }
+    var fileIconURL: URL? { scratchFile?.filenameURL ?? displayedFileURL ?? sourceControlRevision?.url }
+    var displayName: String { scratchFile?.name ?? fileIconURL?.lastPathComponent ?? "Untitled" }
     var contentResponder: NSView { (filePreviewView as NSView?) ?? (emptyFolderView as NSView?) ?? editor }
 
     func focusContent() {
@@ -190,7 +197,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     var isSidebarVisible: Bool { sidebar.isVisible }
     var isSearchSidebarVisible: Bool { sidebar.isSearchVisible }
     var worktreeSidebar: SidebarFileTree? { sidebar.worktree }
+    var sourceControlSidebar: SourceControlSidebar? { sidebar.sourceControl }
     private var jjDocumentChanges: JJDocumentChanges?
+    private var pendingSourceControlDiffFile: URL?
     var scratchOutline: NSOutlineView? { sidebar.scratchOutline }
     private var appearanceObservation: NSKeyValueObservation?
     private(set) var manualSyntaxLanguage: SyntaxLanguage?
@@ -247,7 +256,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             Task { @MainActor in self?.titleBar.update() }
         }
         window.contentView = editorContentView
-        pinToEditorContent(scrollView)
+        editorTopConstraint = pinToEditorContent(scrollView)
         window.toolbarStyle = .unifiedCompact
         window.toolbar = titleBar.toolbar
         window.trackTitlebarPointer()
@@ -553,6 +562,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     func canPerformFind(_ command: FindCommand) -> Bool {
         guard window.attachedSheet == nil else { return false }
         if !hasTextDocument { return command == .toggleSidebar }
+        if !hasEditableTextDocument && (command == .replace || command == .toggleReplace) { return false }
         return sidebar.canPerformFind(command)
     }
 
@@ -682,6 +692,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     func load(
         _ file: FileBuffer, storedSyntaxLanguage: String? = nil, preparedSyntax: SyntaxSnapshot? = nil, scratch: ScratchFile? = nil
     ) {
+        removeSourceControlRevision()
         removeFilePreview()
         removeEmptyFolder()
         updateIdentity(from: file)
@@ -708,6 +719,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func loadPreview(_ preview: OpenFilePreview, revealInWorktree: Bool = true) {
+        removeSourceControlRevision()
+        installFilePreview(preview, revealInWorktree: revealInWorktree)
+    }
+
+    private func installFilePreview(_ preview: OpenFilePreview, revealInWorktree: Bool) {
         let view = FilePreviewView(preview: preview)
         removeFilePreview()
         removeEmptyFolder()
@@ -720,7 +736,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         revision = nil
         editor.isEditable = false
         filePreviewView = view
-        pinToEditorContent(view)
+        filePreviewTopConstraint = pinToEditorContent(view)
         window.initialFirstResponder = view
         scrollView.isHidden = true
         installText("", revealInWorktree: revealInWorktree)
@@ -731,12 +747,103 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         window.initialFirstResponder = editor
         self.filePreviewView = nil
         filePreview = nil
+        filePreviewTopConstraint = nil
         filePreviewView.stop()
         filePreviewView.removeFromSuperview()
         scrollView.isHidden = false
     }
 
+    func openSourceControlFile(
+        _ file: JJSourceControlFile, in change: JJSourceControlRevision, workspace: JJWorkspace,
+        operationID: String, while isWanted: @escaping () -> Bool
+    ) async -> Bool {
+        guard canRequestOpen, isWanted(), !app.isQuitting else { return false }
+        let url = workspace.root.appending(path: file.path, directoryHint: .notDirectory)
+        let folder = folderURL
+        let opensWorkingCopy = change.isWorkingCopy && !file.isDeleted
+        let metadata = opensWorkingCopy ? SourceControlRevisionPreview.metadata(for: file, at: url) : nil
+        do {
+            if opensWorkingCopy && metadata == nil {
+                guard try await app.openFile(url, in: self, focusEditor: false, shouldOpen: isWanted) != nil,
+                      isWanted(), !Task.isCancelled else { return false }
+                if let fileURL, hasEditableTextDocument {
+                    pendingSourceControlDiffFile = editor.jjInlineDiff?.expandAll() == true ? nil : fileURL
+                }
+                return true
+            }
+
+            let generation = beginOpenRequest()
+            let isCurrent = { [self] in
+                !Task.isCancelled && !app.isQuitting && openRequestGeneration == generation && folderURL == folder &&
+                    isWanted() && app.documents.contains(where: { $0 === self })
+            }
+            if let metadata { return await open(.preview(metadata, focusEditor: false), while: isCurrent) }
+            let contents = try await JJSourceControlRepository.file(file, in: change, workspace: workspace, at: operationID)
+            guard isCurrent() else { return false }
+            let preview = try await SourceControlRevisionPreview.prepare(contents, file: file, revision: change, at: url)
+            return await open(.sourceControlPreview(preview), while: isCurrent)
+        } catch {
+            if isWanted(), !app.isQuitting, !Task.isCancelled, canReplaceBuffer,
+               app.documents.contains(where: { $0 === self }) {
+                await showError("Could Not Open “\(url.lastPathComponent)”", detail: error.localizedDescription)
+            }
+            return false
+        }
+    }
+
+    private func loadSourceControlRevision(_ preview: SourceControlRevisionPreview) {
+        removeSourceControlRevision()
+        removeFilePreview()
+        removeEmptyFolder()
+        autosave.reset()
+        sourceControlRevision = preview
+        switch preview.content {
+        case .text(let text, let format, let analysis):
+            fileURL = nil
+            fileIdentity = nil
+            revision = nil
+            manualSyntaxLanguage = nil
+            detectedSyntaxLanguage = .detected(at: preview.url)
+            savedText = text as NSString
+            self.format = format
+            editor.isEditable = false
+            installText(text)
+            editor.setJJLineMarks(analysis.marks, lineStarts: analysis.lineStarts, hunks: analysis.hunks)
+            editor.jjInlineDiff?.expandAll()
+        case .media(let media):
+            installFilePreview(media, revealInWorktree: false)
+        }
+
+        let banner = SourceControlRevisionBanner(preview)
+        sourceControlRevisionBanner = banner
+        let content = filePreviewView as NSView? ?? scrollView
+        let oldTop = filePreviewTopConstraint ?? editorTopConstraint
+        editorContentView.addSubview(banner)
+        oldTop?.isActive = false
+        let newTop = content.topAnchor.constraint(equalTo: banner.bottomAnchor)
+        previewTopConstraint = newTop
+        let guide = editorContentView.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            banner.topAnchor.constraint(equalTo: guide.topAnchor),
+            banner.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
+            banner.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
+            newTop,
+        ])
+    }
+
+    private func removeSourceControlRevision() {
+        guard sourceControlRevision != nil else { return }
+        sourceControlRevision = nil
+        editor.setJJLineMarks([])
+        previewTopConstraint?.isActive = false
+        previewTopConstraint = nil
+        sourceControlRevisionBanner?.removeFromSuperview()
+        sourceControlRevisionBanner = nil
+        (filePreviewTopConstraint ?? editorTopConstraint)?.isActive = true
+    }
+
     func loadEmptyFolder() {
+        removeSourceControlRevision()
         removeFilePreview()
         if !showsEmptyFolder {
             let view = EmptyFolderView()
@@ -768,23 +875,27 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         installText("")
     }
 
-    private func pinToEditorContent(_ view: NSView) {
+    @discardableResult
+    private func pinToEditorContent(_ view: NSView) -> NSLayoutConstraint {
         view.translatesAutoresizingMaskIntoConstraints = false
         if let dock = terminalDockView, dock.superview === editorContentView {
             editorContentView.addSubview(view, positioned: .below, relativeTo: dock)
         } else {
             editorContentView.addSubview(view)
         }
+        let top = view.topAnchor.constraint(equalTo: editorContentView.topAnchor)
         NSLayoutConstraint.activate([
             view.leadingAnchor.constraint(equalTo: editorContentView.leadingAnchor),
             view.trailingAnchor.constraint(equalTo: editorContentView.trailingAnchor),
-            view.topAnchor.constraint(equalTo: editorContentView.topAnchor),
+            top,
             view.bottomAnchor.constraint(equalTo: editorContentView.bottomAnchor),
         ])
         setEditorBottomInset(terminalDockView?.coveredHeight ?? 0)
+        return top
     }
 
     func restoreDraft(_ record: SessionDocument, text: String, identity: FileIdentity? = nil, scratch: ScratchFile? = nil) {
+        removeSourceControlRevision()
         fileRefresh.stop()
         fileURL = record.path.map { URL(fileURLWithPath: $0) }
         scratchFile = scratch
@@ -813,11 +924,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             syntaxLanguage: manualSyntaxLanguage?.rawValue,
             folderPath: folderURL?.path,
             findSettings: savedFind == .empty ? nil : savedFind,
-            editorPosition: hasTextDocument ? editor.capturePosition() : nil,
+            editorPosition: hasEditableTextDocument ? editor.capturePosition() : nil,
             sidebarMode: sidebar.rememberedMode,
             worktreeShowsHidden: sidebar.worktreeShowsHidden ? true : nil,
-            isFilePreview: isShowingFilePreview ? true : nil,
-            showsEmptyFolder: folderURL != nil && displayedFileURL == nil ? showsEmptyFolder : nil,
+            isFilePreview: displayedFileURL != nil && isShowingFilePreview ? true : nil,
+            showsEmptyFolder: folderURL != nil && displayedFileURL == nil ? showsEmptyFolder || sourceControlRevision != nil : nil,
             terminal: terminalSessionState(),
             draftRecovery: draftRecoveryRevision
         )
@@ -836,8 +947,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     @discardableResult
-    func save(asNew: Bool = false, to selectedURL: URL? = nil, encoding: FileTextEncoding? = nil) async -> Bool {
-        guard hasTextDocument, activity.beginSave() else { return false }
+    func save(
+        asNew: Bool = false, to selectedURL: URL? = nil, encoding: FileTextEncoding? = nil,
+        duringWorkspaceMutation: Bool = false
+    ) async -> Bool {
+        guard hasEditableTextDocument, activity.beginSave(duringWorkspaceMutation: duringWorkspaceMutation) else { return false }
         if editor.hasMarkedText() { editor.unmarkText() }
         defer {
             activity.endSave()
@@ -870,7 +984,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             return (url, FileIdentity.at(url))
         }.value
         let promote = asNew || target != fileURL || revision == .missing
-        guard app.reserveSave(to: target, identity: identity, for: self) else {
+        guard app.reserveSave(to: target, identity: identity, for: self,
+                              duringWorkspaceMutation: duringWorkspaceMutation) else {
             await showError("The file is in use by another window.")
             return false
         }
@@ -909,7 +1024,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func saveAsScratch() async {
-        guard canReplaceBuffer, hasTextDocument, !app.isQuitting, activity.beginSave() else { return }
+        guard canReplaceBuffer, hasEditableTextDocument, !app.isQuitting, activity.beginSave() else { return }
         defer {
             activity.endSave()
             autosave.resume()
@@ -1027,10 +1142,85 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func finishWorktreeMutation() {
         let wasEditable = activity.endMutation()
-        editor.isEditable = hasTextDocument && wasEditable
+        editor.isEditable = hasEditableTextDocument && wasEditable
         autosave.resume()
         if !autosave.hasWorker { autosave.scheduleIdle() }
         fileRefresh.resume()
+    }
+
+    @discardableResult
+    func performSourceControlMutation(
+        in workspace: JJWorkspace, operation: @MainActor () async throws -> Void
+    ) async throws -> Bool {
+        let affected = app.documents.filter { document in
+            document.fileURL.map { Self.worktreePathSuffix(from: workspace.root, to: $0) != nil } == true
+        }
+        return try await app.performWorktreeMutation(affecting: [workspace.root]) {
+            var discarded: Set<ObjectIdentifier> = []
+            for document in affected where document.window.isDocumentEdited {
+                guard let folder = document.fileURL?.deletingLastPathComponent() else { continue }
+                if let owner = await JJRepository.discover(at: folder), owner != workspace { continue }
+                guard !Task.isCancelled, !app.isAgentCheck else { return false }
+                if document !== self && !document.window.isKeyWindow { document.window.makeKeyAndOrderFront(nil) }
+                let choice = await document.confirmNamedClose(
+                    consequence: "Continuing without saving discards your edits if the repository operation succeeds."
+                )
+                switch choice {
+                case .save:
+                    guard await document.save(duringWorkspaceMutation: true), !document.window.isDocumentEdited else {
+                        return false
+                    }
+                case .discard:
+                    discarded.insert(ObjectIdentifier(document))
+                case .cancel:
+                    return false
+                }
+            }
+            try Task.checkCancellation()
+            do {
+                try await operation()
+            } catch {
+                for document in affected { await document.refreshAfterSourceControlMutation(discard: false) }
+                throw error
+            }
+            for document in affected {
+                await document.refreshAfterSourceControlMutation(discard: discarded.contains(ObjectIdentifier(document)))
+            }
+            return true
+        }
+    }
+
+    private func refreshAfterSourceControlMutation(discard: Bool) async {
+        guard let url = fileURL, discard || !window.isDocumentEdited else { return }
+        guard let disk = try? await Task.detached(operation: { try FileBuffer.revision(at: url) }).value,
+              disk != revision || discard else { return }
+        let wasFocused = contentHasFocus
+        if disk == .missing {
+            autosave.reset()
+            rememberFilePosition()
+            if folderURL != nil { loadEmptyFolder() }
+            else { resetDocument() }
+            if wasFocused { focusContent() }
+            return
+        }
+        let position = editor.capturePosition()
+        switch try? await Edit.readForOpening(url) {
+        case .text(let file):
+            if discard {
+                autosave.reset()
+                updateIdentity(from: file)
+                installText(file.text, revealInWorktree: false)
+            } else {
+                applyExternalFile(file)
+            }
+            restoreEditorPosition(position)
+        case .preview(let preview):
+            autosave.reset()
+            loadPreview(preview, revealInWorktree: false)
+            if wasFocused { focusContent() }
+        case nil:
+            fileRefresh.check()
+        }
     }
 
     func retargetMovedFile(from source: URL, to destination: URL, revealInWorktree: Bool = true) {
@@ -1133,6 +1323,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func textDidChange() {
+        pendingSourceControlDiffFile = nil
         autosave.noteEdit()
         updateEditedState()
         scheduleDraftCheckpoint()
@@ -1204,10 +1395,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private func closeBuffer(destination: CloseDestination, while isCurrent: () -> Bool = { true }) async -> Bool {
         if editor.hasMarkedText() { editor.unmarkText() }
         let previousFolder = folderURL
-        let wasEditable = !hasTextDocument || editor.isEditable
+        let wasEditable = !hasEditableTextDocument || editor.isEditable
         editor.isEditable = false
         defer {
-            editor.isEditable = hasTextDocument && wasEditable
+            editor.isEditable = hasEditableTextDocument && wasEditable
             activity.endReplacement()
             if folderURL != previousFolder { sidebar.folderChanged() }
             autosave.resume()
@@ -1277,6 +1468,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             } else {
                 rememberFilePosition()
                 installContent(in: folder) {
+                    removeSourceControlRevision()
                     removeFilePreview()
                     removeEmptyFolder()
                     resetDocument()
@@ -1290,6 +1482,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             autosave.clearFailure()
             rememberFilePosition()
             installContent(in: folder) { loadPreview(preview) }
+            if restoreFocus { focusContent() }
+        case .sourceControlPreview(let preview):
+            let restoreFocus = contentHasFocus
+            rememberFilePosition()
+            loadSourceControlRevision(preview)
             if restoreFocus { focusContent() }
         case .emptyFolder(let focus, let folder):
             let restoreFocus = focus || contentHasFocus
@@ -1351,10 +1548,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func reloadScratches() { sidebar.reloadScratches() }
 
-    private func confirmNamedClose() async -> CloseChoice {
+    private func confirmNamedClose(consequence: String = "Closing this document without saving discards your edits.") async -> CloseChoice {
         let alert = NSAlert()
         alert.messageText = "Save changes to “\(displayName)”?"
-        let consequence = "Closing this document without saving discards your edits."
         if let detail = autosave.takeFailure(includingReported: true) {
             alert.informativeText = detail + "\n\n" + consequence
         } else {
@@ -1378,7 +1574,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.undoManager
     }
 
-    var canFocusSelection: Bool { canReplaceBuffer && hasTextDocument && editor.canFocusSelection }
+    var canFocusSelection: Bool { canReplaceBuffer && hasEditableTextDocument && editor.canFocusSelection }
     var canExitFocus: Bool { canReplaceBuffer && editor.focusRanges != nil }
 
     func focusSelection() {
@@ -1445,6 +1641,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private func installText(
         _ text: String, preparedSyntax: SyntaxSnapshot? = nil, revealInWorktree: Bool = true
     ) {
+        pendingSourceControlDiffFile = nil
         discardDraftCheckpoint()
         editor.exitFocus(notify: false)
         editor.preferredLineEnding = format.lineEnding
@@ -1497,8 +1694,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 guard let editor = self?.editor, !editor.hasMarkedText() else { return nil }
                 return editor.string
             }, showMarks: { [weak self] result, normalizeCRLF in
-                self?.editor.setJJLineMarks(result?.marks ?? [], lineStarts: result?.lineStarts ?? [],
-                                            hunks: result?.hunks ?? [], normalizeCRLF: normalizeCRLF)
+                guard let self, sourceControlRevision == nil else { return }
+                editor.setJJLineMarks(result?.marks ?? [], lineStarts: result?.lineStarts ?? [],
+                                      hunks: result?.hunks ?? [], normalizeCRLF: normalizeCRLF)
+                if result != nil, pendingSourceControlDiffFile != nil, pendingSourceControlDiffFile == fileURL {
+                    pendingSourceControlDiffFile = nil
+                    editor.jjInlineDiff?.expandAll()
+                }
             }, suspendMarkerNavigation: { [weak self] in
                 self?.editor.suspendJJMarkerNavigation()
             }, showWorktree: { [weak self] decorations in
@@ -1519,7 +1721,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func scheduleDraftCheckpoint() {
         guard !app.isQuitting, !editor.hasMarkedText() else { return }
-        guard hasTextDocument, fileURL == nil, window.isDocumentEdited else {
+        guard hasEditableTextDocument, fileURL == nil, window.isDocumentEdited else {
             discardDraftCheckpoint()
             return
         }

@@ -280,7 +280,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         fileLabel?.stringValue = document.displayName
         fileLabel?.toolTip = document.displayedFileURL?.path ?? document.displayName
         fitLabels()
-        if document.displayedFileURL == nil && document.manualSyntaxLanguage == nil {
+        if document.fileIconURL == nil && document.manualSyntaxLanguage == nil {
             languageIcon?.image = NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
         } else {
             languageIcon?.image = FileIcons.image(for: document.fileIconURL, appearance: document.window.effectiveAppearance,

@@ -178,6 +178,8 @@ final class EditApplication: NSApplication {
                 return button.isEnabled ? .pointingHand : .arrow
             case let split as NSSplitView where hit === foregroundHit:
                 return split.dividerResizeCursor ?? background
+            case let divider as SourceControlDivider:
+                return divider.isMovable ? .rowResize : .arrow
             case is ClickTarget:
                 return .pointingHand
             case is JJInlineDiffControls:

@@ -1,13 +1,14 @@
 import AppKit
 
 enum SidebarMode: String, Codable, Sendable {
-    case search, worktree, scratches
+    case search, worktree, scratches, sourceControl
 
     var title: String {
         switch self {
         case .search: "Search"
         case .worktree: "Worktree"
         case .scratches: "Scratches"
+        case .sourceControl: "Source Control"
         }
     }
 }
@@ -179,15 +180,17 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     private var search: FindSidebar?
     private(set) var worktree: SidebarFileTree?
     private var scratches: SidebarFileTree?
+    private(set) var sourceControl: SourceControlSidebar?
     private var scratchReload: Task<Void, Never>?
 
     var mode: SidebarMode { rememberedMode ?? (document.folderURL == nil ? .scratches : .search) }
     var isSearchVisible: Bool { isVisible && mode == .search }
     private var worktreeVisible: Bool { isVisible && mode == .worktree }
     private var scratchesVisible: Bool { isVisible && mode == .scratches }
+    private var sourceControlVisible: Bool { isVisible && mode == .sourceControl }
     private var worktreeFile: URL? { document.scratchFile == nil ? document.displayedFileURL : nil }
     var scratchOutline: NSOutlineView? { scratches?.outline }
-    var hasContent: Bool { search != nil || worktree != nil || scratches != nil }
+    var hasContent: Bool { search != nil || worktree != nil || scratches != nil || sourceControl != nil }
     var worktreeShowsHidden: Bool { worktree?.showsHidden ?? restoredWorktreeShowsHidden }
 
     init(document: DocumentWindow, app: Edit) {
@@ -237,6 +240,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         case .search: showSearch()
         case .worktree: showWorktree(focus: false)
         case .scratches: showScratches(focus: false)
+        case .sourceControl: showSourceControl(focus: false)
         }
     }
 
@@ -276,6 +280,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         case .search: searchPanel().focusSearch(reveal: revealSearch)
         case .worktree: showWorktree()
         case .scratches: showScratches()
+        case .sourceControl: showSourceControl()
         }
     }
 
@@ -332,6 +337,22 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         reloadScratches()
     }
 
+    private func showSourceControl(focus: Bool = true) {
+        document.requestAutosave()
+        let panel: SourceControlSidebar
+        if let sourceControl {
+            panel = sourceControl
+        } else {
+            panel = SourceControlSidebar(document: document, app: app)
+            sourceControl = panel
+            installContent(panel.view)
+        }
+        panel.update(folder: document.folderURL)
+        selectMode(.sourceControl)
+        present(focusing: focus ? panel.focusResponder : nil)
+        panel.setActive(true)
+    }
+
     private func installContent(_ view: NSView) {
         view.translatesAutoresizingMaskIntoConstraints = false
         controller.view.addSubview(view)
@@ -365,8 +386,10 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         search?.view.isHidden = mode != .search
         worktree?.view.isHidden = mode != .worktree
         scratches?.view.isHidden = mode != .scratches
+        sourceControl?.view.isHidden = mode != .sourceControl
         if mode != .worktree { worktree?.setActive(false) }
         if mode != .scratches { scratches?.setActive(false) }
+        if mode != .sourceControl { sourceControl?.setActive(false) }
         document.updateOccurrenceFindSettings()
         if changed && mode != .search { search?.switchedAway() }
         updateSidebarMenu()
@@ -384,6 +407,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         }
         updateSidebarMenu()
         reloadScratches()
+        sourceControl?.update(folder: document.folderURL)
     }
 
     func documentTitleChanged(reveal: Bool) {
@@ -439,7 +463,8 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
                          keyEquivalent: "").target = self
             menu.addItem(withTitle: SidebarMode.scratches.title, action: #selector(selectScratchSidebar(_:)),
                          keyEquivalent: "").target = self
-            menu.addItem(withTitle: "Source Control", action: nil, keyEquivalent: "").isEnabled = false
+            menu.addItem(withTitle: SidebarMode.sourceControl.title, action: #selector(selectSourceControlSidebar(_:)),
+                         keyEquivalent: "").target = self
             menu.addItem(withTitle: SidebarMode.search.title, action: #selector(selectSearchSidebar(_:)),
                          keyEquivalent: "").target = self
         }
@@ -460,6 +485,8 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
             hidden.state = worktree.showsHidden ? .on : .off
         case .scratches:
             scratches?.addRootCreationItems(to: menu)
+        case .sourceControl:
+            menu.addItem(withTitle: "Refresh Changes", action: #selector(refreshSourceControl(_:)), keyEquivalent: "").target = self
         }
     }
 
@@ -492,6 +519,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         updateSidebarToolbarVisibility()
         worktree?.setActive(worktreeVisible)
         scratches?.setActive(scratchesVisible)
+        sourceControl?.setActive(sourceControlVisible)
         if !isVisible {
             search?.clearTransientFocus()
             if focusIsInSidebar { returnFocus() }
@@ -532,6 +560,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         setVisible(false)
         worktree?.setActive(false)
         scratches?.setActive(false)
+        sourceControl?.setActive(false)
         search?.clearTransientFocus()
         PanelLayout.withoutAnimation { setSidebarCollapsed(true) }
         search?.refreshDecorations()
@@ -577,6 +606,11 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         showScratches()
     }
 
+    @objc private func selectSourceControlSidebar(_ sender: Any?) {
+        rememberFocus()
+        showSourceControl()
+    }
+
     @objc private func toggleHiddenFiles(_ sender: Any?) {
         guard worktreeVisible, let worktree else { return }
         worktree.setShowsHidden(!worktree.showsHidden)
@@ -584,4 +618,6 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     }
 
     @objc private func refreshSearch(_ sender: Any?) { search?.perform(.refresh) }
+
+    @objc private func refreshSourceControl(_ sender: Any?) { sourceControl?.refresh() }
 }

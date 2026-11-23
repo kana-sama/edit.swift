@@ -545,7 +545,7 @@ enum FindCheck {
         let items = picker.menu.items
         try expect(!picker.isHidden && items.map(\.title) == ["Worktree", "Scratches", "Source Control", "Search"] &&
                    !items[0].isEnabled && !items[0].isHidden && items[1].isEnabled &&
-                   !items[2].isEnabled && !items[2].isHidden && items[3].isEnabled && items[3].state == .on,
+                   items[2].isEnabled && !items[2].isHidden && items[3].isEnabled && items[3].state == .on,
                    "the sidebar title is a mode switcher with unavailable modes listed")
         let menuButton = try require(options.view as? NSButton, "native ellipsis button")
         try expect(!options.isHidden && !menuButton.isBordered && options.menu.items.map(\.title) == ["Refresh Search"] &&
@@ -917,7 +917,7 @@ enum FindCheck {
                    ellipsis.menu.items.map(\.title) == ["New File…", "New Folder…", "", "Show Hidden Files"] &&
                    ellipsis.menu.item(withTitle: "New File…")?.isEnabled == true &&
                    ellipsis.menu.item(withTitle: "New Folder…")?.isEnabled == true &&
-                   menu.item(withTitle: "Source Control")?.isEnabled == false &&
+                   menu.item(withTitle: "Source Control")?.isEnabled == true &&
                    menu.item(withTitle: "Source Control")?.isHidden == false &&
                    menu.item(withTitle: "Search")?.isEnabled == true && menu.item(withTitle: "Worktree")?.state == .on,
                    "Worktree still offers Search alongside its own menu option")

@@ -35,7 +35,7 @@ struct JJFileComparison: Sendable {
     var normalizeCRLF = false
 }
 
-private enum JJEntryKind: String {
+enum JJEntryKind: String, Sendable {
     case absent, file, symlink, tree, conflict
     case submodule = "git-submodule"
 }
@@ -46,14 +46,35 @@ private struct JJChangedEntry: Equatable, Sendable {
 }
 
 enum JJRepository {
-    private enum Failure: Error {
-        case unavailable, invalidResponse, staleWorkspace
+    private enum Failure: LocalizedError {
+        case unavailable, invalidResponse, staleWorkspace, busy
         case command(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .unavailable: "Jujutsu is unavailable."
+            case .invalidResponse: "Jujutsu returned an unexpected response."
+            case .staleWorkspace: "The Jujutsu working copy is stale. Run jj workspace update-stale and try again."
+            case .busy: "Another Jujutsu operation is running. Try again when it finishes."
+            case .command(let message): message.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
     }
 
+    private actor Writes {
+        var active: Set<URL> = []
+
+        func run<T: Sendable>(in repository: URL, _ operation: @Sendable () async throws -> T) async throws -> T {
+            guard active.insert(repository).inserted else { throw Failure.busy }
+            defer { active.remove(repository) }
+            return try await operation()
+        }
+    }
+
+    private static let writes = Writes()
     private static let processQueue = DispatchQueue(label: "Edit.Jujutsu", qos: .utility, attributes: .concurrent)
     private static let readLimit = 32 * 1024 * 1024
-    private static let fileLimit = 4 * 1024 * 1024
+    static let fileLimit = 4 * 1024 * 1024
     static var executable: URL? { executable(in: ProcessInfo.processInfo.environment) }
 
     static func discover(at directory: URL) async -> JJWorkspace? {
@@ -155,12 +176,7 @@ enum JJRepository {
         } else if source == .file {
             // A one-file native diff materializes the merged parent on the left.
             // Passing a fixed program and arguments avoids user diff tools and shell interpolation.
-            base = try await readCommand([
-                "--config", #"merge-tools.edit-jj-source.program="/bin/cat""#,
-                "--config", #"merge-tools.edit-jj-source.diff-args=["$left"]"#,
-                "--config", #"merge-tools.edit-jj-source.diff-invocation-mode="file-by-file""#,
-                "diff", "-r", "@", "--tool", "edit-jj-source", fileset,
-            ], in: workspace, at: pin, limit: fileLimit)
+            base = try await readMergedParent(fileset, revision: "@", in: workspace, at: pin)
         } else {
             base = nil
         }
@@ -172,7 +188,29 @@ enum JJRepository {
                                 normalizeCRLF: normalizeCRLF)
     }
 
+    static func readMergedParent(
+        _ fileset: String, revision: String, in workspace: JJWorkspace, at operationID: String,
+        limit: Int = fileLimit
+    ) async throws -> Data {
+        try await readCommand([
+            "--config", #"merge-tools.edit-jj-source.program="/bin/cat""#,
+            "--config", #"merge-tools.edit-jj-source.diff-args=["$left"]"#,
+            "--config", #"merge-tools.edit-jj-source.diff-invocation-mode="file-by-file""#,
+            "diff", "-r", revision, "--tool", "edit-jj-source", fileset,
+        ], in: workspace, at: operationID, limit: limit)
+    }
+
     static func snapshot(_ workspace: JJWorkspace) async throws {
+        try await withWriteAccess(in: workspace) { try await snapshotWithWriteAccess(workspace) }
+    }
+
+    static func withWriteAccess<T: Sendable>(
+        in workspace: JJWorkspace, _ operation: @Sendable () async throws -> T
+    ) async throws -> T {
+        try await writes.run(in: workspace.repository, operation)
+    }
+
+    static func snapshotWithWriteAccess(_ workspace: JJWorkspace) async throws {
         let head = try await operation(in: workspace)
         let commit = try await workspaceCommit(in: workspace, at: head)
         try await requireCurrentWorkingCopy(workspace, operationID: head, commitID: commit)
@@ -182,7 +220,7 @@ enum JJRepository {
         _ = try await command(["--at-op=@", "util", "snapshot"], in: workspace, timeout: nil)
     }
 
-    private static func requireCurrentWorkingCopy(
+    static func requireCurrentWorkingCopy(
         _ workspace: JJWorkspace, operationID: String, commitID: String
     ) async throws {
         // jj has no working-copy operation template. This command reports the actual local
@@ -237,14 +275,14 @@ enum JJRepository {
         return nil
     }
 
-    private static func readCommand(
+    static func readCommand(
         _ arguments: [String], in workspace: JJWorkspace, at operationID: String = "@", limit: Int = readLimit
     ) async throws -> Data {
         guard operationID == "@" || isOperationID(operationID) else { throw Failure.invalidResponse }
         return try await command(["--at-op=\(operationID)", "--ignore-working-copy"] + arguments, in: workspace, limit: limit)
     }
 
-    private static func command(
+    static func command(
         _ arguments: [String], in workspace: JJWorkspace, limit: Int = readLimit, timeout: TimeInterval? = 12
     ) async throws -> Data {
         guard let executable = await onProcessQueue(body: { Self.executable }) else { throw Failure.unavailable }
@@ -284,15 +322,15 @@ enum JJRepository {
         return String(data: data, encoding: .utf8)
     }
 
-    private static func template(_ fields: [String]) -> String {
+    static func template(_ fields: [String]) -> String {
         fields.map { $0 + #" ++ "\0""# }.joined(separator: " ++ ")
     }
 
-    private static func kind(_ name: String) -> String {
+    static func kind(_ name: String) -> String {
         #"if(\#(name).conflict(), "conflict", if(\#(name).normal_value(), \#(name).file_type(), "absent"))"#
     }
 
-    private static func records(in data: Data, width: Int) throws -> [[String]] {
+    static func records(in data: Data, width: Int) throws -> [[String]] {
         guard !data.isEmpty else { return [] }
         guard data.last == 0 else { throw Failure.invalidResponse }
         let fields = data.split(separator: 0, omittingEmptySubsequences: false).dropLast()
@@ -305,7 +343,7 @@ enum JJRepository {
         }
     }
 
-    private static func literalFileset(_ path: String) -> String {
+    static func literalFileset(_ path: String) -> String {
         let escaped = path.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "\n", with: #"\n"#)
@@ -314,7 +352,7 @@ enum JJRepository {
         return #"root-file:"\#(escaped)""#
     }
 
-    private static func isRelativePath(_ path: String) -> Bool {
+    static func isRelativePath(_ path: String) -> Bool {
         !path.isEmpty && path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
             !$0.isEmpty && $0 != "." && $0 != ".."
         }
@@ -324,7 +362,7 @@ enum JJRepository {
         value.utf8.count == 128 && isHexID(value)
     }
 
-    private static func isHexID(_ value: String) -> Bool {
+    static func isHexID(_ value: String) -> Bool {
         value.utf8.count >= 40 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
     }
 }

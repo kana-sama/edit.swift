@@ -2,7 +2,7 @@ import AppKit
 
 @MainActor
 final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTextFieldDelegate {
-    enum Mode { case worktree, scratches }
+    enum Mode { case worktree, scratches, sourceControl }
 
     private enum RowID: Hashable {
         case file(String)
@@ -10,6 +10,7 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         case scratchCategory(String?)
         case scratch(UUID)
         case draft(UUID)
+        case revisionPath(String, directory: Bool)
 
         static func fileURL(_ url: URL) -> Self { .file(WorktreeFileOperations.path(url)) }
 
@@ -25,6 +26,8 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         let isDirectory: Bool
         let outside: Bool
         var scratchFile: ScratchFile?
+        var sourceControlFile: JJSourceControlFile?
+        var sourceControlStatus = JJStatusCounts()
         var displayName: String?
         var isIgnored = false
         var isSystemHidden = false
@@ -67,6 +70,13 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     private enum OpenTarget: Equatable {
         case file(URL)
         case scratch(UUID)
+        case revision(JJSourceControlFile, RevisionSelection)
+    }
+
+    private struct RevisionSelection: Equatable {
+        let revision: JJSourceControlRevision
+        let workspace: JJWorkspace
+        let operationID: String
     }
 
     @MainActor
@@ -110,6 +120,9 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     private var currentScratchID: UUID?
     private var pendingScratchFiles: [ScratchFile]?
     private var jjDecorations: JJWorktreeDecorations?
+    private var revisionSelection: RevisionSelection?
+    private var revisionFiles: [JJSourceControlFile] = []
+    private var revisionItems: [RowID: Item] = [:]
 
     private lazy var worktreeSource = mode == .worktree ? SidebarWorktreeSource(
         document: document, app: app,
@@ -145,16 +158,22 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         tree.backgroundColor = .clear
         tree.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         tree.intercellSpacing.width = 0
-        tree.allowsMultipleSelection = true
+        tree.allowsMultipleSelection = mode != .sourceControl
         tree.allowsEmptySelection = true
         tree.floatsGroupRows = false
-        tree.setAccessibilityLabel(mode == .worktree ? "Worktree" : "Scratches")
+        switch mode {
+        case .worktree: tree.setAccessibilityLabel("Worktree")
+        case .scratches: tree.setAccessibilityLabel("Scratches")
+        case .sourceControl: tree.setAccessibilityLabel("Changed Files")
+        }
         tree.dataSource = self
         tree.delegate = self
         tree.owner = self
-        tree.registerForDraggedTypes([.fileURL])
-        tree.setDraggingSourceOperationMask([.move, .copy], forLocal: true)
-        tree.setDraggingSourceOperationMask(.copy, forLocal: false)
+        if mode != .sourceControl {
+            tree.registerForDraggedTypes([.fileURL])
+            tree.setDraggingSourceOperationMask([.move, .copy], forLocal: true)
+            tree.setDraggingSourceOperationMask(.copy, forLocal: false)
+        }
 
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
@@ -246,6 +265,76 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         installScratchFiles(files, current: current, preserving: selectedItems.map(\.id))
     }
 
+    func updateSourceControl(
+        revision: JJSourceControlRevision, workspace: JJWorkspace, operationID: String, files: [JJSourceControlFile]
+    ) {
+        guard mode == .sourceControl else { return }
+        let previous = revisionSelection
+        let sameChange = previous?.workspace == workspace && previous?.revision.changeID == revision.changeID
+        revisionSelection = RevisionSelection(revision: revision, workspace: workspace, operationID: operationID)
+        guard !sameChange || revisionFiles != files else { return }
+        let selection = sameChange ? selectedItems.map(\.id) : []
+        let previousDirectories = sameChange ? Set(revisionItems.keys) : []
+        if !sameChange { expanded.removeAll() }
+        revisionFiles = files
+        revisionItems.removeAll(keepingCapacity: true)
+        let root = Item(.revisionPath("", directory: true), directory: true, fileURL: workspace.root)
+        root.isLoaded = true
+        self.root = root
+        for file in files {
+            let components = file.path.split(separator: "/")
+            guard let name = components.last, !components.contains(where: { $0 == "." || $0 == ".." }),
+                  components.joined(separator: "/") == file.path else { continue }
+            var parent = root
+            var path = ""
+            for component in components.dropLast() {
+                if !path.isEmpty { path += "/" }
+                path += component
+                let id = RowID.revisionPath(path, directory: true)
+                let folder: Item
+                if let existing = revisionItems[id] {
+                    folder = existing
+                } else {
+                    let url = workspace.root.appending(path: path, directoryHint: .isDirectory)
+                    folder = Item(id, directory: true, fileURL: url)
+                    folder.displayName = String(component)
+                    folder.isLoaded = true
+                    parent.children.append(folder)
+                    revisionItems[id] = folder
+                    if !previousDirectories.contains(id), files.count <= 100 || parent === root { expanded.insert(id) }
+                }
+                folder.sourceControlStatus.add(file.status)
+                parent = folder
+            }
+            let id = RowID.revisionPath(file.path, directory: false)
+            guard revisionItems[id] == nil else { continue }
+            let url = workspace.root.appending(path: file.path, directoryHint: .notDirectory)
+            let item = Item(id, directory: false, fileURL: url)
+            item.displayName = String(name)
+            item.sourceControlFile = file
+            parent.children.append(item)
+            revisionItems[id] = item
+        }
+        for folder in [root] + revisionItems.values.filter(\.isDirectory) {
+            folder.children.sort {
+                if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+                return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+            }
+        }
+        expanded.formIntersection(revisionItems.keys)
+        reloadTree(keeping: selection)
+    }
+
+    func clearSourceControl() {
+        guard mode == .sourceControl, root != nil else { return }
+        revisionSelection = nil
+        revisionFiles = []
+        revisionItems = [:]
+        expanded.removeAll()
+        root = nil
+        reloadTree()
+    }
+
     private func installScratchFiles(_ files: [ScratchFile], current: UUID?, preserving selection: [RowID]) {
         guard let scratchSource else { return }
         if root == nil {
@@ -332,7 +421,7 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     func setShowsHidden(_ enabled: Bool) { worktreeSource?.setShowsHidden(enabled) }
 
     func refresh() {
-        guard let root else { return }
+        guard mode == .worktree, let root else { return }
         for item in expandedDirectories(from: root) { load(item, force: true) }
     }
 
@@ -541,6 +630,7 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         case .scratch: return root?.visibleChildren.lazy.compactMap { $0.visibleChildren.first { $0.id == id } }.first
         case .draft: return provisionalEntry?.id == id ? provisionalEntry : nil
         case .file(let path): return fileItem(at: path)
+        case .revisionPath: return revisionItems[id]
         }
     }
 
@@ -628,7 +718,10 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         }
         let path = item.id.filePath ?? backingURL?.path ?? (item.isDirectory ? item.scratchCategory ?? "Global" : item.name)
         cell.configure(name: item.name, path: path, icon: icon, muted: muted)
-        cell.setJJStatus(jjStatus(for: item))
+        let detail = item.sourceControlFile.map { file in
+            file.sourcePath.map { "\(file.statusName) from \($0)" } ?? file.statusName
+        }
+        cell.setJJStatus(jjStatus(for: item), detail: detail)
         return cell
     }
 
@@ -644,6 +737,7 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     private func jjStatus(for item: Item) -> JJPathStatus? {
+        if mode == .sourceControl { return item.sourceControlFile?.status ?? item.sourceControlStatus.status }
         guard let url = item.fileURL, !item.outside, item !== provisionalEntry else { return nil }
         return jjDecorations?.status(at: url, directory: item.isDirectory)
     }
@@ -651,9 +745,11 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     private var selectedItems: [Item] { tree.selectedRowIndexes.compactMap { tree.item(atRow: $0) as? Item } }
 
     func openFile(at row: Int, focusContent: Bool = false) {
+        guard mode != .sourceControl || tree.isEnabled else { return }
         guard let item = tree.item(atRow: row) as? Item, !item.isDirectory, item !== provisionalEntry else { return }
         let target: OpenTarget
-        if let file = item.scratchFile { target = .scratch(file.id) }
+        if let file = item.sourceControlFile, let revisionSelection { target = .revision(file, revisionSelection) }
+        else if let file = item.scratchFile { target = .scratch(file.id) }
         else if let url = item.fileURL { target = .file(url) }
         else { return }
         if focusContent && openingFile == nil && item.id == currentRow {
@@ -683,6 +779,12 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
                         self.isActive && document.folderURL == folder &&
                             (self.pendingOpen == nil || self.pendingOpen?.target == target)
                     }
+                case .revision(let file, let selection):
+                    opened = await document.openSourceControlFile(file, in: selection.revision, workspace: selection.workspace,
+                                                                   operationID: selection.operationID) {
+                        self.isActive && self.tree.isEnabled && self.revisionSelection == selection &&
+                            (self.pendingOpen == nil || self.pendingOpen?.target == target)
+                    }
                 }
                 if opened && focusSelectionRevision == self.selectionRevision && self.pendingOpen == nil &&
                     self.isActive && document.window.firstResponder === self.tree {
@@ -693,6 +795,7 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     func activateClickedRow(_ row: Int) {
+        guard mode != .sourceControl || tree.isEnabled else { return }
         if (tree.item(atRow: row) as? Item)?.isDirectory == true {
             toggleFolder(at: row, animated: true)
         } else {
@@ -701,6 +804,7 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     func activateSelection() {
+        guard mode != .sourceControl || tree.isEnabled else { return }
         let row = tree.selectedRow
         if row < 0 {
             document.focusContent()
@@ -1119,6 +1223,17 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     func copySelection() {
+        if mode == .sourceControl {
+            let paths = selectedItems.compactMap { item in
+                if case .revisionPath(let path, _) = item.id { return path }
+                return nil as String?
+            }
+            if !paths.isEmpty {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(paths.joined(separator: "\n"), forType: .string)
+            }
+            return
+        }
         if let scratchSource {
             scratchSource.actions.copy(selectedItems.compactMap(\.scratchFile))
             return
@@ -1143,7 +1258,8 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem object: Any) -> (any NSPasteboardWriting)? {
-        guard let item = object as? Item, item !== provisionalEntry, !item.outside || !item.isDirectory else { return nil }
+        guard mode != .sourceControl, let item = object as? Item, item !== provisionalEntry,
+              !item.outside || !item.isDirectory else { return nil }
         if let scratchSource {
             return item.scratchFile.map { scratchSource.backingURL(for: $0) as NSURL }
         }
@@ -1541,7 +1657,7 @@ private final class WorktreeCell: NSTableCellView {
         toolTip = path
     }
 
-    func setJJStatus(_ status: JJPathStatus?) {
+    func setJJStatus(_ status: JJPathStatus?, detail changeType: String? = nil) {
         jjStatus = status
         let name = label.stringValue
         let detail: String?
@@ -1551,7 +1667,7 @@ private final class WorktreeCell: NSTableCellView {
         case .conflict: detail = "Unresolved conflict"
         case nil: detail = nil
         }
-        label.setAccessibilityLabel(detail.map { "\(name), \($0)" })
+        label.setAccessibilityLabel((changeType ?? detail).map { "\(name), \($0)" })
         updateJJTextColor()
     }
 

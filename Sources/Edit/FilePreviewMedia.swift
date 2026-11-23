@@ -17,6 +17,10 @@ struct FilePreviewDetails: Sendable {
 
     private static let previewPixelLimit = 1600
 
+    static func revisionEntry(kind: String) -> Self {
+        Self(kind: kind, size: nil, created: nil, modified: nil)
+    }
+
     @concurrent
     static func load(_ url: URL) async -> Self {
         let target = url.resolvingSymlinksInPath()
@@ -40,12 +44,30 @@ struct FilePreviewDetails: Sendable {
         return details
     }
 
+    @concurrent
+    static func loadRevision(_ data: Data, at path: URL) async -> (Self, FilePreviewMediaBacking?) {
+        let type = UTType(filenameExtension: path.pathExtension)
+        var details = Self(kind: type?.localizedDescription ?? "File", size: Int64(data.count), created: nil, modified: nil)
+        if type?.conforms(to: .image) == true, let source = CGImageSourceCreateWithData(data as CFData, nil) {
+            details.loadImage(source)
+        } else if type?.conforms(to: .movie) == true || type?.conforms(to: .video) == true,
+                  let backing = try? FilePreviewMediaBacking(data, filename: path.lastPathComponent) {
+            await details.loadVideo(backing.url)
+            return (details, backing)
+        }
+        return (details, nil)
+    }
+
     private mutating func loadImage(_ url: URL) {
         guard let source = CGImageSourceCreateWithURL(
             url as CFURL,
             [kCGImageSourceShouldCache: false] as CFDictionary
         ) else { return }
 
+        loadImage(source)
+    }
+
+    private mutating func loadImage(_ source: CGImageSource) {
         if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
             width = properties[kCGImagePropertyPixelWidth] as? Int
             height = properties[kCGImagePropertyPixelHeight] as? Int
@@ -85,6 +107,25 @@ struct FilePreviewDetails: Sendable {
         generator.requestedTimeToleranceAfter = .zero
         image = try? await generator.image(at: start).image
     }
+}
+
+final class FilePreviewMediaBacking: Sendable {
+    let url: URL
+    private let directory: URL
+
+    init(_ data: Data, filename: String) throws {
+        directory = FileManager.default.temporaryDirectory.appending(path: "edit-preview-\(UUID().uuidString)",
+                                                                     directoryHint: .isDirectory)
+        url = directory.appending(path: filename, directoryHint: .notDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        do { try data.write(to: url) } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
+    }
+
+    deinit { try? FileManager.default.removeItem(at: directory) }
 }
 
 @MainActor
