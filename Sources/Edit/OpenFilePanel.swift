@@ -212,6 +212,7 @@ final class OpenFilePanelHelper: NSObject, NSApplicationDelegate {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.directoryURL = directory
         self.panel = panel
