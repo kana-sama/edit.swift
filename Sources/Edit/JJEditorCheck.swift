@@ -125,39 +125,77 @@ enum JJEditorCheck {
         window.setFrame(frame, display: false)
         document.setFolder(FileManager.default.temporaryDirectory)
         document.toggleSidebarFocus(.worktree)
-        document.restoreTerminal(DocumentTerminalState(
-            panel: TerminalPanelState(dock: .right, spaces: [], selectedSpace: nil, nextSpaceNumber: 1),
-            sizes: TerminalDockSizes(), isVisible: true, wasFocused: false
-        ))
-
         scroll.scrollerStyle = .overlay
         window.layoutIfNeeded()
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
-        let previousWidth = scroll.bounds.width
+        let undockedEdge = scroll.safeAreaRect.maxX
         let mark = JJLineMark(kind: .insertion, lines: 1..<2)
         let starts = [0, 4, 8, 14]
         editor.setJJLineMarks([mark], lineStarts: starts)
 
+        document.restoreTerminal(DocumentTerminalState(
+            panel: TerminalPanelState(dock: .right, spaces: [], selectedSpace: nil, nextSpaceNumber: 1),
+            sizes: TerminalDockSizes(), isVisible: true, wasFocused: false
+        ))
+        window.layoutIfNeeded()
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+
+        func checkShortTrack(previousEdge: CGFloat) throws {
+            let clip = scroll.contentView
+            let rightEdge = scroll.safeAreaRect.maxX
+            guard document.isTerminalDockedRight, let sidebar = document.documentSplitView.arrangedSubviews.last,
+                  abs(scroll.convert(sidebar.bounds, from: sidebar).minX - rightEdge) < 2,
+                  rightEdge + 100 < scroll.bounds.maxX, editor.frame.height <= clip.bounds.height else {
+                throw Failure("put the scrollbar at the exposed edge of a split editor with a short document")
+            }
+            let width = NSScroller.scrollerWidth(for: scroll.verticalScroller?.controlSize ?? .regular, scrollerStyle: .overlay)
+            let y = scroll.isFlipped ? clip.frame.minY + clip.frame.height * 0.375 : clip.frame.maxY - clip.frame.height * 0.375
+            let edge = NSRect(x: rightEdge - width / 2, y: y, width: 1, height: 1)
+            let oldEdge = edge.offsetBy(dx: previousEdge - rightEdge, dy: 0)
+            let paintedEdge = try capture(scroll, in: edge).colorAt(x: 0, y: 0)
+            let paintedBody = try capture(scroll, in: oldEdge).colorAt(x: 0, y: 0)
+            editor.setJJLineMarks([])
+            guard let paintedEdge, let paintedBody,
+                  try capture(scroll, in: edge).colorAt(x: 0, y: 0) != paintedEdge,
+                  try capture(scroll, in: oldEdge).colorAt(x: 0, y: 0) == paintedBody else {
+                throw Failure("paint a short document's marks at the exposed edge after the split changes")
+            }
+        }
+        try checkShortTrack(previousEdge: undockedEdge)
+        let dockedEdge = scroll.safeAreaRect.maxX
+        editor.setJJLineMarks([mark], lineStarts: starts)
         frame.size.width += 250
         window.setFrame(frame, display: false)
         window.layoutIfNeeded()
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
-        let clip = scroll.contentView
-        guard document.isTerminalDockedRight, scroll.bounds.width > previousWidth + 100,
-              editor.frame.height <= clip.bounds.height else {
-            throw Failure("resize a split editor with a document that fits")
+        guard scroll.safeAreaRect.maxX > dockedEdge + 100 else {
+            throw Failure("resize the exposed editor pane beside Terminal")
         }
-        let width = NSScroller.scrollerWidth(for: scroll.verticalScroller?.controlSize ?? .regular, scrollerStyle: .overlay)
-        let y = scroll.isFlipped ? clip.frame.minY + clip.frame.height * 0.375 : clip.frame.maxY - clip.frame.height * 0.375
-        let edge = NSRect(x: scroll.bounds.maxX - width / 2, y: y, width: 1, height: 1)
-        let oldEdge = edge.offsetBy(dx: previousWidth - scroll.bounds.width, dy: 0)
-        let paintedEdge = try capture(scroll, in: edge).colorAt(x: 0, y: 0)
-        let paintedBody = try capture(scroll, in: oldEdge).colorAt(x: 0, y: 0)
-        editor.setJJLineMarks([])
-        guard let paintedEdge, let paintedBody,
-              try capture(scroll, in: edge).colorAt(x: 0, y: 0) != paintedEdge,
-              try capture(scroll, in: oldEdge).colorAt(x: 0, y: 0) == paintedBody else {
-            throw Failure("a short document's marks follow the scrollbar edge after the split widens")
+        try checkShortTrack(previousEdge: dockedEdge)
+
+        let row = "A long line for the scrollbar check.\n"
+        editor.string = String(repeating: row, count: 240)
+        window.layoutIfNeeded()
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        scroll.scrollToVisibleContentOrigin(.zero)
+        scroll.flashScrollers()
+        guard let scroller = scroll.verticalScroller else { throw Failure("show the overlay scrollbar beside Terminal") }
+        let slot = scroller.rect(for: .knobSlot)
+        let knob = scroller.rect(for: .knob)
+        let fraction = 0.75
+        let markY = scroller.isFlipped ? slot.minY + slot.height * fraction : slot.maxY - slot.height * fraction
+        let point = NSPoint(x: slot.midX, y: markY)
+        guard slot.contains(point), !knob.contains(point) else {
+            throw Failure("sample the overlay track outside its thumb")
+        }
+        let origin = scroll.convert(point, from: scroller)
+        let probe = NSRect(x: origin.x, y: origin.y, width: 1, height: 1)
+        let bareTrack = try capture(scroll, in: probe).colorAt(x: 0, y: 0)
+        editor.setJJLineMarks([JJLineMark(kind: .insertion, lines: 174..<186)],
+                             lineStarts: (0..<240).map { $0 * row.utf16.count })
+        guard let bareTrack, let paintedTrack = try capture(scroll, in: probe).colorAt(x: 0, y: 0),
+              paintedTrack != bareTrack else {
+            throw Failure("paint an offscreen change through the visible overlay scroller beside Terminal")
         }
     }
 

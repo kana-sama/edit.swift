@@ -114,7 +114,8 @@ final class JJEditorDecorations {
     private func trackFrame(in scroll: NSScrollView, scroller: NSScroller?) -> NSRect {
         let clip = scroll.contentView.frame
         let width = NSScroller.scrollerWidth(for: scroller?.controlSize ?? .regular, scrollerStyle: scroll.scrollerStyle)
-        let edge = NSRect(x: scroll.bounds.maxX - width, y: clip.minY, width: width, height: clip.height)
+        // The scroll view extends under the docked sidebars. The scroller follows the exposed pane.
+        let edge = NSRect(x: scroll.safeAreaRect.maxX - width, y: clip.minY, width: width, height: clip.height)
 
         guard let scroller, scroller.superview === scroll, hasVerticalScrollRange(in: scroll) else { return edge }
         let slot = scroll.convert(scroller.rect(for: .knobSlot), from: scroller).intersection(scroll.bounds)
