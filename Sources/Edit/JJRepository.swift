@@ -77,6 +77,13 @@ enum JJRepository {
     static let fileLimit = 4 * 1024 * 1024
     static var executable: URL? { executable(in: ProcessInfo.processInfo.environment) }
 
+    static func hasWorkspace(at directory: URL) -> Bool {
+        guard let location = enclosingWorkspace(of: directory) else { return false }
+        let operationStore = location.repository.appending(path: "op_store", directoryHint: .isDirectory)
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: operationStore.path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+
     static func discover(at directory: URL) async -> JJWorkspace? {
         guard let candidate = await onProcessQueue(body: { enclosingWorkspace(of: directory) }),
               let response = try? await readCommand(["root"], in: candidate),

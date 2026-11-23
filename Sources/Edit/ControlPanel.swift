@@ -646,6 +646,10 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         case ("b", .command):
             document.performFind(.toggleSidebar)
             return nil
+        case ("g", [.command, .shift]) where document.canFocusSidebar(.sourceControl):
+            dismiss(restoreFocus: true)
+            document.toggleSidebarFocus(.sourceControl)
+            return nil
         case ("f", .command), ("e", [.command, .shift]), ("w", [.command, .shift]):
             let mode: SidebarMode = switch key {
             case "f": .search

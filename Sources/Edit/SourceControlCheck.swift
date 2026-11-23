@@ -4,10 +4,13 @@ import AppKit
 enum SourceControlCheck {
     static func run(in app: Edit, render: (NSWindow) throws -> Void) async throws {
         guard let executable = JJRepository.executable else { return }
-        let folder = FileManager.default.temporaryDirectory.appending(path: "Edit Source Control \(UUID())")
+        let fixture = FileManager.default.temporaryDirectory.appending(path: "Edit Jujutsu \(UUID())")
+        let folder = fixture.appending(path: "Project")
         let nested = folder.appending(path: "Notes")
+        let plain = fixture.appending(path: "Plain")
         try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: folder) }
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        try FileManager.default.createDirectory(at: plain, withIntermediateDirectories: false)
         let file = nested.appending(path: "Tracked.txt")
         let removed = folder.appending(path: "Removed.txt")
         let original = (1...18).map { "Line \($0)\n" }.joined()
@@ -29,12 +32,36 @@ enum SourceControlCheck {
 
         let document = app.makeDocument()
         defer { document.window.close() }
+        guard let menu = NSApplication.shared.mainMenu,
+              let viewMenu = menu.item(withTitle: "View")?.submenu,
+              let focus = viewMenu.item(withTitle: "Focus Jujutsu"),
+              let previous = menu.items.compactMap(\.submenu).lazy.compactMap({ $0.item(withTitle: "Find Previous") }).first,
+              let shortcut = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .shift], timestamp: 0,
+                                             windowNumber: document.window.windowNumber, context: nil, characters: "G",
+                                             charactersIgnoringModifiers: "g", isARepeat: false, keyCode: 5) else {
+            throw Failure("find the Focus Jujutsu command and its shortcut")
+        }
+        try expect(!app.validateUserInterfaceItem(focus), "disable Focus Jujutsu without an open folder")
         _ = try await app.openFile(nested, in: document)
-        document.toggleSidebarFocus(.sourceControl)
-        guard let panel = document.sourceControlSidebar else { throw Failure("open the Source Control sidebar") }
+        try expect(app.validateUserInterfaceItem(focus) && focus.keyEquivalent == "g" &&
+                   focus.keyEquivalentModifierMask == [.command, .shift] && previous.keyEquivalent.isEmpty,
+                   "assign Shift-Command-G to Focus Jujutsu in a nested workspace folder")
+        try expect(app.routeWindowEvent(shortcut) != nil && viewMenu.performKeyEquivalent(with: shortcut), "dispatch Shift-Command-G through the View menu")
+        guard let panel = document.sourceControlSidebar else { throw Failure("open Jujutsu from the shortcut, current mode \(document.sidebarMode.title)") }
+        document.window.layoutIfNeeded()
+        guard let sidebarMenu = document.window.toolbar?.items.compactMap({ $0 as? SidebarMenuItem }).first(where: { $0.modePicker != nil }) else {
+            throw Failure("install the Jujutsu sidebar switcher")
+        }
+        try expect(document.sidebarMode.title == "Jujutsu" && sidebarMenu.modePicker?.selectedItem?.title == "Jujutsu",
+                   "show the Jujutsu title in the switcher")
         try await waitFor("show the working change and both changed paths") {
             panel.selection?.isWorkingCopy == true && panel.detail?.files.count == 2
         }
+        try expect(document.window.firstResponder === panel.graphView.table, "move keyboard focus to the graph when it loads")
+        try expect(viewMenu.performKeyEquivalent(with: shortcut) && document.isSidebarVisible &&
+                   document.window.firstResponder === document.contentResponder, "return focus to the document without closing Jujutsu")
+        try expect(viewMenu.performKeyEquivalent(with: shortcut) && document.window.firstResponder === panel.graphView.table,
+                   "focus the graph again with the same shortcut")
         document.window.layoutIfNeeded()
         try expect(panel.graphView.revisions.contains { $0.subject == "Historical change" }, "show multiple revisions in the graph")
         try expect(panel.graphView.revisions.filter(\.isWorkingCopy).count == 1, "mark exactly one working-copy graph node")
@@ -67,8 +94,8 @@ enum SourceControlCheck {
         guard let historyRow = panel.graphView.revisions.firstIndex(where: { $0.subject == "Historical change" }) else {
             throw Failure("find the history row")
         }
-        let menu = panel.graphView.table.menuForRow?(historyRow)
-        try expect(menu?.item(withTitle: "Squash into Parent")?.isEnabled == true && menu?.item(withTitle: "Abandon Change…")?.isEnabled == true,
+        let contextMenu = panel.graphView.table.menuForRow?(historyRow)
+        try expect(contextMenu?.item(withTitle: "Squash into Parent")?.isEnabled == true && contextMenu?.item(withTitle: "Abandon Change…")?.isEnabled == true,
                    "offer change actions when opening the context menu on an unselected row")
         try await waitFor("browse a historical change while keeping the working-copy pointer") {
             panel.selection?.subject == "Historical change" && panel.detail?.files.count == 1
@@ -104,6 +131,13 @@ enum SourceControlCheck {
         try await waitFor("return from the revision preview to the live editor") {
             document.editor.isEditable && document.sourceControlRevisionBanner == nil && document.editor.string == working
         }
+        document.setFolder(plain)
+        try expect(document.isSidebarVisible && document.sidebarMode == .worktree && sidebarMenu.menu.item(withTitle: "Jujutsu")?.isEnabled == false,
+                   "leave Jujutsu and disable its switcher item when leaving the workspace")
+        try expect(!app.validateUserInterfaceItem(focus) && focus.keyEquivalent.isEmpty && previous.keyEquivalent == "g",
+                   "restore the Find Previous shortcut outside the workspace")
+        app.focusJujutsu(nil)
+        try expect(document.sidebarMode == .worktree, "ignore a direct focus command outside a workspace")
     }
 
     private static func row(named name: String, in outline: NSOutlineView) -> Int? {

@@ -64,6 +64,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     lazy var draftRecovery = DraftRecoveryStore(directory: storageFolder.appending(path: "DraftRecovery", directoryHint: .isDirectory))
     lazy var syntaxOverrides = SyntaxLanguageOverrides(defaults: isAgentCheck ? nil : .standard)
     private weak var recentMenu: NSMenu?
+    private weak var focusJujutsuItem: NSMenuItem?
+    private weak var findPreviousItem: NSMenuItem?
     private var controlPanel: ControlPanel?
     private var windowEventMonitor: Any?
     private var openFilePanel: OpenFilePanel?
@@ -244,6 +246,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     func routeWindowEvent(_ event: NSEvent) -> NSEvent? {
         switch event.type {
         case .keyDown:
+            if event.charactersIgnoringModifiers?.lowercased() == "g",
+               event.modifierFlags.intersection([.control, .command, .option, .shift]) == [.command, .shift] {
+                updateJujutsuShortcut()
+            }
             let document = documents.first { $0.window === event.window }
             return document?.handleTerminalKey(event) == true ? nil : event
         default:
@@ -273,6 +279,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     func menuWillOpen(_ menu: NSMenu) {
         activeDocument?.requestAutosave()
+        if menu === focusJujutsuItem?.menu || menu === findPreviousItem?.menu { updateJujutsuShortcut() }
         guard let recentMenu, menu === recentMenu || menu === recentMenu.supermenu else { return }
         populateRecentMenu(recentMenu)
         if menu === recentMenu { Task { await recentFiles.prune() } }
@@ -501,9 +508,23 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         focusSidebar(.scratches)
     }
 
+    @objc func focusJujutsu(_ sender: Any?) {
+        focusSidebar(.sourceControl)
+    }
+
+    func updateJujutsuShortcut() {
+        let document = activeDocument
+        let inWorkspace = document?.hasJujutsuWorkspace == true
+        document?.recheckJujutsuSidebar(available: inWorkspace)
+        // Keep Find Previous on the same shortcut in windows where Jujutsu is unavailable.
+        focusJujutsuItem?.keyEquivalent = inWorkspace ? "g" : ""
+        focusJujutsuItem?.keyEquivalentModifierMask = [.command, .shift]
+        findPreviousItem?.keyEquivalent = inWorkspace ? "" : "g"
+        findPreviousItem?.keyEquivalentModifierMask = [.command, .shift]
+    }
+
     private func focusSidebar(_ mode: SidebarMode) {
-        guard let document = activeDocument, document.window.attachedSheet == nil,
-              mode != .worktree || document.folderURL != nil else { return }
+        guard let document = activeDocument, document.canFocusSidebar(mode) else { return }
         controlPanel?.dismiss(restoreFocus: true)
         document.toggleSidebarFocus(mode)
     }
@@ -539,6 +560,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(toggleWorktreeSidebar(_:)):
             return activeDocument.map { $0.folderURL != nil && $0.window.attachedSheet == nil } ?? false
+        case #selector(focusJujutsu(_:)):
+            return activeDocument?.canFocusSidebar(.sourceControl) ?? false
         case #selector(findNext(_:)): return activeDocument?.canPerformFind(.next) ?? false
         case #selector(findPrevious(_:)): return activeDocument?.canPerformFind(.previous) ?? false
         case #selector(performFindControlAction(_:)):
@@ -656,6 +679,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         pendingFullScreen.removeAll { $0 === document }
         didFinishFullScreenRestore(for: document)
         documents.removeAll { $0 === document }
+        updateJujutsuShortcut()
     }
 
     func reserveSave(
@@ -1036,7 +1060,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         edit.addCommand("Find…", #selector(openFind(_:)), "f").target = self
         edit.addCommand("Replace…", #selector(openReplace(_:)), "f", [.command, .option]).target = self
         edit.addCommand("Find Next", #selector(findNext(_:)), "g").target = self
-        edit.addCommand("Find Previous", #selector(findPrevious(_:)), "g", [.command, .shift]).target = self
+        let previousItem = edit.addCommand("Find Previous", #selector(findPrevious(_:)), "g", [.command, .shift])
+        previousItem.target = self
+        findPreviousItem = previousItem
         edit.addItem(.separator())
 
         let lines = NSMenu(title: "Lines")
@@ -1069,6 +1095,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         view.addCommand("Toggle Sidebar", #selector(toggleSidebar(_:)), "b").target = self
         view.addCommand("Focus Worktree", #selector(toggleWorktreeSidebar(_:)), "e", [.command, .shift]).target = self
         view.addCommand("Focus Scratches", #selector(focusScratches(_:)), "w", [.command, .shift]).target = self
+        let jujutsuItem = view.addCommand("Focus Jujutsu", #selector(focusJujutsu(_:)), "", [.command, .shift])
+        jujutsuItem.target = self
+        focusJujutsuItem = jujutsuItem
         view.addCommand("Toggle Terminal", #selector(toggleTerminal(_:))).target = self
         view.addCommand("Command Mode…", #selector(showCommandMode(_:)), "p", [.command, .shift]).target = self
         view.addCommand("Change Language Mode…", #selector(showLanguageModes(_:))).target = self
@@ -1086,6 +1115,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         app.mainMenu = menuBar
         app.windowsMenu = window
         app.helpMenu = help
+        updateJujutsuShortcut()
     }
 
 #if EDIT_AGENT_CHECKS

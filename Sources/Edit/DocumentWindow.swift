@@ -151,6 +151,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     var displayedFileURL: URL? { sourceControlRevision == nil ? filePreview?.url ?? fileURL : nil }
     var fileIconURL: URL? { scratchFile?.filenameURL ?? displayedFileURL ?? sourceControlRevision?.url }
     var displayName: String { scratchFile?.name ?? fileIconURL?.lastPathComponent ?? "Untitled" }
+    var hasJujutsuWorkspace: Bool { folderURL.map(JJRepository.hasWorkspace(at:)) ?? false }
     var contentResponder: NSView { (filePreviewView as NSView?) ?? (emptyFolderView as NSView?) ?? editor }
 
     func focusContent() {
@@ -571,11 +572,22 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         sidebar.performFind(command)
     }
 
+    func canFocusSidebar(_ mode: SidebarMode) -> Bool {
+        guard !app.isQuitting, window.attachedSheet == nil else { return false }
+        return switch mode {
+        case .search: hasTextDocument
+        case .worktree: folderURL != nil
+        case .sourceControl: hasJujutsuWorkspace
+        case .scratches: true
+        }
+    }
+
     func toggleSidebarFocus(_ mode: SidebarMode) {
-        guard !app.isQuitting, window.attachedSheet == nil,
-              mode != .worktree || folderURL != nil, mode != .search || hasTextDocument else { return }
+        guard canFocusSidebar(mode) else { return }
         sidebar.toggleFocus(of: mode)
     }
+
+    func recheckJujutsuSidebar(available: Bool) { sidebar.recheckJujutsuAvailability(available) }
 
     func updateOccurrenceFindSettings() {
         editor.occurrenceHighlighting.updateFind(options: findSettings.options,
@@ -655,6 +667,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     func windowDidBecomeKey(_ notification: Notification) {
         reportAutosaveFailure()
         jjDocumentChanges?.recheck()
+        app.updateJujutsuShortcut()
     }
 
     func windowDidEndSheet(_ notification: Notification) {

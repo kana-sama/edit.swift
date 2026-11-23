@@ -8,7 +8,7 @@ enum SidebarMode: String, Codable, Sendable {
         case .search: "Search"
         case .worktree: "Worktree"
         case .scratches: "Scratches"
-        case .sourceControl: "Source Control"
+        case .sourceControl: "Jujutsu"
         }
     }
 }
@@ -205,7 +205,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     deinit { scratchReload?.cancel() }
 
     func restore(mode: SidebarMode?, width: Double, visible: Bool, showsHidden: Bool) {
-        rememberedMode = mode == .worktree && document.folderURL == nil ? .search : mode
+        rememberedMode = mode.map(availableMode)
         self.width = width
         restoredWorktreeShowsHidden = showsHidden
         document.updateOccurrenceFindSettings()
@@ -236,7 +236,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     }
 
     private func showCurrentMode() {
-        switch mode {
+        switch availableMode(mode) {
         case .search: showSearch()
         case .worktree: showWorktree(focus: false)
         case .scratches: showScratches(focus: false)
@@ -269,7 +269,6 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     }
 
     func toggleFocus(of mode: SidebarMode) {
-        guard mode != .worktree || document.folderURL != nil else { return }
         if isVisible && self.mode == mode && focusIsInSidebar {
             focusBeforeSidebar = nil
             returnFocus()
@@ -338,6 +337,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     }
 
     private func showSourceControl(focus: Bool = true) {
+        guard document.hasJujutsuWorkspace else { return }
         document.requestAutosave()
         let panel: SourceControlSidebar
         if let sourceControl {
@@ -396,18 +396,35 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     }
 
     func folderChanged() {
-        if let folder = document.folderURL {
-            if worktreeVisible { worktree?.update(folder: folder, currentFile: worktreeFile) }
-        } else if mode == .worktree {
-            if isVisible {
-                showSearch(focusingQuery: focusIsInSidebar)
-            } else {
-                selectMode(.search)
-            }
-        }
-        updateSidebarMenu()
+        if worktreeVisible, let folder = document.folderURL { worktree?.update(folder: folder, currentFile: worktreeFile) }
+        switchToAvailableMode()
         reloadScratches()
         sourceControl?.update(folder: document.folderURL)
+        app.updateJujutsuShortcut()
+    }
+
+    func recheckJujutsuAvailability(_ available: Bool) {
+        if mode == .sourceControl, !available { switchToAvailableMode() }
+        sidebarHeader?.menu.item(withTitle: SidebarMode.sourceControl.title)?.isEnabled = available
+    }
+
+    private func availableMode(_ mode: SidebarMode) -> SidebarMode {
+        if mode == .sourceControl, !document.hasJujutsuWorkspace { return document.folderURL == nil ? .search : .worktree }
+        if mode == .worktree, document.folderURL == nil { return .search }
+        return mode
+    }
+
+    private func switchToAvailableMode() {
+        let available = availableMode(mode)
+        if available == mode {
+            updateSidebarMenu()
+        } else if !isVisible {
+            selectMode(available)
+        } else if available == .worktree {
+            showWorktree(focus: focusIsInSidebar)
+        } else {
+            showSearch(focusingQuery: focusIsInSidebar)
+        }
     }
 
     func documentTitleChanged(reveal: Bool) {
@@ -425,6 +442,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     func makeSidebarHeader() -> SidebarMenuItem {
         let item = SidebarMenuItem(itemIdentifier: DocumentTitleBar.sidebarItemIdentifier, showsTitle: true, mode: mode)
         let options = SidebarMenuItem(itemIdentifier: Self.sidebarMenuItem, showsTitle: false, mode: mode)
+        item.menu.delegate = self
         options.menu.delegate = self
         updateSidebarMenuItems(item)
         updateSidebarMenuItems(options)
@@ -437,7 +455,9 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        if let options = sidebarHeader?.options, options.menu === menu {
+        if sidebarHeader?.menu === menu {
+            recheckJujutsuAvailability(document.hasJujutsuWorkspace)
+        } else if let options = sidebarHeader?.options, options.menu === menu {
             updateSidebarMenuItems(options)
         }
     }
@@ -469,6 +489,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
                          keyEquivalent: "").target = self
         }
         menu.item(withTitle: SidebarMode.worktree.title)?.isEnabled = document.folderURL != nil
+        menu.item(withTitle: SidebarMode.sourceControl.title)?.isEnabled = document.hasJujutsuWorkspace
         picker.selectItem(at: menu.indexOfItem(withTitle: mode.title))
     }
 

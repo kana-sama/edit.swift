@@ -2,7 +2,7 @@ import AppKit
 
 @MainActor
 final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
-    let view = NSView()
+    let view: NSView = SourceControlFocusView()
     let graphView = SourceControlGraphView()
     private(set) lazy var fileTree = SidebarFileTree(document: document, app: app, mode: .sourceControl)
     private unowned let document: DocumentWindow
@@ -72,11 +72,13 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
         graph: graphBody, changeHeader: makeHeader(changeToggle, actions: [actionsButton]), change: changeBody
     )
 
-    var focusResponder: NSView { graphView.table.isHiddenOrHasHiddenAncestor ? filterButton : graphView.table }
+    var focusResponder: NSView {
+        graphView.table.isEnabled && !graphView.table.isHiddenOrHasHiddenAncestor ? graphView.table : view
+    }
 
     private enum PanelError: LocalizedError {
         case noWorkspace
-        var errorDescription: String? { "Open a Jujutsu workspace to use Source Control." }
+        var errorDescription: String? { "Open a Jujutsu workspace to use this sidebar." }
     }
 
     private struct DescriptionDraft {
@@ -396,6 +398,9 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
             selection?.description == editing?.original
         graphView.table.isEnabled = canAct
         fileTree.outline.isEnabled = canAct && detail != nil
+        if document.window.firstResponder === view, focusResponder === graphView.table {
+            document.window.makeFirstResponder(graphView.table)
+        }
     }
 
     private func preview(_ direction: JJSourceControlOperations.Direction) async throws -> JJSourceControlOperations.Preview {
@@ -888,6 +893,11 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
         ])
         return header
     }
+}
+
+@MainActor
+private final class SourceControlFocusView: NSView {
+    override var acceptsFirstResponder: Bool { true }
 }
 
 private extension Array {
