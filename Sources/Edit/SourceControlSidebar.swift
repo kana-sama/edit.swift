@@ -68,6 +68,7 @@ final class SourceControlSidebar: NSObject {
 
 #if EDIT_AGENT_CHECKS
     var operationsViewForCheck: NSView { operations.checkView }
+    var descriptionViewForCheck: NSView { descriptionPopover.checkView }
     var revsetEditorViewForCheck: NSView { revsetEditor.checkView }
     func revsetMenuForCheck() -> NSMenu { makeRevsetMenu() }
 #endif
@@ -527,9 +528,19 @@ final class SourceControlSidebar: NSObject {
         alert.informativeText = "“\(change.subject)” will be folded into “\(parent.subject)”."
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 340, height: 116))
         let text = NSTextView(frame: NSRect(origin: .zero, size: scroll.contentSize))
+        text.isRichText = false
+        text.isVerticallyResizable = true
+        text.isHorizontallyResizable = false
+        text.autoresizingMask = [.width]
+        text.textContainer?.widthTracksTextView = true
+        text.textContainerInset = NSSize(width: 5, height: 5)
         text.font = .systemFont(ofSize: NSFont.systemFontSize)
         text.string = parent.description.trimmingCharacters(in: .newlines) + "\n\n" + change.description
-        SourceControlDescriptionPopover.configureEditor(text, in: scroll)
+        text.setAccessibilityLabel("Change Description")
+        scroll.borderType = .bezelBorder
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.documentView = text
         alert.accessoryView = scroll
         alert.addButton(withTitle: "Squash into Parent")
         alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"

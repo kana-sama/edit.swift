@@ -165,6 +165,7 @@ enum SourceControlCheck {
         }
         try expect(!FileManager.default.fileExists(atPath: external.path) && (try? String(contentsOf: file, encoding: .utf8)) == working,
                    "discard the selected added file and preserve unrelated changes")
+        try await checkDescription(in: document.window, panel: panel)
         document.setFolder(plain)
         try expect(document.isSidebarVisible && document.sidebarMode == .worktree && sidebarMenu.menu.item(withTitle: "Jujutsu")?.isEnabled == false,
                    "leave Jujutsu and disable its switcher item when leaving the workspace")
@@ -272,6 +273,95 @@ enum SourceControlCheck {
                 panel.revsetMenuForCheck().item(withTitle: "Default Log")?.state == .on &&
                 panel.graphView.table.isEnabled && panel.detail?.files.count == 2
         }
+    }
+
+    private static func checkDescription(in window: NSWindow, panel: SourceControlSidebar) async throws {
+        let origin = window.frame.origin
+        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
+        window.orderBack(nil)
+        defer {
+            window.orderOut(nil)
+            window.setFrameOrigin(origin)
+        }
+        try expect(window.alphaValue == 0 && window.ignoresMouseEvents && !NSApp.isActive, "keep the description check in the background")
+        let content = panel.descriptionViewForCheck
+        guard let revision = panel.selection,
+              let open = button(in: panel.view, where: { $0.toolTip == "Edit change description" }),
+              let save = button(in: content, where: { $0.title == "Save" }),
+              let scroll = descendant(of: content, where: { (_: NSScrollView) in true }),
+              let editor = scroll.documentView as? EditorTextView,
+              let layout = editor.textLayoutManager else { throw Failure("find the change description and its editor") }
+        func checkViewport() throws {
+            content.layoutSubtreeIfNeeded()
+            let size = scroll.contentSize
+            let cellWidth = ("0" as NSString).size(withAttributes: [.font: EditorTextView.defaultFont]).width
+            let padding = editor.textContainerInset.width + (editor.textContainer?.lineFragmentPadding ?? 0)
+            try expect(abs(size.width - 2 * padding - 72 * cellWidth) < 1.1 && size.height >= 220,
+                       "open the description with a 72-column viewport (\(size.width) × \(size.height))")
+        }
+        func paragraph(at offset: Int) throws -> NSAttributedString {
+            guard let location = layout.location(layout.documentRange.location, offsetBy: offset),
+                  let paragraph = layout.textLayoutFragment(for: location)?.textElement as? NSTextParagraph else {
+                throw Failure("lay out the description paragraph at \(offset)")
+            }
+            return paragraph.attributedString
+        }
+
+        open.performClick(nil)
+        try await waitFor("show the description in the popover") { content.window?.isVisible == true }
+        try checkViewport()
+        try expect(editor.string == revision.description && editor.isEditable && content.window?.firstResponder === editor &&
+                   editor.selectedRange() == NSRange(location: 0, length: revision.subject.utf16.count),
+                   "open the complete description and select the editable subject")
+
+        let prefix = "Keep the full change description visible in Edit e\u{301}"
+        let subject = prefix + " with more detail"
+        let body = "Show the complete description and keep the subject easy to edit."
+        let edited = subject + "\n\n" + String(repeating: body + "\n", count: 16)
+        editor.insertText(edited, replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
+        layout.ensureLayout(for: layout.documentRange)
+        let rendered = try paragraph(at: 0)
+        let bold = rendered.attribute(.font, at: prefix.utf16.count - 1, effectiveRange: nil) as? NSFont
+        let excess = rendered.attribute(.font, at: prefix.utf16.count, effectiveRange: nil) as? NSFont
+        let red = rendered.attribute(.foregroundColor, at: prefix.utf16.count, effectiveRange: nil) as? NSColor
+        let second = try paragraph(at: subject.utf16.count + 2)
+        try expect(bold.map { NSFontManager.shared.traits(of: $0).contains(.boldFontMask) } == true &&
+                   excess.map { NSFontManager.shared.traits(of: $0).contains(.boldFontMask) } == false &&
+                   red == .systemRed && second.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor != .systemRed,
+                   "emphasize 50 complete characters and color only the subject overflow")
+        try expect(editor.bounds.height > scroll.contentSize.height, "scroll a long body inside the popover")
+        editor.undoManager?.undo()
+        try expect(editor.string == revision.description, "undo edits in the description editor")
+        editor.undoManager?.redo()
+        try expect(editor.string == edited, "redo the complete description edit")
+        save.performClick(nil)
+        try await waitFor("save only the description text through Jujutsu") {
+            panel.selection?.description == edited && content.window?.isVisible != true && panel.graphView.table.isEnabled
+        }
+
+        open.performClick(nil)
+        try await waitFor("reopen the saved description at the subject") {
+            content.window?.isVisible == true && editor.selectedRange() == NSRange(location: 0, length: subject.utf16.count)
+        }
+        try checkViewport()
+        try expect(scroll.visibleContentOrigin.y < 2, "start the long description at the top of its viewport")
+
+        guard let index = panel.graphView.revisions.firstIndex(where: \.isImmutable) else {
+            throw Failure("find an immutable change to read")
+        }
+        let immutable = panel.graphView.revisions[index]
+        panel.graphView.table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        try await waitFor("select the immutable change") { panel.selection?.id == immutable.id }
+        guard let view = button(in: panel.view, where: { $0.toolTip == "View change description" }) else {
+            throw Failure("find the read-only description action")
+        }
+        view.performClick(nil)
+        try await waitFor("reopen the description for a read-only change") { content.window?.isVisible == true }
+        try checkViewport()
+        try expect(!editor.isEditable && editor.isSelectable && save.title == "Done" &&
+                   editor.string == (immutable.description.isEmpty ? "No description" : immutable.description),
+                   "show a full read-only description that can be copied")
+        save.performClick(nil)
     }
 
     private static func checkOperationDirection(in window: NSWindow, panel: SourceControlSidebar) async throws {
