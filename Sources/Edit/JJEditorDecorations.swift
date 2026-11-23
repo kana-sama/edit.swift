@@ -32,6 +32,7 @@ final class JJEditorDecorations {
     private var scrollerStyle: NSScroller.Style?
     private var lineStarts: [Int] = []
     private(set) var marks: [JJLineMark] = []
+    var allowsNavigation = true
     private var lastMarkLines: [Int] = []
     private var trackSize = NSSize.zero
     private var trackMarks: [PositionedMark] = []
@@ -48,6 +49,7 @@ final class JJEditorDecorations {
     }
 
     func setMarks(_ marks: [JJLineMark], lineStarts: [Int]) {
+        allowsNavigation = true
         guard marks != self.marks || lineStarts != self.lineStarts else { return }
         self.marks = marks.sorted {
             if $0.lines.lowerBound != $1.lines.lowerBound { return $0.lines.lowerBound < $1.lines.lowerBound }
@@ -101,7 +103,8 @@ final class JJEditorDecorations {
     }
 
     func hitTest(in scroll: NSScrollView, at point: NSPoint, nativeHit: NSView) -> NSView? {
-        guard track.superview === scroll, scroll.contentView.bounds.height < (scroll.documentView?.frame.height ?? 0),
+        guard allowsNavigation, track.superview === scroll,
+              scroll.contentView.bounds.height < (scroll.documentView?.frame.height ?? 0),
               trackMark(at: track.convert(point, from: scroll)) != nil else { return nil }
         if let scroller = nativeScroller,
            nativeHit === scroller || nativeHit.isDescendant(of: scroller),
@@ -151,7 +154,7 @@ final class JJEditorDecorations {
             nativeScroller?.mouseDown(with: event)
             return
         }
-        guard let editor, let scroll = editor.enclosingScrollView,
+        guard allowsNavigation, let editor, let scroll = editor.enclosingScrollView,
               let mark = trackMark(at: track.convert(event.locationInWindow, from: nil)) else { return }
         let line = mark.lines.lowerBound
         let lineHeight = editor.defaultParagraphStyle?.minimumLineHeight ?? 18

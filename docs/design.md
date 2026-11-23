@@ -12,6 +12,12 @@ Document windows use the compact unified AppKit toolbar with a fixed icon-only d
 
 Use system appearance, semantic colors, text styles, control metrics, and SF Symbols for interface chrome. Respect platform preferences for contrast and reduced transparency. Keep persistent controls focused on actions the owner needs.
 
+## Asynchronous updates
+
+Flicker is a rendering defect. Keep the last complete presentation visible while preparing its replacement, then install the new presentation in one update. When the visible result is temporarily out of date, give it a short, fixed timeout that repeated requests cannot extend. Suspend actions that need current information while the result is stale. At the timeout, show a stable pending or unavailable state until the current result is ready. Clear an old result immediately if it belongs to a different active context.
+
+File Preview keeps the current document and title together until the next preview is ready. Syntax highlighting keeps the existing colors while a new parse runs. Go to File keeps previous results visible and disables opening them while the next query runs. [File Preview](features/file-preview/spec.md) · [Syntax highlighting](features/syntax-highlighting/spec.md) · [Go to File](features/control/spec.md)
+
 ## Verifying native interactions
 
 Before implementing or changing an interaction, identify the closest system app and the equivalent view on the supported macOS release. Use Finder list view for a file tree. Follow the system app for layout, controls, feedback, keyboard access, and state transitions. Record any owner-requested exception in the feature specification.

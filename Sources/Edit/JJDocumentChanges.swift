@@ -20,6 +20,7 @@ final class JJDocumentChanges {
     private let monitor: JJChangeMonitor
     private let text: @MainActor () -> String?
     private let showMarks: @MainActor ([JJLineMark], [Int]) -> Void
+    private let suspendMarkerNavigation: @MainActor () -> Void
     private let showWorktree: @MainActor (JJWorktreeDecorations?) -> Void
     private var file: File?
     private var folder: URL?
@@ -27,7 +28,10 @@ final class JJDocumentChanges {
     private var folderSubscription: JJChangeMonitor.Subscription?
     private var findingFile: Task<Void, Never>?
     private var findingFolder: Task<Void, Never>?
+    private var pendingBufferRefresh: Task<Void, Never>?
     private var rendering: Task<Void, Never>?
+    private var presentationExpiry: Task<Void, Never>?
+    private var hasVisibleMarks = false
     private var fileContents: JJWorkspaceContents?
     private var folderContents: JJWorkspaceContents?
     private var comparison: Comparison?
@@ -38,11 +42,13 @@ final class JJDocumentChanges {
         monitor: JJChangeMonitor,
         text: @escaping @MainActor () -> String?,
         showMarks: @escaping @MainActor ([JJLineMark], [Int]) -> Void,
+        suspendMarkerNavigation: @escaping @MainActor () -> Void,
         showWorktree: @escaping @MainActor (JJWorktreeDecorations?) -> Void
     ) {
         self.monitor = monitor
         self.text = text
         self.showMarks = showMarks
+        self.suspendMarkerNavigation = suspendMarkerNavigation
         self.showWorktree = showWorktree
     }
 
@@ -63,9 +69,23 @@ final class JJDocumentChanges {
         }
     }
 
-    func bufferChanged(immediately: Bool = false) {
-        showMarks([], [])
-        render(after: immediately ? .zero : .milliseconds(150))
+    func bufferChanged() {
+        guard fileContents != nil else { return }
+        rendering?.cancel()
+        retainPresentation()
+        // Batch edits from the first change so steady typing still gets periodic updates.
+        guard pendingBufferRefresh == nil else { return }
+        pendingBufferRefresh = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            pendingBufferRefresh = nil
+            render()
+        }
+    }
+
+    func bufferReplaced() {
+        clearPresentation()
+        render()
     }
 
     func recheck() {
@@ -131,10 +151,7 @@ final class JJDocumentChanges {
         fileContents = contents
         comparison = nil
         diskMatchesBuffer = nil
-        if contents == nil {
-            showMarks([], [])
-            setLocalStatus(nil)
-        }
+        if contents == nil { clearPresentation() }
         render()
     }
 
@@ -146,19 +163,17 @@ final class JJDocumentChanges {
         render()
     }
 
-    private func render(after delay: Duration = .zero) {
+    private func render() {
+        pendingBufferRefresh?.cancel()
+        pendingBufferRefresh = nil
         rendering?.cancel()
         rendering = nil
         guard let file, let contents = fileContents, let path = contents.relativePath(to: file.url),
               !path.isEmpty else { return }
+        retainPresentation()
         let state = contents.repository
         rendering = Task { [weak self] in
-            do {
-                if delay > .zero { try await Task.sleep(for: delay) }
-                if let self, !Task.isCancelled { await self.render(file, path: path, in: state) }
-            } catch {
-                return
-            }
+            if let self, !Task.isCancelled { await self.render(file, path: path, in: state) }
         }
     }
 
@@ -173,8 +188,7 @@ final class JJDocumentChanges {
                 diskMatchesBuffer = inSync
             }
             guard inSync else {
-                showMarks([], [])
-                setLocalStatus(nil)
+                clearPresentation()
                 return
             }
 
@@ -187,14 +201,13 @@ final class JJDocumentChanges {
                 comparison = Comparison(operation: state.operationID, value: pair)
             }
             guard let pair else {
-                showMarks([], [])
-                setLocalStatus(nil)
+                clearPresentation()
                 return
             }
             guard let current = text() else { return }
             let result = await Self.analyze(pair, text: current)
             try Task.checkCancellation()
-            showMarks(result.marks, result.lineStarts)
+            presentMarks(result.marks, lineStarts: result.lineStarts)
             let status: JJPathStatus?
             if pair.isConflicted && result.remainsConflicted != false {
                 status = .conflict
@@ -209,11 +222,32 @@ final class JJDocumentChanges {
             }
             setLocalStatus(LocalStatus(operation: state.operationID, override: .init(path: path, status: status)))
         } catch {
-            if !Task.isCancelled {
-                showMarks([], [])
-                setLocalStatus(nil)
-            }
+            if !Task.isCancelled { clearPresentation() }
         }
+    }
+
+    private func retainPresentation() {
+        guard presentationExpiry == nil, hasVisibleMarks || localStatus != nil else { return }
+        if hasVisibleMarks { suspendMarkerNavigation() }
+        // The deadline belongs to the visible result, so subsequent edits cannot extend it.
+        presentationExpiry = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(750)) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            presentationExpiry = nil
+            clearPresentation()
+        }
+    }
+
+    private func presentMarks(_ marks: [JJLineMark], lineStarts: [Int]) {
+        presentationExpiry?.cancel()
+        presentationExpiry = nil
+        hasVisibleMarks = !marks.isEmpty
+        showMarks(marks, lineStarts)
+    }
+
+    private func clearPresentation() {
+        presentMarks([], lineStarts: [])
+        setLocalStatus(nil)
     }
 
     @concurrent
@@ -248,7 +282,9 @@ final class JJDocumentChanges {
     isolated deinit {
         findingFile?.cancel()
         findingFolder?.cancel()
+        pendingBufferRefresh?.cancel()
         rendering?.cancel()
+        presentationExpiry?.cancel()
         monitor.unsubscribe(fileSubscription)
         monitor.unsubscribe(folderSubscription)
     }

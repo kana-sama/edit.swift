@@ -61,6 +61,14 @@ enum JJEditorCheck {
                                                  eventNumber: 0, clickCount: 1, pressure: 1) else {
                 throw Failure("exposed marker and unmarked track route clicks in \(style)")
             }
+            editor.suspendJJMarkerNavigation()
+            guard editor.jjLineMarks == marks, scroll.hitTest(parent.convert(destination, from: nil)) === nativeHit else {
+                throw Failure("pending markers stay visible and yield clicks to the native scroll view in \(style)")
+            }
+            editor.setJJLineMarks(marks, lineStarts: starts)
+            guard scroll.hitTest(parent.convert(destination, from: nil)) === marker else {
+                throw Failure("a matching refresh restores marker clicks in \(style)")
+            }
 
             marker.mouseDown(with: click)
             guard let layout = editor.textLayoutManager,
@@ -83,21 +91,42 @@ enum JJEditorCheck {
                 }
             }
         }
-        editor.insertText("edited ", replacementRange: selection)
-        guard editor.jjLineMarks.isEmpty else { throw Failure("edits clear markers awaiting a new diff") }
+
+        scroll.scrollToVisibleContentOrigin(.zero)
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        guard let line = editor.lineBounds(at: starts[3]) else { throw Failure("lay out a visible gutter mark") }
+        let gutterX = editor.convert(scroll.visibleContentOrigin, to: scroll).x
+        let sample = NSRect(x: max(gutterX, scroll.contentView.frame.minX) + 3,
+                            y: scroll.convert(line, from: editor).midY, width: 1, height: 1)
+        func gutterPixel() throws -> NSColor {
+            let bitmap = try capture(scroll, in: sample)
+            guard let color = bitmap.colorAt(x: 0, y: 0) else { throw Failure("sample the gutter") }
+            return color
+        }
+        let painted = try gutterPixel()
+        editor.setJJLineMarks([])
+        guard try gutterPixel() != painted else { throw Failure("draw the gutter mark on the running editor") }
+        editor.setJJLineMarks(marks, lineStarts: starts)
+        editor.suspendJJMarkerNavigation()
+        editor.insertText("edited ", replacementRange: NSRange(location: 0, length: 0))
+        guard try gutterPixel() == painted else { throw Failure("keep the gutter painted before a new diff arrives") }
     }
 
     private static func editorBodyPaint(in scroll: NSScrollView) throws -> [NSColor] {
-        let bounds = scroll.bounds
-        guard let bitmap = scroll.bitmapImageRepForCachingDisplay(in: bounds) else {
-            throw Failure("capture the editor with and without markers")
-        }
-        scroll.cacheDisplay(in: bounds, to: bitmap)
+        let bitmap = try capture(scroll, in: scroll.bounds)
         return try [2, 3, 4].map { row in
             guard let color = bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh * row / 6) else {
                 throw Failure("sample the rendered editor body")
             }
             return color
         }
+    }
+
+    private static func capture(_ view: NSView, in rect: NSRect) throws -> NSBitmapImageRep {
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: rect) else {
+            throw Failure("capture the editor")
+        }
+        view.cacheDisplay(in: rect, to: bitmap)
+        return bitmap
     }
 }

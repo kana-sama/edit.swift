@@ -1469,7 +1469,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         updateTitle(revealInWorktree: revealInWorktree)
         updateEditedState()
         findPanel?.bufferReplaced()
-        jjDocumentChanges?.bufferChanged(immediately: true)
+        jjDocumentChanges?.bufferReplaced()
     }
 
     private func updateIdentity(from file: FileBuffer) {
@@ -1506,6 +1506,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 return editor.string
             }, showMarks: { [weak self] marks, starts in
                 self?.editor.setJJLineMarks(marks, lineStarts: starts)
+            }, suspendMarkerNavigation: { [weak self] in
+                self?.editor.suspendJJMarkerNavigation()
             }, showWorktree: { [weak self] decorations in
                 self?.worktreeSidebar?.setJJDecorations(decorations)
             })

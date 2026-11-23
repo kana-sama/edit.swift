@@ -836,7 +836,6 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func textDidChange(_ notification: Notification) {
-        jjDecorations?.setMarks([], lineStarts: [])
         guard !updatingComposition else {
             onJJCompositionChange?()
             occurrenceHighlighting.reset()
@@ -876,6 +875,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     var jjLineMarks: [JJLineMark] { jjDecorations?.marks ?? [] }
+
+    func suspendJJMarkerNavigation() {
+        jjDecorations?.allowsNavigation = false
+    }
 
     func requestLineRefresh() {
         guard !lineRefreshPending else { return }

@@ -37,7 +37,14 @@ enum JJIndicatorCheck {
         }
         try render(document.window)
 
+        let previousMarks = document.editor.jjLineMarks
         document.editor.insertText("First line\n", replacementRange: NSRange(location: 0, length: 0))
+        try expect(document.editor.jjLineMarks == previousMarks, "typing keeps the last rendered marks while refreshing")
+        for _ in 0..<7 {
+            try await Task.sleep(for: .milliseconds(45))
+            document.editor.insertText(">", replacementRange: NSRange(location: 0, length: 0))
+            try expect(!document.editor.jjLineMarks.isEmpty, "consecutive edits do not flash an empty gutter")
+        }
         try await waitFor("show a second mark from unsaved text") {
             document.editor.jjLineMarks.contains(JJLineMark(kind: .insertion, lines: 0..<1)) &&
                 document.editor.jjLineMarks.contains(JJLineMark(kind: .replacement, lines: 71..<72))
@@ -54,7 +61,49 @@ enum JJIndicatorCheck {
         try await waitFor("show a newly edited change with existing modifications") {
             document.editor.jjLineMarks.count == 2 && hasStatus("Tracked.txt, Changed", in: tree)
         }
+        try await checkPresentationDeadline(in: app, tracked: tracked)
         try await checkSnapshotCadence(executable, in: folder, tracked: tracked)
+    }
+
+    private static func checkPresentationDeadline(in app: Edit, tracked: URL) async throws {
+        @MainActor
+        final class Presentation {
+            var text: String?
+            var marks: [JJLineMark] = []
+            var localStatus: JJWorktreeDecorations.Override?
+        }
+
+        let file = try FileBuffer.read(tracked)
+        let presentation = Presentation()
+        presentation.text = file.text
+        let changes = JJDocumentChanges(monitor: app.jjChanges, text: { presentation.text }, showMarks: { marks, _ in
+            presentation.marks = marks
+        }, suspendMarkerNavigation: {}, showWorktree: { decorations in
+            presentation.localStatus = decorations?.override
+        })
+        defer { changes.stop() }
+        changes.update(file: file.url, revision: file.revision, folder: tracked.deletingLastPathComponent())
+        try await waitFor("install marks and local status before delaying the next diff") {
+            !presentation.marks.isEmpty && presentation.localStatus != nil
+        }
+
+        presentation.text = nil
+        changes.bufferChanged()
+        try expect(!presentation.marks.isEmpty && presentation.localStatus != nil,
+                   "keep the old result during the short transition")
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !presentation.marks.isEmpty && ContinuousClock.now < deadline {
+            changes.bufferChanged()
+            try await Task.sleep(for: .milliseconds(80))
+        }
+        try expect(presentation.marks.isEmpty && presentation.localStatus == nil,
+                   "continued changes cannot extend the old result's deadline")
+
+        presentation.text = file.text
+        changes.bufferChanged()
+        try await waitFor("show the current result when it becomes available") {
+            !presentation.marks.isEmpty && presentation.localStatus != nil
+        }
     }
 
     private static func checkSnapshotCadence(_ executable: URL, in folder: URL, tracked: URL) async throws {
