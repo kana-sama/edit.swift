@@ -230,6 +230,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         return URL(fileURLWithPath: path)
     }
 
+    func applicationDidResignActive(_ notification: Notification) {
+        for document in documents { document.checkForExternalFileChanges() }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         if let windowEventMonitor { NSEvent.removeMonitor(windowEventMonitor) }
         documents.forEach { $0.closeTerminalSessions() }

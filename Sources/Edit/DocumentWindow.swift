@@ -127,6 +127,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private(set) var fileURL: URL? {
         didSet {
             if oldValue != fileURL {
+                fileRefresh.stop()
                 scratchFile = nil
                 detectedSyntaxLanguage = SyntaxLanguage.detected(at: fileURL)
             }
@@ -172,6 +173,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var pendingFullScreen = false
     private let activity = DocumentActivity()
     private lazy var autosave = DocumentAutosave(document: self)
+    private lazy var fileRefresh = DocumentFileRefresh(
+        canRefresh: { [weak self] in self?.canRefreshFile == true },
+        apply: { [weak self] in self?.applyExternalFile($0) }
+    )
     private var draftRecoveryRevision: DraftRecoveryRevision?
     var draftRecoveryID: UUID? { draftRecoveryRevision?.id }
     private var draftCheckpoint: Task<Void, Never>?
@@ -255,7 +260,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             self.editor.occurrenceHighlighting.reset()
             self.editor.occurrenceHighlighting.selectionChanged()
         }
-        editor.onBlur = { [weak self] in self?.requestAutosave() }
+        editor.onBlur = { [weak self] in self?.editorLostFocus() }
         for name in [Notification.Name.NSUndoManagerDidUndoChange, .NSUndoManagerDidRedoChange] {
             NotificationCenter.default.addObserver(self, selector: #selector(undoOrRedo(_:)), name: name, object: nil)
         }
@@ -630,11 +635,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        requestAutosave()
+        editorLostFocus()
     }
 
     func windowDidMiniaturize(_ notification: Notification) {
-        requestAutosave()
+        editorLostFocus()
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
@@ -643,7 +648,35 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func windowDidEndSheet(_ notification: Notification) {
+        fileRefresh.resume()
         Task { @MainActor [weak self] in self?.reportAutosaveFailure() }
+    }
+
+    func checkForExternalFileChanges() { fileRefresh.check() }
+
+    private func editorLostFocus() {
+        requestAutosave()
+        checkForExternalFileChanges()
+    }
+
+    private var canRefreshFile: Bool {
+        canReplaceBuffer && !app.isQuitting && !window.isDocumentEdited && !autosave.hasWorker &&
+            !editor.hasMarkedText() && !(NSApp.isActive && window.isKeyWindow && contentHasFocus)
+    }
+
+    private func applyExternalFile(_ file: FileBuffer) {
+        let changedText = savedText?.isEqual(to: file.text) != true
+        let position = changedText ? editor.capturePosition() : nil
+        let changedRevision = revision != file.revision
+        // The clean buffer may have a queued snapshot from before an undo.
+        autosave.reset()
+        updateIdentity(from: file)
+        if changedText {
+            installText(file.text, revealInWorktree: false)
+            restoreEditorPosition(position)
+        } else if changedRevision {
+            updateJJContext()
+        }
     }
 
     func load(
@@ -752,6 +785,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func restoreDraft(_ record: SessionDocument, text: String, identity: FileIdentity? = nil, scratch: ScratchFile? = nil) {
+        fileRefresh.stop()
         fileURL = record.path.map { URL(fileURLWithPath: $0) }
         scratchFile = scratch
         if let scratch { detectedSyntaxLanguage = SyntaxLanguage.detected(at: scratch.filenameURL) }
@@ -808,7 +842,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         defer {
             activity.endSave()
             autosave.resume()
-            reportAutosaveFailure()
+            autosaveDidFinish()
         }
         await autosave.waitForWrite()
         if selectedURL == nil, !asNew, fileURL != nil, revision != .missing, !window.isDocumentEdited {
@@ -879,7 +913,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         defer {
             activity.endSave()
             autosave.resume()
-            reportAutosaveFailure()
+            autosaveDidFinish()
         }
         if editor.hasMarkedText() { editor.unmarkText() }
         await autosave.waitForWrite()
@@ -957,6 +991,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func requestAutosave() { autosave.request() }
 
+    func autosaveDidFinish() {
+        fileRefresh.resume()
+        reportAutosaveFailure()
+    }
+
     // Closing, replacing, and quitting hold off new writes while draining the queue.
     func flushAutosave() async { await autosave.flush() }
 
@@ -991,6 +1030,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.isEditable = hasTextDocument && wasEditable
         autosave.resume()
         if !autosave.hasWorker { autosave.scheduleIdle() }
+        fileRefresh.resume()
     }
 
     func retargetMovedFile(from source: URL, to destination: URL, revealInWorktree: Bool = true) {
@@ -1014,6 +1054,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         let previousLanguage = resolvedSyntaxLanguage
         fileURL = movedURL
         fileIdentity = fileURL.flatMap { FileIdentity.at($0) }
+        if revision != nil, revision != .missing { fileRefresh.observe(movedURL, stamp: nil) }
         if let manualSyntaxLanguage {
             app.syntaxOverrides.set(nil, for: original)
             app.syntaxOverrides.set(manualSyntaxLanguage, for: fileURL)
@@ -1170,6 +1211,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             activity.endReplacement()
             if folderURL != previousFolder { sidebar.folderChanged() }
             autosave.resume()
+            fileRefresh.resume()
         }
 
         await flushAutosave()
@@ -1353,6 +1395,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         if !app.isQuitting { discardDraftCheckpoint() }
+        fileRefresh.stop()
         closeTerminalSessions()
         jjDocumentChanges?.stop()
         rememberFilePosition()
@@ -1428,6 +1471,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         format = file.format
         savedText = file.text as NSString
         editor.preferredLineEnding = format.lineEnding
+        if file.diskStamp != nil { fileRefresh.observe(file.url, stamp: file.diskStamp) }
     }
 
     private func updateTitle(revealInWorktree: Bool = true) {
@@ -1469,6 +1513,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         let isEdited = savedText.map { !(editor.textStorage?.mutableString.isEqual($0) ?? false) } ?? true
         if isEdited != window.isDocumentEdited {
             window.isDocumentEdited = isEdited
+            if !isEdited { fileRefresh.resume() }
         }
     }
 

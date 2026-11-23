@@ -129,6 +129,7 @@ enum FilesCheck {
         try await checkEncodings(in: app, directory: directory)
         try checkSaveMetadata(in: directory)
         try await checkCoordinatedSave(in: directory)
+        try await checkExternalRefresh(in: app, directory: directory)
         try await checkAutosaveAndNewBuffer(in: app, directory: directory)
         try await checkRememberedPosition(in: app, directory: directory)
         try await checkInterruptedDrafts(in: app, directory: directory)
@@ -750,6 +751,68 @@ enum FilesCheck {
         } catch FileBufferError.changedOnDisk {
             try expect(try FileBuffer.read(url).text == "External", "keep the coordinated writer's newer version")
         }
+    }
+
+    private static func checkExternalRefresh(in app: Edit, directory: URL) async throws {
+        let file = directory.appendingPathComponent("External refresh.txt")
+        let lines = (0..<80).map { "Line \($0)\n" }.joined()
+        try Data(("First\n" + lines).utf8).write(to: file)
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        _ = try await app.openFile(file, in: document)
+        let editor = document.editor
+        let window = document.window
+        editor.scrollRangeToVisible(NSRange(location: 310, length: 0))
+        editor.setCaretSelections([NSRange(location: 180, length: 3), NSRange(location: 325, length: 0)], record: false)
+        document.toggleSidebarFocus(.search)
+        let search = try resolve(window.firstResponder)
+        try expect(search !== editor, "Search owns focus before the external update")
+        let position = editor.capturePosition()
+        let initialIdentity = FileIdentity.at(file)
+
+        let inPlace = "Other\n" + lines
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.write(contentsOf: Data(inPlace.utf8))
+        try handle.close()
+        try await waitFor("reload an in-place write without switching back to Edit", timeout: .seconds(3)) { editor.string == inPlace }
+        try expect(window.firstResponder === search && !window.isDocumentEdited && document.fileIdentity == initialIdentity,
+                   "reload keeps focus in Search and the file clean")
+        let refreshedPosition = editor.capturePosition()
+        try expect(refreshedPosition.selections == position.selections &&
+                   abs(refreshedPosition.verticalOffset - position.verticalOffset) < 1,
+                   "reload retains the editor selections and scroll position")
+
+        let replaced = "Third\n" + lines
+        try Data(replaced.utf8).write(to: file, options: .atomic)
+        try await waitFor("reload an atomic external save at the same path", timeout: .seconds(3)) { editor.string == replaced }
+        try expect(document.fileIdentity == FileIdentity.at(file) && document.fileIdentity != initialIdentity,
+                   "reload adopts the replacement file identity")
+
+        document.focusContent()
+        let undo = editor.editorUndoManager
+        undo.beginUndoGrouping()
+        editor.insertText("Local ", replacementRange: NSRange(location: 0, length: 0))
+        editor.breakUndoCoalescing()
+        undo.endUndoGrouping()
+        let newest = "Final\n" + lines
+        try Data(newest.utf8).write(to: file, options: .atomic)
+        document.toggleSidebarFocus(.search)
+        var conflict: String?
+        try await waitFor("report the conflict while the dirty buffer stays in place") {
+            if conflict == nil { conflict = document.takeAutosaveFailure() }
+            return conflict != nil
+        }
+        try expect(window.isDocumentEdited && editor.string.hasPrefix("Local ") &&
+                   (try FileBuffer.read(file)).text == newest, "external reload and autosave both preserve the conflicting edits")
+        undo.undo()
+        try await waitFor("apply the pending external change once the local edit is undone", timeout: .seconds(3)) { editor.string == newest }
+        try expect(window.firstResponder === search && !window.isDocumentEdited, "pending reload keeps Search focused")
+
+        document.focusContent()
+        editor.setSelectedRange(NSRange(location: 0, length: 0))
+        editor.insertText("Saved ", replacementRange: editor.selectedRange())
+        let saved = await document.save()
+        try expect(saved && (try FileBuffer.read(file)).text == "Saved " + newest, "Save uses the refreshed disk revision")
     }
 
     private static func checkAutosaveAndNewBuffer(in app: Edit, directory: URL) async throws {

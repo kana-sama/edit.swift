@@ -120,6 +120,26 @@ struct FileBuffer: Sendable {
         let replacedIdentity: FileIdentity?
     }
 
+    struct DiskStamp: Equatable, Sendable {
+        let identity: FileIdentity
+        private let size: off_t
+        private let links: nlink_t
+        private let modifiedSeconds: Int
+        private let modifiedNanoseconds: Int
+        private let changedSeconds: Int
+        private let changedNanoseconds: Int
+
+        fileprivate init(_ status: stat) {
+            identity = FileIdentity(status)
+            size = status.st_size
+            links = status.st_nlink
+            modifiedSeconds = status.st_mtimespec.tv_sec
+            modifiedNanoseconds = status.st_mtimespec.tv_nsec
+            changedSeconds = status.st_ctimespec.tv_sec
+            changedNanoseconds = status.st_ctimespec.tv_nsec
+        }
+    }
+
     private struct DiskFile {
         let handle: FileHandle
         let status: stat
@@ -129,13 +149,19 @@ struct FileBuffer: Sendable {
     let text: String
     let format: FileFormat
     let revision: FileRevision
-    let identity: FileIdentity?
+    let diskStamp: DiskStamp?
+    var identity: FileIdentity? { diskStamp?.identity }
 
     private static let encodingAttribute = "com.apple.TextEncoding"
 
     static func revision(at url: URL) throws -> FileRevision {
         guard let contents = try diskContents(at: url) else { return .missing }
         return FileRevision(bytes: contents.bytes)
+    }
+
+    static func readIfChanged(_ url: URL, since stamp: DiskStamp?) throws -> FileBuffer? {
+        guard let status = try fileStatus(at: url), DiskStamp(status) != stamp else { return nil }
+        return try read(url)
     }
 
     static func canonicalURL(_ url: URL) -> URL {
@@ -158,7 +184,7 @@ struct FileBuffer: Sendable {
         guard let disk = try diskContents(at: url, readEncoding: true) else {
             guard allowMissing else { throw fileError(ENOENT, url) }
             try requireDirectory(url.deletingLastPathComponent())
-            return FileBuffer(url: url, text: "", format: FileFormat(), revision: .missing, identity: nil)
+            return FileBuffer(url: url, text: "", format: FileFormat(), revision: .missing, diskStamp: nil)
         }
 
         let taggedBOM = disk.encoding.flatMap { encoding in
@@ -174,7 +200,7 @@ struct FileBuffer: Sendable {
 
         let format = FileFormat(hasBOM: bomEncoding != nil, lineEnding: dominantLineEnding(in: text) ?? "\n",
                                 storedEncoding: encoding == .utf8 ? nil : encoding)
-        return FileBuffer(url: url, text: text, format: format, revision: FileRevision(bytes: disk.bytes), identity: disk.identity)
+        return FileBuffer(url: url, text: text, format: format, revision: FileRevision(bytes: disk.bytes), diskStamp: disk.stamp)
     }
 
     static func save(
@@ -296,7 +322,7 @@ struct FileBuffer: Sendable {
 
         var savedFormat = format
         savedFormat.lineEnding = dominantLineEnding(in: text) ?? format.lineEnding
-        let file = FileBuffer(url: url, text: text, format: savedFormat, revision: revision, identity: FileIdentity(outputStatus))
+        let file = FileBuffer(url: url, text: text, format: savedFormat, revision: revision, diskStamp: DiskStamp(outputStatus))
         return SaveResult(file: file, replacedIdentity: original.map { FileIdentity($0.status) })
     }
 
@@ -310,7 +336,7 @@ struct FileBuffer: Sendable {
 
     private static func diskContents(
         at url: URL, readEncoding: Bool = false
-    ) throws -> (bytes: Data, encoding: FileTextEncoding?, identity: FileIdentity)? {
+    ) throws -> (bytes: Data, encoding: FileTextEncoding?, stamp: DiskStamp)? {
         guard let file = try openFile(at: url, access: O_RDONLY) else { return nil }
         let handle = file.handle
         defer { try? handle.close() }
@@ -320,7 +346,7 @@ struct FileBuffer: Sendable {
         var after = stat()
         guard fstat(handle.fileDescriptor, &after) == 0 else { throw fileError(errno, url) }
         guard sameVersion(file.status, after) else { throw FileBufferError.changedOnDisk }
-        return (data, encoding, FileIdentity(after))
+        return (data, encoding, DiskStamp(after))
     }
 
     private static func openFile(at url: URL, access: Int32) throws -> DiskFile? {
@@ -347,12 +373,7 @@ struct FileBuffer: Sendable {
     }
 
     private static func sameVersion(_ before: stat, _ after: stat) -> Bool {
-        FileIdentity(before) == FileIdentity(after) && before.st_size == after.st_size &&
-            before.st_nlink == after.st_nlink &&
-            before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec &&
-            before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec &&
-            before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec &&
-            before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec
+        DiskStamp(before) == DiskStamp(after)
     }
 
     private static func encodingHint(from descriptor: Int32) -> FileTextEncoding? {

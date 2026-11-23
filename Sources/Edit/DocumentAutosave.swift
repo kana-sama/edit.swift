@@ -57,7 +57,7 @@ final class DocumentAutosave {
                 await write(request)
             }
             worker = nil
-            document.reportAutosaveFailure()
+            document.autosaveDidFinish()
         }
     }
 

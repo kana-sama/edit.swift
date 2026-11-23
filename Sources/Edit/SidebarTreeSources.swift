@@ -20,7 +20,7 @@ final class SidebarWorktreeSource: NSObject {
     private let editName: (WorktreeActions.NameRequest, URL) -> Void
     private var folder: URL?
     private var active = false
-    private var monitor: WorktreeMonitor?
+    private var monitor: FileSystemEvents?
     private var requests: [String: Task<Void, Never>] = [:]
     private var hiddenPaths: Set<String> = []
     private(set) var showsHidden = false
@@ -112,7 +112,27 @@ final class SidebarWorktreeSource: NSObject {
     private func updateMonitor() {
         monitor = nil
         guard active, let folder else { return }
-        monitor = WorktreeMonitor(directory: folder, changed: directoriesChanged)
+        monitor = FileSystemEvents(directory: folder) { [weak self] events in
+            self?.monitorChanged(events)
+        }
+    }
+
+    private func monitorChanged(_ events: [FileSystemEvents.Event]) {
+        let structural = FSEventStreamEventFlags(kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemRemoved
+            | kFSEventStreamEventFlagItemRenamed | kFSEventStreamEventFlagItemFinderInfoMod
+            | kFSEventStreamEventFlagItemInodeMetaMod)
+        var changedPaths = Set<String>()
+        for event in events {
+            let path = event.path as NSString
+            if event.requiresRescan || path.lastPathComponent == ".gitignore" {
+                directoriesChanged([], true)
+                return
+            }
+            if event.flags & structural != 0 {
+                changedPaths.insert(URL(filePath: path.deletingLastPathComponent, directoryHint: .isDirectory).standardizedFileURL.path)
+            }
+        }
+        if !changedPaths.isEmpty { directoriesChanged(changedPaths, false) }
     }
 
     private func readHiddenPaths() {
@@ -221,58 +241,5 @@ final class SidebarScratchSource {
         guard let folder else { return "Global" }
         let name = URL(filePath: folder, directoryHint: .isDirectory).lastPathComponent
         return name.isEmpty ? folder : name
-    }
-}
-
-@MainActor
-private final class WorktreeMonitor {
-    private var stream: FSEventStreamRef?
-    private let changed: @MainActor (Set<String>, Bool) -> Void
-
-    init(directory: URL, changed: @escaping @MainActor (Set<String>, Bool) -> Void) {
-        self.changed = changed
-        var context = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(),
-                                           retain: nil, release: nil, copyDescription: nil)
-        let flags = kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagWatchRoot
-        stream = FSEventStreamCreate(nil, { _, info, count, paths, flags, _ in
-            guard let info else { return }
-            let monitor = Unmanaged<WorktreeMonitor>.fromOpaque(info).takeUnretainedValue()
-            let paths = unsafeBitCast(paths, to: NSArray.self) as? [String] ?? []
-            let structural = FSEventStreamEventFlags(kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemRemoved
-                | kFSEventStreamEventFlagItemRenamed | kFSEventStreamEventFlagItemFinderInfoMod
-                | kFSEventStreamEventFlagItemInodeMetaMod)
-            let overflow = FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs | kFSEventStreamEventFlagRootChanged)
-            var changedPaths = Set<String>()
-            var reload = false
-            for index in 0..<min(count, paths.count) {
-                let path = paths[index]
-                if flags[index] & overflow != 0 || (path as NSString).lastPathComponent == ".gitignore" {
-                    reload = true
-                    break
-                }
-                if flags[index] & structural != 0 {
-                    let parent = (path as NSString).deletingLastPathComponent
-                    changedPaths.insert(URL(filePath: parent, directoryHint: .isDirectory).standardizedFileURL.path)
-                }
-            }
-            guard reload || !changedPaths.isEmpty else { return }
-            MainActor.assumeIsolated { monitor.changed(changedPaths, reload) }
-        }, &context, [directory.path] as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.25,
-        FSEventStreamCreateFlags(flags))
-        if let stream {
-            FSEventStreamSetDispatchQueue(stream, .main)
-            if !FSEventStreamStart(stream) {
-                FSEventStreamInvalidate(stream)
-                FSEventStreamRelease(stream)
-                self.stream = nil
-            }
-        }
-    }
-
-    isolated deinit {
-        guard let stream else { return }
-        FSEventStreamStop(stream)
-        FSEventStreamInvalidate(stream)
-        FSEventStreamRelease(stream)
     }
 }
