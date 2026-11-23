@@ -161,13 +161,8 @@ enum FindSearch {
     }
 }
 
-struct FindTextEdit {
-    let range: NSRange
-    let replacement: String
-
-    // The text-storage notification gives the bounding range of a change as one edit.
-    // Find replacements supply their original individual ranges so intervening dismissals survive.
-    static func moving(_ ranges: Set<NSRange>, through edits: [FindTextEdit]) -> Set<NSRange> {
+extension EditorTextEdit {
+    static func moving(_ ranges: Set<NSRange>, through edits: [EditorTextEdit]) -> Set<NSRange> {
         guard !ranges.isEmpty else { return [] }
         var result: Set<NSRange> = []
         var editIndex = 0
@@ -175,7 +170,7 @@ struct FindTextEdit {
         for range in ranges.sorted(by: { $0.location < $1.location }) {
             while editIndex < edits.count && NSMaxRange(edits[editIndex].range) <= range.location {
                 let edit = edits[editIndex]
-                offset += edit.replacement.utf16.count - edit.range.length
+                offset += edit.lengthChange
                 editIndex += 1
             }
             if editIndex == edits.count || edits[editIndex].range.location >= NSMaxRange(range) {
@@ -185,7 +180,17 @@ struct FindTextEdit {
         return result
     }
 
-    static func singleChange(from old: NSString, to new: NSString) -> FindTextEdit {
+    static func moving(_ position: Int, through edits: [EditorTextEdit]) -> Int {
+        var offset = 0
+        for edit in edits {
+            if edit.range.location > position { break }
+            if position < NSMaxRange(edit.range) { return edit.range.location + offset }
+            offset += edit.lengthChange
+        }
+        return position + offset
+    }
+
+    static func singleChange(from old: NSString, to new: NSString) -> EditorTextEdit {
         let oldLength = old.length
         let newLength = new.length
         let shorter = min(oldLength, newLength)
@@ -198,9 +203,9 @@ struct FindTextEdit {
             endOffset += 1
         }
 
-        return FindTextEdit(
+        return EditorTextEdit(
             range: NSRange(location: start, length: oldLength - start - endOffset),
-            replacement: new.substring(with: NSRange(location: start, length: newLength - start - endOffset))
+            text: new.substring(with: NSRange(location: start, length: newLength - start - endOffset))
         )
     }
 }

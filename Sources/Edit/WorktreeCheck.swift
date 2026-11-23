@@ -173,7 +173,7 @@ enum WorktreeCheck {
         let pasteboard = NSPasteboard.withUniqueName()
         defer { pasteboard.releaseGlobally() }
         _ = pasteboard.writeObjects([writer])
-        let exported = WorktreeActions.fileURLs(on: pasteboard).map { $0.standardizedFileURL.path }
+        let exported = SidebarFileCommands.fileURLs(on: pasteboard).map { $0.standardizedFileURL.path }
         try expect(exported == [nested.standardizedFileURL.path],
                    "dragging exports a native file URL, received \(exported)")
 

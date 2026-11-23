@@ -196,7 +196,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
     }
     var worktreeShowsHidden = false
-    var worktreeSidebar: WorktreeSidebar? { findPanel?.worktree }
+    var worktreeSidebar: SidebarFileTree? { findPanel?.worktree }
     private var jjDocumentChanges: JJDocumentChanges?
     var scratchOutline: NSOutlineView? { findPanel?.scratchOutline }
     private var appearanceObservation: NSKeyValueObservation?
@@ -258,7 +258,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         window.contentView = editorContentView
         pinToEditorContent(scrollView)
         window.toolbarStyle = .unifiedCompact
-        window.toolbar = titleBar.makeToolbar(delegate: titleBar)
+        window.toolbar = titleBar.toolbar
         window.trackTitlebarPointer()
         window.initialFirstResponder = editor
         window.makeFirstResponder(editor)
@@ -459,13 +459,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                                       ofDividerAt: split.splitViewItems.count - 2)
         // AppKit reapplies a preferred fraction when entering full screen.
         item.preferredThicknessFraction = NSSplitViewItem.unspecifiedDimension
-        if let toolbar = window.toolbar {
-            if !toolbar.items.contains(where: { $0.itemIdentifier == .inspectorTrackingSeparator }) {
-                toolbar.insertItem(withItemIdentifier: .inspectorTrackingSeparator, at: toolbar.items.count)
-            }
-            resizeTitleBars()
-            titleBar.setTerminalTitleVisible(true, in: toolbar)
-        }
+        resizeTitleBars()
+        titleBar.setTerminalDocked(true)
     }
 
     private var currentTerminalSidebarWidth: CGFloat {
@@ -512,10 +507,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         guard let terminalSidebar else { return }
         let width = currentTerminalSidebarWidth
         if width > 0 { terminalSidebarWidth = width }
-        if let toolbar = window.toolbar {
-            titleBar.setTerminalTitleVisible(false, in: toolbar)
-            toolbar.removeItem(identifier: .inspectorTrackingSeparator)
-        }
+        titleBar.setTerminalDocked(false)
         terminalPanel?.placeHeader(in: nil)
         terminalTitleHost = nil
         terminalTitleWidthLimit = nil
@@ -656,7 +648,6 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         restoreVisibleTerminalIfReady()
         resizeTitleBars()
         titleBar.setFullScreen(true)
-        findPanel?.finishSidebarHeaderLayout()
         app.didFinishFullScreenRestore(for: self)
     }
 
@@ -664,15 +655,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         pendingFullScreen = false
         restoreVisibleTerminalIfReady()
         titleBar.setFullScreen(false)
-        findPanel?.finishSidebarHeaderLayout()
         app.didFinishFullScreenRestore(for: self)
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
         normalFrame = nil
-        titleBar.setFullScreen(false)
         resizeTitleBars()
-        findPanel?.finishSidebarHeaderLayout()
+        titleBar.setFullScreen(false)
     }
 
     func windowDidResignKey(_ notification: Notification) {

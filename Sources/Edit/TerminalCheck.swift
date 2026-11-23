@@ -419,10 +419,10 @@ enum TerminalCheck {
         let header = try rightHeader(in: companion)
         try expect(header.window === companion, "attach the right header to the companion window")
         let headerFrame = windowPosition(of: header)
-        document.titleBar.setTerminalTitleVisible(false, in: toolbar)
+        document.titleBar.setTerminalHeaderVisible(false)
         try expect(header.isHidden && !toolbar.items.contains { $0.itemIdentifier == DocumentTitleBar.terminalItemIdentifier },
                    "remove the native title immediately from the companion window")
-        document.titleBar.setTerminalTitleVisible(true, in: toolbar)
+        document.titleBar.setTerminalHeaderVisible(true)
         let restored = try rightHeader(in: companion)
         try expect(restored === header && !restored.isHiddenOrHasHiddenAncestor && windowPosition(of: restored) == headerFrame &&
                    restored.superview?.layer?.animation(forKey: #keyPath(CALayer.transform)) == nil &&

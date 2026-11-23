@@ -2,12 +2,12 @@ import AppKit
 
 @MainActor
 final class FindDecorations {
-    private static let previewAttribute = NSAttributedString.Key("dev.edit.find-preview")
-
-    private final class PreviewStyle: NSObject {
-        let original: NSParagraphStyle?
-        init(_ original: NSParagraphStyle?) { self.original = original }
+    private struct PreviewRows {
+        let text: String
+        let rows: EditorTextRows
+        let layout: EditorProjectedTextLayout
     }
+
     private weak var editor: EditorTextView?
     private var ranges: [NSRange] = []
     private var selected: NSRange?
@@ -15,9 +15,14 @@ final class FindDecorations {
     private var snapshot = ""
     private var matchRects: [NSRect] = []
     private var activeRects: [NSRect] = []
-    private var previewView: FindPreviewView?
+    private var previewAccessibility: NSView?
+    private var proposedRows: PreviewRows?
+    private var sourceBands: [NSRect] = []
+    private var sourceChanges: [NSRect] = []
+    private var proposedBand: NSRect?
+    private var proposedChange = NSRange()
+    private var previewSourceRange: NSRange?
     private var layingOut = false
-    private var previewPadding: (range: NSRange, height: CGFloat, source: String)?
 
     init(editor: EditorTextView) {
         self.editor = editor
@@ -71,10 +76,12 @@ final class FindDecorations {
         var index = firstRangeEnding(after: visible.location)
         while index < ranges.count && ranges[index].location < NSMaxRange(visible) {
             let range = ranges[index]
-            if range != selected { matchRects.append(contentsOf: rects(for: range)) }
+            if range != selected && previewSourceRange.map({ NSIntersectionRange($0, range).length == 0 }) != false {
+                matchRects.append(contentsOf: rects(for: range))
+            }
             index += 1
         }
-        let activeRects = selected.map { rects(for: $0) } ?? []
+        let activeRects = previewSourceRange == nil ? selected.map { rects(for: $0) } ?? [] : []
         setHighlightRects(matches: matchRects, active: activeRects, in: editor)
     }
 
@@ -89,6 +96,7 @@ final class FindDecorations {
     }
 
     private func drawHighlights(in dirtyRect: NSRect) {
+        drawPreview(in: dirtyRect)
         if !matchRects.isEmpty {
             NSColor.systemYellow.withAlphaComponent(0.30).setFill()
             for rect in matchRects where rect.intersects(dirtyRect) { rect.intersection(dirtyRect).fill() }
@@ -114,171 +122,138 @@ final class FindDecorations {
     }
 
     private func updatePreview(in editor: EditorTextView) {
-        guard let (range, replacement) = preview, let window = editor.window, let font = editor.font else {
+        guard let (range, replacement) = preview, let manager = editor.textLayoutManager else {
             clearPreview()
             return
         }
         let source = snapshot as NSString
-        guard NSMaxRange(range) <= source.length, source.length > 0 else {
+        guard range.location >= 0, NSMaxRange(range) <= source.length, source.length > 0 else {
             clearPreview()
             return
         }
         let start = LineEditing.line(at: range.location, in: source).start
         let last = LineEditing.line(at: max(range.location, NSMaxRange(range) - 1), in: source)
         let end = max(last.contentEnd, NSMaxRange(range))
-        let removed = source.substring(with: NSRange(location: start, length: end - start))
-        let added = source.substring(with: NSRange(location: start, length: range.location - start))
-            + replacement + source.substring(with: NSRange(location: NSMaxRange(range), length: end - NSMaxRange(range)))
+        let live = NSRange(location: start, length: end - start)
+        let old = source.substring(with: live)
+        let added = (old as NSString).replacingCharacters(
+            in: NSRange(location: range.location - start, length: range.length), with: replacement
+        )
+        let style = EditorProjectedTextLayout.Style(editor: editor)
+        let proposed: PreviewRows
+        if let cached = proposedRows, cached.text == added, cached.layout.style == style {
+            proposed = cached
+        } else {
+            let text = added as NSString
+            let rows = EditorTextRows(in: text, range: NSRange(location: 0, length: text.length), includingTrailingLine: true)
+            proposed = PreviewRows(text: added, rows: rows, layout: EditorProjectedTextLayout(text: added, style: style))
+            proposedRows = proposed
+        }
 
-        let screen = editor.firstRect(forCharacterRange: NSRange(location: start, length: 0), actualRange: nil)
-        let anchor = editor.convert(window.convertFromScreen(screen), from: nil)
-        let visible = editor.visibleRect
-        guard visible.width > 0 && visible.height > 0, anchor.height > 0 else {
-            previewView?.isHidden = true
+        let paragraph = source.lineRange(for: NSRange(location: min(last.start, source.length - 1), length: 0)).location
+        let atEmptyLastLine = last.start == source.length
+        let height = CGFloat(proposed.rows.count + (atEmptyLastLine ? 1 : 0)) * style.lineHeight
+        editor.layoutSpacing.set([.init(id: .replacement, paragraph: paragraph, edge: .after, height: height)], for: .find)
+        let previous = previewBounds
+        let viewport = manager.textViewportLayoutController.viewportRange.map { editor.charRange($0, in: manager) }
+        let origin = editor.textContainerOrigin
+        let visible = viewport.flatMap { range -> NSRange? in
+            let known = NSIntersectionRange(NSRange(location: start, length: last.end - start), range)
+            guard known.length > 0 else { return nil }
+            return source.lineRange(for: known)
+        }
+        var bands: [NSRect] = []
+        if let visible {
+            var offset = max(start, visible.location)
+            let limit = min(last.end, NSMaxRange(visible))
+            while offset < limit {
+                if let line = editor.laidOutLineBounds(at: offset) {
+                    bands.append(NSRect(x: editor.bounds.minX, y: line.minY, width: editor.bounds.width, height: line.height))
+                }
+                offset = NSMaxRange(source.lineRange(for: NSRange(location: offset, length: 0)))
+            }
+        }
+        var changes: [NSRect] = []
+        if let visible, let segment = editor.textRange(NSIntersectionRange(range, visible), in: manager),
+           !segment.isEmpty {
+            manager.enumerateTextSegments(in: segment, type: .standard, options: .rangeNotRequired) { _, rect, _, _ in
+                if !rect.isEmpty { changes.append(rect.offsetBy(dx: origin.x, dy: origin.y)) }
+                return true
+            }
+        }
+        let reserved = editor.layoutSpacing.rect(for: .replacement)
+        if atEmptyLastLine, let reserved {
+            bands.append(NSRect(x: reserved.minX, y: reserved.minY, width: reserved.width, height: style.lineHeight))
+            proposedBand = NSRect(x: reserved.minX, y: reserved.minY + style.lineHeight,
+                                  width: reserved.width, height: reserved.height - style.lineHeight)
+        } else {
+            proposedBand = reserved
+        }
+        previewSourceRange = live
+        sourceBands = bands
+        sourceChanges = changes
+        proposedChange = NSRange(location: range.location - start, length: replacement.utf16.count)
+        invalidatePreview(previous, editor: editor)
+        updateAccessibility(label: "Replace \(old) with \(added)", editor: editor)
+    }
+
+    private var previewBounds: NSRect {
+        sourceBands.reduce(proposedBand ?? .null) { $0.union($1) }
+    }
+
+    private func invalidatePreview(_ previous: NSRect, editor: EditorTextView) {
+        let dirty = previous.union(previewBounds).intersection(editor.visibleRect)
+        if !dirty.isEmpty { editor.setNeedsDisplay(dirty) }
+    }
+
+    private func updateAccessibility(label: String, editor: EditorTextView) {
+        let frame = previewBounds.intersection(editor.visibleRect)
+        guard !frame.isEmpty else {
+            previewAccessibility?.isHidden = true
             return
         }
-
-        let view = previewView ?? FindPreviewView(frame: .zero)
-        if previewView == nil {
-            editor.addSubview(view)
-            previewView = view
+        let element = previewAccessibility ?? PreviewAccessibility()
+        if previewAccessibility == nil {
+            editor.addSubview(element)
+            element.setAccessibilityElement(true)
+            element.setAccessibilityRole(.staticText)
+            previewAccessibility = element
         }
-        let offset = range.location - start
-        view.configure(removed: removed, removedRange: NSRange(location: offset, length: range.length),
-                       added: added, addedRange: NSRange(location: offset, length: replacement.utf16.count),
-                       font: font, lineHeight: anchor.height,
-                       textOffset: editor.textContainerOrigin.x + (editor.textContainer?.lineFragmentPadding ?? 0) - visible.minX,
-                       paragraphStyle: editor.defaultParagraphStyle)
-        if setPreviewPadding(range: last.range, height: view.addedHeight) {
-            let updated = editor.firstRect(forCharacterRange: NSRange(location: start, length: 0), actualRange: nil)
-            view.frame = NSRect(x: visible.minX, y: editor.convert(window.convertFromScreen(updated), from: nil).minY,
-                                width: visible.width, height: view.naturalHeight)
-        } else {
-            view.frame = NSRect(x: visible.minX, y: anchor.minY, width: visible.width, height: view.naturalHeight)
-        }
-        view.isHidden = !visible.intersects(view.frame)
+        if element.frame != frame { element.frame = frame }
+        element.setAccessibilityLabel(label)
+        element.isHidden = false
     }
 
     func clearPreview() {
-        previewView?.isHidden = true
-        setPreviewPadding(range: nil, height: 0)
+        guard let editor else { return }
+        let previous = previewBounds
+        previewAccessibility?.isHidden = true
+        proposedRows = nil
+        proposedBand = nil
+        previewSourceRange = nil
+        sourceBands = []
+        sourceChanges = []
+        editor.layoutSpacing.set([], for: .find)
+        invalidatePreview(previous, editor: editor)
     }
 
-    @discardableResult
-    private func setPreviewPadding(range: NSRange?, height: CGFloat) -> Bool {
-        guard let editor, let storage = editor.textStorage else { return false }
-        let old = previewPadding
-        if old == nil && range == nil { return false }
-        let source = editor.string
-        if old?.range == range && (old?.height ?? 0) == height && (old == nil || old?.source == source) { return false }
-        previewPadding = range.map { ($0, height, source) }
-        storage.beginEditing()
-        if let old, storage.length > 0 {
-            // If text changed from under the preview, the marked style may have moved with it.
-            let affected = old.source == source && NSMaxRange(old.range) <= storage.length
-                ? old.range : NSRange(location: 0, length: storage.length)
-            storage.enumerateAttribute(Self.previewAttribute, in: affected) { value, span, _ in
-                guard let style = value as? PreviewStyle else { return }
-                storage.removeAttribute(Self.previewAttribute, range: span)
-                if let original = style.original {
-                    storage.addAttribute(.paragraphStyle, value: original, range: span)
-                } else {
-                    storage.removeAttribute(.paragraphStyle, range: span)
-                }
-            }
-        }
-        if let range, range.length > 0, NSMaxRange(range) <= storage.length {
-            storage.enumerateAttribute(.paragraphStyle, in: range) { value, span, _ in
-                let original = value as? NSParagraphStyle
-                let base = original ?? editor.defaultParagraphStyle ?? .default
-                let padded = base.mutableCopy() as! NSMutableParagraphStyle
-                padded.paragraphSpacing += height
-                storage.addAttributes([.paragraphStyle: padded, Self.previewAttribute: PreviewStyle(original)], range: span)
-            }
-        }
-        storage.endEditing()
-        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
-        return true
+    private func drawPreview(in dirtyRect: NSRect) {
+        NSColor.systemRed.withAlphaComponent(0.22).setFill()
+        for band in sourceBands where band.intersects(dirtyRect) { band.intersection(dirtyRect).fill() }
+        NSColor.systemRed.withAlphaComponent(0.42).setFill()
+        for rect in sourceChanges where rect.intersects(dirtyRect) { rect.intersection(dirtyRect).fill() }
+        guard let editor, let band = proposedBand, let proposedRows, band.intersects(dirtyRect),
+              let context = NSGraphicsContext.current?.cgContext else { return }
+        let clipped = band.intersection(dirtyRect)
+        NSColor.systemGreen.withAlphaComponent(0.22).setFill()
+        clipped.fill()
+        proposedRows.layout.draw(proposedRows.rows, at: NSPoint(x: editor.textContainerOrigin.x, y: band.minY),
+                                 dirtyRect: clipped, in: context, highlights: [proposedChange],
+                                 highlightColor: NSColor.systemGreen.withAlphaComponent(0.42))
     }
 }
 
-private final class FindPreviewView: NSView {
-    private struct Line {
-        let text: String
-        let changed: NSRange
-    }
-
-    private var removed: [Line] = []
-    private var added: [Line] = []
-    private var font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-    private var lineHeight: CGFloat = 16
-    private var textOffset: CGFloat = 0
-    private var paragraphStyle: NSParagraphStyle?
-
-    override var isFlipped: Bool { true }
+// The painted preview follows the live text layout. This view only exposes its VoiceOver description.
+private final class PreviewAccessibility: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    var addedHeight: CGFloat { CGFloat(added.count) * lineHeight }
-
-    var naturalHeight: CGFloat { CGFloat(removed.count + added.count) * lineHeight }
-
-    func configure(
-        removed: String, removedRange: NSRange, added: String, addedRange: NSRange,
-        font: NSFont, lineHeight: CGFloat, textOffset: CGFloat, paragraphStyle: NSParagraphStyle?
-    ) {
-        clipsToBounds = true
-        self.removed = Self.lines(in: removed, changed: removedRange)
-        self.added = Self.lines(in: added, changed: addedRange)
-        self.font = font
-        self.lineHeight = lineHeight
-        self.textOffset = textOffset
-        self.paragraphStyle = paragraphStyle
-        setAccessibilityElement(true)
-        setAccessibilityRole(.staticText)
-        setAccessibilityLabel("Replace \(removed) with \(added)")
-        needsDisplay = true
-    }
-
-    private static func lines(in text: String, changed: NSRange) -> [Line] {
-        let source = text as NSString
-        var lines: [Line] = []
-        var start = 0
-        var end = 0
-        var contentEnd = 0
-        repeat {
-            source.getLineStart(&start, end: &end, contentsEnd: &contentEnd,
-                                for: NSRange(location: end, length: 0))
-            let range = NSRange(location: start, length: contentEnd - start)
-            let intersection = NSIntersectionRange(changed, range)
-            let relativeChange = intersection.length > 0
-                ? NSRange(location: intersection.location - start, length: intersection.length)
-                : NSRange(location: 0, length: 0)
-            lines.append(Line(text: source.substring(with: range), changed: relativeChange))
-        } while end < source.length
-        if contentEnd < end { lines.append(Line(text: "", changed: NSRange(location: 0, length: 0))) }
-        return lines
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        NSColor.textBackgroundColor.setFill()
-        dirtyRect.fill()
-        drawLines(removed, startingAt: 0, color: .systemRed, dirtyRect: dirtyRect)
-        drawLines(added, startingAt: removed.count, color: .systemGreen, dirtyRect: dirtyRect)
-    }
-
-    private func drawLines(_ lines: [Line], startingAt offset: Int, color: NSColor, dirtyRect: NSRect) {
-        var attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.textColor]
-        attributes[.paragraphStyle] = paragraphStyle
-        color.withAlphaComponent(0.22).setFill()
-        for (index, line) in lines.enumerated() {
-            let row = NSRect(x: 0, y: CGFloat(index + offset) * lineHeight, width: bounds.width, height: lineHeight)
-            guard row.intersects(dirtyRect) else { continue }
-            row.fill()
-            let text = NSMutableAttributedString(string: line.text, attributes: attributes)
-            if line.changed.length > 0 {
-                text.addAttribute(.backgroundColor, value: color.withAlphaComponent(0.42), range: line.changed)
-            }
-            text.draw(at: NSPoint(x: textOffset, y: row.minY))
-        }
-    }
 }

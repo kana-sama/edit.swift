@@ -1,14 +1,18 @@
 import Foundation
 
-enum MultiCaretEditing {
-    struct Replacement {
-        var range: NSRange
-        var text: String
+struct EditorTextEdit {
+    var range: NSRange
+    var text: String
 
-        func result(at offset: Int) -> NSRange {
-            NSRange(location: range.location + offset, length: text.utf16.count)
-        }
+    var lengthChange: Int { text.utf16.count - range.length }
+
+    func result(at offset: Int) -> NSRange {
+        NSRange(location: range.location + offset, length: text.utf16.count)
     }
+}
+
+enum MultiCaretEditing {
+    typealias Replacement = EditorTextEdit
 
     struct LineBlock {
         var line: LineEditing.Line

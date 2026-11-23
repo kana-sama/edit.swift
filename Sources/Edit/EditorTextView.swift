@@ -48,6 +48,9 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var onFindEditorInteraction: (() -> Void)?
     var onFindViewportChange: (() -> Void)?
     var onDrawFindHighlights: ((NSRect) -> Void)?
+    var onBufferEdit: ((NSTextStorage, [EditorTextEdit]?) -> Void)?
+    private var applyingTextEdits: [EditorTextEdit]?
+    lazy var layoutSpacing = EditorLayoutSpacing(editor: self)
     fileprivate var jjDecorations: JJEditorDecorations?
     private(set) var jjInlineDiff: JJInlineDiff?
     weak var syntaxHighlighting: SyntaxHighlighting?
@@ -103,6 +106,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         editor.selectedTextAttributes.removeValue(forKey: .foregroundColor)
         editor.insertionPointColor = .textColor
         editor.delegate = editor
+        if let storage = editor.textStorage {
+            NotificationCenter.default.addObserver(editor, selector: #selector(storageDidEdit(_:)),
+                                                   name: NSTextStorage.didProcessEditingNotification, object: storage)
+        }
         editor.setFontSize(defaultFontSize)
         scrollView.documentView = editor
         return (scrollView, editor)
@@ -868,6 +875,16 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         return top...max(top, rect.maxY - scroll.contentInsets.bottom)
     }
 
+    func laidOutLineBounds(at offset: Int) -> NSRect? {
+        guard let layout = textLayoutManager,
+              let location = layout.location(layout.documentRange.location, offsetBy: offset),
+              let fragment = layout.textLayoutFragment(for: location), fragment.state == .layoutAvailable,
+              let line = fragment.textLineFragment(for: location, isUpstreamAffinity: false) else { return nil }
+        let frame = fragment.layoutFragmentFrame
+        return line.typographicBounds.offsetBy(dx: frame.minX + textContainerOrigin.x,
+                                               dy: frame.minY + textContainerOrigin.y)
+    }
+
     func lineBounds(at offset: Int) -> NSRect? {
         guard let window else { return nil }
         let caret = firstRect(forCharacterRange: NSRange(location: offset, length: 0), actualRange: nil)
@@ -879,10 +896,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         replace(edit.range, with: edit.replacement, selection: edit.selection)
     }
 
-    func replaceFoundText(in range: NSRange, with replacement: String) -> Bool {
+    func replaceFoundText(_ edits: [EditorTextEdit], caret: Int) -> Bool {
         guard !hasMarkedText() else { return false }
         jjInlineDiff?.clearProjectedSelection()
-        return replace(range, with: replacement)
+        return applyMultiEdits(edits, selections: [NSRange(location: caret, length: 0)])
     }
 
     private func allowsProjectedChange(in range: NSRange) -> Bool {
@@ -918,7 +935,9 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         guard isEditable, range.length > 0 || !replacement.isEmpty, let textStorage else { return false }
         if !coalesce { breakUndoCoalescing() }
         guard shouldChangeText(in: range, replacementString: replacement) else { return false }
-        textStorage.replaceCharacters(in: range, with: replacement)
+        withTextEdits([EditorTextEdit(range: range, text: replacement)]) {
+            textStorage.replaceCharacters(in: range, with: replacement)
+        }
         let next = selection ?? NSRange(location: range.location + replacement.utf16.count, length: 0)
         setSelectedRange(next)
         didChangeText()
@@ -934,6 +953,19 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         }
         requestLineRefresh()
         jjInlineDiff?.selectionChanged()
+    }
+
+    func withTextEdits(_ edits: [EditorTextEdit], _ apply: () -> Void) {
+        let previous = applyingTextEdits
+        applyingTextEdits = edits
+        defer { applyingTextEdits = previous }
+        apply()
+    }
+
+    @objc private func storageDidEdit(_ notification: Notification) {
+        guard let storage = notification.object as? NSTextStorage, storage.editedMask.contains(.editedCharacters) else { return }
+        layoutSpacing.sourceDidEdit()
+        onBufferEdit?(storage, applyingTextEdits)
     }
 
     func textDidChange(_ notification: Notification) {

@@ -171,8 +171,8 @@ final class JJInlineDiff: NSResponder {
                 return (hunk.mark.lines.lowerBound, total)
             }
             overviewRevision &+= 1
+            interaction.clear()
             display.display(next)
-            interaction.display(next)
         }
         guard let scroll = editor?.enclosingScrollView else { return }
         if next.isEmpty {

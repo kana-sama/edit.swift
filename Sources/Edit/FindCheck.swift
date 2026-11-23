@@ -61,6 +61,7 @@ enum FindCheck {
         try expect(window.firstResponder === editor, "hiding Find restores editor focus")
         document.performFind(.next)
         try expect(editor.string == "cat cat\ncat", "finding with the sidebar hidden preserves text")
+        try await checkDismissalDuringDisjointEdits(in: app.makeDocument())
         try await checkReturnNavigation(in: app.makeDocument())
         try await checkResumingResult(in: app)
         try await checkRenderedHighlights(in: app.makeDocument())
@@ -70,6 +71,30 @@ enum FindCheck {
         try await checkWindowSession(in: app)
         try expect(NSApplication.shared.activationPolicy() == .prohibited &&
                    !NSApplication.shared.isActive && !window.isVisible, "Find stays in the isolated hidden window")
+    }
+
+    private static func checkDismissalDuringDisjointEdits(in document: DocumentWindow) async throws {
+        let editor = document.editor
+        defer { document.window.close() }
+        editor.string = "cat cat cat"
+        editor.setSelectedRange(NSRange(location: 0, length: 3))
+        document.performFind(.find)
+        let table = try require(descendant(of: document.window.contentView, type: FindResultsTable.self), "find the results")
+        try await waitUntil("three initial matches") { table.numberOfRows == 3 }
+        table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        document.performFind(.dismissSelected)
+
+        let undo = try require(editor.undoManager, "find the document undo manager")
+        undo.removeAllActions()
+        undo.groupsByEvent = false
+        let edits = [EditorTextEdit(range: NSRange(location: 0, length: 0), text: "!"),
+                     EditorTextEdit(range: NSRange(location: 11, length: 0), text: "!")]
+        try expect(editor.applyMultiEdits(edits, selections: [NSRange(location: 13, length: 0)]), "apply two disjoint insertions")
+        try await waitUntil("keep the middle match dismissed after the edits") { document.canPerformFind(.next) && table.numberOfRows == 2 }
+        try expect(editor.string == "!cat cat cat!" && undo.canUndo, "register one undo for the transaction")
+        undo.undo()
+        try await waitUntil("keep the middle match dismissed after undo") { document.canPerformFind(.next) && table.numberOfRows == 2 }
+        try expect(editor.string == "cat cat cat", "undo both insertions together")
     }
 
     private static func checkWindowSession(in app: Edit) async throws {
@@ -580,9 +605,14 @@ enum FindCheck {
         try expect(previewDistance > lineRect(fourthLine).height * 1.75,
                    "the next document line remains visible below the replacement preview")
         try expect(editor.string == lines.joined(separator: "\n"), "the preview leaves the source buffer unchanged")
+        editor.increaseTextSize(nil)
         document.performFind(.clearSelection)
         let plainDistance = abs(lineRect(fourthLine).minY - lineRect(followingLine).minY)
-        try expect(plainDistance < previewDistance, "clearing preview restores the original line spacing")
+        let nearbyLine = followingLine + lines[5].utf16.count + 1
+        let nearbyDistance = abs(lineRect(followingLine).minY - lineRect(nearbyLine).minY)
+        try expect(plainDistance < previewDistance && abs(plainDistance - nearbyDistance) <= 1,
+                   "clearing a zoomed preview restores the current line spacing")
+        editor.resetTextSize(nil)
         document.performFind(.toggleReplace)
         window.layoutIfNeeded()
         try checkResultHover(in: table, window: window)
@@ -712,6 +742,8 @@ enum FindCheck {
         window.orderBack(nil)
         try expect(window.isVisible && window.alphaValue == 0 && !NSApp.isActive,
                    "exercise sidebar visibility in a transparent ordered window")
+        let toolbar = try require(window.toolbar, "find the toolbar before installing any sidebar")
+        let fileTitle = toolbar.items.first { $0.itemIdentifier == DocumentTitleBar.fileItemIdentifier }
 
         let folder = FileManager.default.temporaryDirectory.appending(path: "Sidebar toggle \(UUID())")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -728,6 +760,9 @@ enum FindCheck {
             try expect(document.findSettings.visible && document.sidebarMode == mode && !sidebar.isCollapsed &&
                        abs(sidebar.viewController.view.frame.width - width) < 1 && window.frame == frame,
                        "show the sidebar at its remembered width in the same call")
+            try expect(window.toolbar === toolbar && fileTitle != nil &&
+                       toolbar.items.first { $0.itemIdentifier == DocumentTitleBar.fileItemIdentifier } === fileTitle,
+                       "open the sidebar without rebuilding the toolbar or re-creating the file title")
             try expect(title.view?.window === window && title.view?.isHiddenOrHasHiddenAncestor == false &&
                        title.view?.superview?.layer?.animation(forKey: #keyPath(CALayer.transform)) == nil &&
                        title.view?.superview?.layer?.animation(forKey: #keyPath(CALayer.opacity)) == nil,

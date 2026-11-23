@@ -434,12 +434,15 @@ extension EditorTextView {
         }
 
         multiCaret.isApplying = true
-        storage.beginEditing()
-        for replacement in edits.reversed() {
-            storage.replaceCharacters(in: replacement.range, with: replacement.text)
+        var restoredLiveFocus = false
+        withTextEdits(edits) {
+            storage.beginEditing()
+            for replacement in edits.reversed() {
+                storage.replaceCharacters(in: replacement.range, with: replacement.text)
+            }
+            restoredLiveFocus = updateFocus(after: edits, restoring: restoreFocus)
+            storage.endEditing()
         }
-        let restoredLiveFocus = updateFocus(after: edits, restoring: restoreFocus)
-        storage.endEditing()
         setCaretSelections(selections, record: false,
                            focusNavigation: restoredLiveFocus ? restoreNavigation : nil)
         multiCaret.isApplying = true
@@ -448,7 +451,7 @@ extension EditorTextView {
         breakUndoCoalescing()
         if let primary = caretSelections.last { scrollRangeToVisible(primary) }
 
-        let ownsUndoGroup = previousFocus != nil && manager?.groupingLevel == 0 &&
+        let ownsUndoGroup = (previousFocus != nil || manager?.groupsByEvent == false) && manager?.groupingLevel == 0 &&
             manager?.isUndoing == false && manager?.isRedoing == false
         if ownsUndoGroup { manager?.beginUndoGrouping() }
         manager?.registerUndo(withTarget: self) { editor in

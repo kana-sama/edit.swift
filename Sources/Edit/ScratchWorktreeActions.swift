@@ -21,14 +21,14 @@ final class ScratchWorktreeActions {
 
     private weak var document: DocumentWindow?
     private unowned let app: Edit
-    private let worktree: WorktreeActions
+    private let commands: SidebarFileCommands
     private var undoChanges: [Change] = []
     private var redoChanges: [Change] = []
 
-    init(document: DocumentWindow, app: Edit, worktree: WorktreeActions) {
+    init(document: DocumentWindow, app: Edit) {
         self.document = document
         self.app = app
-        self.worktree = worktree
+        commands = SidebarFileCommands(document: document, app: app)
     }
 
     var canWork: Bool {
@@ -46,24 +46,24 @@ final class ScratchWorktreeActions {
         menu.autoenablesItems = false
         if let file {
             let files = selection.isEmpty ? [file] : selection
-            worktree.addFileItems(to: menu, for: app.scratchStore.url(for: file), isDirectory: false,
+            commands.addFileItems(to: menu, for: app.scratchStore.url(for: file), isDirectory: false,
                                   copySelection: files.map(app.scratchStore.url(for:)))
             menu.addItem(.separator())
-            menu.addItem(worktree.action("Rename…", enabled: canWork, body: rename))
+            menu.addItem(commands.action("Rename…", enabled: canWork, body: rename))
             let moveItem = NSMenuItem(title: "Move to", action: nil, keyEquivalent: "")
             moveItem.submenu = moveMenu(for: files, categories: categories)
             moveItem.isEnabled = canWork
             menu.addItem(moveItem)
-            worktree.addTrashItem(to: menu, enabled: canWork, perform: remove)
+            commands.addTrashItem(to: menu, enabled: canWork, perform: remove)
         } else {
             if let folderPath {
                 let directory = URL(filePath: folderPath, directoryHint: .isDirectory)
-                worktree.addFileItems(to: menu, for: directory, isDirectory: true, copySelection: [directory])
+                commands.addFileItems(to: menu, for: directory, isDirectory: true, copySelection: [directory])
                 menu.addItem(.separator())
             }
-            let canPaste = !app.isAgentCheck && !WorktreeActions.fileURLs(on: .general).isEmpty
-            menu.addItem(worktree.action("Paste", enabled: canWork && canPaste) { [weak self] in
-                _ = self?.transfer(WorktreeActions.fileURLs(on: .general), to: folderPath)
+            let canPaste = !app.isAgentCheck && !SidebarFileCommands.fileURLs(on: .general).isEmpty
+            menu.addItem(commands.action("Paste", enabled: canWork && canPaste) { [weak self] in
+                _ = self?.transfer(SidebarFileCommands.fileURLs(on: .general), to: folderPath)
             })
             menu.addItem(.separator())
             addCreationItems(to: menu, create: create)
@@ -72,7 +72,7 @@ final class ScratchWorktreeActions {
     }
 
     func addCreationItems(to menu: NSMenu, create: @escaping () -> Void) {
-        menu.addItem(worktree.action("New File…", enabled: canWork, body: create))
+        menu.addItem(commands.action("New File…", enabled: canWork, body: create))
     }
 
     private func moveMenu(for files: [ScratchFile], categories: [String?]) -> NSMenu {
@@ -80,12 +80,12 @@ final class ScratchWorktreeActions {
         menu.autoenablesItems = false
         for path in categories {
             let title = path.map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "Global"
-            menu.addItem(worktree.action(title, enabled: canWork && files.contains { $0.folderPath != path }) { [weak self] in
+            menu.addItem(commands.action(title, enabled: canWork && files.contains { $0.folderPath != path }) { [weak self] in
                 _ = self?.move(files, to: path, copying: false)
             })
         }
         menu.addItem(.separator())
-        menu.addItem(worktree.action("Choose Folder…", enabled: canWork) { [weak self] in
+        menu.addItem(commands.action("Choose Folder…", enabled: canWork) { [weak self] in
             Task { [weak self] in
                 guard let self, let path = await document?.chooseScratchFolder() else { return }
                 _ = move(files, to: path, copying: false)
@@ -137,7 +137,7 @@ final class ScratchWorktreeActions {
     }
 
     func copy(_ files: [ScratchFile]) {
-        worktree.copy(files.map(app.scratchStore.url(for:)))
+        SidebarFileCommands.copy(files.map(app.scratchStore.url(for:)))
     }
 
     func trash(_ files: [ScratchFile], didRemove: @escaping () -> Void) {

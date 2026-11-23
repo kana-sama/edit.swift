@@ -11,7 +11,7 @@ struct JJInlineDiffSelection {
         let key: NSRange
         let liveOffset: Int
         let text: NSString
-        let removedLength: Int
+        let rows: EditorTextRows
         let displayRange: NSRange
     }
 
@@ -23,33 +23,43 @@ struct JJInlineDiffSelection {
         let source = source as NSString
         self.source = source
         var inserted = 0
-        blocks = hunks.sorted {
+        var addedAtEnd = false
+        let sorted = hunks.filter { !$0.removedText.isEmpty }.sorted {
             if $0.currentRange.location == $1.currentRange.location {
                 return $0.baseRange.location < $1.baseRange.location
             }
             return $0.currentRange.location < $1.currentRange.location
-        }.compactMap { hunk in
+        }
+        blocks = sorted.enumerated().compactMap { index, hunk in
             let boundary = min(hunk.currentRange.location, source.length)
             guard !hunk.removedText.isEmpty, boundary >= 0 else { return nil }
             // Pending hunks can briefly have old offsets. The view still inserts removed rows between lines.
             let offset = boundary == source.length ? boundary
                 : source.lineRange(for: NSRange(location: boundary, length: 0)).location
-            let removedLength = hunk.removedText.utf16.count
-            // An unterminated old final line still appears on its own row above live text.
-            let separator = offset < source.length && hunk.removedText.last?.isNewline == false ? lineEnding : ""
-            let text = (hunk.removedText + separator) as NSString
+            let leading = boundary == source.length && source.length > 0 && !addedAtEnd &&
+                (source as String).last?.isNewline == false ? lineEnding : ""
+            if boundary == source.length { addedAtEnd = true }
+            let trailing = (offset < source.length || index + 1 < sorted.count) &&
+                hunk.removedText.last?.isNewline == false ? lineEnding : ""
+            let text = (leading + hunk.removedText + trailing) as NSString
             let range = NSRange(location: offset + inserted, length: text.length)
+            let removed = hunk.removedText as NSString
+            let rows = EditorTextRows(in: removed, range: NSRange(location: 0, length: removed.length))
+                .shifted(by: range.location + leading.utf16.count)
             inserted += range.length
-            return Block(key: hunk.baseRange, liveOffset: offset, text: text,
-                         removedLength: removedLength, displayRange: range)
+            return Block(key: hunk.baseRange, liveOffset: offset, text: text, rows: rows, displayRange: range)
         }
         length = source.length + inserted
     }
 
     var string: String { text(in: NSRange(location: 0, length: length)) ?? "" }
 
+    func removedRows(for key: NSRange) -> EditorTextRows? {
+        blocks.first { $0.key == key }?.rows
+    }
+
     func displayRange(forRemoved key: NSRange) -> NSRange? {
-        blocks.first { $0.key == key }.map { NSRange(location: $0.displayRange.location, length: $0.removedLength) }
+        removedRows(for: key)?.range
     }
 
     func displayOffset(for position: Position) -> Int? {
@@ -72,7 +82,7 @@ struct JJInlineDiffSelection {
             if offset < range.location { break }
             let end = NSMaxRange(range)
             if offset < end || (offset == end && preferPrevious) {
-                return .removed(key: block.key, offset: min(block.removedLength, offset - range.location))
+                return .removed(key: block.key, offset: max(0, min(block.rows.range.length, offset - block.rows.range.location)))
             }
             inserted += range.length
         }

@@ -2,16 +2,30 @@ import AppKit
 import CoreServices
 
 @MainActor
-final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTextFieldDelegate {
+final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTextFieldDelegate {
     enum Mode { case worktree, scratches }
 
+    private enum RowID: Hashable {
+        case file(String)
+        case scratchRoot
+        case scratchCategory(String?)
+        case scratch(UUID)
+        case draft(UUID)
+
+        static func fileURL(_ url: URL) -> Self { .file(WorktreeFileOperations.path(url)) }
+
+        var filePath: String? {
+            if case .file(let path) = self { return path }
+            return nil
+        }
+    }
+
     private final class Item: NSObject {
-        let url: URL
+        let id: RowID
+        let fileURL: URL?
         let isDirectory: Bool
-        let path: String
         let outside: Bool
         var scratchFile: ScratchFile?
-        var scratchCategory: String?
         var displayName: String?
         var isIgnored = false
         var isSystemHidden = false
@@ -21,35 +35,53 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         var isLoaded = false
         var expandWithAnimationWhenLoaded = false
 
-        init(_ url: URL, directory: Bool, outside: Bool = false) {
-            self.url = url
-            path = WorktreeFileOperations.path(url)
+        init(_ id: RowID, directory: Bool, fileURL: URL? = nil, outside: Bool = false) {
+            self.id = id
+            self.fileURL = fileURL
             self.isDirectory = directory
             self.outside = outside
+        }
+
+        convenience init(_ url: URL, directory: Bool, outside: Bool = false) {
+            self.init(.fileURL(url), directory: directory, fileURL: url, outside: outside)
+        }
+
+        var scratchCategory: String? {
+            if case .scratchCategory(let folder) = id { return folder }
+            return nil
         }
 
         var name: String {
             if let scratchFile { return scratchFile.name }
             if let displayName { return displayName }
+            guard let fileURL, let path = id.filePath else { return "" }
             if outside && isDirectory { return (path as NSString).abbreviatingWithTildeInPath }
-            return url.lastPathComponent.isEmpty ? path : url.lastPathComponent
+            return fileURL.lastPathComponent.isEmpty ? path : fileURL.lastPathComponent
         }
+    }
+
+    private enum NameRequest {
+        case worktree(WorktreeActions.NameRequest, root: URL)
+        case scratch(file: ScratchFile?, category: String?)
+    }
+
+    private enum OpenTarget: Equatable {
+        case file(URL)
+        case scratch(UUID)
     }
 
     @MainActor
     private final class NameEdit {
-        let request: WorktreeActions.NameRequest
-        let root: URL
+        let request: NameRequest
         let entry: Item
         let draftParent: Item?
-        let selection: [String]
+        let selection: [RowID]
         let field = NSTextField()
         var submitting = false
         var error: NSPopover?
 
-        init(request: WorktreeActions.NameRequest, root: URL, entry: Item, draftParent: Item?, selection: [String]) {
+        init(request: NameRequest, entry: Item, draftParent: Item?, selection: [RowID]) {
             self.request = request
-            self.root = root
             self.entry = entry
             self.draftParent = draftParent
             self.selection = selection
@@ -57,7 +89,6 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     private static let hiddenItemsKey = "WorktreeHiddenItems"
-    private static let scratchRoot = URL(filePath: "/.edit-scratches", directoryHint: .isDirectory)
     private static let hiddenItemsChanged = Notification.Name("Edit.WorktreeHiddenItemsChanged")
     private let container = NSView()
     private let scroll = WorktreeScrollView()
@@ -67,19 +98,19 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     private let mode: Mode
     private var root: Item?
     private var outside: Item?
-    private var currentPath: String?
-    private var currentDirectories: Set<String> = []
-    private var pathToReveal: String?
-    private var restoredSelection: [String] = []
+    private var currentRow: RowID?
+    private var currentDirectories: Set<RowID> = []
+    private var rowToReveal: RowID?
+    private var restoredSelection: [RowID] = []
     private var selectionRevision: UInt64 = 0
     private var restoringSelection = false
     private var manualHidden: Set<String> = []
-    private var expanded: Set<String> = []
+    private var expanded: Set<RowID> = []
     private var requests: [String: Task<Void, Never>] = [:]
     private var isActive = false
     private var monitor: WorktreeMonitor?
     private var reloading = false
-    private var pendingOpen: URL?
+    private var pendingOpen: OpenTarget?
     private var openingFile: Task<Void, Never>?
     private var nameEdit: NameEdit?
     private var scratchFiles: [ScratchFile] = []
@@ -95,14 +126,14 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         toggleHidden: { [weak self] in self?.toggleHidden($0) },
         editName: { [weak self] in self?.beginNameEdit($0, in: $1) }
     )
-    private lazy var scratchActions = ScratchWorktreeActions(document: document, app: app, worktree: actions)
+    private lazy var scratchActions = ScratchWorktreeActions(document: document, app: app)
 
     var view: NSView { container }
     var outline: NSOutlineView { tree }
     var isObservingWorktree: Bool { mode == .worktree && isActive }
     private(set) var showsHidden = false
 
-    init(document: DocumentWindow, app: Edit, mode: Mode = .worktree) {
+    init(document: DocumentWindow, app: Edit, mode: Mode) {
         self.document = document
         self.app = app
         self.mode = mode
@@ -173,7 +204,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         startMonitoring()
         if mode == .worktree { document.updateJJContext() }
         if active {
-            pathToReveal = currentPath
+            rowToReveal = currentRow
             if mode == .scratches, !currentDirectories.isSubset(of: expanded) {
                 expanded.formUnion(currentDirectories)
                 reloadTree()
@@ -186,8 +217,8 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     func update(folder: URL, currentFile: URL?, revealCurrentFile: Bool = true) {
         let folder = folder.standardizedFileURL
-        let folderPath = WorktreeFileOperations.path(folder)
-        let rootChanged = root?.path != folderPath
+        let rootID = RowID.fileURL(folder)
+        let rootChanged = root?.id != rootID
         if rootChanged {
             restoredSelection.removeAll()
             pendingOpen = nil
@@ -202,22 +233,22 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         }
 
         let file = currentFile?.standardizedFileURL
-        let filePath = file.map(WorktreeFileOperations.path)
-        guard rootChanged || currentPath != filePath else { return }
-        currentPath = filePath
+        let fileID = file.map(RowID.fileURL)
+        guard rootChanged || currentRow != fileID else { return }
+        currentRow = fileID
         currentDirectories = []
-        if !rootChanged, let outside { expanded.remove(outside.path) }
+        if !rootChanged, let outside { expanded.remove(outside.id) }
         outside = nil
         // Loading a previous selection must not move the highlight back during rapid navigation.
-        pathToReveal = revealCurrentFile && openingFile == nil ? filePath : nil
+        rowToReveal = revealCurrentFile && openingFile == nil ? fileID : nil
         if let file, WorktreeFileOperations.contains(file, in: folder) {
             currentDirectories = ancestors(of: file, in: folder)
-            expanded.formUnion(currentDirectories.subtracting([folderPath]))
+            expanded.formUnion(currentDirectories.subtracting([rootID]))
         } else if let file {
             let parent = Item(file.deletingLastPathComponent(), directory: true, outside: true)
             parent.visibleChildren = [Item(file, directory: false, outside: true)]
             outside = parent
-            expanded.insert(parent.path)
+            expanded.insert(parent.id)
         }
         reloadTree()
     }
@@ -233,21 +264,18 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             updateScratchCurrent(current, reveal: true)
             return
         }
-        installScratchFiles(files, current: current, preserving: selectedItems.map(\.path))
+        installScratchFiles(files, current: current, preserving: selectedItems.map(\.id))
     }
 
-    private func installScratchFiles(_ files: [ScratchFile], current: UUID?, preserving selection: [String]) {
+    private func installScratchFiles(_ files: [ScratchFile], current: UUID?, preserving selection: [RowID]) {
         if root == nil {
-            root = Item(Self.scratchRoot, directory: true)
+            root = Item(.scratchRoot, directory: true)
             root?.isLoaded = true
         }
         guard let root else { return }
         let selected = Set(selection)
-        let selectedFiles = root.children.flatMap(\.children).filter { selected.contains($0.path) }
-        let selectedByID = Dictionary(uniqueKeysWithValues: selectedFiles.compactMap { item in
-            item.scratchFile.map { ($0.id, item.path) }
-        })
-        let previous = Dictionary(uniqueKeysWithValues: root.children.map { ($0.path, $0) })
+        let previous = Dictionary(uniqueKeysWithValues: root.children.map { ($0.id, $0) })
+        let previousFiles = Dictionary(uniqueKeysWithValues: root.children.flatMap(\.children).map { ($0.id, $0) })
         scratchFiles = files
         scratchProject = document.folderURL.map(WorktreeFileOperations.path)
         var groups = Dictionary(grouping: files, by: \.folderPath)
@@ -260,9 +288,8 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         let names = Dictionary(grouping: categoryPaths) { Self.scratchFolderName($0).lowercased() }
         var kept = selection.filter { previous[$0] != nil }
         root.children = categoryPaths.map { folderPath in
-            let url = Self.scratchFolderURL(folderPath)
-            let path = WorktreeFileOperations.path(url)
-            let category = previous[path] ?? Item(url, directory: true)
+            let categoryID = RowID.scratchCategory(folderPath)
+            let category = previous[categoryID] ?? Item(categoryID, directory: true)
             let name = Self.scratchFolderName(folderPath)
             if let folderPath, (names[name.lowercased()]?.count ?? 0) > 1 {
                 let parent = (folderPath as NSString).deletingLastPathComponent as NSString
@@ -270,21 +297,18 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             } else {
                 category.displayName = name
             }
-            category.scratchCategory = folderPath
             category.isLoaded = true
-            let children = Dictionary(uniqueKeysWithValues: category.children.map { ($0.path, $0) })
             category.children = (groups[folderPath] ?? []).sorted {
                 let comparison = $0.name.localizedStandardCompare($1.name)
                 return comparison == .orderedSame ? $0.name < $1.name : comparison == .orderedAscending
             }.map { file in
-                let url = Self.scratchFileURL(file)
-                let path = WorktreeFileOperations.path(url)
-                let item = children[path] ?? Item(url, directory: false)
-                item.scratchFile = file
-                if let oldPath = selectedByID[file.id] {
-                    kept.append(path)
-                    if oldPath != path { expanded.insert(category.path) }
+                let id = RowID.scratch(file.id)
+                let item = previousFiles[id] ?? Item(id, directory: false)
+                if selected.contains(id) {
+                    kept.append(id)
+                    if item.scratchFile?.folderPath != file.folderPath { expanded.insert(categoryID) }
                 }
+                item.scratchFile = file
                 return item
             }
             return category
@@ -303,27 +327,28 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     func revealCurrentScratch() {
-        guard mode == .scratches, openingFile == nil, let currentPath else { return }
-        pathToReveal = currentPath
+        guard mode == .scratches, openingFile == nil, let currentRow else { return }
+        rowToReveal = currentRow
         expanded.formUnion(currentDirectories)
         revealActiveScratch()
     }
 
     private func revealActiveScratch() {
-        guard nameEdit == nil, let path = currentDirectories.first, let category = item(at: path) else { return }
+        guard nameEdit == nil, let id = currentDirectories.first, let category = item(at: id) else { return }
         if !tree.isItemExpanded(category) { tree.setFolderExpanded(category, expanded: true, animated: false) }
         revealPendingItem()
     }
 
     private func setScratchCurrent(_ id: UUID?, reveal: Bool) {
-        let url = scratchFiles.first { $0.id == id }.map(Self.scratchFileURL)
-        let nextPath = url.map(WorktreeFileOperations.path)
-        let changed = currentScratchID != id || currentPath != nextPath
+        let file = scratchFiles.first { $0.id == id }
+        let next = file.map { RowID.scratch($0.id) }
+        let directories = Set(file.map { [RowID.scratchCategory($0.folderPath)] } ?? [])
+        let changed = currentScratchID != id || currentRow != next || currentDirectories != directories
         currentScratchID = id
-        currentPath = nextPath
-        currentDirectories = Set(url.map { [WorktreeFileOperations.path($0.deletingLastPathComponent())] } ?? [])
+        currentRow = next
+        currentDirectories = directories
         if changed && reveal && openingFile == nil {
-            pathToReveal = nextPath
+            rowToReveal = next
             expanded.formUnion(currentDirectories)
         }
     }
@@ -334,28 +359,17 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         return name.isEmpty ? folderPath : name
     }
 
-    private static func scratchFolderURL(_ folderPath: String?) -> URL {
-        let component = folderPath.map {
-            Data($0.utf8).base64EncodedString().replacingOccurrences(of: "/", with: "_")
-        } ?? "global"
-        return scratchRoot.appending(path: component, directoryHint: .isDirectory)
-    }
-
-    private static func scratchFileURL(_ file: ScratchFile) -> URL {
-        scratchFolderURL(file.folderPath).appending(path: file.id.uuidString, directoryHint: .notDirectory)
-    }
-
-    private func ancestors(of url: URL, in folder: URL) -> Set<String> {
-        let rootPath = WorktreeFileOperations.path(folder)
-        var paths: Set<String> = []
+    private func ancestors(of url: URL, in folder: URL) -> Set<RowID> {
+        let rootID = RowID.fileURL(folder)
+        var ids: Set<RowID> = []
         var ancestor = url.deletingLastPathComponent()
         while WorktreeFileOperations.contains(ancestor, in: folder) {
-            let path = WorktreeFileOperations.path(ancestor)
-            paths.insert(path)
-            if path == rootPath { break }
+            let id = RowID.fileURL(ancestor)
+            ids.insert(id)
+            if id == rootID { break }
             ancestor.deleteLastPathComponent()
         }
-        return paths
+        return ids
     }
 
     func setShowsHidden(_ enabled: Bool) {
@@ -378,13 +392,13 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     private func startMonitoring() {
         monitor = nil
-        guard mode == .worktree, isActive, let root else { return }
-        monitor = WorktreeMonitor(directory: root.url) { [weak self] paths, reload in
+        guard isActive, let directory = root?.fileURL else { return }
+        monitor = WorktreeMonitor(directory: directory) { [weak self] paths, reload in
             guard let self, let root = self.root else { return }
             if reload {
                 refresh()
             } else {
-                for item in expandedDirectories(from: root) where paths.contains(item.path) {
+                for item in expandedDirectories(from: root) where item.id.filePath.map(paths.contains) == true {
                     load(item, force: true)
                 }
             }
@@ -403,12 +417,10 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     private func load(_ item: Item, force: Bool = false) {
-        guard mode == .worktree, let root, !item.outside, item.isDirectory, item !== provisionalEntry else { return }
-        let path = item.path
+        guard let rootURL = root?.fileURL, let directoryURL = item.fileURL, let path = item.id.filePath,
+              !item.outside, item.isDirectory, item !== provisionalEntry else { return }
         if force { requests[path]?.cancel() }
         else if item.isLoaded || requests[path] != nil { return }
-        let directoryURL = item.url
-        let rootURL = root.url
         requests[path] = Task { [weak self, weak item] in
             let work = Task.detached(priority: .userInitiated) {
                 Result { try WorktreeDirectory.read(directoryURL, within: rootURL) }
@@ -436,16 +448,16 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         let firstLoad = !item.isLoaded && item.visibleChildren.isEmpty
         item.expandWithAnimationWhenLoaded = false
         let changed = !item.isLoaded || entries.count != item.children.count || zip(entries, item.children).contains { entry, child in
-            WorktreeFileOperations.path(entry.url) != child.path || entry.isDirectory != child.isDirectory ||
+            RowID.fileURL(entry.url) != child.id || entry.isDirectory != child.isDirectory ||
                 entry.isIgnored != child.isIgnored || entry.isHidden != child.isSystemHidden
         }
         item.isLoaded = true
         // Reloading identical rows would interrupt the outline's expansion animation.
         guard changed || shouldAnimateExpansion else { return }
-        let previous = Dictionary(uniqueKeysWithValues: item.children.map { ($0.path, $0) })
+        let previous = Dictionary(uniqueKeysWithValues: item.children.map { ($0.id, $0) })
         item.children = entries.map { entry in
             let child: Item
-            if let existing = previous[WorktreeFileOperations.path(entry.url)], existing.isDirectory == entry.isDirectory {
+            if let existing = previous[.fileURL(entry.url)], existing.isDirectory == entry.isDirectory {
                 child = existing
             } else {
                 child = Item(entry.url, directory: entry.isDirectory)
@@ -468,10 +480,10 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             reloading = true
             tree.setFolderExpanded(item, expanded: true, animated: true)
             reloading = false
-            if tree.isItemExpanded(item) { expanded.insert(item.path) }
+            if tree.isItemExpanded(item) { expanded.insert(item.id) }
             return
         }
-        let selection = selectedItems.map(\.path)
+        let selection = selectedItems.map(\.id)
         reloading = true
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
@@ -492,7 +504,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     private func updateVisibleChildren(of item: Item) {
-        if mode == .scratches {
+        guard let directoryPath = item.id.filePath else {
             item.visibleChildren = item.children
             return
         }
@@ -500,19 +512,19 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         item.visibleChildren = item.children.filter { child in
             child.hasHiddenParent = parentHidden
             return showsHidden || (!parentHidden && !isHidden(child))
-                || child.path == currentPath || currentDirectories.contains(child.path)
+                || child.id == currentRow || currentDirectories.contains(child.id)
         }
         // The CLI can open a new path before the file exists on disk.
-        if let currentPath, item.isLoaded, currentDirectories.contains(item.path),
-           URL(filePath: currentPath).deletingLastPathComponent().path == item.path,
-           !item.visibleChildren.contains(where: { $0.path == currentPath }) {
+        if let currentPath = currentRow?.filePath, item.isLoaded, currentDirectories.contains(item.id),
+           URL(filePath: currentPath).deletingLastPathComponent().path == directoryPath,
+           !item.visibleChildren.contains(where: { $0.id == currentRow }) {
             item.visibleChildren.append(Item(URL(filePath: currentPath), directory: false))
         }
     }
 
-    private func reloadTree(keeping paths: [String]? = nil) {
+    private func reloadTree(keeping ids: [RowID]? = nil) {
         guard nameEdit == nil else { return }
-        let selection = paths ?? selectedItems.map(\.path)
+        let selection = ids ?? selectedItems.map(\.id)
         if let root {
             var pending = [root]
             while let item = pending.popLast() {
@@ -535,7 +547,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     private func restoreExpansion(from item: Item) {
-        guard item.isDirectory, expanded.contains(item.path) else { return }
+        guard item.isDirectory, expanded.contains(item.id) else { return }
         tree.expandItem(item)
         load(item)
         for child in item.visibleChildren where child.isDirectory {
@@ -543,13 +555,13 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         }
     }
 
-    private func restoreSelection(_ paths: [String]) {
-        selectRows(visibleRows(for: paths))
+    private func restoreSelection(_ ids: [RowID]) {
+        selectRows(visibleRows(for: ids))
     }
 
-    private func visibleRows(for paths: [String]) -> IndexSet {
-        IndexSet(paths.compactMap { path in
-            guard let item = item(at: path) else { return nil }
+    private func visibleRows(for ids: [RowID]) -> IndexSet {
+        IndexSet(ids.compactMap { id in
+            guard let item = item(at: id) else { return nil }
             let row = tree.row(forItem: item)
             return row >= 0 ? row : nil
         })
@@ -582,61 +594,73 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     private func revealPendingItem() {
-        guard nameEdit == nil, let pathToReveal, let item = item(at: pathToReveal) else { return }
+        guard nameEdit == nil, let rowToReveal, let item = item(at: rowToReveal) else { return }
         let row = tree.row(forItem: item)
         guard row >= 0 else { return }
-        self.pathToReveal = nil
+        self.rowToReveal = nil
         if mode == .worktree || !tree.selectedRowIndexes.contains(row) {
             tree.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
         tree.scrollRowToVisible(row)
     }
 
-    private func item(at path: String) -> Item? {
-        if let file = outside?.visibleChildren.first, file.path == path { return file }
-        if let outside, outside.path == path { return outside }
+    private func item(at id: RowID) -> Item? {
+        switch id {
+        case .scratchRoot: return root?.id == id ? root : nil
+        case .scratchCategory: return root?.visibleChildren.first { $0.id == id }
+        case .scratch: return root?.visibleChildren.lazy.compactMap { $0.visibleChildren.first { $0.id == id } }.first
+        case .draft: return provisionalEntry?.id == id ? provisionalEntry : nil
+        case .file(let path): return fileItem(at: path)
+        }
+    }
+
+    private func fileItem(at path: String) -> Item? {
+        let id = RowID.file(path)
+        if let file = outside?.visibleChildren.first, file.id == id { return file }
+        if let outside, outside.id == id { return outside }
         guard var item = root else { return nil }
-        while item.path != path {
-            let prefix = item.path.hasSuffix("/") ? item.path : item.path + "/"
+        while item.id != id {
+            guard let parent = item.id.filePath else { return nil }
+            let prefix = parent.hasSuffix("/") ? parent : parent + "/"
             guard path.hasPrefix(prefix) else { return nil }
             let next = path.dropFirst(prefix.count).prefix { $0 != "/" }
-            guard let child = item.visibleChildren.first(where: { $0.path == prefix + next }) else { return nil }
+            guard let child = item.visibleChildren.first(where: { $0.id == .file(prefix + next) }) else { return nil }
             item = child
         }
         return item
     }
 
     private func readHiddenItems() {
-        guard !app.isAgentCheck, let root else {
+        guard !app.isAgentCheck, let rootPath = root?.id.filePath else {
             manualHidden = []
             return
         }
-        manualHidden = Set(UserDefaults.standard.dictionary(forKey: Self.hiddenItemsKey)?[root.path] as? [String] ?? [])
+        manualHidden = Set(UserDefaults.standard.dictionary(forKey: Self.hiddenItemsKey)?[rootPath] as? [String] ?? [])
     }
 
     private func toggleHidden(_ url: URL) {
-        guard let root else { return }
+        guard let rootPath = root?.id.filePath else { return }
         if !app.isAgentCheck { readHiddenItems() }
         let path = WorktreeFileOperations.path(url)
         if manualHidden.remove(path) == nil { manualHidden.insert(path) }
         if !app.isAgentCheck {
             var folders = UserDefaults.standard.dictionary(forKey: Self.hiddenItemsKey) ?? [:]
-            folders[root.path] = manualHidden.isEmpty ? nil : manualHidden.sorted()
+            folders[rootPath] = manualHidden.isEmpty ? nil : manualHidden.sorted()
             UserDefaults.standard.set(folders, forKey: Self.hiddenItemsKey)
-            NotificationCenter.default.post(name: Self.hiddenItemsChanged, object: nil, userInfo: ["root": root.path])
+            NotificationCenter.default.post(name: Self.hiddenItemsChanged, object: nil, userInfo: ["root": rootPath])
         }
         reloadTree()
     }
 
     @objc private func hiddenItemsChanged(_ notification: Notification) {
-        guard let root, notification.userInfo?["root"] as? String == root.path else { return }
+        guard let rootPath = root?.id.filePath, notification.userInfo?["root"] as? String == rootPath else { return }
         let previous = manualHidden
         readHiddenItems()
         if previous != manualHidden { reloadTree() }
     }
 
     private func isHidden(_ item: Item) -> Bool {
-        item.isSystemHidden || manualHidden.contains(item.path)
+        item.isSystemHidden || item.id.filePath.map(manualHidden.contains) == true
     }
 
     private var provisionalEntry: Item? { nameEdit?.draftParent == nil ? nil : nameEdit?.entry }
@@ -669,13 +693,13 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     func outlineViewItemDidExpand(_ notification: Notification) {
         guard !reloading, let item = notification.userInfo?["NSObject"] as? Item else { return }
-        expanded.insert(item.path)
+        expanded.insert(item.id)
         load(item, force: item.isLoaded)
     }
 
     func outlineViewItemDidCollapse(_ notification: Notification) {
         guard !reloading, let item = notification.userInfo?["NSObject"] as? Item else { return }
-        expanded.remove(item.path)
+        expanded.remove(item.id)
     }
 
     func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
@@ -688,16 +712,16 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         let cell = outlineView.makeView(withIdentifier: WorktreeCell.identifier, owner: self) as? WorktreeCell
             ?? WorktreeCell()
         let muted = item.isIgnored || isHidden(item)
-        let backingURL = item.scratchFile.map { app.scratchStore.url(for: $0) } ?? item.url
+        let backingURL = item.scratchFile.map { app.scratchStore.url(for: $0) } ?? item.fileURL
         let icon: NSImage?
         if item.isDirectory {
             icon = nil
         } else {
-            let nameURL = item.scratchFile?.filenameURL ?? item.url
+            let nameURL = item.scratchFile?.filenameURL ?? item.fileURL ?? URL(filePath: item.name)
             icon = FileIcons.image(for: nameURL, appearance: outlineView.effectiveAppearance,
-                                  language: app.syntaxOverrides.language(for: backingURL)?.iconIdentifier)
+                                  language: backingURL.flatMap { app.syntaxOverrides.language(for: $0)?.iconIdentifier })
         }
-        let path = mode == .worktree ? item.path : item.isDirectory ? item.scratchCategory ?? "Global" : backingURL.path
+        let path = item.id.filePath ?? backingURL?.path ?? (item.isDirectory ? item.scratchCategory ?? "Global" : item.name)
         cell.configure(name: item.name, path: path, icon: icon, muted: muted)
         cell.setJJStatus(jjStatus(for: item))
         return cell
@@ -715,8 +739,8 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     private func jjStatus(for item: Item) -> JJPathStatus? {
-        guard mode == .worktree, !item.outside, item !== provisionalEntry else { return nil }
-        return jjDecorations?.status(at: item.url, directory: item.isDirectory)
+        guard let url = item.fileURL, !item.outside, item !== provisionalEntry else { return nil }
+        return jjDecorations?.status(at: url, directory: item.isDirectory)
     }
 
     private var selectedItems: [Item] { tree.selectedRowIndexes.compactMap { tree.item(atRow: $0) as? Item } }
@@ -726,23 +750,25 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         if mode == .scratches && !tree.selectedRowIndexes.contains(row) {
             selectRows(IndexSet(integer: row))
         }
-        pathToReveal = nil
-        pendingOpen = item.url
+        rowToReveal = nil
+        if let file = item.scratchFile { pendingOpen = .scratch(file.id) }
+        else if let url = item.fileURL { pendingOpen = .file(url) }
+        else { return }
         guard openingFile == nil else { return }
         openingFile = Task { [weak self, app, document] in
             defer { self?.openingFile = nil }
-            while let self, let url = self.pendingOpen {
+            while let self, let target = self.pendingOpen {
                 self.pendingOpen = nil
-                if self.mode == .scratches {
-                    guard let id = UUID(uuidString: url.lastPathComponent),
-                          let scratch = self.scratchFiles.first(where: { $0.id == id }) else { continue }
+                switch target {
+                case .scratch(let id):
+                    guard let scratch = self.scratchFiles.first(where: { $0.id == id }) else { continue }
                     _ = await document.openScratch(scratch, focusEditor: false) {
-                        self.isActive && (self.pendingOpen == nil || self.pendingOpen == url)
+                        self.isActive && (self.pendingOpen == nil || self.pendingOpen == target)
                     }
-                } else {
+                case .file(let url):
                     let folder = document.folderURL
                     await app.openFiles([url], in: document, focusEditor: false) {
-                        self.isActive && self.document.folderURL == folder && (self.pendingOpen == nil || self.pendingOpen == url)
+                        self.isActive && self.document.folderURL == folder && (self.pendingOpen == nil || self.pendingOpen == target)
                     }
                 }
             }
@@ -788,56 +814,66 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         let changed = folders.filter { tree.isItemExpanded($0) != expanding }
         guard !changed.isEmpty else { return cancelledMouseExpansion || selection.count > 1 }
 
-        let closingPaths = Set(expanding ? [] : changed.map(\.path))
+        let closingPaths = Set(expanding ? [] : changed.compactMap(\.id.filePath))
         for folder in changed {
             // Collapsing a parent leaves the expansion state of its hidden children intact.
-            if !expanding,
-               WorktreeFileOperations.isUnderSelection(folder.url.deletingLastPathComponent(), paths: closingPaths) {
+            if !expanding, let url = folder.fileURL,
+               WorktreeFileOperations.isUnderSelection(url.deletingLastPathComponent(), paths: closingPaths) {
                 continue
             }
             tree.setFolderExpanded(folder, expanded: expanding, animated: false)
         }
-        if selection.count > 1 { restoreSelection(selection.map(\.path)) }
+        if selection.count > 1 { restoreSelection(selection.map(\.id)) }
         return true
     }
 
     func renameSelection() {
-        guard let root, tree.selectedRowIndexes.count == 1, let item = selectedItems.first else { return }
-        beginNameEdit(.rename(item.url), in: root.url)
+        guard tree.selectedRowIndexes.count == 1, let item = selectedItems.first else { return }
+        rename(item)
+    }
+
+    private func rename(_ item: Item) {
+        if let file = item.scratchFile, scratchActions.canWork {
+            beginNameEdit(.scratch(file: file, category: file.folderPath), entry: item)
+        } else if let url = item.fileURL, let folder = root?.fileURL {
+            beginNameEdit(.rename(url), in: folder)
+        }
     }
 
     private func beginNameEdit(_ request: WorktreeActions.NameRequest, in openedFolder: URL) {
-        let canEdit = mode == .scratches ? scratchActions.canWork : actions.canEditName(in: openedFolder)
-        guard isActive, let root, canEdit, nameEdit?.submitting != true else { return }
-        if let nameEdit { finishNameEdit(nameEdit) }
-        let entry: Item
-        let draftParent: Item?
+        guard actions.canEditName(in: openedFolder), let root else { return }
+        let worktree = NameRequest.worktree(request, root: openedFolder)
         switch request {
         case .rename(let url):
-            guard let item = item(at: WorktreeFileOperations.path(url)), item !== root, !item.outside else { return }
-            if mode == .scratches && item.scratchFile == nil { return }
-            entry = item
-            draftParent = nil
+            guard let item = item(at: .fileURL(url)), item !== root, !item.outside else { return }
+            beginNameEdit(worktree, entry: item)
         case .create(let directory, let isDirectory):
-            guard let parent = item(at: WorktreeFileOperations.path(directory)), !parent.outside else { return }
-            if mode == .scratches && (isDirectory || parent === root) { return }
-            if parent !== root { tree.expandItem(parent) }
-            let base = isDirectory ? "untitled folder" : "untitled"
-            let occupied = Set(parent.children.map { $0.name.lowercased() })
-            var initial = base
-            var suffix = 2
-            while occupied.contains(initial) {
-                initial = "\(base) \(suffix)"
-                suffix += 1
-            }
-            entry = Item(parent.url.appending(path: initial), directory: isDirectory)
-            draftParent = parent
+            guard let parent = item(at: .fileURL(directory)), !parent.outside else { return }
+            beginNameEdit(worktree, entry: makeDraft(in: parent, directory: isDirectory), draftParent: parent)
         }
+    }
 
-        let edit = NameEdit(request: request, root: openedFolder, entry: entry, draftParent: draftParent,
-                            selection: selectedItems.map(\.path))
+    private func makeDraft(in parent: Item, directory: Bool) -> Item {
+        let base = directory ? "untitled folder" : "untitled"
+        let occupied = Set(parent.children.map { $0.name.lowercased() })
+        var name = base
+        var suffix = 2
+        while occupied.contains(name) {
+            name = "\(base) \(suffix)"
+            suffix += 1
+        }
+        let entry = Item(.draft(UUID()), directory: directory)
+        entry.displayName = name
+        return entry
+    }
+
+    private func beginNameEdit(_ request: NameRequest, entry: Item, draftParent: Item? = nil) {
+        guard isActive, let root, nameEdit?.submitting != true else { return }
+        if let nameEdit { finishNameEdit(nameEdit) }
+        if let draftParent, draftParent !== root { tree.expandItem(draftParent) }
+        let edit = NameEdit(request: request, entry: entry, draftParent: draftParent, selection: selectedItems.map(\.id))
         nameEdit = edit
-        pathToReveal = nil
+        rowToReveal = nil
         if let draftParent {
             tree.insertItems(at: IndexSet(integer: draftParent.visibleChildren.count),
                              inParent: draftParent === root ? nil : draftParent, withAnimation: [])
@@ -884,7 +920,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         // Let AppKit finish the focus change before removing the edited row.
         Task { [weak self, weak edit] in
             guard let self, let edit, !edit.submitting, edit.field.currentEditor() == nil else { return }
-            let selection = self.selectedItems.filter { $0 !== self.provisionalEntry }.map(\.path)
+            let selection = self.selectedItems.filter { $0 !== self.provisionalEntry }.map(\.id)
             self.finishNameEdit(edit, keeping: selection.isEmpty ? edit.selection : selection)
         }
     }
@@ -907,31 +943,25 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         Task { [weak self, document] in
             guard let self else { return }
             do {
-                if mode == .scratches {
-                    let folderPath = edit.draftParent?.scratchCategory ?? edit.entry.scratchFile?.folderPath
-                    let record = try await scratchActions.commitName(name, file: edit.entry.scratchFile, folderPath: folderPath)
+                switch edit.request {
+                case .scratch(let file, let category):
+                    let record = try await scratchActions.commitName(name, file: file, folderPath: category)
                     guard nameEdit === edit else { return }
                     let stillEditing = document.window.firstResponder === editor
-                    let url = Self.scratchFileURL(record)
-                    pathToReveal = WorktreeFileOperations.path(url)
-                    expanded.insert(WorktreeFileOperations.path(url.deletingLastPathComponent()))
+                    rowToReveal = .scratch(record.id)
+                    expanded.insert(.scratchCategory(record.folderPath))
                     pendingScratchFiles = (pendingScratchFiles ?? scratchFiles).filter { $0.id != record.id } + [record]
                     finishNameEdit(edit)
                     if edit.draftParent != nil, stillEditing { _ = await document.openScratch(record) }
-                    return
-                }
-                let url = try await actions.commitName(name, for: edit.request, in: edit.root)
-                guard nameEdit === edit else { return }
-                let path = WorktreeFileOperations.path(url)
-                if case .rename(let source) = edit.request {
-                    retargetExpansion(from: source, to: url)
-                }
-                expanded.formUnion(ancestors(of: url, in: edit.root).subtracting([WorktreeFileOperations.path(edit.root)]))
-                pathToReveal = path
-                let stillEditing = document.window.firstResponder === editor
-                finishNameEdit(edit)
-                if case .create(_, false) = edit.request, stillEditing {
-                    await app.openFiles([url], in: document)
+                case .worktree(let request, let folder):
+                    let url = try await actions.commitName(name, for: request, in: folder)
+                    guard nameEdit === edit else { return }
+                    if case .rename(let source) = request { retargetExpansion(from: source, to: url) }
+                    expanded.formUnion(ancestors(of: url, in: folder).subtracting([.fileURL(folder)]))
+                    rowToReveal = .fileURL(url)
+                    let stillEditing = document.window.firstResponder === editor
+                    finishNameEdit(edit)
+                    if case .create(_, false) = request, stillEditing { await app.openFiles([url], in: document) }
                 }
             } catch {
                 guard nameEdit === edit else { return }
@@ -963,7 +993,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         popover.show(relativeTo: edit.field.bounds, of: edit.field, preferredEdge: .maxY)
     }
 
-    private func finishNameEdit(_ edit: NameEdit, keeping selection: [String]? = nil) {
+    private func finishNameEdit(_ edit: NameEdit, keeping selection: [RowID]? = nil) {
         guard nameEdit === edit else { return }
         nameEdit = nil
         edit.error?.close()
@@ -1014,9 +1044,9 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             tree.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
         if mode == .scratches { return scratchMenu(for: item, in: root) }
-        let urls = row >= 0 ? selectedItems.filter { $0 !== provisionalEntry }.map(\.url) : []
-        let folder = root.url
-        return actions.menu(for: item.url, isDirectory: item.isDirectory, selection: urls, root: folder) { [weak self] in
+        guard let url = item.fileURL, let folder = root.fileURL else { return nil }
+        let urls = row >= 0 ? selectedItems.filter { $0 !== provisionalEntry }.compactMap(\.fileURL) : []
+        return actions.menu(for: url, isDirectory: item.isDirectory, selection: urls, root: folder) { [weak self] in
             guard let self, actions.canTrash(urls, in: folder) else { return }
             document.window.makeFirstResponder(tree)
             actions.trash(urls, within: folder, updateSelection: fileSelectionUpdate(in: folder))
@@ -1032,7 +1062,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             : file?.folderPath ?? item.scratchCategory
         return scratchActions.menu(
             file: file, folderPath: folderPath, selection: selection, categories: categories,
-            rename: { [weak self] in self?.beginNameEdit(.rename(item.url), in: root.url) },
+            rename: { [weak self] in self?.rename(item) },
             create: { [weak self] in self?.beginScratchCreation(in: folderPath) },
             remove: { [weak self] in
                 guard let self else { return }
@@ -1043,12 +1073,15 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     private func beginScratchCreation(in folderPath: String?) {
-        beginNameEdit(.create(in: Self.scratchFolderURL(folderPath), directory: false), in: Self.scratchRoot)
+        guard scratchActions.canWork, let parent = item(at: .scratchCategory(folderPath)) else { return }
+        beginNameEdit(.scratch(file: nil, category: folderPath), entry: makeDraft(in: parent, directory: false), draftParent: parent)
     }
 
     private func trashScratches(_ files: [ScratchFile]) {
-        let update = fileSelectionUpdate(in: Self.scratchRoot)
-        scratchActions.trash(files) { update(.removed(files.map(Self.scratchFileURL))) }
+        let removed = Set(files.map { RowID.scratch($0.id) })
+        let wasRemoved: (Item) -> Bool = { removed.contains($0.id) }
+        let update = selectionAfterRemoval(excluding: wasRemoved)
+        scratchActions.trash(files) { update(wasRemoved) }
     }
 
     func trashSelection() {
@@ -1057,15 +1090,15 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             trashScratches(selectedItems.compactMap(\.scratchFile))
             return
         }
-        let items = selectedItems.map(\.url)
-        guard actions.canTrash(items, in: root.url) else { return }
-        actions.trash(items, within: root.url, updateSelection: fileSelectionUpdate(in: root.url))
+        let items = selectedItems.compactMap(\.fileURL)
+        guard let folder = root.fileURL, actions.canTrash(items, in: folder) else { return }
+        actions.trash(items, within: folder, updateSelection: fileSelectionUpdate(in: folder))
     }
 
     func undoActionName(redo: Bool) -> String? {
         if mode == .scratches { return scratchActions.undoActionName(redo: redo) }
-        guard let root else { return nil }
-        return actions.undoActionName(in: root.url, redo: redo)
+        guard let folder = root?.fileURL else { return nil }
+        return actions.undoActionName(in: folder, redo: redo)
     }
 
     func undoFileChange(redo: Bool) {
@@ -1075,54 +1108,38 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             scratchActions.undo(redo: redo) { [weak self] files in
                 guard let self, selectionRevision == revision,
                       document.window.firstResponder === tree, nameEdit == nil else { return }
-                revealSelection(files.map(Self.scratchFileURL), in: Self.scratchRoot)
+                restoredSelection = files.map { .scratch($0.id) }
+                expanded.formUnion(files.map { .scratchCategory($0.folderPath) })
+                rowToReveal = nil
+                reloadTree()
             }
             return
         }
-        actions.undo(in: root.url, redo: redo, updateSelection: fileSelectionUpdate(in: root.url))
+        guard let folder = root.fileURL else { return }
+        actions.undo(in: folder, redo: redo, updateSelection: fileSelectionUpdate(in: folder))
     }
 
     private func fileSelectionUpdate(in folder: URL) -> (WorktreeActions.SelectionChange) -> Void {
         let revision = selectionRevision
-        let folderPath = WorktreeFileOperations.path(folder)
-        let selection = selectedItems.map(\.url)
-        let anchor = tree.selectedRowIndexes.first
-        var neighbors: [URL] = []
-        if let anchor {
-            let paths = Set(selection.map(WorktreeFileOperations.path))
-            func nearbyItem(in rows: some Sequence<Int>) -> URL? {
-                rows.lazy.compactMap { (self.tree.item(atRow: $0) as? Item)?.url }
-                    .first { !WorktreeFileOperations.isUnderSelection($0, paths: paths) }
-            }
-            if let next = nearbyItem(in: (anchor + 1)..<tree.numberOfRows) { neighbors.append(next) }
-            if let previous = nearbyItem(in: (0..<anchor).reversed()) { neighbors.append(previous) }
+        let folderID = RowID.fileURL(folder)
+        let selectedPaths = Set(selectedItems.compactMap(\.id.filePath))
+        let selectAfterRemoving = selectionAfterRemoval { item in
+            item.fileURL.map { WorktreeFileOperations.isUnderSelection($0, paths: selectedPaths) } == true
         }
         return { [weak self] change in
-            guard let self, root?.path == folderPath else { return }
+            guard let self, root?.id == folderID else { return }
             if case .renamed(let move) = change {
                 retargetExpansion(from: move.source, to: move.destination)
             }
             guard selectionRevision == revision,
                   document.window.firstResponder === tree, nameEdit == nil else { return }
-            pathToReveal = nil
+            rowToReveal = nil
             switch change {
             case .removed(let removed):
                 let removedPaths = Set(removed.map(WorktreeFileOperations.path))
-                func wasRemoved(_ item: URL) -> Bool {
-                    WorktreeFileOperations.isUnderSelection(item, paths: removedPaths)
+                selectAfterRemoving { item in
+                    item.fileURL.map { WorktreeFileOperations.isUnderSelection($0, paths: removedPaths) } == true
                 }
-                guard selection.contains(where: wasRemoved) else { return }
-                let surviving = selection.filter { !wasRemoved($0) }
-                var rows = visibleRows(for: surviving.map(WorktreeFileOperations.path))
-                if rows.isEmpty {
-                    let nearby = neighbors.filter { !wasRemoved($0) }.map(WorktreeFileOperations.path)
-                    for path in nearby {
-                        rows = visibleRows(for: [path])
-                        if !rows.isEmpty { break }
-                    }
-                }
-                selectRows(rows)
-                if let first = rows.first { tree.scrollRowToVisible(first) }
             case .restored(let items):
                 revealSelection(items, in: folder)
             case .renamed(let move):
@@ -1131,10 +1148,37 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         }
     }
 
+    private func selectionAfterRemoval(excluding excluded: (Item) -> Bool) -> ((Item) -> Bool) -> Void {
+        let revision = selectionRevision
+        let selection = selectedItems
+        var neighbors: [Item] = []
+        if let anchor = tree.selectedRowIndexes.first {
+            func nearbyItem(in rows: some Sequence<Int>) -> Item? {
+                rows.lazy.compactMap { (self.tree.item(atRow: $0) as? Item) }.first { !excluded($0) }
+            }
+            if let next = nearbyItem(in: (anchor + 1)..<tree.numberOfRows) { neighbors.append(next) }
+            if let previous = nearbyItem(in: (0..<anchor).reversed()) { neighbors.append(previous) }
+        }
+        return { [weak self] wasRemoved in
+            guard let self, selectionRevision == revision, document.window.firstResponder === tree,
+                  nameEdit == nil, selection.contains(where: wasRemoved) else { return }
+            rowToReveal = nil
+            var rows = visibleRows(for: selection.filter { !wasRemoved($0) }.map(\.id))
+            if rows.isEmpty {
+                for neighbor in neighbors where !wasRemoved(neighbor) {
+                    rows = visibleRows(for: [neighbor.id])
+                    if !rows.isEmpty { break }
+                }
+            }
+            selectRows(rows)
+            if let first = rows.first { tree.scrollRowToVisible(first) }
+        }
+    }
+
     private func revealSelection(_ items: [URL], in folder: URL) {
-        restoredSelection = items.map(WorktreeFileOperations.path)
-        let rootPath = WorktreeFileOperations.path(folder)
-        for item in items { expanded.formUnion(ancestors(of: item, in: folder).subtracting([rootPath])) }
+        restoredSelection = items.map(RowID.fileURL)
+        let rootID = RowID.fileURL(folder)
+        for item in items { expanded.formUnion(ancestors(of: item, in: folder).subtracting([rootID])) }
         reloadTree()
     }
 
@@ -1143,10 +1187,11 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         let destinationPath = WorktreeFileOperations.path(destination)
         guard sourcePath != destinationPath else { return }
         let prefix = sourcePath + "/"
-        expanded = Set(expanded.map { path in
-            if path == sourcePath { return destinationPath }
-            if path.hasPrefix(prefix) { return destinationPath + path.dropFirst(sourcePath.count) }
-            return path
+        expanded = Set(expanded.map { id in
+            guard let path = id.filePath else { return id }
+            if path == sourcePath { return .file(destinationPath) }
+            if path.hasPrefix(prefix) { return .file(destinationPath + path.dropFirst(sourcePath.count)) }
+            return id
         })
     }
 
@@ -1163,18 +1208,18 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             scratchActions.copy(selectedItems.compactMap(\.scratchFile))
             return
         }
-        let urls = selectedItems.filter { $0 !== provisionalEntry && (!$0.isDirectory || !$0.outside) }.map(\.url)
-        if !urls.isEmpty { actions.copy(urls) }
+        let urls = selectedItems.filter { $0 !== provisionalEntry && (!$0.isDirectory || !$0.outside) }.compactMap(\.fileURL)
+        if !urls.isEmpty { SidebarFileCommands.copy(urls) }
     }
 
     func pasteIntoSelection() {
         if mode == .scratches {
             guard let category = scratchDestination(for: selectedItems.first) else { return }
-            _ = scratchActions.transfer(WorktreeActions.fileURLs(on: .general), to: category.scratchCategory)
+            _ = scratchActions.transfer(SidebarFileCommands.fileURLs(on: .general), to: category.scratchCategory)
             return
         }
-        guard let root, let directory = destination(for: selectedItems.first) else { return }
-        _ = actions.paste(into: directory, within: root.url)
+        guard let folder = root?.fileURL, let directory = destination(for: selectedItems.first) else { return }
+        _ = actions.paste(into: directory, within: folder)
     }
 
     func outlineView(_ outlineView: NSOutlineView, draggingSession session: NSDraggingSession,
@@ -1187,7 +1232,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         if mode == .scratches {
             return item.scratchFile.map { app.scratchStore.url(for: $0) as NSURL }
         }
-        return item.url as NSURL
+        return item.fileURL.map { $0 as NSURL }
     }
 
     func outlineView(_ outlineView: NSOutlineView, validateDrop info: any NSDraggingInfo,
@@ -1216,14 +1261,14 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             return scratchActions.transfer(drop.urls, to: drop.category.scratchCategory)
         }
         let operation = dropOperation(info, onto: target)
-        guard operation != [], let root, let directory = destination(for: target) else { return false }
-        return actions.transfer(WorktreeActions.fileURLs(on: info.draggingPasteboard), into: directory,
-                                move: operation == .move, within: root.url)
+        guard operation != [], let folder = root?.fileURL, let directory = destination(for: target) else { return false }
+        return actions.transfer(SidebarFileCommands.fileURLs(on: info.draggingPasteboard), into: directory,
+                                move: operation == .move, within: folder)
     }
 
     private func dropOperation(_ info: any NSDraggingInfo, onto target: Item?) -> NSDragOperation {
         guard let directory = destination(for: target) else { return [] }
-        let urls = WorktreeActions.fileURLs(on: info.draggingPasteboard)
+        let urls = SidebarFileCommands.fileURLs(on: info.draggingPasteboard)
         let wantsCopy = NSEvent.modifierFlags.contains(.option)
         let source = (info.draggingSource as? WorktreeOutline)?.owner
         let operation: NSDragOperation = source?.mode == .worktree && !wantsCopy ? .move : .copy
@@ -1236,7 +1281,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     private func scratchDrop(_ info: any NSDraggingInfo, onto target: Item?)
         -> (category: Item, operation: NSDragOperation, files: [ScratchFile], urls: [URL])? {
         guard scratchActions.canWork, let category = scratchDestination(for: target) else { return nil }
-        let urls = WorktreeActions.fileURLs(on: info.draggingPasteboard)
+        let urls = SidebarFileCommands.fileURLs(on: info.draggingPasteboard)
         guard !urls.isEmpty, !urls.contains(where: \.hasDirectoryPath) else { return nil }
         if let source = (info.draggingSource as? WorktreeOutline)?.owner, source.mode == .scratches {
             let records = Dictionary(uniqueKeysWithValues: source.scratchFiles.map {
@@ -1255,19 +1300,22 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     private func scratchDestination(for item: Item?) -> Item? {
         guard let item, item !== root else {
-            return self.item(at: WorktreeFileOperations.path(Self.scratchFolderURL(scratchProject)))
+            return self.item(at: .scratchCategory(scratchProject))
         }
         guard item !== provisionalEntry else { return nil }
-        return item.isDirectory ? item : itemAtParent(of: item)
+        if item.isDirectory { return item }
+        return item.scratchFile.flatMap { self.item(at: .scratchCategory($0.folderPath)) }
     }
 
     private func destination(for item: Item?) -> URL? {
-        guard let item else { return root?.url }
-        guard !item.outside, item !== provisionalEntry else { return nil }
-        return item.isDirectory ? item.url : item.url.deletingLastPathComponent()
+        guard let item else { return root?.fileURL }
+        guard let url = item.fileURL, !item.outside, item !== provisionalEntry else { return nil }
+        return item.isDirectory ? url : url.deletingLastPathComponent()
     }
 
-    private func itemAtParent(of item: Item) -> Item? { self.item(at: item.url.deletingLastPathComponent().path) }
+    private func itemAtParent(of item: Item) -> Item? {
+        item.fileURL.flatMap { self.item(at: .fileURL($0.deletingLastPathComponent())) }
+    }
 }
 
 private final class WorktreeScrollView: NSScrollView {
@@ -1287,7 +1335,7 @@ private final class WorktreeOutline: NSOutlineView, NSMenuItemValidation {
 
     private var disclosureActions: [NSUserInterfaceItemIdentifier: Selector] = [:]
     private var pointerTrackingArea: NSTrackingArea?
-    weak var owner: WorktreeSidebar?
+    weak var owner: SidebarFileTree?
     private(set) var isPlainPrimaryClick = false
     var didStartDrag = false
 

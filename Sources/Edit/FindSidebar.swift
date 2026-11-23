@@ -162,9 +162,8 @@ final class SidebarMenuItem: NSToolbarItem {
 }
 
 @MainActor
-final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate, NSMenuDelegate {
+final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     private static let sidebarMenuItem = NSToolbarItem.Identifier("Edit.SidebarMenu")
-    private static let sidebarTitleItem = NSToolbarItem.Identifier("Edit.SidebarTitle")
     // The toolbar needs room for the window controls, Worktree title and options button.
     private static let minimumSidebarWidth: CGFloat = 208 + SidebarMenuItem.titleLeadingPadding
     private static let maximumSidebarWidth: CGFloat = 650
@@ -191,8 +190,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private var splitView: NSSplitView { document.documentSplitView }
     private let sidebarContent = NSView()
     private let searchContent = NSStackView()
-    private(set) var worktree: WorktreeSidebar?
-    private var scratches: WorktreeSidebar?
+    private(set) var worktree: SidebarFileTree?
+    private var scratches: SidebarFileTree?
     var scratchOutline: NSOutlineView? { scratches?.outline }
     private var scratchReload: Task<Void, Never>?
     private let sidebar = NSViewController()
@@ -200,7 +199,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private lazy var decorations = FindDecorations(editor: document.editor)
     private var installed = false
     private weak var sidebarHeader: SidebarMenuItem?
-    private var nativeHeaderVisible = false
     private weak var focusBeforeSidebar: NSView?
     private weak var focusBeforeMode: NSView?
     private var previousMode: SidebarMode?
@@ -213,7 +211,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private var selectedMatchLocation: Int?
     private var editingResults = false
     private var previewRequested = false
-    private var movingDismissalsForReplacement = false
     private var applyingEdits = false
     private var bufferSearchScheduled = false
     private var pending = false
@@ -231,9 +228,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         bufferSnapshot = document.editor.string
         super.init()
         configure()
-        if let storage = document.editor.textStorage {
-            NotificationCenter.default.addObserver(self, selector: #selector(storageDidEdit(_:)),
-                                                   name: NSTextStorage.didProcessEditingNotification, object: storage)
+        document.editor.onBufferEdit = { [weak self] storage, edits in
+            self?.bufferDidEdit(storage, edits: edits)
         }
     }
 
@@ -324,11 +320,11 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     private func showWorktree(focus: Bool = true) {
         guard let folder = document.folderURL else { return }
         document.requestAutosave()
-        let browser: WorktreeSidebar
+        let browser: SidebarFileTree
         if let worktree {
             browser = worktree
         } else {
-            browser = WorktreeSidebar(document: document, app: app)
+            browser = SidebarFileTree(document: document, app: app, mode: .worktree)
             worktree = browser
             if document.worktreeShowsHidden { browser.setShowsHidden(true) }
             installSidebar(browser.view)
@@ -341,11 +337,11 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
 
     private func showScratches(focus: Bool = true) {
         document.requestAutosave()
-        let list: WorktreeSidebar
+        let list: SidebarFileTree
         if let scratches {
             list = scratches
         } else {
-            list = WorktreeSidebar(document: document, app: app, mode: .scratches)
+            list = SidebarFileTree(document: document, app: app, mode: .scratches)
             scratches = list
             installSidebar(list.view)
         }
@@ -507,29 +503,27 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         requestSearchIfNeeded()
     }
 
-    @objc private func storageDidEdit(_ notification: Notification) {
-        guard let storage = notification.object as? NSTextStorage,
-              storage.editedMask.contains(.editedCharacters) else { return }
+    private func bufferDidEdit(_ storage: NSTextStorage, edits: [EditorTextEdit]?) {
         let text = storage.string
-        let movesDismissals = !movingDismissalsForReplacement && !dismissed.isEmpty
-        if selectedMatchLocation != nil || movesDismissals {
-            let range = storage.editedRange
-            let oldLength = range.length - storage.changeInLength
-            let edit: FindTextEdit
-            let oldCount = bufferSnapshot.utf16.count
-            if range.location != NSNotFound && NSMaxRange(range) <= storage.length &&
-                oldLength >= 0 && oldLength <= oldCount && range.location <= oldCount - oldLength {
-                edit = FindTextEdit(range: NSRange(location: range.location, length: oldLength),
-                                    replacement: (text as NSString).substring(with: range))
+        if selectedMatchLocation != nil || !dismissed.isEmpty {
+            let changes: [EditorTextEdit]
+            if let edits {
+                changes = edits
             } else {
-                edit = FindTextEdit.singleChange(from: bufferSnapshot as NSString, to: text as NSString)
+                let range = storage.editedRange
+                let oldLength = range.length - storage.changeInLength
+                let oldCount = bufferSnapshot.utf16.count
+                if range.location != NSNotFound && NSMaxRange(range) <= storage.length &&
+                   oldLength >= 0 && oldLength <= oldCount && range.location <= oldCount - oldLength {
+                    changes = [EditorTextEdit(range: NSRange(location: range.location, length: oldLength),
+                                              text: (text as NSString).substring(with: range))]
+                } else {
+                    changes = [EditorTextEdit.singleChange(from: bufferSnapshot as NSString, to: text as NSString)]
+                }
             }
-            if movesDismissals { dismissed = FindTextEdit.moving(dismissed, through: [edit]) }
-            if let location = selectedMatchLocation, edit.range.location <= location {
-                // Preserve the position in the current buffer, including while its search is pending.
-                selectedMatchLocation = location >= NSMaxRange(edit.range)
-                    ? location + edit.replacement.utf16.count - edit.range.length
-                    : edit.range.location
+            dismissed = EditorTextEdit.moving(dismissed, through: changes)
+            if let location = selectedMatchLocation {
+                selectedMatchLocation = EditorTextEdit.moving(location, through: changes)
             }
         }
         bufferSnapshot = text
@@ -696,20 +690,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         button.heightAnchor.constraint(equalToConstant: 26).isActive = true
     }
 
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        (nativeHeaderVisible ? [Self.sidebarTitleItem, .sidebarTrackingSeparator] : [.sidebarTrackingSeparator]) +
-            document.titleBar.defaultItemIdentifiers
-    }
-
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [Self.sidebarTitleItem, .sidebarTrackingSeparator] + document.titleBar.allowedItemIdentifiers
-    }
-
-    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
-                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        if let item = document.titleBar.makeItem(identifier) { return item }
-        guard identifier == Self.sidebarTitleItem else { return nil }
-        let item = SidebarMenuItem(itemIdentifier: identifier, showsTitle: true, mode: document.sidebarMode)
+    func makeSidebarHeader() -> SidebarMenuItem {
+        let item = SidebarMenuItem(itemIdentifier: DocumentTitleBar.sidebarItemIdentifier, showsTitle: true, mode: document.sidebarMode)
         let options = SidebarMenuItem(itemIdentifier: Self.sidebarMenuItem, showsTitle: false, mode: document.sidebarMode)
         options.menu.delegate = self
         updateSidebarMenuItems(item)
@@ -818,7 +800,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         sidebarItem.preferredThicknessFraction = min(0.7, CGFloat(settings.width) / max(splitView.bounds.width, 1))
         sidebarItem.isCollapsed = true
         split.insertSplitViewItem(sidebarItem, at: 0)
-        window.toolbar = document.titleBar.makeToolbar(delegate: self)
+        document.titleBar.installSidebar(self)
         window.initialFirstResponder = document.contentResponder
         NotificationCenter.default.addObserver(self, selector: #selector(splitResized(_:)),
                                                name: NSSplitView.didResizeSubviewsNotification, object: split.splitView)
@@ -883,28 +865,12 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
     }
 
     private func updateSidebarToolbarVisibility() {
-        setNativeHeaderVisible(settings.visible && !sidebarItem.isCollapsed)
+        document.titleBar.setSidebarHeaderVisible(settings.visible && !sidebarItem.isCollapsed)
         guard let header = sidebarHeader, let options = header.options else { return }
         let optionsHidden = options.menu.items.isEmpty
         PanelLayout.withoutAnimation {
             if options.isHidden != optionsHidden { options.isHidden = optionsHidden }
             if options.view?.isHidden != optionsHidden { options.view?.isHidden = optionsHidden }
-        }
-    }
-
-    private func setNativeHeaderVisible(_ visible: Bool) {
-        guard nativeHeaderVisible != visible, let toolbar = document.window.toolbar else { return }
-        nativeHeaderVisible = visible
-        PanelLayout.withoutAnimation {
-            if visible {
-                toolbar.insertItem(withItemIdentifier: Self.sidebarTitleItem, at: 0)
-            } else {
-                sidebarHeader?.view?.isHidden = true
-                toolbar.removeItem(identifier: Self.sidebarTitleItem)
-            }
-            let window = document.window
-            window.layoutIfNeeded()
-            if let host = document.titleBar.toolbarWindow, host !== window { host.layoutIfNeeded() }
         }
     }
 
@@ -914,11 +880,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         document.window.layoutIfNeeded()
         document.titleBar.resize()
         updateSidebarToolbarVisibility()
-    }
-
-    func finishSidebarHeaderLayout() {
-        guard let header = sidebarHeader, !header.isHidden else { return }
-        PanelLayout.finishHeaderLayout(header, in: document.window)
     }
 
     private func focusSearch() {
@@ -1267,51 +1228,24 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
               document.editor.isEditable, !document.editor.hasMarkedText(),
               let first = hits.first, let last = hits.last, document.editor.string == resultSnapshot else { return }
         let source = resultSnapshot as NSString
-        let edits = hits.map { FindTextEdit(range: $0.range, replacement: $0.replacement(
-            using: settings.replacement, in: source, isRegex: settings.options.regularExpression
-        )) }
-        let span = NSRange(location: first.range.location, length: NSMaxRange(last.range) - first.range.location)
-        let editor = document.editor
-        let scoped = editor.focusRanges != nil
-        var output: String?
-        if !scoped {
-            var start = span.location
-            var replacement = ""
-            for edit in edits {
-                replacement += source.substring(with: NSRange(location: start, length: edit.range.location - start))
-                replacement += edit.replacement
-                start = NSMaxRange(edit.range)
-            }
-            output = replacement
+        let edits = hits.compactMap { hit -> EditorTextEdit? in
+            let text = hit.replacement(using: settings.replacement, in: source, isRegex: settings.options.regularExpression)
+            guard text != source.substring(with: hit.range) else { return nil }
+            return EditorTextEdit(range: hit.range, text: text)
         }
-
-        advanceFrom = advance ? first.range.location + edits[0].replacement.utf16.count : nil
-        let replacements = scoped ? edits.compactMap { edit -> MultiCaretEditing.Replacement? in
-            guard edit.replacement != source.substring(with: edit.range) else { return nil }
-            return MultiCaretEditing.Replacement(range: edit.range, text: edit.replacement)
-        } : []
-        if scoped ? replacements.isEmpty : output == source.substring(with: span) {
+        guard !edits.isEmpty else {
             publish(baseMatches)
             return
         }
-        let oldDismissed = dismissed
-        dismissed = FindTextEdit.moving(dismissed, through: edits)
+        advanceFrom = advance ? EditorTextEdit.moving(NSMaxRange(first.range), through: edits) : nil
+        let end = EditorTextEdit.moving(NSMaxRange(last.range), through: edits)
         decorations.clearPreview()
-        movingDismissalsForReplacement = true
         applyingEdits = true
-        let changed: Bool
-        if let output {
-            changed = editor.replaceFoundText(in: span, with: output)
-        } else {
-            let end = NSMaxRange(last.range) + replacements.reduce(0) { $0 + $1.text.utf16.count - $1.range.length }
-            changed = editor.applyMultiEdits(replacements, selections: [NSRange(location: end, length: 0)])
-        }
-        movingDismissalsForReplacement = false
+        let changed = document.editor.replaceFoundText(edits, caret: end)
         applyingEdits = false
         if changed {
             document.requestAutosave()
         } else {
-            dismissed = oldDismissed
             advanceFrom = nil
         }
     }
