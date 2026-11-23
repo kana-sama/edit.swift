@@ -60,13 +60,11 @@ enum JJInlineDiffCheck {
         let unmarkedHit = scroll.hitTest(hitPoint)
 
         editor.setJJLineMarks(analysis.marks, lineStarts: analysis.lineStarts, hunks: analysis.hunks)
-        guard let controller = editor.jjInlineDiff,
-              let bitmap = scroll.bitmapImageRepForCachingDisplay(in: scroll.bounds) else {
-            throw Failure("install and render the inline change controls")
+        guard let controller = editor.jjInlineDiff else {
+            throw Failure("install inline change controls")
         }
-        scroll.cacheDisplay(in: scroll.bounds, to: bitmap)
         guard let gutter = scroll.hitTest(hitPoint), gutter !== unmarkedHit else {
-            throw Failure("hit the gutter just outside its visible stripe")
+            throw Failure("hit the gutter just outside its visible stripe before drawing")
         }
         let gutterY = scroll.convert(initialLine, from: editor).midY
         for x in [0.5, 4.0, 8.0, 11.5] {
@@ -129,6 +127,27 @@ enum JJInlineDiffCheck {
         editor.setCaretSelections([NSRange(location: 0, length: 0)], record: false)
         let hoverPoint = editor.convert(NSPoint(x: block.midX, y: firstRemoved.midY), to: nil)
         controller.mouseMoved(with: try mouse(.mouseMoved, at: hoverPoint, in: window))
+        let initialPanel = try require(panels(in: scroll).first, "show a panel to find its button position")
+        let initialRestore = try button("Edit.Diff.Restore", in: initialPanel)
+        window.layoutIfNeeded()
+        let restoreHover = initialRestore.convert(NSPoint(x: initialRestore.bounds.midX,
+                                                         y: initialRestore.bounds.midY), to: nil)
+        let hover = try mouse(.mouseMoved, at: restoreHover, in: window)
+        controller.mouseExited(with: hover)
+        guard panels(in: scroll).isEmpty else { throw Failure("hide the panel before approaching its position") }
+        var cursorImages: [NSCursor] = []
+        let tracking = EditApplication.ClickCursorTracking(currentCursor: { cursorImages.last ?? .iBeam },
+                                                            setCursor: { cursorImages.append($0) })
+        tracking.dispatch(hover.type, in: window, resolve: {
+            EditApplication.clickCursor(in: window, at: restoreHover)
+        }) {
+            controller.mouseMoved(with: hover)
+            window.layoutIfNeeded()
+        }
+        tracking.end(restoreImage: false)
+        guard cursorImages == [.pointingHand] else {
+            throw Failure("show the pointing hand on the same move that reveals the floating button")
+        }
         let hoverPanel = try require(panels(in: scroll).first, "show a panel on mouse hover")
         let next = try button("Edit.Diff.Next", in: hoverPanel)
         let previous = try button("Edit.Diff.Previous", in: hoverPanel)
@@ -303,7 +322,10 @@ enum JJInlineDiffCheck {
                         }
                     }
                 }
-                if phase == "on resize" { controller.layout() }
+                if phase == "on resize" {
+                    try checkExpandedGutter(on: oldGlyph, editor: editor, scroll: scroll, window: window, state: state)
+                    controller.layout()
+                }
             }
         }
 
@@ -331,6 +353,30 @@ enum JJInlineDiffCheck {
         position.x = 0
         scroll.scrollToVisibleContentOrigin(position)
         try checkAlignment("after returning to the first column")
+    }
+
+    private static func checkExpandedGutter(on row: NSRect, editor: EditorTextView, scroll: NSScrollView,
+                                            window: NSWindow, state: String) throws {
+        let parent = try require(scroll.superview, "find the scroll view's event parent")
+        let edge = max(editor.convert(scroll.visibleContentOrigin, to: scroll).x, scroll.contentView.frame.minX)
+        let y = scroll.convert(row, from: editor).midY
+        let center = scroll.convert(NSPoint(x: edge + 8, y: y), to: nil)
+        let target = scroll.hitTest(parent.convert(center, from: nil))
+        guard target is ClickTarget else { throw Failure("find the expanded gutter \(state)") }
+        // The split view's resize grip owns the seam with an open leading sidebar.
+        let first: CGFloat = scroll.safeAreaRect.minX > scroll.bounds.minX ? 2.5 : 0.5
+        for x in [first, 4, 8, 11.5] {
+            let location = scroll.convert(NSPoint(x: edge + x, y: y), to: nil)
+            guard scroll.hitTest(parent.convert(location, from: nil)) === target,
+                  EditApplication.clickCursor(in: window, at: location) === NSCursor.pointingHand else {
+                throw Failure("use the click target's cursor across the expanded gutter at x=\(x) \(state)")
+            }
+        }
+        let outside = scroll.convert(NSPoint(x: edge + 12.5, y: y), to: nil)
+        guard scroll.hitTest(parent.convert(outside, from: nil)) !== target,
+              EditApplication.clickCursor(in: window, at: outside) == nil else {
+            throw Failure("leave text navigation immediately beyond the expanded gutter \(state)")
+        }
     }
 
     private static func checkMixedSelection(in document: DocumentWindow, controller: JJInlineDiff, undo: UndoManager) throws {

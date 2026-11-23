@@ -35,12 +35,10 @@ final class EditApplication: NSApplication {
     }
 
     override func sendEvent(_ event: NSEvent) {
-        let refreshAfterDispatch: Bool
         switch event.type {
-        case .mouseMoved, .cursorUpdate, .mouseEntered, .mouseExited:
-            refreshAfterDispatch = false
-        case .leftMouseDown, .leftMouseUp, .rightMouseUp, .otherMouseUp, .scrollWheel:
-            refreshAfterDispatch = true
+        case .mouseMoved, .cursorUpdate, .mouseEntered, .mouseExited,
+             .leftMouseDown, .leftMouseUp, .rightMouseUp, .otherMouseUp, .scrollWheel:
+            break
         case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .rightMouseDown:
             clickCursorTracking.end(restoreImage: false)
             super.sendEvent(event)
@@ -49,28 +47,40 @@ final class EditApplication: NSApplication {
             super.sendEvent(event)
             return
         }
-        guard isActive, let window = event.window, window.isVisible else {
+        guard isActive else {
             super.sendEvent(event)
             return
         }
-        // AppKit can deliver several tracking events for the same movement when rows
-        // or controls appear. Resolve them all against the current pointer location.
-        let handled = updateClickCursor(in: window)
-        if event.type == .cursorUpdate && handled { return }
-        super.sendEvent(event)
-        if refreshAfterDispatch, isActive, window.isVisible { updateClickCursor(in: window) }
+        let point = NSEvent.mouseLocation
+        guard let window = Self.cursorWindow(for: event, at: point, windowAt: { point in
+            self.window(withWindowNumber: NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0))
+        }) else {
+            clickCursorTracking.end(restoreImage: false)
+            super.sendEvent(event)
+            return
+        }
+        clickCursorTracking.dispatch(event.type, in: window, resolve: {
+            guard self.isActive, window.isVisible else { return nil }
+            return Self.clickCursor(in: window, at: window.mouseLocationOutsideOfEventStream)
+        }) {
+            super.sendEvent(event)
+        }
     }
 
-    @discardableResult
-    private func updateClickCursor(in window: NSWindow) -> Bool {
-        let point = window.mouseLocationOutsideOfEventStream
-        return clickCursorTracking.update(Self.clickCursor(in: window, at: point), in: window)
+    static func cursorWindow(for event: NSEvent, at screenPoint: NSPoint,
+                             windowAt: (NSPoint) -> NSWindow?) -> NSWindow? {
+        // Mouse movement can arrive with no AppKit window, including over window chrome.
+        // Resolve the current pointer consistently across queued tracking events.
+        if let window = event.window, window.isVisible, window.frame.contains(screenPoint) { return window }
+        guard let window = windowAt(screenPoint), window.isVisible else { return nil }
+        return window
     }
 
     @MainActor
     final class ClickCursorTracking {
         private(set) weak var window: NSWindow?
-        private var cursorOverride: (applied: NSCursor, original: NSCursor)?
+        private var originalCursor: NSCursor?
+        private var appliedCursor: NSCursor?
         private var restoresCursorRects = false
         private let currentCursor: () -> NSCursor
         private let setCursor: (NSCursor) -> Void
@@ -83,35 +93,55 @@ final class EditApplication: NSApplication {
 
         @discardableResult
         func update(_ cursor: NSCursor?, in window: NSWindow) -> Bool {
-            if self.window !== window || cursor == nil { end() }
-            guard let cursor else { return false }
-
-            if self.window == nil {
-                self.window = window
-                cursorOverride = (cursor, currentCursor())
+            guard let cursor else {
+                end()
+                return false
             }
-            // Choose one cursor owner before dispatch. A native reset followed
-            // by a manual set would show two cursor images for one event.
-            if window.areCursorRectsEnabled {
-                window.disableCursorRects()
-                restoresCursorRects = true
-            }
-            cursorOverride?.applied = cursor
+            prepare(cursor, in: window)
+            appliedCursor = cursor
             if currentCursor() !== cursor { setCursor(cursor) }
             return true
         }
 
+        func dispatch(_ type: NSEvent.EventType, in window: NSWindow,
+                      resolve: () -> NSCursor?, send: () -> Void) {
+            let cursor = resolve()
+            if type == .cursorUpdate {
+                if !update(cursor, in: window) { send() }
+                return
+            }
+            // Keep native cursor rectangles from competing with the foreground target.
+            // Publish the image only after dispatch, which can show or move a control.
+            prepare(cursor, in: window)
+            send()
+            update(resolve(), in: window)
+        }
+
+        private func prepare(_ cursor: NSCursor?, in window: NSWindow) {
+            if self.window !== window { end(restoreImage: false) }
+            guard cursor != nil || self.window === window else { return }
+            if self.window == nil {
+                self.window = window
+                originalCursor = currentCursor()
+            }
+            if window.areCursorRectsEnabled {
+                window.disableCursorRects()
+                restoresCursorRects = true
+            }
+        }
+
         func end(restoreImage: Bool = true) {
             let previousWindow = window
-            let previousCursor = cursorOverride
+            let original = originalCursor
+            let applied = appliedCursor
             let enableCursorRects = restoresCursorRects
             window = nil
-            cursorOverride = nil
+            originalCursor = nil
+            appliedCursor = nil
             restoresCursorRects = false
             if enableCursorRects { previousWindow?.enableCursorRects() }
-            if restoreImage, let previousCursor, currentCursor() === previousCursor.applied,
-               previousCursor.original !== previousCursor.applied {
-                setCursor(previousCursor.original)
+            if restoreImage, let original, let applied, currentCursor() === applied, original !== applied {
+                setCursor(original)
             }
         }
     }

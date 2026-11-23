@@ -193,6 +193,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
+        // SwiftTerm temporarily changes this window-wide setting and restores the value it found.
+        window.acceptsMouseMovedEvents = true
         (scrollView, editor) = EditorTextView.scrollingEditor(in: window.contentLayoutRect)
         editorContentView = NSView(frame: scrollView.frame)
         super.init()

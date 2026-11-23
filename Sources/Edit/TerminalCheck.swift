@@ -227,16 +227,23 @@ enum TerminalCheck {
         window.orderBack(nil)
         try expect(window.isVisible && window.alphaValue == 0 && !NSApp.isActive,
                    "exercise terminal visibility in a transparent ordered window")
+        try expect(window.acceptsMouseMovedEvents, "enable mouse movement before attaching terminal views")
         document.performFind(.toggleSidebar)
         document.showTerminal()
         let panel = try require(view("Edit.Terminal.Panel", in: window.contentView), "find the terminal panel")
         let terminal = try require(window.firstResponder as? LocalProcessTerminalView, "focus the terminal")
+        terminal.linkHighlightMode = .hover
+        terminal.linkHighlightMode = .hoverWithModifier
+        try expect(window.acceptsMouseMovedEvents, "keep hover delivery after the terminal stops tracking links")
         let options = try require(view("Edit.Terminal.Options", in: panel) as? NSButton, "find the terminal dock options")
         let controller = try require(options.target as? TerminalPanel, "find the terminal controller")
         let frame = window.frame
 
         for dock in [TerminalDock.below, .right] {
-            if dock == .right { try expect(dockAction(.right, in: controller), "dock the terminal on the right") }
+            if dock == .right {
+                try expect(dockAction(.right, in: controller), "dock the terminal on the right")
+                try checkTitleButtonHover(in: window)
+            }
             let settledPanel = windowPosition(of: panel)
             let coveredHeight = document.scrollView.contentInsets.bottom
             for _ in 0..<3 {
@@ -259,6 +266,37 @@ enum TerminalCheck {
                                header.superview?.layer?.animation(forKey: #keyPath(CALayer.opacity)) == nil,
                                "attach the right header immediately at its normal geometry")
                 }
+            }
+        }
+    }
+
+    private static func checkTitleButtonHover(in window: NSWindow) throws {
+        let header = try rightHeader(in: window)
+        var cursorImages: [NSCursor] = []
+        let tracking = EditApplication.ClickCursorTracking(currentCursor: { cursorImages.last ?? .iBeam },
+                                                            setCursor: { cursorImages.append($0) })
+        defer { tracking.end() }
+        for identifier in ["Edit.Terminal.SplitDown", "Edit.Terminal.SplitRight"] {
+            let button = try require(view(identifier, in: header) as? NSButton, "find a native titlebar button")
+            let frame = windowPosition(of: button)
+            for x in [frame.minX + 2, frame.midX, frame.maxX - 2] {
+                let location = NSPoint(x: x, y: frame.midY)
+                let screenPoint = window.convertPoint(toScreen: location)
+                let hover = try require(NSEvent.mouseEvent(with: .mouseMoved, location: screenPoint, modifierFlags: [],
+                    timestamp: 0, windowNumber: 0, context: nil, eventNumber: 1, clickCount: 0, pressure: 0),
+                    "create a hover event with no window")
+                let target = EditApplication.cursorWindow(for: hover, at: screenPoint) { point in
+                    point == screenPoint ? window : nil
+                }
+                try expect(hover.window == nil && target === window, "resolve windowless hover over the titlebar")
+                var nativeRectsEnabled = true
+                tracking.dispatch(hover.type, in: window, resolve: {
+                    EditApplication.clickCursor(in: window, at: location)
+                }) {
+                    nativeRectsEnabled = window.areCursorRectsEnabled
+                }
+                try expect(!nativeRectsEnabled && cursorImages == [.pointingHand],
+                           "show one pointing hand on first hover and keep it across titlebar buttons")
             }
         }
     }

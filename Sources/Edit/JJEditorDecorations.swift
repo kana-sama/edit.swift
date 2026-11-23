@@ -27,6 +27,13 @@ final class JJEditorDecorations {
         let rect: NSRect
     }
 
+    private struct GutterMark {
+        let mark: JJLineMark
+        let bounds: NSRect
+        let stripes: [NSRect]
+        var isDeletionBoundary = false
+    }
+
     private weak var editor: EditorTextView?
     private weak var nativeScroller: NSScroller?
     private var scrollerStyle: NSScroller.Style?
@@ -37,7 +44,6 @@ final class JJEditorDecorations {
     private var trackSize = NSSize.zero
     private var trackOverviewRevision: UInt = 0
     private var trackMarks: [PositionedMark] = []
-    private var gutterMarks: [PositionedMark] = []
     private let gutterWidth: CGFloat = 7
     private let gutter = JJEditorMarkerView()
     private let track = JJEditorMarkerView()
@@ -47,7 +53,6 @@ final class JJEditorDecorations {
         gutter.clipsToBounds = true
         track.clipsToBounds = true
         gutter.drawMarks = { [weak self] rect in self?.drawGutter(in: rect) }
-        gutter.acceptsClick = { [weak self] point in self?.gutterMark(at: point) != nil }
         gutter.onClick = { [weak self] event in
             guard let self, let mark = gutterMark(at: gutter.convert(event.locationInWindow, from: nil)) else { return }
             self.editor?.jjInlineDiff?.toggle(mark)
@@ -73,7 +78,6 @@ final class JJEditorDecorations {
             gutter.removeFromSuperview()
             track.removeFromSuperview()
             trackMarks.removeAll()
-            gutterMarks.removeAll()
         } else if let scroll = editor?.enclosingScrollView {
             layout(in: scroll)
             updateTrackMarks()
@@ -117,6 +121,17 @@ final class JJEditorDecorations {
     }
 
     func hitTest(in scroll: NSScrollView, at point: NSPoint, nativeHit: NSView) -> NSView? {
+        if gutter.superview != nil, scroll.safeAreaRect.contains(point),
+           gutterMark(at: gutter.convert(point, from: scroll)) != nil {
+            // The paint view shares the titlebar's material with the text. Route clicks
+            // at the scroll view, whose edge decorations can cover that subtree.
+            var hit: NSView? = nativeHit
+            while let view = hit, view !== scroll {
+                if view is NSControl || view is JJInlineDiffControls { return nil }
+                hit = view.superview
+            }
+            return gutter
+        }
         guard allowsNavigation, track.superview === scroll, hasVerticalScrollRange(in: scroll),
               trackMark(at: track.convert(point, from: scroll)) != nil else { return nil }
         if let scroller = nativeScroller,
@@ -227,36 +242,51 @@ final class JJEditorDecorations {
     }
 
     private func drawGutter(in dirtyRect: NSRect) {
-        guard let editor, let layout = editor.textLayoutManager else { return }
+        guard let editor else { return }
+        for marker in visibleGutterMarks(in: editor) where marker.bounds.intersects(dirtyRect) {
+            if marker.isDeletionBoundary {
+                let rect = marker.bounds
+                let path = NSBezierPath()
+                path.move(to: NSPoint(x: rect.minX, y: rect.minY))
+                path.line(to: NSPoint(x: rect.minX, y: rect.maxY))
+                path.line(to: NSPoint(x: rect.maxX, y: rect.midY))
+                path.close()
+                marker.mark.kind.color.setFill()
+                path.fill()
+            } else {
+                for stripe in marker.stripes where stripe.intersects(dirtyRect) {
+                    fill(stripe, kind: marker.mark.kind)
+                }
+            }
+        }
+    }
+
+    private func visibleGutterMarks(in editor: EditorTextView) -> [GutterMark] {
+        guard let layout = editor.textLayoutManager else { return [] }
         let viewport = layout.textViewportLayoutController.viewportRange.map { editor.charRange($0, in: layout) }
-        guard viewport != nil || lineStarts.isEmpty else { return }
+        guard viewport != nil || lineStarts.isEmpty else { return [] }
         let firstLine = max(0, lineIndex(at: viewport?.lowerBound ?? 0) - 1)
         let lastLine = min(lineStarts.count, lineIndex(at: viewport?.upperBound ?? 0) + 1)
         var index = firstMarkEnding(atOrAfter: firstLine)
-        var positions: [PositionedMark] = []
+        var positions: [GutterMark] = []
         while index < marks.count && marks[index].lines.lowerBound <= lastLine {
-            let mark = marks[index]
-            if let rect = drawGutterMark(mark, firstLine: firstLine, lastLine: lastLine, editor: editor, dirtyRect: dirtyRect) {
-                if !gutterHitArea(around: rect).isEmpty { positions.append(PositionedMark(mark: mark, rect: rect)) }
+            if let marker = gutterMark(marks[index], firstLine: firstLine, lastLine: lastLine, in: editor),
+               !gutterHitArea(around: marker.bounds).isEmpty {
+                positions.append(marker)
             }
             index += 1
         }
-        gutterMarks = positions
-    }
-
-    private var actionableGutterMarks: [PositionedMark] {
-        guard allowsNavigation, let diff = editor?.jjInlineDiff else { return [] }
-        return gutterMarks.filter { diff.canToggle($0.mark) }
+        return positions
     }
 
     private func gutterMark(at point: NSPoint) -> JJLineMark? {
-        guard gutter.bounds.contains(point) else { return nil }
-        let candidates = actionableGutterMarks
-        if let exact = candidates.first(where: { point.y >= $0.rect.minY && point.y < $0.rect.maxY }) {
+        guard allowsNavigation, gutter.bounds.contains(point), let editor, let diff = editor.jjInlineDiff else { return nil }
+        let candidates = visibleGutterMarks(in: editor).filter { diff.canToggle($0.mark) }
+        if let exact = candidates.first(where: { point.y >= $0.bounds.minY && point.y < $0.bounds.maxY }) {
             return exact.mark
         }
-        return candidates.filter { gutterHitArea(around: $0.rect).contains(point) }
-            .min { abs($0.rect.midY - point.y) < abs($1.rect.midY - point.y) }?.mark
+        return candidates.filter { gutterHitArea(around: $0.bounds).contains(point) }
+            .min { abs($0.bounds.midY - point.y) < abs($1.bounds.midY - point.y) }?.mark
     }
 
     private func gutterHitArea(around rect: NSRect) -> NSRect {
@@ -286,42 +316,31 @@ final class JJEditorDecorations {
         return low
     }
 
-    private func drawGutterMark(
-        _ mark: JJLineMark, firstLine: Int, lastLine: Int, editor: EditorTextView, dirtyRect: NSRect
-    ) -> NSRect? {
+    private func gutterMark(_ mark: JJLineMark, firstLine: Int, lastLine: Int, in editor: EditorTextView) -> GutterMark? {
         if let expanded = editor.jjInlineDiff?.expandedRegion(for: mark) {
             let rect = gutter.convert(expanded, from: editor)
             let stripe = NSRect(x: 2, y: rect.minY, width: 3, height: rect.height)
-            if stripe.intersects(dirtyRect) { fill(stripe, kind: mark.kind) }
-            return stripe
+            return GutterMark(mark: mark, bounds: stripe, stripes: [stripe])
         }
         if mark.kind == .deletion {
             guard mark.lines.lowerBound >= firstLine, let y = boundary(mark.lines.lowerBound, editor: editor) else { return nil }
             let axis = gutter.convert(NSPoint(x: 0, y: y), from: editor).y
             let triangle = NSRect(x: 1, y: axis - 3, width: 5, height: 6)
-            if triangle.intersects(dirtyRect) {
-                let path = NSBezierPath()
-                path.move(to: NSPoint(x: triangle.minX, y: triangle.minY))
-                path.line(to: NSPoint(x: triangle.minX, y: triangle.maxY))
-                path.line(to: NSPoint(x: triangle.maxX, y: triangle.midY))
-                path.close()
-                mark.kind.color.setFill()
-                path.fill()
-            }
-            return triangle
+            return GutterMark(mark: mark, bounds: triangle, stripes: [], isDeletionBoundary: true)
         }
         let start = max(mark.lines.lowerBound, firstLine)
         let end = min(mark.lines.upperBound, lastLine)
         guard start < end else { return nil }
         var bounds = NSRect.null
+        var stripes: [NSRect] = []
         for line in start..<end {
             guard let row = laidOutLine(at: line, editor: editor) else { continue }
             let rect = gutter.convert(row, from: editor)
             let stripe = NSRect(x: 2, y: rect.minY, width: 3, height: rect.height)
-            if stripe.intersects(dirtyRect) { fill(stripe, kind: mark.kind) }
+            stripes.append(stripe)
             bounds = bounds.union(stripe)
         }
-        return bounds.isNull ? nil : bounds
+        return bounds.isNull ? nil : GutterMark(mark: mark, bounds: bounds, stripes: stripes)
     }
 
     private func laidOutLine(at line: Int, editor: EditorTextView) -> NSRect? {
@@ -372,7 +391,6 @@ final class JJEditorDecorations {
 private final class JJEditorMarkerView: NSView, ClickTarget {
     var drawMarks: ((NSRect) -> Void)?
     var onClick: ((NSEvent) -> Void)?
-    var acceptsClick: ((NSPoint) -> Bool)?
 
     override var isFlipped: Bool { true }
 
@@ -381,10 +399,7 @@ private final class JJEditorMarkerView: NSView, ClickTarget {
         needsDisplay = true
     }
 
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        let local = convert(point, from: superview)
-        return bounds.contains(local) && acceptsClick?(local) == true ? self : nil
-    }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func draw(_ dirtyRect: NSRect) { drawMarks?(dirtyRect) }
     override func mouseDown(with event: NSEvent) { onClick?(event) }
