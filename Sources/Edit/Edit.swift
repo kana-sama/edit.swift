@@ -112,20 +112,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         installMenus(in: app)
         windowEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .scrollWheel]) { [weak self] event in
             guard let self else { return event }
-            if event.type == .scrollWheel {
-                guard let window = event.window else { return event }
-                return TerminalScrollView.routeWheel(event, in: window, at: event.locationInWindow) ? nil : event
-            }
-            if event.type == .keyDown {
-                let document = documents.first { $0.window === event.window }
-                if event.keyCode == 53, event.window?.attachedSheet == nil,
-                   event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
-                   let editor = document?.editor, !editor.hasMarkedText(), editor.jjInlineDiff?.collapseAll() == true {
-                    return nil
-                }
-                return document?.handleTerminalKey(event) == true ? nil : event
-            }
-            return routeTitleClick(event)
+            return routeWindowEvent(event)
         }
         let initial = makeDocument()
         if isAgentCheck {
@@ -223,6 +210,19 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     func applicationWillTerminate(_ notification: Notification) {
         if let windowEventMonitor { NSEvent.removeMonitor(windowEventMonitor) }
         documents.forEach { $0.closeTerminalSessions() }
+    }
+
+    func routeWindowEvent(_ event: NSEvent) -> NSEvent? {
+        switch event.type {
+        case .scrollWheel:
+            guard let window = event.window else { return event }
+            return TerminalScrollView.routeWheel(event, in: window, at: event.locationInWindow) ? nil : event
+        case .keyDown:
+            let document = documents.first { $0.window === event.window }
+            return document?.handleTerminalKey(event) == true ? nil : event
+        default:
+            return routeTitleClick(event)
+        }
     }
 
     private func routeTitleClick(_ event: NSEvent) -> NSEvent? {

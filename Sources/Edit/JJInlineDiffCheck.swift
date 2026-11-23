@@ -218,6 +218,16 @@ enum JJInlineDiffCheck {
                                                  timestamp: 0, windowNumber: window.windowNumber, context: nil,
                                                  characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
                                                  isARepeat: false, keyCode: 53), "create an Escape key event")
+        document.performFind(.find)
+        let field = try require(window.firstResponder as? FindFieldTextView, "focus Search with the diff expanded")
+        let app = try require(NSApp.delegate as? Edit, "find the window event monitor")
+        let routedEscape = try require(app.routeWindowEvent(escape), "route Escape to Search")
+        field.keyDown(with: routedEscape)
+        guard controller.hasExpandedHunks, window.firstResponder === editor else {
+            throw Failure("give Escape to the focused Search field before the diff")
+        }
+        document.performFind(.toggleSidebar)
+        editor.setCaretSelections(carets, record: false, primaryAffinity: .downstream)
         func pressEscape() {
             if !editor.performKeyEquivalent(with: escape) { editor.keyDown(with: escape) }
         }
