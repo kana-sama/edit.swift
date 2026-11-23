@@ -12,7 +12,7 @@ final class JJInlineDiffControls: NSView {
     private var hoverArea: NSTrackingArea?
 
     var onCancel: (() -> Bool)?
-    var onHoverChange: ((Bool) -> Void)?
+    var onPointerChange: ((NSEvent) -> Void)?
 
     init(restore: @escaping () -> Void, previous: @escaping () -> Void, next: @escaping () -> Void) {
         self.restore = restore
@@ -75,8 +75,8 @@ final class JJInlineDiffControls: NSView {
         addTrackingArea(area)
     }
 
-    override func mouseEntered(with event: NSEvent) { onHoverChange?(true) }
-    override func mouseExited(with event: NSEvent) { onHoverChange?(false) }
+    override func mouseEntered(with event: NSEvent) { onPointerChange?(event) }
+    override func mouseExited(with event: NSEvent) { onPointerChange?(event) }
 
     override func cancelOperation(_ sender: Any?) {
         if onCancel?() != true { super.cancelOperation(sender) }

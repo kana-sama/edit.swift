@@ -4,7 +4,7 @@ Review a change in the editor where it was made. Inline diff uses the same compa
 
 ## Expand and review
 
-- Click a gutter mark to expand that change. Click it again to collapse it. The collapsed mark retains its appearance. Give it a slightly wider and taller target in the editor margin and use the pointing-hand cursor over that target. The scrollbar marks continue to scroll to a change.
+- Click a gutter mark to expand that change. Click it again to collapse it. The collapsed mark retains its appearance. Give it a slightly wider and taller target in the editor margin. Use the pointing-hand cursor throughout the clickable area. The scrollbar marks continue to scroll to a change.
 - A deletion shows the removed text on red rows at its old position. A replacement shows the red rows first, then the live green rows. An insertion colors the live rows green. Use a stronger shade on the changed spans in a replacement when the difference can be computed within its budget. Keep the code type size and line spacing in both appearances.
 - Removed text is selectable and read-only. Click it to place a caret, move with the keyboard, select, and copy it within the block. Up and Down can carry a single caret between live and removed rows. Live green rows support the ordinary editor commands. Save, Find, and the document's editing and undo operations use the live buffer.
 - Several changes can stay open. Escape collapses them together before ordinary editor selection cancellation. When the native input method or a modal sheet handles Escape, it receives it first. Closing a change with focus in its removed text returns focus to the source editor.
@@ -12,7 +12,7 @@ Review a change in the editor where it was made. Inline diff uses the same compa
 
 ## Contextual actions
 
-When the mouse or latest caret is in an open change, show compact AppKit actions at the upper trailing edge of the change. Keep them reachable while the top of the block scrolls away. The mouse takes precedence when it points at a different open change. Moving onto the controls keeps them tied to that change. Use native buttons for **Restore**, **Next Change**, and **Previous Change**, with tooltips and accessibility labels.
+An open change shows compact AppKit actions when the latest caret is on one of its rows or the mouse is over one of its rows. When the caret and mouse are on different open changes, show their panels simultaneously. When both are on the same change, show one panel. Place each panel at the upper trailing edge of its change and keep it reachable while the top of the block scrolls away. Moving onto a panel keeps it tied to its own change. Use native buttons for **Restore**, **Next Change**, and **Previous Change**, with tooltips and accessibility labels.
 
 Next and Previous move to the adjacent change in the document and expand it if needed. Wrap at the end or beginning of the file. The destination becomes the active change. Preserve any separately expanded changes.
 
@@ -22,9 +22,9 @@ A conflict marker or an ambiguous diff range can still provide status without of
 
 ## Verification
 
-- Expand one deletion, replacement, and insertion from the gutter. Click just beside a mark to exercise its enlarged hit target. Confirm ordinary clicks just outside the target still go to the editor.
+- Expand one deletion, replacement, and insertion from the gutter. Check that the pointer appears throughout the enlarged hit target, and that clicks and the regular text cursor work outside it.
 - Select removed text and try navigating, copying, and changing it. Verify the live buffer and its saved text include only the current version. Type in a green row, undo, and check the refreshed diff.
-- Show the controls by placing the primary caret and by moving the mouse over red and green rows. Move the mouse onto the controls, navigate to another closed change, wrap in both directions, and collapse all with Escape.
+- Place the primary caret in one open change and hover over another. Confirm two panels appear and each acts on its own change. Move the mouse onto a panel and then onto the change containing the caret. Confirm the shared change shows one panel. Navigate to a closed change, wrap in both directions, and collapse all with Escape.
 - Restore individual insertions, deletions, and replacements and undo each one. Exercise the start and end of a document, an empty live buffer, mixed line endings, a protected Focus range, and a stale diff.
 - Inspect an isolated native window in both appearances and while scrolling horizontally and vertically. Resize and zoom with several open changes, including a deleted block taller than the viewport. Check viewport and control placement, and leave neighboring text editable.
 

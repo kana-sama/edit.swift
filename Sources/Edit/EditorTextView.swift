@@ -895,6 +895,25 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         jjInlineDiff?.suspend()
     }
 
+    func usesJJGutterCursor(at locationInWindow: NSPoint) -> Bool {
+        jjDecorations?.usesGutterCursor(at: locationInWindow) == true
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if !applyJJGutterCursor(for: event) { super.cursorUpdate(with: event) }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        if !applyJJGutterCursor(for: event) { super.mouseMoved(with: event) }
+    }
+
+    private func applyJJGutterCursor(for event: NSEvent) -> Bool {
+        // TextKit owns overlapping cursor tracking in the text inset under the gutter.
+        guard usesJJGutterCursor(at: event.locationInWindow) else { return false }
+        NSCursor.pointingHand.set()
+        return true
+    }
+
     func requestLineRefresh() {
         guard !lineRefreshPending else { return }
         lineRefreshPending = true

@@ -34,7 +34,7 @@ final class JJEditorDecorations {
     private(set) var marks: [JJLineMark] = []
     var allowsNavigation = true {
         didSet {
-            if allowsNavigation != oldValue { gutter.window?.invalidateCursorRects(for: gutter) }
+            if allowsNavigation != oldValue { refreshGutterCursorAreas() }
         }
     }
     private var lastMarkLines: [Int] = []
@@ -52,10 +52,6 @@ final class JJEditorDecorations {
         track.clipsToBounds = true
         gutter.drawMarks = { [weak self] rect in self?.drawGutter(in: rect) }
         gutter.acceptsClick = { [weak self] point in self?.gutterMark(at: point) != nil }
-        gutter.cursorRects = { [weak self] in
-            guard let self else { return [] }
-            return actionableGutterMarks.map { gutterHitArea(around: $0.rect) }
-        }
         gutter.onClick = { [weak self] event in
             guard let self, let mark = gutterMark(at: gutter.convert(event.locationInWindow, from: nil)) else { return }
             self.editor?.jjInlineDiff?.toggle(mark)
@@ -82,6 +78,7 @@ final class JJEditorDecorations {
             track.removeFromSuperview()
             trackMarks.removeAll()
             gutterMarks.removeAll()
+            refreshGutterCursorAreas()
         } else if let scroll = editor?.enclosingScrollView {
             layout(in: scroll)
             updateTrackMarks()
@@ -251,8 +248,17 @@ final class JJEditorDecorations {
         }
         if positions != gutterMarks {
             gutterMarks = positions
-            gutter.window?.invalidateCursorRects(for: gutter)
         }
+        refreshGutterCursorAreas()
+    }
+
+    func usesGutterCursor(at locationInWindow: NSPoint) -> Bool {
+        guard gutter.window != nil else { return false }
+        return gutterMark(at: gutter.convert(locationInWindow, from: nil)) != nil
+    }
+
+    private func refreshGutterCursorAreas() {
+        gutter.setCursorAreas(actionableGutterMarks.map { gutterHitArea(around: $0.rect) }.filter { !$0.isEmpty })
     }
 
     private var actionableGutterMarks: [PositionedMark] {
@@ -261,6 +267,7 @@ final class JJEditorDecorations {
     }
 
     private func gutterMark(at point: NSPoint) -> JJLineMark? {
+        guard gutter.bounds.contains(point) else { return nil }
         let candidates = actionableGutterMarks
         if let exact = candidates.first(where: { point.y >= $0.rect.minY && point.y < $0.rect.maxY }) {
             return exact.mark
@@ -383,7 +390,7 @@ private final class JJEditorMarkerView: NSView {
     var drawMarks: ((NSRect) -> Void)?
     var onClick: ((NSEvent) -> Void)?
     var acceptsClick: ((NSPoint) -> Bool)?
-    var cursorRects: (() -> [NSRect])?
+    private var cursorAreas: [NSTrackingArea] = []
 
     override var isFlipped: Bool { true }
 
@@ -397,9 +404,27 @@ private final class JJEditorMarkerView: NSView {
         return bounds.contains(local) && acceptsClick?(local) == true ? self : nil
     }
 
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        for rect in cursorRects?() ?? [] { addCursorRect(rect, cursor: .pointingHand) }
+    func setCursorAreas(_ rects: [NSRect]) {
+        guard cursorAreas.map(\.rect) != rects else { return }
+        for area in cursorAreas { removeTrackingArea(area) }
+        cursorAreas = rects.map {
+            NSTrackingArea(rect: $0, options: [.cursorUpdate, .mouseMoved, .activeInKeyWindow], owner: self)
+        }
+        for area in cursorAreas { addTrackingArea(area) }
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if !applyGutterCursor(for: event) { super.cursorUpdate(with: event) }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        if !applyGutterCursor(for: event) { super.mouseMoved(with: event) }
+    }
+
+    private func applyGutterCursor(for event: NSEvent) -> Bool {
+        guard acceptsClick?(convert(event.locationInWindow, from: nil)) == true else { return false }
+        NSCursor.pointingHand.set()
+        return true
     }
     override func draw(_ dirtyRect: NSRect) { drawMarks?(dirtyRect) }
     override func mouseDown(with event: NSEvent) { onClick?(event) }

@@ -12,24 +12,11 @@ final class JJInlineDiff: NSResponder {
     private(set) var overviewRevision: UInt = 0
     private var normalizeCRLF = false
     private var current = true
-    private var controlTarget: NSRange?
-    private var navigationTarget: NSRange?
+    private var panels: [NSRange: JJInlineDiffControls] = [:]
+    private weak var lastTextResponder: NSResponder?
     private var pointer: NSPoint?
-    private var pointerOnControls = false
     private var tracking: NSTrackingArea?
     private weak var trackedScroll: NSScrollView?
-
-    private lazy var controls: JJInlineDiffControls = {
-        let bar = JJInlineDiffControls(restore: { [weak self] in self?.restore() },
-                                       previous: { [weak self] in self?.navigate(by: -1) },
-                                       next: { [weak self] in self?.navigate(by: 1) })
-        bar.onCancel = { [weak self] in self?.collapseAll() == true }
-        bar.onHoverChange = { [weak self] inside in
-            self?.pointerOnControls = inside
-            self?.refreshControls()
-        }
-        return bar
-    }()
 
     init(editor: EditorTextView) {
         self.editor = editor
@@ -54,7 +41,6 @@ final class JJInlineDiff: NSResponder {
             hunks = updated
             expandableMarks = Set(updated.map(\.mark))
             expanded.formIntersection(updated.map(\.baseRange))
-            if let navigationTarget, !expanded.contains(navigationTarget) { self.navigationTarget = nil }
             applyExpansion()
         } else if hasExpandedHunks {
             refreshControls()
@@ -64,14 +50,13 @@ final class JJInlineDiff: NSResponder {
     func suspend() {
         guard current else { return }
         current = false
-        if hasExpandedHunks { controls.setAvailability(restore: false, previous: false, next: false) }
+        for panel in panels.values { panel.setAvailability(restore: false, previous: false, next: false) }
     }
 
     func canToggle(_ mark: JJLineMark) -> Bool { current && expandableMarks.contains(mark) }
 
     func toggle(_ mark: JJLineMark) {
         guard current, let hunk = hunks.first(where: { $0.mark == mark }) else { return }
-        navigationTarget = nil
         let opening = expanded.remove(hunk.baseRange) == nil
         if opening { expanded.insert(hunk.baseRange) }
         applyExpansion()
@@ -85,13 +70,11 @@ final class JJInlineDiff: NSResponder {
     func collapseAll() -> Bool {
         guard hasExpandedHunks else { return false }
         expanded.removeAll()
-        navigationTarget = nil
         applyExpansion()
         return true
     }
 
     func selectionChanged() {
-        navigationTarget = nil
         editor?.requestLineRefresh()
     }
 
@@ -143,13 +126,11 @@ final class JJInlineDiff: NSResponder {
 
     override func mouseMoved(with event: NSEvent) {
         pointer = event.locationInWindow
-        if !pointerOnControls && !pointerIsOverControls { navigationTarget = nil }
         refreshControls()
     }
 
     override func mouseExited(with event: NSEvent) {
         pointer = nil
-        pointerOnControls = false
         refreshControls()
     }
 
@@ -172,10 +153,9 @@ final class JJInlineDiff: NSResponder {
             if let tracking { trackedScroll?.removeTrackingArea(tracking) }
             tracking = nil
             trackedScroll = nil
+            lastTextResponder = nil
             pointer = nil
-            pointerOnControls = false
-            controlTarget = nil
-            controls.removeFromSuperview()
+            removePanels(except: [])
         } else {
             if tracking == nil || trackedScroll !== scroll {
                 if let tracking { trackedScroll?.removeTrackingArea(tracking) }
@@ -192,14 +172,17 @@ final class JJInlineDiff: NSResponder {
         editor?.requestLineRefresh()
     }
 
-    private var pointerIsOverControls: Bool {
-        guard let pointer, !controls.isHidden, controls.superview != nil else { return false }
-        return controls.bounds.contains(controls.convert(pointer, from: nil))
-    }
-
     private func selectedHunk(in editor: EditorTextView) -> JJDiffHunk? {
-        if let focused = display.hunk(for: editor.window?.firstResponder) { return focused }
-        guard editor.window?.firstResponder === editor, let selection = editor.caretSelections.last else { return nil }
+        var responder = editor.window?.firstResponder
+        if let view = responder as? NSView, panels.values.contains(where: { view.isDescendant(of: $0) }) {
+            responder = lastTextResponder
+        }
+        if let focused = display.hunk(for: responder) {
+            lastTextResponder = responder
+            return focused
+        }
+        guard responder === editor, let selection = editor.caretSelections.last else { return nil }
+        lastTextResponder = editor
         let caret = editor.activeEnd(of: selection)
         return visibleHunks.first { hunk in
             let range = hunk.currentRange
@@ -210,6 +193,15 @@ final class JJInlineDiff: NSResponder {
         }
     }
 
+    private func hoveredHunk(in editor: EditorTextView, scroll: NSScrollView, visible: NSRect) -> JJDiffHunk? {
+        guard let pointer, visible.contains(scroll.convert(pointer, from: nil)) else { return nil }
+        if let hovered = panels.first(where: { $0.value.bounds.contains($0.value.convert(pointer, from: nil)) })?.key {
+            return visibleHunks.first { $0.baseRange == hovered }
+        }
+        let inEditor = editor.convert(pointer, from: nil)
+        return visibleHunks.first { display.rect(for: $0)?.contains(inEditor) == true }
+    }
+
     private func refreshControls() {
         guard hasExpandedHunks, let editor, let scroll = editor.enclosingScrollView else { return }
         var visible = scroll.contentView.frame
@@ -218,47 +210,59 @@ final class JJInlineDiff: NSResponder {
         visible.origin.y += scroll.isFlipped ? insets.top : insets.bottom
         visible.size.width -= insets.left + insets.right
         visible.size.height -= insets.top + insets.bottom
-        let target: JJDiffHunk?
-        let staysOverControls = pointerOnControls || pointerIsOverControls ||
-            (editor.window?.firstResponder as? NSView)?.isDescendant(of: controls) == true
-        if let navigationTarget, let destination = visibleHunks.first(where: { $0.baseRange == navigationTarget }) {
-            target = destination
-        } else if staysOverControls, let controlTarget {
-            target = visibleHunks.first { $0.baseRange == controlTarget }
-        } else {
-            let hovered = pointer.flatMap { point -> JJDiffHunk? in
-                guard visible.contains(scroll.convert(point, from: nil)) else { return nil }
-                let inEditor = editor.convert(point, from: nil)
-                return visibleHunks.first { display.rect(for: $0)?.contains(inEditor) == true }
-            }
-            target = hovered ?? selectedHunk(in: editor)
-        }
-        guard let target, let block = display.rect(for: target).map({ scroll.convert($0, from: editor) }),
-              !visible.intersection(block).isEmpty else {
-            controls.isHidden = true
-            controlTarget = nil
-            pointerOnControls = false
-            return
-        }
-
+        let targets = Set([selectedHunk(in: editor), hoveredHunk(in: editor, scroll: scroll, visible: visible)]
+            .compactMap { $0?.baseRange })
         let scrollWidth = scroll.scrollerStyle == .overlay
             ? NSScroller.scrollerWidth(for: scroll.verticalScroller?.controlSize ?? .regular, scrollerStyle: .overlay)
             : 0
-        let size = controls.fittingSize
-        let x = max(visible.minX + 4, visible.maxX - size.width - scrollWidth - 6)
-        let preferredY = scroll.isFlipped ? block.minY + 2 : block.maxY - size.height - 2
-        let y = max(visible.minY + 2, min(preferredY, visible.maxY - size.height - 2))
-        controlTarget = target.baseRange
-        controls.frame = NSRect(origin: NSPoint(x: x, y: y), size: size)
-        controls.setAvailability(restore: current && canRestore(target, in: editor),
-                                 previous: current && hunks.count > 1, next: current && hunks.count > 1)
-        if controls.superview !== scroll { scroll.addSubview(controls, positioned: .above, relativeTo: nil) }
-        controls.isHidden = false
+        var placements: [(key: NSRange, panel: JJInlineDiffControls, frame: NSRect)] = []
+        for target in visibleHunks where targets.contains(target.baseRange) {
+            guard let region = display.rect(for: target) else { continue }
+            let block = scroll.convert(region, from: editor)
+            guard !visible.intersection(block).isEmpty else { continue }
+            let panel = panel(for: target.baseRange)
+            let size = panel.fittingSize
+            let x = max(visible.minX + 4, visible.maxX - size.width - scrollWidth - 6)
+            let preferredY = scroll.isFlipped ? block.minY + 2 : block.maxY - size.height - 2
+            let y = max(visible.minY + 2, min(preferredY, visible.maxY - size.height - 2))
+            panel.setAvailability(restore: current && canRestore(target, in: editor),
+                                  previous: current && hunks.count > 1, next: current && hunks.count > 1)
+            placements.append((target.baseRange, panel, NSRect(origin: NSPoint(x: x, y: y), size: size)))
+        }
+        removePanels(except: Set(placements.map(\.key)))
+        placements.sort { $0.frame.minY < $1.frame.minY }
+        if placements.count == 2 && placements[0].frame.maxY + 2 > placements[1].frame.minY {
+            let lastY = visible.maxY - placements[1].frame.height - 2
+            placements[1].frame.origin.y = min(lastY, placements[0].frame.maxY + 2)
+            placements[0].frame.origin.y = max(visible.minY + 2,
+                                              placements[1].frame.minY - placements[0].frame.height - 2)
+        }
+        for (_, panel, frame) in placements {
+            panel.frame = frame
+            if panel.superview !== scroll { scroll.addSubview(panel, positioned: .above, relativeTo: nil) }
+        }
     }
 
-    private func navigate(by step: Int) {
+    private func panel(for key: NSRange) -> JJInlineDiffControls {
+        if let panel = panels[key] { return panel }
+        let panel = JJInlineDiffControls(restore: { [weak self] in self?.restore(key) },
+                                         previous: { [weak self] in self?.navigate(from: key, by: -1) },
+                                         next: { [weak self] in self?.navigate(from: key, by: 1) })
+        panel.onCancel = { [weak self] in self?.collapseAll() == true }
+        panel.onPointerChange = { [weak self] event in self?.mouseMoved(with: event) }
+        panels[key] = panel
+        return panel
+    }
+
+    private func removePanels(except keys: Set<NSRange>) {
+        for key in Set(panels.keys).subtracting(keys) {
+            panels.removeValue(forKey: key)?.removeFromSuperview()
+        }
+    }
+
+    private func navigate(from key: NSRange, by step: Int) {
         guard current, let editor, hunks.count > 1,
-              let index = hunks.firstIndex(where: { $0.baseRange == controlTarget }) else { return }
+              let index = hunks.firstIndex(where: { $0.baseRange == key }) else { return }
         let target = hunks[(index + step + hunks.count) % hunks.count]
         expanded.insert(target.baseRange)
         let caret = NSRange(location: target.currentRange.location, length: 0)
@@ -266,7 +270,6 @@ final class JJInlineDiff: NSResponder {
             editor.window?.makeFirstResponder(editor)
             editor.setCaretSelections([caret], record: false)
         }
-        navigationTarget = target.baseRange
         applyExpansion()
         display.reveal(target)
         layout()
@@ -276,8 +279,8 @@ final class JJInlineDiff: NSResponder {
         editor.isEditable && !editor.hasMarkedText() && editor.focusAllowsEdits([hunk.currentRange])
     }
 
-    private func restore() {
-        guard current, let editor, let hunk = visibleHunks.first(where: { $0.baseRange == controlTarget }),
+    private func restore(_ key: NSRange) {
+        guard current, let editor, let hunk = visibleHunks.first(where: { $0.baseRange == key }),
               canRestore(hunk, in: editor), let source = editor.textStorage?.mutableString else { return }
         let range = hunk.currentRange
         guard range.location <= source.length, range.length <= source.length - range.location,
@@ -295,7 +298,6 @@ final class JJInlineDiff: NSResponder {
         guard editor.applyMultiEdits([edit], selections: [caret]) else { return }
         editor.undoManager?.setActionName("Restore Change")
         expanded.remove(hunk.baseRange)
-        navigationTarget = nil
         applyExpansion()
     }
 }

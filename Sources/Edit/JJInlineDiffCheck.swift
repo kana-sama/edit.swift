@@ -67,6 +67,20 @@ enum JJInlineDiffCheck {
         guard let gutter = scroll.hitTest(hitPoint), gutter !== unmarkedHit else {
             throw Failure("hit the gutter just outside its visible stripe")
         }
+        let gutterY = scroll.convert(initialLine, from: editor).midY
+        for x in [0.5, 4.0, 8.0, 11.5] {
+            let location = scroll.convert(NSPoint(x: gutterX + x, y: gutterY), to: nil)
+            let tracked = gutter.trackingAreas.contains {
+                $0.options.contains(.cursorUpdate) && $0.rect.contains(gutter.convert(location, from: nil))
+            }
+            guard scroll.hitTest(parent.convert(location, from: nil)) === gutter,
+                  editor.usesJJGutterCursor(at: location), tracked else {
+                throw Failure("use the pointing hand across the clickable gutter at x=\(x)")
+            }
+        }
+        let outsideGutter = scroll.convert(NSPoint(x: gutterX + 12.5, y: gutterY), to: nil)
+        guard scroll.hitTest(parent.convert(outsideGutter, from: nil)) !== gutter,
+              !editor.usesJJGutterCursor(at: outsideGutter) else { throw Failure("leave the text cursor outside the hit area") }
         gutter.mouseDown(with: try mouse(.leftMouseDown, at: clickPoint, in: window))
 
         guard controller.hasExpandedHunks,
@@ -108,30 +122,55 @@ enum JJInlineDiffCheck {
         let removedInWindow = removed.convert(removed.bounds, to: nil)
         let hoverPoint = NSPoint(x: removedInWindow.midX, y: removedInWindow.midY)
         controller.mouseMoved(with: try mouse(.mouseMoved, at: hoverPoint, in: window))
-        let next = try button("Edit.Diff.Next", in: scroll)
-        let previous = try button("Edit.Diff.Previous", in: scroll)
-        _ = try button("Edit.Diff.Restore", in: scroll)
+        let hoverPanel = try require(panels(in: scroll).first, "show a panel on mouse hover")
+        let next = try button("Edit.Diff.Next", in: hoverPanel)
+        let previous = try button("Edit.Diff.Previous", in: hoverPanel)
+        _ = try button("Edit.Diff.Restore", in: hoverPanel)
         next.performClick(nil)
         guard controller.expandedRegion(for: replacement.mark) != nil,
               controller.expandedRegion(for: deletion.mark) != nil else {
             throw Failure("Next opens the following deletion and keeps the replacement open")
         }
-        next.performClick(nil)
+        let mousePanelRect = hoverPanel.convert(hoverPanel.bounds, to: nil)
+        let mousePanelCenter = NSPoint(x: mousePanelRect.midX, y: mousePanelRect.midY)
+        controller.mouseMoved(with: try mouse(.mouseMoved, at: mousePanelCenter, in: window))
+        func caretPanel() throws -> JJInlineDiffControls {
+            let visible = panels(in: scroll)
+            guard visible.count == 2, let panel = visible.first(where: { $0 !== hoverPanel }),
+                  !panel.frame.intersects(hoverPanel.frame) else {
+                throw Failure("keep a separate panel for the mouse and the caret")
+            }
+            return panel
+        }
+        try button("Edit.Diff.Next", in: caretPanel()).performClick(nil)
         guard controller.expandedRegion(for: insertion.mark) != nil else {
             throw Failure("Next can open an addition with no removed rows")
         }
-        previous.performClick(nil)
+        try button("Edit.Diff.Previous", in: caretPanel()).performClick(nil)
         guard editor.selectedRange().location == deletion.currentRange.location else {
             throw Failure("Previous selects the preceding deletion")
         }
-        previous.performClick(nil)
+        try button("Edit.Diff.Previous", in: caretPanel()).performClick(nil)
+        guard panels(in: scroll).count == 1, panels(in: scroll).first === hoverPanel else {
+            throw Failure("show one panel when the mouse and caret share a change")
+        }
         previous.performClick(nil)
         guard editor.selectedRange().location == insertion.currentRange.location else {
             throw Failure("Previous wraps to the last change")
         }
-        next.performClick(nil)
+        try button("Edit.Diff.Next", in: caretPanel()).performClick(nil)
         guard editor.selectedRange().location == replacement.currentRange.location else {
             throw Failure("Next wraps to the first change")
+        }
+        let deleted = try require(controller.expandedRegion(for: deletion.mark), "lay out the expanded deletion")
+        let deletionHover = editor.convert(NSPoint(x: deleted.midX, y: deleted.midY), to: nil)
+        controller.mouseMoved(with: try mouse(.mouseMoved, at: deletionHover, in: window))
+        _ = try caretPanel()
+        let green = try require(editor.lineBounds(at: replacement.currentRange.location), "lay out the live changed row")
+        let liveHover = editor.convert(NSPoint(x: green.midX, y: green.midY), to: nil)
+        controller.mouseMoved(with: try mouse(.mouseMoved, at: liveHover, in: window))
+        guard panels(in: scroll).count == 1, panels(in: scroll).first === hoverPanel else {
+            throw Failure("keep only the caret panel when the mouse moves onto its live rows")
         }
 
         let carets = [NSRange(location: 0, length: 0), NSRange(location: replacement.currentRange.location, length: 0)]
@@ -171,6 +210,10 @@ enum JJInlineDiffCheck {
         try require(descendant(of: view) { (button: NSButton) in
             button.identifier?.rawValue == identifier && button.isEnabled && !button.isHiddenOrHasHiddenAncestor
         }, "show an enabled native button for \(identifier)")
+    }
+
+    private static func panels(in scroll: NSScrollView) -> [JJInlineDiffControls] {
+        scroll.subviews.compactMap { $0 as? JJInlineDiffControls }.filter { !$0.isHiddenOrHasHiddenAncestor }
     }
 
     private static func descendant<View: NSView>(of root: NSView, matching predicate: (View) -> Bool) -> View? {
