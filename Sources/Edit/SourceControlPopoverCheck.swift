@@ -4,32 +4,6 @@ import AppKit
 enum SourceControlPopoverCheck {
     static func run(preview: JJSourceControlOperations.Preview) throws {
         let anchor = NSView()
-        var appliedScope: JJSourceControlScope?
-        var query: String?
-        let filter = SourceControlFilterPopover(anchor: anchor, onScopeChange: { appliedScope = $0 }, onQueryChange: { query = $0 })
-        let filterView = filter.checkView
-        filterView.layoutSubtreeIfNeeded()
-        let filterTitle = try label("Filter Changes", in: filterView)
-        guard let scopes = descendants(of: filterView, as: NSSegmentedControl.self).first,
-              let search = descendants(of: filterView, as: NSSearchField.self).first else { throw Failure("Missing filter controls") }
-        try expect(scopes.segmentCount == 3 && scopes.segmentDistribution == .fillEqually, "Show all three scopes as equal segments")
-        try expect(abs(minX(filterTitle, in: filterView) - minX(search, in: filterView)) < 1 &&
-                   abs(scopes.frame.width - search.frame.width) < 1 && search.frame.width > 280,
-                   "Align the title, scope picker, and search on the leading edge")
-        search.stringValue = "  checkout  "
-        _ = search.sendAction(search.action, to: search.target)
-        try expect(query == "checkout", "Send the trimmed graph query from the native search field")
-        filter.selectRevsetForCheck()
-        try expect(appliedScope == .revset("mutable() | trunk()"), "Apply the revset when switching to its segment")
-        let previousHeight = filterView.frame.height
-        let message = "The expression is invalid. Check the spelling of the bookmark or provide an existing change identifier."
-        filter.setError(message)
-        filterView.layoutSubtreeIfNeeded()
-        let error = try label(message, in: filterView)
-        try expect(filterView.frame.height > previousHeight && error.frame.height > 15 &&
-                   abs(minX(error, in: filterView) - minX(filterTitle, in: filterView)) < 1,
-                   "Wrap revset errors while preserving leading alignment")
-
         let operations = SourceControlOperationPopover(anchor: anchor, prepare: { _ in preview }, apply: { _ in })
         let operationView = operations.viewForCheck(preview)
         operationView.layoutSubtreeIfNeeded()

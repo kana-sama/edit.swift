@@ -69,6 +69,7 @@ enum SourceControlCheck {
         try expect(panel.graphView.revisions.contains { $0.subject == "Historical change" }, "show multiple revisions in the graph")
         try expect(panel.graphView.revisions.filter(\.isWorkingCopy).count == 1, "mark exactly one working-copy graph node")
         try checkLayout(in: document, panel: panel)
+        try await checkRevsets(in: document, panel: panel, workspace: workspace, app: app)
 
         let tree = panel.fileTree.outline
         try open("Tracked.txt", in: panel.fileTree)
@@ -173,6 +174,106 @@ enum SourceControlCheck {
         try expect(document.sidebarMode == .worktree, "ignore a direct focus command outside a workspace")
     }
 
+    private static func checkRevsets(in document: DocumentWindow, panel: SourceControlSidebar, workspace: JJWorkspace, app: Edit) async throws {
+        func choose(_ title: String) throws {
+            guard let item = panel.revsetMenuForCheck().item(withTitle: title),
+                  let action = item.action, NSApp.sendAction(action, to: item.target, from: item) else {
+                throw Failure("activate \(title) from the revset menu")
+            }
+        }
+        let menu = panel.revsetMenuForCheck()
+        try expect(menu.item(withTitle: "Default Log")?.state == .on && menu.item(withTitle: "All Changes")?.toolTip == "all()",
+                   "start with the configured log and provide all() as a built-in revset")
+        try choose("All Changes")
+        try await waitFor("show all() in the graph") {
+            panel.graphView.table.isEnabled && panel.graphView.revisions.contains(where: \.isWorkingCopy)
+        }
+        try expect(panel.revsetMenuForCheck().item(withTitle: "All Changes")?.state == .on, "mark the selected revset in the menu")
+
+        let window = document.window
+        let frame = window.frame
+        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
+        window.orderBack(nil)
+        defer {
+            window.orderOut(nil)
+            window.setFrame(frame, display: false)
+        }
+        try expect(window.alphaValue == 0 && window.ignoresMouseEvents && !NSApp.isActive, "keep the revset check in the background")
+        let editor = panel.revsetEditorViewForCheck
+        guard let name = descendant(of: editor, where: { (field: NSTextField) in field.placeholderString == "My changes" }),
+              let expression = descendant(of: editor, where: { (field: NSTextField) in field.placeholderString == "mutable()" }),
+              let save = button(in: editor, where: { $0.title == "Save" }),
+              let picker = button(in: panel.view, where: { $0.identifier?.rawValue == "JujutsuRevsets" }),
+              let workingCopy = button(in: panel.view, where: { $0.toolTip == "Go to Working Copy" }),
+              let sidebar = document.documentSplitView.arrangedSubviews.first else {
+            throw Failure("find the revset editor and graph controls")
+        }
+        try choose("New Revset…")
+        try expect(!save.isEnabled, "require both a name and an expression")
+        let newName = "Repository root with a deliberately long display name"
+        name.stringValue = newName
+        expression.stringValue = "all("
+        expression.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: expression))
+        save.performClick(nil)
+        try await waitFor("keep an invalid revset in the editor with an error") {
+            save.isEnabled && descendant(of: editor, where: { (field: NSTextField) in
+                !field.isHidden && field.stringValue.contains("Error:")
+            }) != nil
+        }
+        try expect(panel.revsetMenuForCheck().item(withTitle: newName) == nil, "keep invalid revsets out of the list")
+        expression.stringValue = "root()"
+        expression.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: expression))
+        save.performClick(nil)
+        try await waitFor("apply the new revset to the real graph") {
+            panel.graphView.table.isEnabled && panel.graphView.revisions.count == 1 &&
+                panel.graphView.revisions.first?.isWorkingCopy == false
+        }
+        let width = sidebar.frame.width
+        PanelLayout.withoutAnimation {
+            document.documentSplitView.setPosition(211, ofDividerAt: 0)
+            window.layoutIfNeeded()
+        }
+        let pickerFrame = panel.view.convert(picker.bounds, from: picker)
+        let jumpFrame = panel.view.convert(workingCopy.bounds, from: workingCopy)
+        let fits = !picker.isHiddenOrHasHiddenAncestor && pickerFrame.maxX <= jumpFrame.minX && pickerFrame.width > 20
+        PanelLayout.withoutAnimation {
+            document.documentSplitView.setPosition(width, ofDividerAt: 0)
+            window.layoutIfNeeded()
+        }
+        try expect(fits && picker.toolTip?.contains(newName) == true, "fit a long revset name alongside the graph actions")
+        try choose("Edit Revset…")
+        try expect(name.stringValue == newName && expression.stringValue == "root()", "open the selected revset for editing")
+        name.stringValue = "Repository Root"
+        save.performClick(nil)
+        try await waitFor("save the edited name and keep it selected") {
+            panel.revsetMenuForCheck().item(withTitle: "Repository Root")?.state == .on
+        }
+
+        let otherProject = JJWorkspace(root: workspace.root.deletingLastPathComponent(), repository: workspace.repository)
+        let otherSettings = try SourceControlRevsetStore(url: app.sourceControlRevsets.url).read(for: otherProject)
+        try expect(otherSettings.selected == .defaultLog && otherSettings.custom.isEmpty, "scope saved revsets to the workspace root")
+        let reopened = app.makeDocument()
+        defer { reopened.window.close() }
+        _ = try await app.openFile(workspace.root, in: reopened)
+        reopened.toggleSidebarFocus(.sourceControl)
+        guard let restored = reopened.sourceControlSidebar else { throw Failure("reopen Jujutsu from the workspace root") }
+        try await waitFor("restore the selected revset in a newly opened project window") {
+            restored.revsetMenuForCheck().item(withTitle: "Repository Root")?.state == .on &&
+                restored.graphView.revisions.count == 1 && restored.graphView.revisions.first?.isWorkingCopy == false
+        }
+        workingCopy.performClick(nil)
+        try await waitFor("reveal the working copy within a revset that excludes it") {
+            panel.selection?.isWorkingCopy == true && panel.graphView.table.isEnabled
+        }
+        try expect(panel.revsetMenuForCheck().item(withTitle: "Repository Root")?.state == .on, "leave the selected revset set after revealing the working copy")
+        try choose("Remove Revset")
+        try await waitFor("return to the configured log after removing the active revset") {
+            panel.revsetMenuForCheck().item(withTitle: "Repository Root") == nil &&
+                panel.revsetMenuForCheck().item(withTitle: "Default Log")?.state == .on &&
+                panel.graphView.table.isEnabled && panel.detail?.files.count == 2
+        }
+    }
+
     private static func checkOperationDirection(in window: NSWindow, panel: SourceControlSidebar) async throws {
         let operations = panel.operationsViewForCheck
         guard let open = button(in: panel.view, where: { $0.toolTip == "Repository Operations" }),
@@ -226,7 +327,7 @@ enum SourceControlCheck {
               let graphCell = graph.cell,
               let detail = button(in: panel.view, where: { $0.title == "Change" }),
               let detailCell = detail.cell,
-              let filter = button(in: panel.view, where: { $0.toolTip == "Filter Changes" }),
+              let revsets = button(in: panel.view, where: { $0.identifier?.rawValue == "JujutsuRevsets" }),
               let actions = button(in: panel.view, where: { $0.toolTip == "Change Actions" }),
               let create = button(in: panel.view, where: { $0.toolTip == "New Change" }) else {
             throw Failure("find the Source Control section controls")
@@ -244,7 +345,7 @@ enum SourceControlCheck {
         }
         try expect(!create.isHiddenOrHasHiddenAncestor && panel.view.convert(create.bounds, from: create).maxX <= panel.view.bounds.maxX,
                    "fit the graph controls at minimum sidebar width")
-        for (toggle, firstAction) in [(graph, filter), (detail, actions)] {
+        for (toggle, firstAction) in [(graph, revsets), (detail, actions)] {
             try expect(toggle.imagePosition == .imageTrailing && toggle.isAccessibilityExpanded() &&
                        panel.view.convert(firstAction.bounds, from: firstAction).minX -
                        panel.view.convert(toggle.bounds, from: toggle).maxX >= 10,

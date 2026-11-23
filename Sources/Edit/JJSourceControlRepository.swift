@@ -1,18 +1,5 @@
 import Foundation
 
-enum JJSourceControlScope: Equatable, Sendable {
-    case log, stack, revset(String)
-
-    fileprivate var arguments: [String] {
-        switch self {
-        case .log: []
-        case .stack:
-            ["-r", "((::@ | @::) & mutable()) | @ | (parents(((::@ | @::) & mutable()) | @) & immutable())"]
-        case .revset(let expression): ["--revision=\(expression)"]
-        }
-    }
-}
-
 struct JJSourceControlEdge: Hashable, Sendable {
     /// A nil target represents ancestry outside of the displayed graph.
     let target: String?
@@ -152,12 +139,13 @@ enum JJSourceControlRepository {
     }
 
     static func graph(
-        in workspace: JJWorkspace, scope: JJSourceControlScope, includeWorkingCopy: Bool = false,
+        in workspace: JJWorkspace, revset: String?, includeWorkingCopy: Bool = false,
         limit: Int = 600
     ) async throws -> JJSourceControlGraph {
         let operation = try await JJRepository.operation(in: workspace)
         let limit = min(max(1, limit), 1_800)
-        async let graph = revisions(scope.arguments, limit: limit + 1, in: workspace, at: operation)
+        let arguments = revset.map { ["--revision=\($0)"] } ?? []
+        async let graph = revisions(arguments, limit: limit + 1, in: workspace, at: operation)
         async let workingCopy = singleRevision("@", in: workspace, at: operation)
         let (result, working) = try await (graph, workingCopy)
         let isTruncated = result.count > limit
@@ -175,6 +163,11 @@ enum JJSourceControlRepository {
         guard try await JJRepository.operation(in: workspace) == operation else { throw Failure.changedOperation }
         return JJSourceControlGraph(operationID: operation, workingCopy: working, revisions: visible,
                                     isTruncated: isTruncated)
+    }
+
+    static func validateRevset(_ expression: String, in workspace: JJWorkspace) async throws {
+        let operation = try await JJRepository.operation(in: workspace)
+        _ = try await revisions(["--revision=\(expression)"], limit: 1, in: workspace, at: operation)
     }
 
     static func detail(

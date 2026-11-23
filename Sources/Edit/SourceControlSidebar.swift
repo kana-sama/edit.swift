@@ -10,7 +10,7 @@ final class SourceControlSidebar: NSObject {
 
     private let graphToggle = NSButton()
     private let changeToggle = NSButton()
-    private let filterButton = NSButton()
+    private let revsetButton = NSButton()
     private let workingCopyButton = NSButton()
     private let operationsButton = NSButton()
     private let newButton = NSButton()
@@ -25,9 +25,9 @@ final class SourceControlSidebar: NSObject {
     private let fileHeading = NSTextField(labelWithString: "Changed Files")
     private let fileMessage = NSTextField(wrappingLabelWithString: "")
     private lazy var descriptionPopover = SourceControlDescriptionPopover(anchor: detailTitle) { [weak self] in self?.saveDescription($0) }
-    private lazy var filter = SourceControlFilterPopover(anchor: filterButton,
-        onScopeChange: { [weak self] in self?.setScope($0) },
-        onQueryChange: { [weak self] in self?.setQuery($0) })
+    private lazy var revsetEditor = SourceControlRevsetEditor(anchor: revsetButton) { [weak self] name, expression, id in
+        try await self?.saveRevset(name: name, expression: expression, replacing: id)
+    }
     private lazy var operations = SourceControlOperationPopover(
         anchor: operationsButton,
         prepare: { [weak self] direction in
@@ -47,11 +47,9 @@ final class SourceControlSidebar: NSObject {
     private var expiry: Task<Void, Never>?
     private var busy = false
     private var stale = false
-    private var scope: JJSourceControlScope = .log
-    private var lastSuccessfulScope: JJSourceControlScope = .log
+    private var revsets = SourceControlRevsets()
     private var includeWorkingCopy = false
     private var revealWorkingCopy = false
-    private var query = ""
     private(set) var graph: JJSourceControlGraph?
     private(set) var selection: JJSourceControlRevision?
     private(set) var detail: JJSourceControlDetail?
@@ -60,7 +58,7 @@ final class SourceControlSidebar: NSObject {
     private let graphBody = NSView()
     private let changeBody = NSView()
     private lazy var panes = SourceControlPanes(
-        graphHeader: makeHeader(graphToggle, actions: [filterButton, workingCopyButton, operationsButton, newButton]),
+        graphHeader: makeHeader(graphToggle, actions: [revsetButton, workingCopyButton, operationsButton, newButton]),
         graph: graphBody, changeHeader: makeHeader(changeToggle, actions: [actionsButton]), change: changeBody
     )
 
@@ -70,6 +68,8 @@ final class SourceControlSidebar: NSObject {
 
 #if EDIT_AGENT_CHECKS
     var operationsViewForCheck: NSView { operations.checkView }
+    var revsetEditorViewForCheck: NSView { revsetEditor.checkView }
+    func revsetMenuForCheck() -> NSMenu { makeRevsetMenu() }
 #endif
 
     private enum PanelError: LocalizedError {
@@ -99,7 +99,10 @@ final class SourceControlSidebar: NSObject {
         stopObserving()
         workspace = nil
         graph = nil
-        lastSuccessfulScope = .log
+        revsets = SourceControlRevsets()
+        updateRevsetButton()
+        includeWorkingCopy = false
+        revealWorkingCopy = false
         hasPresentedGraph = false
         selection = nil
         detail = nil
@@ -138,7 +141,7 @@ final class SourceControlSidebar: NSObject {
         app.jjChanges.unsubscribe(subscription)
         subscription = nil
         operations.close()
-        filter.close()
+        revsetEditor.close()
         descriptionPopover.close()
     }
 
@@ -160,8 +163,11 @@ final class SourceControlSidebar: NSObject {
             guard let self, !Task.isCancelled, active, self.folder == folder else { return }
             discovery = nil
             workspace = found
-            if let found { observe(found) }
-            else {
+            if let found {
+                revsets = (try? app.sourceControlRevsets.read(for: found)) ?? SourceControlRevsets()
+                updateRevsetButton()
+                observe(found)
+            } else {
                 showGraphMessage("No usable Jujutsu workspace was found for this folder.")
                 updateControls()
             }
@@ -200,33 +206,17 @@ final class SourceControlSidebar: NSObject {
                 fileTree.view.isHidden = true
             }
         }
-        let scope = scope
+        let revset = revsets.selected
         let includeWorkingCopy = includeWorkingCopy
         graphRequest = Task { [weak self] in
             do {
-                let result = try await JJSourceControlRepository.graph(in: workspace, scope: scope, includeWorkingCopy: includeWorkingCopy)
+                let result = try await JJSourceControlRepository.graph(
+                    in: workspace, revset: revset.expression, includeWorkingCopy: includeWorkingCopy
+                )
                 guard let self, !Task.isCancelled, active, self.workspace == workspace else { return }
-                filter.setError(nil)
-                publish(result, scope: scope)
+                publish(result)
             } catch {
                 guard let self, !Task.isCancelled, active, self.workspace == workspace else { return }
-                if case .revset = scope {
-                    let current = try? await JJRepository.operation(in: workspace)
-                    guard !Task.isCancelled else { return }
-                    filter.setError(error.localizedDescription)
-                    if let graph, current == graph.operationID {
-                        finishGraphRequest()
-                        displayGraph(forceDetail: false)
-                        return
-                    }
-                    let fallback = lastSuccessfulScope == scope ? .log : lastSuccessfulScope
-                    if let result = try? await JJSourceControlRepository.graph(in: workspace, scope: fallback, includeWorkingCopy: includeWorkingCopy) {
-                        guard !Task.isCancelled else { return }
-                        publish(result, scope: fallback)
-                        return
-                    }
-                    guard !Task.isCancelled else { return }
-                }
                 finishGraphRequest()
                 graph = nil
                 selection = nil
@@ -248,23 +238,17 @@ final class SourceControlSidebar: NSObject {
         stale = false
     }
 
-    private func publish(_ result: JJSourceControlGraph, scope: JJSourceControlScope) {
+    private func publish(_ result: JJSourceControlGraph) {
         finishGraphRequest()
         let changedOperation = graph?.operationID != result.operationID
         graph = result
-        lastSuccessfulScope = scope
-        switch scope {
-        case .log: filterButton.title = "Log"
-        case .stack: filterButton.title = "Stack"
-        case .revset: filterButton.title = "Revset"
-        }
         if changedOperation { operations.invalidate() }
         displayGraph(forceDetail: changedOperation)
     }
 
     private func displayGraph(forceDetail: Bool) {
         guard let graph else { return }
-        let rows = filtered(graph.revisions)
+        let rows = graph.revisions
         graphLimit.isHidden = !graph.isTruncated || rows.isEmpty
         graphLimit.stringValue = "Showing the first \(graph.revisions.count) changes"
         let old = selection
@@ -289,33 +273,6 @@ final class SourceControlSidebar: NSObject {
         }
         else { renderDetail() }
         updateControls()
-    }
-
-    private func filtered(_ revisions: [JJSourceControlRevision]) -> [JJSourceControlRevision] {
-        guard !query.isEmpty else { return revisions }
-        let visible = revisions.filter { revision in
-            revision.description.localizedCaseInsensitiveContains(query) || revision.changeID.hasPrefix(query.lowercased()) ||
-                revision.bookmarks.contains(where: { $0.localizedCaseInsensitiveContains(query) })
-        }
-        let ids = Set(visible.map(\.id))
-        let source = Dictionary(uniqueKeysWithValues: revisions.map { ($0.id, $0.edges) })
-        var elided: [String: [JJSourceControlEdge]] = [:]
-        func nearest(_ edge: JJSourceControlEdge) -> [JJSourceControlEdge] {
-            guard let target = edge.target, !ids.contains(target) else { return [edge] }
-            if let stored = elided[target] { return stored }
-            let parents = source[target, default: []]
-            var visited: Set<String?> = []
-            let crossings = parents.isEmpty ? [.init(target: nil, indirect: true)] : parents.flatMap(nearest)
-                .filter { visited.insert($0.target).inserted }.map { JJSourceControlEdge(target: $0.target, indirect: true) }
-            elided[target] = crossings
-            return crossings
-        }
-        return visible.map { revision in
-            var result = revision
-            var targets: Set<String?> = []
-            result.edges = revision.edges.flatMap(nearest).sorted { !$0.indirect && $1.indirect }.filter { targets.insert($0.target).inserted }
-            return result
-        }
     }
 
     private func choose(_ revision: JJSourceControlRevision) {
@@ -393,7 +350,7 @@ final class SourceControlSidebar: NSObject {
     private func updateControls() {
         let canBrowse = active && workspace != nil
         let canAct = canBrowse && graph != nil && !stale && !busy
-        filterButton.isEnabled = canBrowse
+        revsetButton.isEnabled = canBrowse
         operationsButton.isEnabled = canBrowse && !busy
         newButton.isEnabled = canAct
         workingCopyButton.isEnabled = canAct
@@ -444,8 +401,6 @@ final class SourceControlSidebar: NSObject {
                 if selectingWorkingCopy {
                     includeWorkingCopy = true
                     revealWorkingCopy = true
-                    query = ""
-                    filter.setQuery("")
                 }
             }
         } catch {
@@ -630,8 +585,6 @@ final class SourceControlSidebar: NSObject {
         panes.setGraphExpanded(true)
         updateDisclosures()
         revealWorkingCopy = true
-        query = ""
-        filter.setQuery("")
         if graph.revisions.contains(where: { $0.id == graph.workingCopy.id }) { displayGraph(forceDetail: false) }
         else {
             includeWorkingCopy = true
@@ -660,17 +613,90 @@ final class SourceControlSidebar: NSObject {
 
     @objc private func showOperations(_ sender: Any?) { operations.show() }
 
-    @objc private func showFilter(_ sender: NSButton) { filter.show() }
-
-    private func setScope(_ scope: JJSourceControlScope) {
-        self.scope = scope
-        includeWorkingCopy = false
-        requestGraph()
+    @objc private func showRevsets(_ sender: NSButton) {
+        guard let workspace else { return }
+        if let settings = try? app.sourceControlRevsets.read(for: workspace) { installRevsets(settings) }
+        let menu = makeRevsetMenu()
+        let bounds = sender.bounds
+        let x = sender.userInterfaceLayoutDirection == .rightToLeft ? bounds.maxX - menu.size.width : bounds.minX
+        menu.popUp(positioning: nil, at: NSPoint(x: x, y: sender.isFlipped ? bounds.maxY : bounds.minY), in: sender)
     }
 
-    private func setQuery(_ text: String) {
-        query = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !stale { displayGraph(forceDetail: false) }
+    private func makeRevsetMenu() -> NSMenu {
+        let menu = NSMenu(title: "Revsets")
+        let selectedID = revsets.selected.id
+        for entry in revsets.entries {
+            let item = NSMenuItem(title: entry.name, action: #selector(chooseRevset(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = entry.id
+            item.state = entry.id == selectedID ? .on : .off
+            item.toolTip = entry.expression ?? "The repository’s configured jj log"
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        for (title, action) in [("New Revset…", #selector(newRevset))] +
+            (revsets.canEditSelected ? [("Edit Revset…", #selector(editRevset)), ("Remove Revset", #selector(removeRevset))] : []) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    @objc private func chooseRevset(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String, id != revsets.selected.id else { return }
+        updateRevsets { try $0.select(id) }
+    }
+
+    @objc private func newRevset() { revsetEditor.show(editing: nil) }
+
+    @objc private func editRevset() {
+        guard revsets.canEditSelected else { return }
+        revsetEditor.show(editing: revsets.selected)
+    }
+
+    @objc private func removeRevset() {
+        guard revsets.canEditSelected else { return }
+        let id = revsets.selected.id
+        updateRevsets { $0.remove(id) }
+    }
+
+    private func saveRevset(name: String, expression: String, replacing id: String?) async throws {
+        guard let workspace else { throw PanelError.noWorkspace }
+        try await JJSourceControlRepository.validateRevset(expression, in: workspace)
+        try Task.checkCancellation()
+        guard active, self.workspace == workspace else { throw PanelError.noWorkspace }
+        let settings = try app.sourceControlRevsets.update(for: workspace) {
+            try $0.save(name: name, expression: expression, replacing: id)
+        }
+        installRevsets(settings)
+    }
+
+    private func updateRevsets(_ change: (inout SourceControlRevsets) throws -> Void) {
+        guard let workspace else { return }
+        do {
+            installRevsets(try app.sourceControlRevsets.update(for: workspace, change))
+        } catch {
+            Task { await document.showError("Could Not Save Revsets", detail: error.localizedDescription) }
+        }
+    }
+
+    private func installRevsets(_ settings: SourceControlRevsets) {
+        let changed = revsets.selected != settings.selected
+        revsets = settings
+        updateRevsetButton()
+        if changed {
+            includeWorkingCopy = false
+            revealWorkingCopy = false
+            requestGraph()
+        }
+    }
+
+    private func updateRevsetButton() {
+        let selected = revsets.selected
+        revsetButton.title = selected.id == SourceControlRevset.defaultLog.id ? "Log" : selected.name
+        revsetButton.toolTip = "Revsets · \(selected.name)"
+        revsetButton.setAccessibilityLabel("Revsets, \(selected.name)")
     }
 
     private func configure() {
@@ -683,8 +709,14 @@ final class SourceControlSidebar: NSObject {
             button.font = .systemFont(ofSize: 12, weight: .semibold)
             button.contentTintColor = .secondaryLabelColor
         }
-        configure(filterButton, title: "Log", action: #selector(showFilter(_:)), symbol: "chevron.down", label: "Filter Changes")
-        filterButton.imagePosition = .imageTrailing
+        configure(revsetButton, title: "Log", action: #selector(showRevsets(_:)), symbol: "chevron.down")
+        revsetButton.identifier = NSUserInterfaceItemIdentifier("JujutsuRevsets")
+        revsetButton.imageHugsTitle = true
+        revsetButton.lineBreakMode = .byTruncatingTail
+        revsetButton.cell?.usesSingleLineMode = true
+        revsetButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        revsetButton.widthAnchor.constraint(lessThanOrEqualToConstant: 128).isActive = true
+        updateRevsetButton()
         configure(workingCopyButton, title: "@", action: #selector(goToWorkingCopy(_:)), label: "Go to Working Copy")
         configure(operationsButton, action: #selector(showOperations(_:)), symbol: "clock.arrow.circlepath", label: "Repository Operations")
         configure(newButton, action: #selector(newChange(_:)), symbol: "plus", label: "New Change")

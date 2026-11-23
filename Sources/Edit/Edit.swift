@@ -72,6 +72,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     private weak var openPanelDocument: DocumentWindow?
     private(set) lazy var recentFiles = RecentFiles(url: recentHistoryURL)
     lazy var jjChanges = JJChangeMonitor()
+    lazy var sourceControlRevsets = SourceControlRevsetStore(url: storageFolder.appending(path: "jujutsu-revsets.json"))
     lazy var scratchStore = ScratchStore(
         root: storageFolder.appending(path: "Scratches", directoryHint: .isDirectory),
         trashDirectoryForChecks: isAgentCheck ? storageFolder.appending(path: "ScratchTrash", directoryHint: .isDirectory) : nil
