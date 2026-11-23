@@ -912,7 +912,6 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             setNeedsDisplay(currentLine.intersection(visibleRect))
             currentLine = newLine
             setNeedsDisplay(currentLine.intersection(visibleRect))
-            jjDecorations?.invalidateGutter()
         }
     }
 
@@ -923,17 +922,13 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         return caret.compare(viewport.location) != .orderedAscending && caret.compare(viewport.endLocation) != .orderedDescending
     }
 
-    func drawCurrentLine(in dirtyRect: NSRect, relativeTo view: NSView) {
-        let stripe = dirtyRect.intersection(view.convert(currentLine, from: self))
+    override func drawBackground(in dirtyRect: NSRect) {
+        super.drawBackground(in: dirtyRect)
+        let stripe = dirtyRect.intersection(currentLine)
         if !stripe.isEmpty {
             NSColor.labelColor.withAlphaComponent(0.06).setFill()
             stripe.fill()
         }
-    }
-
-    override func drawBackground(in dirtyRect: NSRect) {
-        super.drawBackground(in: dirtyRect)
-        drawCurrentLine(in: dirtyRect, relativeTo: self)
         occurrenceHighlighting.draw(in: dirtyRect)
         bracketNavigation.draw(in: dirtyRect)
         onDrawFindHighlights?(dirtyRect)

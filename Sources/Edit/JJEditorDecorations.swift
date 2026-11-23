@@ -82,7 +82,7 @@ final class JJEditorDecorations {
         }
         let gutterInEditor = editor.convert(gutterFrame, from: scroll)
         if gutter.frame != gutterInEditor { gutter.frame = gutterInEditor }
-        invalidateGutter()
+        gutter.needsDisplay = true
 
         let scroller = scroll.verticalScroller
         let style = scroll.scrollerStyle
@@ -102,10 +102,6 @@ final class JJEditorDecorations {
         if track.frame != frame { track.frame = frame }
         if frame.size != trackSize { updateTrackMarks() }
         if style != .overlay { track.needsDisplay = true }
-    }
-
-    func invalidateGutter() {
-        gutter.needsDisplay = true
     }
 
     func hitTest(in scroll: NSScrollView, at point: NSPoint, nativeHit: NSView) -> NSView? {
@@ -211,15 +207,12 @@ final class JJEditorDecorations {
             }
         }
         for marker in trackMarks where marker.rect.intersects(dirtyRect) {
-            fill(marker.rect, kind: marker.mark.kind)
+            fill(marker.rect, kind: marker.mark.kind, conflictBackground: .textBackgroundColor)
         }
     }
 
     private func drawGutter(in dirtyRect: NSRect) {
         guard let editor, let layout = editor.textLayoutManager else { return }
-        editor.backgroundColor.setFill()
-        dirtyRect.fill()
-        editor.drawCurrentLine(in: dirtyRect, relativeTo: gutter)
         let viewport = layout.textViewportLayoutController.viewportRange.map { editor.charRange($0, in: layout) }
         guard viewport != nil || lineStarts.isEmpty else { return }
         let firstLine = max(0, lineIndex(at: viewport?.lowerBound ?? 0) - 1)
@@ -298,15 +291,17 @@ final class JJEditorDecorations {
         return line > 0 ? laidOutLine(at: line - 1, editor: editor)?.maxY : nil
     }
 
-    private func fill(_ rect: NSRect, kind: JJLineMark.Kind) {
+    private func fill(_ rect: NSRect, kind: JJLineMark.Kind, conflictBackground: NSColor? = nil) {
         kind.color.setFill()
         if kind != .conflict || rect.height < 4 {
             rect.fill()
             return
         }
-        // Give hatching a solid background so lower-priority track marks do not show through.
-        (NSColor.textBackgroundColor.blended(withFraction: 0.16, of: kind.color) ?? .textBackgroundColor).setFill()
-        rect.fill()
+        if let conflictBackground {
+            // Preserve the conflict mark's priority where scrollbar marks overlap.
+            (conflictBackground.blended(withFraction: 0.16, of: kind.color) ?? conflictBackground).setFill()
+            rect.fill()
+        }
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(rect: rect).addClip()
         kind.color.setStroke()

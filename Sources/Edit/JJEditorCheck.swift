@@ -113,17 +113,18 @@ enum JJEditorCheck {
 
         try checkTrackAfterResize(in: document)
         try checkGutterUnderTitlebar(in: document)
-        try checkCurrentLineThroughGutter(in: document)
+        try checkGutterTransparency(in: document)
     }
 
-    private static func checkCurrentLineThroughGutter(in document: DocumentWindow) throws {
+    private static func checkGutterTransparency(in document: DocumentWindow) throws {
         let editor = document.editor
         let scroll = document.scrollView
-        let row = String(repeating: "long test line ", count: 24) + "\n"
+        let row = String(repeating: "M", count: 240) + "\n"
         let starts = [0, 1] + (0..<80).map { 2 + $0 * row.utf16.count }
         editor.string = "\n\n" + String(repeating: row, count: 80)
         document.window.layoutIfNeeded()
-        editor.setJJLineMarks([JJLineMark(kind: .insertion, lines: 0..<1)], lineStarts: starts)
+        editor.setJJLineMarks([JJLineMark(kind: .insertion, lines: 0..<1),
+                               JJLineMark(kind: .conflict, lines: 3..<4)], lineStarts: starts)
 
         func pixel(x: CGFloat, at offset: Int) throws -> NSColor {
             guard let line = editor.lineBounds(at: offset) else { throw Failure("lay out the current line") }
@@ -149,6 +150,31 @@ enum JJEditorCheck {
                     throw Failure("extend the current-line background through the gutter while keeping the marker visible")
                 }
             }
+        }
+
+        func gutterSample(at line: Int, inset: CGFloat, width: CGFloat) throws -> NSBitmapImageRep {
+            guard let bounds = editor.lineBounds(at: starts[line]) else { throw Failure("lay out text under the gutter") }
+            let row = scroll.convert(bounds, from: editor)
+            return try capture(scroll, in: NSRect(x: scroll.safeAreaRect.minX + inset, y: row.minY,
+                                                  width: width, height: row.height))
+        }
+
+        guard scroll.visibleContentOrigin.x > 0 else { throw Failure("scroll wide text beneath the gutter") }
+        let unmarked = try gutterSample(at: 2, inset: 0, width: 7)
+        let hatched = try gutterSample(at: 3, inset: 3, width: 1)
+        editor.setJJLineMarks([])
+        let bare = try gutterSample(at: 2, inset: 0, width: 7)
+        let bareHatching = try gutterSample(at: 3, inset: 3, width: 1)
+        guard let bareText = bare.representation(using: .png, properties: [:]),
+              bareText == unmarked.representation(using: .png, properties: [:]),
+              bareText != (try gutterSample(at: 0, inset: 0, width: 7)).representation(using: .png, properties: [:]) else {
+            throw Failure("leave horizontally scrolled glyphs visible between gutter marks")
+        }
+        let hatchCoverage = (0..<hatched.pixelsHigh).map { y in
+            hatched.colorAt(x: 0, y: y) != bareHatching.colorAt(x: 0, y: y)
+        }
+        guard hatchCoverage.contains(true), hatchCoverage.contains(false) else {
+            throw Failure("show text in the gaps between purple conflict strokes")
         }
     }
 
