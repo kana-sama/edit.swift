@@ -80,6 +80,7 @@ enum WorktreeCheck {
         try expect(document.window.areCursorRectsEnabled && cursorImages == [.pointingHand, .arrow],
                    "show the default cursor over the empty Worktree area")
         try checkDisclosureStyle(disclose)
+        try expect(!disclose.ignoresMultiClick, "the disclosure button accepts rapid clicks")
         try checkDisclosureContrast(disclose, in: document.window)
         try checkSelectionShape(in: tree, window: document.window)
         let fileCell = try require(cell(at: log, in: tree), "file row")
@@ -108,8 +109,12 @@ enum WorktreeCheck {
         try await waitFor("a single folder row click expands and keeps tree focus") {
             tree.isItemExpanded(folder) && document.window.firstResponder === tree
         }
-        try click(sources, in: tree)
-        try await waitFor("a second single click collapses the selected folder") { !tree.isItemExpanded(folder) }
+        try click(sources, in: tree, clickCount: 2)
+        try await waitFor("a rapid second click collapses the selected folder") { !tree.isItemExpanded(folder) }
+        try click(sources, in: tree, clickCount: 3)
+        try await waitFor("a rapid third click expands the selected folder") { tree.isItemExpanded(folder) }
+        try click(sources, in: tree, clickCount: 4)
+        try await waitFor("a rapid fourth click collapses the selected folder") { !tree.isItemExpanded(folder) }
 
         try click(log, in: tree, modifiers: [.command])
         try expect(tree.selectedRowIndexes.contains(log), "Command-click selects the file")
@@ -952,7 +957,7 @@ enum WorktreeCheck {
     }
 
     private static func click(
-        _ row: Int, in outline: NSOutlineView, modifiers: NSEvent.ModifierFlags = []
+        _ row: Int, in outline: NSOutlineView, modifiers: NSEvent.ModifierFlags = [], clickCount: Int = 1
     ) throws {
         let rect = outline.frameOfCell(atColumn: 0, row: row)
         let location = outline.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
@@ -960,7 +965,7 @@ enum WorktreeCheck {
         func event(_ type: NSEvent.EventType) throws -> NSEvent {
             try require(NSEvent.mouseEvent(with: type, location: location, modifierFlags: modifiers,
                                          timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
-                                         eventNumber: 1, clickCount: 1, pressure: 1), "outline click")
+                                         eventNumber: 1, clickCount: clickCount, pressure: 1), "outline click")
         }
         window.makeFirstResponder(outline)
         let press = try event(.leftMouseDown)

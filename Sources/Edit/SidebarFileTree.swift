@@ -1368,11 +1368,21 @@ private final class WorktreeOutline: NSOutlineView, NSMenuItemValidation {
         let point = convert(event.locationInWindow, from: nil)
         let clicked = row(at: point)
         let disclosure = clicked >= 0 && frameOfOutlineCell(atRow: clicked).contains(point)
-        super.mouseDown(with: event)
+        let isFolder = clicked >= 0 && item(atRow: clicked).map { isExpandable($0) } == true
+        let plainClick = event.modifierFlags.intersection([.command, .shift, .control, .option]).isEmpty
+        if isFolder, !disclosure, plainClick, event.clickCount > 1,
+           let press = NSEvent.mouseEvent(with: .leftMouseDown, location: event.locationInWindow,
+                                          modifierFlags: event.modifierFlags, timestamp: event.timestamp,
+                                          windowNumber: event.windowNumber, context: nil, eventNumber: event.eventNumber,
+                                          clickCount: 1, pressure: event.pressure) {
+            // AppKit tracks a single press through release and reserves multi-clicks for doubleAction.
+            super.mouseDown(with: press)
+        } else {
+            super.mouseDown(with: event)
+        }
 
         // A table's action can skip already selected rows. Use the release from its native tracking.
-        guard !didStartDrag, clicked >= 0, !disclosure, event.clickCount == 1,
-              event.modifierFlags.intersection([.command, .shift, .control, .option]).isEmpty,
+        guard !didStartDrag, clicked >= 0, !disclosure, plainClick, isFolder || event.clickCount == 1,
               let release = NSApp.currentEvent, release.type == .leftMouseUp,
               release.window === window, release.timestamp >= event.timestamp,
               row(at: convert(release.locationInWindow, from: nil)) == clicked else { return }
@@ -1404,6 +1414,7 @@ private final class WorktreeOutline: NSOutlineView, NSMenuItemValidation {
         }
         button.target = self
         button.action = action
+        button.ignoresMultiClick = false
     }
 
     @objc private func toggleDirectory(_ sender: NSButton) {
