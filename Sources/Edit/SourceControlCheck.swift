@@ -188,7 +188,11 @@ enum SourceControlCheck {
         let split = document.documentSplitView
         guard let sidebar = split.arrangedSubviews.first,
               let graph = button(in: panel.view, where: { $0.title == "Changes" }),
+              let graphCell = graph.cell,
               let detail = button(in: panel.view, where: { $0.title == "Change" }),
+              let detailCell = detail.cell,
+              let filter = button(in: panel.view, where: { $0.toolTip == "Filter Changes" }),
+              let actions = button(in: panel.view, where: { $0.toolTip == "Change Actions" }),
               let create = button(in: panel.view, where: { $0.toolTip == "New Change" }) else {
             throw Failure("find the Source Control section controls")
         }
@@ -205,6 +209,12 @@ enum SourceControlCheck {
         }
         try expect(!create.isHiddenOrHasHiddenAncestor && panel.view.convert(create.bounds, from: create).maxX <= panel.view.bounds.maxX,
                    "fit the graph controls at minimum sidebar width")
+        for (toggle, firstAction) in [(graph, filter), (detail, actions)] {
+            try expect(toggle.imagePosition == .imageTrailing && toggle.isAccessibilityExpanded() &&
+                       panel.view.convert(firstAction.bounds, from: firstAction).minX -
+                       panel.view.convert(toggle.bounds, from: toggle).maxX >= 10,
+                       "place the \(toggle.title) chevron after the title and separate it from the actions")
+        }
         guard let title = button(in: panel.view, where: { $0.title == "Working change" }),
               let graphRow = panel.graphView.table.view(atColumn: 0, row: panel.graphView.table.selectedRow, makeIfNecessary: true) else {
             throw Failure("find the collapsed title and the selected graph row")
@@ -216,15 +226,25 @@ enum SourceControlCheck {
         }
         try expect(graphLabels.count == 3 && graphLabels.allSatisfy { $0.cell?.usesSingleLineMode == true && $0.maximumNumberOfLines == 1 },
                    "keep the graph subject, change ID, and long bookmark on two lines")
+        let graphTitle = graphCell.titleRect(forBounds: graph.bounds)
+        let graphChevron = graphCell.imageRect(forBounds: graph.bounds)
+        let changeTitle = detailCell.titleRect(forBounds: detail.bounds)
+        let changeChevron = detailCell.imageRect(forBounds: detail.bounds)
         graph.performClick(nil)
         document.window.layoutIfNeeded()
         try expect(panel.graphView.view.isHiddenOrHasHiddenAncestor && !panel.fileTree.view.isHiddenOrHasHiddenAncestor,
                    "keep the file tree visible when the graph collapses")
+        try expect(!graph.isAccessibilityExpanded() && graphTitle == graphCell.titleRect(forBounds: graph.bounds) &&
+                   graphChevron == graphCell.imageRect(forBounds: graph.bounds) && !create.isHiddenOrHasHiddenAncestor,
+                   "keep the Changes title, chevron slot and actions in place when the graph collapses")
         graph.performClick(nil)
         detail.performClick(nil)
         document.window.layoutIfNeeded()
         try expect(!panel.graphView.view.isHiddenOrHasHiddenAncestor && panel.fileTree.view.isHiddenOrHasHiddenAncestor,
                    "keep the graph visible when change details collapse")
+        try expect(!detail.isAccessibilityExpanded() && changeTitle == detailCell.titleRect(forBounds: detail.bounds) &&
+                   changeChevron == detailCell.imageRect(forBounds: detail.bounds) && !actions.isHiddenOrHasHiddenAncestor,
+                   "keep the Change title, chevron slot and actions in place when the details collapse")
         detail.performClick(nil)
         document.window.layoutIfNeeded()
     }

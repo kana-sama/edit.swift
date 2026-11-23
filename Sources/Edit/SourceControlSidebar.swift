@@ -15,6 +15,8 @@ final class SourceControlSidebar: NSObject {
     private let operationsButton = NSButton()
     private let newButton = NSButton()
     private let actionsButton = NSButton()
+    private static let collapsedChevron = disclosureImage("chevron.forward")
+    private static let expandedChevron = disclosureImage("chevron.down")
     private let graphMessage = NSTextField(wrappingLabelWithString: "")
     private let graphLimit = NSTextField(labelWithString: "")
     private let detailTitle = NSButton()
@@ -645,10 +647,11 @@ final class SourceControlSidebar: NSObject {
     }
 
     private func updateDisclosures() {
-        graphToggle.image = Self.symbol(panes.graphExpanded ? "chevron.down" : "chevron.right", size: 9)
-        changeToggle.image = Self.symbol(panes.changeExpanded ? "chevron.down" : "chevron.right", size: 9)
-        graphToggle.setAccessibilityHelp(panes.graphExpanded ? "Collapse Changes" : "Expand Changes")
-        changeToggle.setAccessibilityHelp(panes.changeExpanded ? "Collapse Change" : "Expand Change")
+        for (button, expanded) in [(graphToggle, panes.graphExpanded), (changeToggle, panes.changeExpanded)] {
+            button.image = expanded ? Self.expandedChevron : Self.collapsedChevron
+            button.setAccessibilityExpanded(expanded)
+            button.setAccessibilityHelp("\(expanded ? "Collapse" : "Expand") \(button.title)")
+        }
     }
 
     @objc private func showOperations(_ sender: Any?) { operations.show() }
@@ -670,9 +673,11 @@ final class SourceControlSidebar: NSObject {
         configure(graphToggle, title: "Changes", action: #selector(toggleGraph(_:)))
         configure(changeToggle, title: "Change", action: #selector(toggleChange(_:)))
         for button in [graphToggle, changeToggle] {
-            button.imagePosition = .imageLeading
-            button.alignment = .left
+            button.imagePosition = .imageTrailing
+            button.imageHugsTitle = true
+            button.alignment = .natural
             button.font = .systemFont(ofSize: 12, weight: .semibold)
+            button.contentTintColor = .secondaryLabelColor
         }
         configure(filterButton, title: "Log", action: #selector(showFilter(_:)), symbol: "chevron.down", label: "Filter Changes")
         filterButton.imagePosition = .imageTrailing
@@ -785,6 +790,19 @@ final class SourceControlSidebar: NSObject {
             .withSymbolConfiguration(.init(pointSize: size, weight: .medium))
     }
 
+    private static func disclosureImage(_ name: String) -> NSImage? {
+        guard let glyph = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold)) else { return nil }
+        // Give both symbol shapes the same size and alignment for the button cell.
+        let image = NSImage(size: NSSize(width: 14, height: 12), flipped: false) { bounds in
+            glyph.draw(in: NSRect(x: bounds.midX - glyph.size.width / 2, y: bounds.midY - glyph.size.height / 2,
+                                  width: glyph.size.width, height: glyph.size.height))
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
     private func makeHeader(_ title: NSButton, actions: [NSButton]) -> NSView {
         let header = NSView()
         let row = NSStackView(views: actions)
@@ -796,8 +814,8 @@ final class SourceControlSidebar: NSObject {
             child.translatesAutoresizingMaskIntoConstraints = false
         }
         NSLayoutConstraint.activate([
-            title.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 9), title.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            row.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 3),
+            title.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 11), title.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            row.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 12),
             row.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -9), row.centerYAnchor.constraint(equalTo: header.centerYAnchor)
         ])
         return header
