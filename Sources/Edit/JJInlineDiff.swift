@@ -195,8 +195,12 @@ final class JJInlineDiff: NSResponder {
 
     private func hoveredHunk(in editor: EditorTextView, scroll: NSScrollView, visible: NSRect) -> JJDiffHunk? {
         guard let pointer, visible.contains(scroll.convert(pointer, from: nil)) else { return nil }
-        if let hovered = panels.first(where: { $0.value.bounds.contains($0.value.convert(pointer, from: nil)) })?.key {
-            return visibleHunks.first { $0.baseRange == hovered }
+        var hit = scroll.hitTest(scroll.superview?.convert(pointer, from: nil) ?? pointer)
+        while let view = hit, view !== scroll {
+            if let panel = view as? JJInlineDiffControls {
+                return visibleHunks.first { $0.baseRange == panel.hunkKey }
+            }
+            hit = view.superview
         }
         let inEditor = editor.convert(pointer, from: nil)
         return visibleHunks.first { display.rect(for: $0)?.contains(inEditor) == true }
@@ -245,9 +249,8 @@ final class JJInlineDiff: NSResponder {
 
     private func panel(for key: NSRange) -> JJInlineDiffControls {
         if let panel = panels[key] { return panel }
-        let panel = JJInlineDiffControls(restore: { [weak self] in self?.restore(key) },
-                                         previous: { [weak self] in self?.navigate(from: key, by: -1) },
-                                         next: { [weak self] in self?.navigate(from: key, by: 1) })
+        let panel = JJInlineDiffControls(hunkKey: key, restore: { [weak self] key in self?.restore(key) },
+                                         navigate: { [weak self] key, step in self?.navigate(from: key, by: step) })
         panel.onCancel = { [weak self] in self?.collapseAll() == true }
         panel.onPointerChange = { [weak self] event in self?.mouseMoved(with: event) }
         panels[key] = panel
@@ -265,13 +268,12 @@ final class JJInlineDiff: NSResponder {
               let index = hunks.firstIndex(where: { $0.baseRange == key }) else { return }
         let target = hunks[(index + step + hunks.count) % hunks.count]
         expanded.insert(target.baseRange)
-        let caret = NSRange(location: target.currentRange.location, length: 0)
-        if editor.focusAllowsEdits([caret]) {
-            editor.window?.makeFirstResponder(editor)
-            editor.setCaretSelections([caret], record: false)
-        }
         applyExpansion()
         display.reveal(target)
+        let caret = NSRange(location: target.currentRange.location, length: 0)
+        if editor.focusAllowsEdits([caret]), editor.window?.makeFirstResponder(editor) == true {
+            editor.setCaretSelections([caret], record: false)
+        }
         layout()
     }
 

@@ -50,7 +50,7 @@ final class JJInlineDiffLayout: NSObject, NSTextLayoutManagerDelegate {
     }
 
     func layout() {
-        guard !layingOut, let editor, let manager = editor.textLayoutManager,
+        guard !layingOut, let editor, let scroll = editor.enclosingScrollView, let manager = editor.textLayoutManager,
               let source = editor.textStorage?.mutableString else { return }
         layingOut = true
         defer { layingOut = false }
@@ -72,7 +72,7 @@ final class JJInlineDiffLayout: NSObject, NSTextLayoutManagerDelegate {
             refreshGapParagraphs(newGaps, source: source, editor: editor)
             manager.textViewportLayoutController.layoutViewport()
         }
-        let viewport = editor.enclosingScrollView?.documentVisibleRect ?? editor.visibleRect
+        let viewport = scroll.documentVisibleRect
         let visible = manager.textViewportLayoutController.viewportRange.map { editor.charRange($0, in: manager) }
         var invalidated = NSRect.null
         for index in entries.indices {

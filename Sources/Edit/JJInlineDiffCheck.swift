@@ -215,6 +215,64 @@ enum JJInlineDiffCheck {
         guard editor.string == current, !undo.canUndo else { throw Failure("undo Restore with one edit") }
         undo.redo()
         guard editor.string == restored else { throw Failure("redo Restore") }
+
+        try checkMouseNavigation(in: document, controller: controller)
+    }
+
+    private static func checkMouseNavigation(in document: DocumentWindow, controller: JJInlineDiff) throws {
+        let window = document.window
+        let editor = document.editor
+        let scroll = document.scrollView
+        let longLine = String(repeating: " code under the panel", count: 14)
+        func fixture(_ prefix: String) -> String {
+            (1...5).map { index in
+                "\(prefix) \(index)\(index == 4 ? longLine : "")\ncontext \(index)\n"
+            }.joined()
+        }
+        let current = fixture("new")
+        let analysis = JJLineDiff.analyze(base: fixture("old"), current: current, isConflicted: false, recordedConflict: nil)
+        guard analysis.hunks.count == 5 else { throw Failure("lay out five independent changes for mouse navigation") }
+        let second = analysis.hunks[1]
+        let fourth = analysis.hunks[3]
+        editor.string = current
+        window.makeFirstResponder(editor)
+        editor.setCaretSelections([NSRange(location: 0, length: 0)], record: false)
+        editor.setJJLineMarks(analysis.marks, lineStarts: analysis.lineStarts, hunks: analysis.hunks)
+        controller.toggle(second.mark)
+        controller.toggle(fourth.mark)
+
+        for (identifier, destination) in [("Edit.Diff.Previous", analysis.hunks[2]), ("Edit.Diff.Next", analysis.hunks[4])] {
+            editor.setCaretSelections([NSRange(location: second.currentRange.location, length: 0)], record: false)
+            controller.layout()
+            let fourthRegion = try require(controller.expandedRegion(for: fourth.mark), "lay out the fourth change")
+            let line = try require(editor.lineBounds(at: fourth.currentRange.location), "lay out the long changed line")
+            let hover = editor.convert(NSPoint(x: fourthRegion.midX, y: fourthRegion.midY), to: nil)
+            controller.mouseMoved(with: try mouse(.mouseMoved, at: hover, in: window))
+            let controls = panels(in: scroll)
+            guard controls.count == 2, let panel = controls.first(where: { $0.hunkKey == fourth.baseRange }),
+                  controls.contains(where: { $0.hunkKey == second.baseRange }),
+                  panel.frame.intersects(scroll.convert(fourthRegion, from: editor)),
+                  editor.lineBounds(at: fourth.currentRange.location) == line else {
+                throw Failure("overlay the fourth change without shifting its text or the caret's panel")
+            }
+            let arrow = try button(identifier, in: panel)
+            window.layoutIfNeeded()
+            let point = arrow.convert(NSPoint(x: arrow.bounds.midX, y: arrow.bounds.midY), to: nil)
+            controller.mouseMoved(with: try mouse(.mouseMoved, at: point, in: window))
+            let windowFrame = try require(window.contentView?.superview, "find the window's hit testing view")
+            let hit = try require(windowFrame.hitTest(windowFrame.superview?.convert(point, from: nil) ?? point),
+                                  "hit the arrow on the hovered panel")
+            guard hit === arrow, editor.selectedRange().location == second.currentRange.location,
+                  controller.expandedRegion(for: destination.mark) == nil else {
+                throw Failure("start a native arrow click on the fourth change with the caret on the second")
+            }
+            // Dispatch the action of the hit-tested button in the non-interactive test window.
+            guard let action = arrow.action, NSApp.sendAction(action, to: arrow.target, from: arrow),
+                  editor.selectedRange().location == destination.currentRange.location,
+                  controller.expandedRegion(for: destination.mark) != nil else {
+                throw Failure("move the caret and expand the change adjacent to the clicked panel")
+            }
+        }
     }
 
     private static func mouse(_ type: NSEvent.EventType, at point: NSPoint, in window: NSWindow) throws -> NSEvent {

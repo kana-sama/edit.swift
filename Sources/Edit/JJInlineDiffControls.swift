@@ -2,22 +2,22 @@ import AppKit
 
 @MainActor
 final class JJInlineDiffControls: NSView {
-    private let glass = NSGlassEffectView()
+    let hunkKey: NSRange
+    private let buttons = NSStackView()
     private let restoreButton = NSButton(title: "Restore", target: nil, action: nil)
     private let nextButton = NSButton(title: "", target: nil, action: nil)
     private let previousButton = NSButton(title: "", target: nil, action: nil)
-    private let restore: () -> Void
-    private let previous: () -> Void
-    private let next: () -> Void
+    private let restore: (NSRange) -> Void
+    private let navigate: (NSRange, Int) -> Void
     private var hoverArea: NSTrackingArea?
 
     var onCancel: (() -> Bool)?
     var onPointerChange: ((NSEvent) -> Void)?
 
-    init(restore: @escaping () -> Void, previous: @escaping () -> Void, next: @escaping () -> Void) {
+    init(hunkKey: NSRange, restore: @escaping (NSRange) -> Void, navigate: @escaping (NSRange, Int) -> Void) {
+        self.hunkKey = hunkKey
         self.restore = restore
-        self.previous = previous
-        self.next = next
+        self.navigate = navigate
         super.init(frame: .zero)
 
         identifier = .init("Edit.Diff.Actions")
@@ -30,34 +30,44 @@ final class JJInlineDiffControls: NSView {
         configure(previousButton, identifier: "Edit.Diff.Previous", label: "Previous Change",
                   action: #selector(previousChange), symbol: "arrow.up")
 
-        let buttons = NSStackView(views: [restoreButton, nextButton, previousButton])
+        let separator = NSBox()
+        separator.boxType = .separator
+        for view in [restoreButton, separator, previousButton, nextButton] as [NSView] {
+            buttons.addArrangedSubview(view)
+        }
         buttons.orientation = .horizontal
         buttons.alignment = .centerY
         buttons.spacing = 2
-        buttons.edgeInsets = NSEdgeInsets(top: 3, left: 4, bottom: 3, right: 4)
+        buttons.edgeInsets = NSEdgeInsets(top: 2, left: 4, bottom: 2, right: 4)
+        buttons.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(buttons)
 
-        glass.cornerRadius = 12
-        glass.style = .regular
-        glass.effectIsInteractive = true
-        glass.contentView = buttons
-        glass.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(glass)
         for button in [restoreButton, nextButton, previousButton] {
             button.widthAnchor.constraint(equalToConstant: button === restoreButton ? 56 : 24).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 24).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 23).isActive = true
         }
         NSLayoutConstraint.activate([
-            glass.leadingAnchor.constraint(equalTo: leadingAnchor),
-            glass.trailingAnchor.constraint(equalTo: trailingAnchor),
-            glass.topAnchor.constraint(equalTo: topAnchor),
-            glass.bottomAnchor.constraint(equalTo: bottomAnchor),
+            separator.widthAnchor.constraint(equalToConstant: 1),
+            separator.heightAnchor.constraint(equalToConstant: 17),
+            buttons.leadingAnchor.constraint(equalTo: leadingAnchor),
+            buttons.trailingAnchor.constraint(equalTo: trailingAnchor),
+            buttons.topAnchor.constraint(equalTo: topAnchor),
+            buttons.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
     }
 
     required init?(coder: NSCoder) { nil }
 
-    override var intrinsicContentSize: NSSize {
-        glass.contentView?.fittingSize ?? .zero
+    override var intrinsicContentSize: NSSize { buttons.fittingSize }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let background = NSColor.controlBackgroundColor.blended(withFraction: 0.06, of: .textColor)
+            ?? .controlBackgroundColor
+        background.withAlphaComponent(1).setFill()
+        let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7)
+        shape.fill()
+        NSColor.separatorColor.setStroke()
+        shape.stroke()
     }
 
     func setAvailability(restore: Bool, previous: Bool, next: Bool) {
@@ -98,7 +108,7 @@ final class JJInlineDiffControls: NSView {
         }
     }
 
-    @objc private func restoreChange() { restore() }
-    @objc private func previousChange() { previous() }
-    @objc private func nextChange() { next() }
+    @objc private func restoreChange() { restore(hunkKey) }
+    @objc private func previousChange() { navigate(hunkKey, -1) }
+    @objc private func nextChange() { navigate(hunkKey, 1) }
 }
