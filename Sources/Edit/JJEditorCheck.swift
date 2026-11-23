@@ -110,6 +110,55 @@ enum JJEditorCheck {
         editor.suspendJJMarkerNavigation()
         editor.insertText("edited ", replacementRange: NSRange(location: 0, length: 0))
         guard try gutterPixel() == painted else { throw Failure("keep the gutter painted before a new diff arrives") }
+
+        try checkTrackAfterResize(in: document)
+    }
+
+    private static func checkTrackAfterResize(in document: DocumentWindow) throws {
+        let window = document.window
+        let editor = document.editor
+        let scroll = document.scrollView
+        editor.setJJLineMarks([])
+        editor.string = "one\ntwo\nthree\nfour\n"
+        var frame = window.frame
+        frame.size.width = 1120
+        window.setFrame(frame, display: false)
+        document.setFolder(FileManager.default.temporaryDirectory)
+        document.toggleSidebarFocus(.worktree)
+        document.restoreTerminal(DocumentTerminalState(
+            panel: TerminalPanelState(dock: .right, spaces: [], selectedSpace: nil, nextSpaceNumber: 1),
+            sizes: TerminalDockSizes(), isVisible: true, wasFocused: false
+        ))
+
+        scroll.scrollerStyle = .overlay
+        window.layoutIfNeeded()
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        let previousWidth = scroll.bounds.width
+        let mark = JJLineMark(kind: .insertion, lines: 1..<2)
+        let starts = [0, 4, 8, 14]
+        editor.setJJLineMarks([mark], lineStarts: starts)
+
+        frame.size.width += 250
+        window.setFrame(frame, display: false)
+        window.layoutIfNeeded()
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        let clip = scroll.contentView
+        guard document.isTerminalDockedRight, scroll.bounds.width > previousWidth + 100,
+              editor.frame.height <= clip.bounds.height else {
+            throw Failure("resize a split editor with a document that fits")
+        }
+        let width = NSScroller.scrollerWidth(for: scroll.verticalScroller?.controlSize ?? .regular, scrollerStyle: .overlay)
+        let y = scroll.isFlipped ? clip.frame.minY + clip.frame.height * 0.375 : clip.frame.maxY - clip.frame.height * 0.375
+        let edge = NSRect(x: scroll.bounds.maxX - width / 2, y: y, width: 1, height: 1)
+        let oldEdge = edge.offsetBy(dx: previousWidth - scroll.bounds.width, dy: 0)
+        let paintedEdge = try capture(scroll, in: edge).colorAt(x: 0, y: 0)
+        let paintedBody = try capture(scroll, in: oldEdge).colorAt(x: 0, y: 0)
+        editor.setJJLineMarks([])
+        guard let paintedEdge, let paintedBody,
+              try capture(scroll, in: edge).colorAt(x: 0, y: 0) != paintedEdge,
+              try capture(scroll, in: oldEdge).colorAt(x: 0, y: 0) == paintedBody else {
+            throw Failure("a short document's marks follow the scrollbar edge after the split widens")
+        }
     }
 
     private static func editorBodyPaint(in scroll: NSScrollView) throws -> [NSColor] {

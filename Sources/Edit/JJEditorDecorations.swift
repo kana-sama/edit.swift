@@ -103,8 +103,7 @@ final class JJEditorDecorations {
     }
 
     func hitTest(in scroll: NSScrollView, at point: NSPoint, nativeHit: NSView) -> NSView? {
-        guard allowsNavigation, track.superview === scroll,
-              scroll.contentView.bounds.height < (scroll.documentView?.frame.height ?? 0),
+        guard allowsNavigation, track.superview === scroll, hasVerticalScrollRange(in: scroll),
               trackMark(at: track.convert(point, from: scroll)) != nil else { return nil }
         if let scroller = nativeScroller,
            nativeHit === scroller || nativeHit.isDescendant(of: scroller),
@@ -113,14 +112,19 @@ final class JJEditorDecorations {
     }
 
     private func trackFrame(in scroll: NSScrollView, scroller: NSScroller?) -> NSRect {
-        if let scroller, scroller.superview != nil {
-            let slot = scroller.rect(for: .knobSlot)
-            if !slot.isEmpty { return scroll.convert(slot, from: scroller).intersection(scroll.bounds) }
-        }
-        // With no scrollbar range AppKit may omit the slot entirely.
         let clip = scroll.contentView.frame
         let width = NSScroller.scrollerWidth(for: scroller?.controlSize ?? .regular, scrollerStyle: scroll.scrollerStyle)
-        return NSRect(x: scroll.bounds.maxX - width, y: clip.minY, width: width, height: clip.height)
+        let edge = NSRect(x: scroll.bounds.maxX - width, y: clip.minY, width: width, height: clip.height)
+
+        guard let scroller, scroller.superview === scroll, hasVerticalScrollRange(in: scroll) else { return edge }
+        let slot = scroll.convert(scroller.rect(for: .knobSlot), from: scroller).intersection(scroll.bounds)
+        // AppKit can retain the scroller's old frame while the editor pane is resizing.
+        guard !slot.isEmpty, slot.minX >= edge.minX else { return edge }
+        return slot
+    }
+
+    private func hasVerticalScrollRange(in scroll: NSScrollView) -> Bool {
+        scroll.contentView.bounds.height < (scroll.documentView?.frame.height ?? 0)
     }
 
     private func updateTrackMarks() {
