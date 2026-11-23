@@ -50,6 +50,7 @@ final class JJInlineDiffLayout: NSObject, NSTextLayoutManagerDelegate {
         }
         layout()
         editor.setNeedsDisplay(editor.visibleRect)
+        editor.invalidateOverscrollBackground()
     }
 
     func layout() {
@@ -110,11 +111,18 @@ final class JJInlineDiffLayout: NSObject, NSTextLayoutManagerDelegate {
                 if let removed { invalidated = invalidated.union(removed) }
             }
         }
-        if !invalidated.isNull { editor.setNeedsDisplay(fullWidth(of: invalidated, in: editor).intersection(viewport)) }
+        if !invalidated.isNull {
+            editor.setNeedsDisplay(fullWidth(of: invalidated, in: editor).intersection(viewport))
+            editor.invalidateOverscrollBackground()
+        }
     }
 
-    func drawBackground(in dirtyRect: NSRect) {
+    func drawBackground(in dirtyRect: NSRect, includesText: Bool) {
         guard let editor else { return }
+        func clippedBand(_ band: NSRect) -> NSRect {
+            NSRect(x: dirtyRect.minX, y: band.minY, width: dirtyRect.width, height: band.height)
+                .intersection(dirtyRect)
+        }
         let removedColor = NSColor.textBackgroundColor.blended(withFraction: 0.14, of: .systemRed) ?? .textBackgroundColor
         let insertedColor = NSColor.systemGreen.withAlphaComponent(0.13)
         let insertedDetail = NSColor.systemGreen.withAlphaComponent(0.33)
@@ -122,18 +130,20 @@ final class JJInlineDiffLayout: NSObject, NSTextLayoutManagerDelegate {
         for entry in entries {
             if let band = entry.insertedRect {
                 insertedColor.setFill()
-                fullWidth(of: band, in: editor).intersection(dirtyRect).fill()
-                insertedDetail.setFill()
-                for rect in entry.insertedHighlightRects where rect.intersects(dirtyRect) {
-                    rect.intersection(dirtyRect).fill()
+                clippedBand(band).fill()
+                if includesText {
+                    insertedDetail.setFill()
+                    for rect in entry.insertedHighlightRects where rect.intersects(dirtyRect) {
+                        rect.intersection(dirtyRect).fill()
+                    }
                 }
             }
             if let band = entry.removedRect {
-                let clipped = fullWidth(of: band, in: editor).intersection(dirtyRect)
+                let clipped = clippedBand(band)
                 guard !clipped.isEmpty else { continue }
                 removedColor.setFill()
                 clipped.fill()
-                guard let context, let text = entry.removedTextLayout else { continue }
+                guard includesText, let context, let text = entry.removedTextLayout else { continue }
                 // Red paragraphs use TextKit glyphs in this editor's drawing pass and document coordinates.
                 context.saveGState()
                 context.clip(to: clipped)

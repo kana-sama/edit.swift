@@ -12,7 +12,7 @@ Review a change in the editor where it was made. Inline diff uses the same compa
 
 ## Layout
 
-The editor uses a single text view. Its TextKit layout reserves room for removed paragraphs, and native TextKit line fragments supply their glyphs and character geometry. Draw removed text and both change backgrounds in the editor's own document coordinates. The same layout supplies the removed caret, mouse hit testing, selection painting, and scrolling. Sidebars change the visible area of that document and clip all rows together. The live buffer remains the source for editing, saving, Jujutsu comparisons, and undo.
+The editor uses a single text view. Its TextKit layout reserves room for removed paragraphs, and native TextKit line fragments supply their glyphs and character geometry. Draw removed text and both change backgrounds in the editor's own document coordinates. Extend the change backgrounds across the exposed space during horizontal overscroll at either edge. The same layout supplies the removed caret, mouse hit testing, selection painting, and scrolling. Sidebars change the visible area of that document and clip all rows together. The live buffer remains the source for editing, saving, Jujutsu comparisons, and undo.
 
 ## Contextual actions
 

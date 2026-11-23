@@ -110,8 +110,8 @@ final class JJInlineDiff: NSResponder {
         refreshControls()
     }
 
-    func drawBackground(in rect: NSRect) {
-        if hasExpandedHunks { display.drawBackground(in: rect) }
+    func drawBackground(in rect: NSRect, includesText: Bool = true) {
+        if hasExpandedHunks { display.drawBackground(in: rect, includesText: includesText) }
     }
 
     func expandedRegion(for mark: JJLineMark) -> NSRect? {

@@ -211,12 +211,34 @@ enum JJInlineDiffCheck {
             throw Failure("keep only the caret panel when the mouse moves onto its live rows")
         }
 
-        let carets = [NSRange(location: 0, length: 0), NSRange(location: replacement.currentRange.location, length: 0)]
-        editor.setCaretSelections(carets, record: false)
-        editor.cancelOperation(nil)
+        let primary = NSRange(location: replacement.currentRange.location, length: 3)
+        let carets = [NSRange(location: 0, length: 0), primary]
+        editor.setCaretSelections(carets, record: false, primaryAffinity: .downstream)
+        let escape = try require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                                                 timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                                 characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                                                 isARepeat: false, keyCode: 53), "create an Escape key event")
+        func pressEscape() {
+            if !editor.performKeyEquivalent(with: escape) { editor.keyDown(with: escape) }
+        }
+        pressEscape()
         guard !controller.hasExpandedHunks, editor.caretSelections == carets,
               editor.string == current, !undo.canUndo else {
             throw Failure("Escape closes all previews before clearing carets and leaves the buffer intact")
+        }
+        pressEscape()
+        guard editor.caretSelections == [primary] else {
+            throw Failure("the second Escape leaves the primary selection")
+        }
+        pressEscape()
+        guard editor.caretSelections == [NSRange(location: primary.upperBound, length: 0)],
+              editor.string == current, !undo.canUndo else {
+            throw Failure("the third Escape collapses the primary selection without editing the buffer (\(editor.caretSelections))")
+        }
+        editor.setSelectedRange(primary, affinity: .upstream, stillSelecting: false)
+        pressEscape()
+        guard editor.caretSelections == [NSRange(location: primary.location, length: 0)] else {
+            throw Failure("Escape collapses a backward selection to its active end")
         }
 
         controller.toggle(replacement.mark)
@@ -353,6 +375,54 @@ enum JJInlineDiffCheck {
         position.x = 0
         scroll.scrollToVisibleContentOrigin(position)
         try checkAlignment("after returning to the first column")
+        try checkOverscrolledBackgrounds(in: document, controller: controller, hunk: hunk)
+    }
+
+    private static func checkOverscrolledBackgrounds(
+        in document: DocumentWindow, controller: JJInlineDiff, hunk: JJDiffHunk
+    ) throws {
+        let editor = document.editor
+        let scroll = document.scrollView
+        let clip = scroll.contentView
+        let footer = (editor.string as NSString).range(of: "footer")
+        editor.setSelectedRange(NSRange(location: footer.location, length: 0))
+        editor.refreshCurrentLine()
+
+        let rows = try [
+            require(editor.lineBounds(at: 0), "lay out an ordinary row"),
+            require(controller.removedCaretRect(key: hunk.baseRange, offset: 0), "lay out a removed row"),
+            require(editor.lineBounds(at: hunk.currentRange.location), "lay out an added row"),
+            require(editor.lineBounds(at: footer.location), "lay out the active row"),
+        ]
+        for edge in ["left", "right"] {
+            let documentFrame = editor.frame
+            let x = edge == "left" ? documentFrame.minX - 24 : documentFrame.maxX + 24 - clip.bounds.width
+            // Install an intermediate rubber-band position without sending input to the user's desktop.
+            var viewport = clip.bounds
+            viewport.origin.x = x
+            clip.bounds = viewport
+            scroll.reflectScrolledClipView(clip)
+
+            let sampleX = edge == "left" ? clip.bounds.minX : clip.bounds.maxX - 1
+            func color(_ row: NSRect) throws -> NSColor {
+                let point = editor.convert(NSPoint(x: 0, y: row.midY), to: clip)
+                let sample = NSRect(x: sampleX, y: point.y, width: 1, height: 1)
+                guard clip.bounds.contains(sample), !editor.frame.intersects(sample) else {
+                    throw Failure("expose space beyond the \(edge) document edge")
+                }
+                return try require(renderedColors(in: scroll.convert(sample, from: clip), of: scroll).first,
+                                   "sample the \(edge) overscroll")
+            }
+            let ordinary = try color(rows[0])
+            let removed = try color(rows[1])
+            let added = try color(rows[2])
+            let active = try color(rows[3])
+            guard removed.redComponent > removed.greenComponent + 0.025,
+                  added.greenComponent > added.redComponent + 0.025,
+                  abs(active.redComponent - ordinary.redComponent) > 0.025 else {
+                throw Failure("continue the active, removed, and added backgrounds into the \(edge) overscroll")
+            }
+        }
     }
 
     private static func checkExpandedGutter(on row: NSRect, editor: EditorTextView, scroll: NSScrollView,

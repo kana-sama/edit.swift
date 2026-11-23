@@ -8,7 +8,7 @@ Focus lets the user edit selected lines of a document in place. The surrounding 
 - Focus every line touched by a selection and every line holding a caret. A selection ending exactly at the start of the next line leaves that line out. Combine adjacent lines into a block. Each block includes its internal line breaks and ends before the separator that leads into protected text.
 - Keep empty carets at their columns. Collapse each nonempty selection to a caret at its active end, clamped to its last focused line if that end falls beyond the block. Merge coincident carets, keep the viewport in place, and leave the scope independent of later selections.
 - **Exit Focus** is available in the Edit menu and Control while the mode is active. It returns the carets and selections to their locations in the full document and keeps all edits.
-- Escape first goes to the control handling the current interaction, such as an input method, menu, sheet, palette, or Search field. In the editor it clears nonempty selections and extra carets first. With a single empty caret and no interaction to cancel, Escape exits Focus.
+- Escape first goes to the control handling the current interaction, such as an input method, menu, sheet, palette, or Search field. In the editor it closes expanded inline changes, keeps the primary selection when there are multiple carets, or collapses a single selection to its active end. With a single empty caret and no interaction to cancel, Escape exits Focus.
 - A primary click on text outside the scope exits Focus and places the caret where clicked. A drag that starts inside extends the selection through focused text only. Hover, ordinary scrolling, and switching keyboard focus to Search or Control keep the mode active.
 
 ## Command scope

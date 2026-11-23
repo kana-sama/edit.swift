@@ -251,7 +251,9 @@ extension EditorTextView {
     }
 
     @objc func keepPrimarySelection(_ sender: Any?) {
-        if let primary = caretSelections.last { setCaretSelections([primary]) }
+        guard let primary = caretSelections.last else { return }
+        let navigation = multiCaret.navigation[primary].map { [primary: $0] } ?? [:]
+        setCaretSelections([primary], navigation: navigation, primaryAffinity: selectionAffinity)
     }
 
     func handleMultiCaretKey(_ event: NSEvent) -> Bool {
@@ -266,10 +268,6 @@ extension EditorTextView {
             return true
         }
         multiCaret.pendingSkip = false
-        if focusRanges == nil && modifiers.isEmpty && character == "\u{1b}" && hasSecondarySelections && !hasMarkedText() {
-            keepPrimarySelection(nil)
-            return true
-        }
         return false
     }
 

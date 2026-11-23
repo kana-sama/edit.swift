@@ -583,16 +583,27 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         if multiCaretComposition != nil {
             discardMultiCaretComposition()
             inputContext?.discardMarkedText()
-        } else if !hasMarkedText(), jjInlineDiff?.collapseAll() == true {
             return
-        } else if focusSession != nil && !hasMarkedText() {
-            if let primary = caretSelections.last, hasSecondarySelections || primary.length > 0 {
-                setCaretSelections([NSRange(location: activeEnd(of: primary), length: 0)])
+        }
+        guard !hasMarkedText() else {
+            super.cancelOperation(sender)
+            return
+        }
+        if jjInlineDiff?.collapseAll() == true { return }
+
+        if let scope = focusRanges {
+            let selections = focusedSelections(in: scope)
+            if let primary = selections.last, selections.count > 1 {
+                setFocusedSelections([primary], in: scope)
+            } else if let primary = selections.last, primary.anchor != primary.head {
+                setFocusedSelections([FocusNavigationSelection(anchor: primary.head, head: primary.head)], in: scope)
             } else {
                 exitFocus()
             }
-        } else if hasSecondarySelections && !hasMarkedText() {
+        } else if hasSecondarySelections {
             keepPrimarySelection(sender)
+        } else if let primary = caretSelections.last, primary.length > 0 {
+            setCaretSelections([NSRange(location: activeEnd(of: primary), length: 0)])
         } else {
             super.cancelOperation(sender)
         }
@@ -1008,7 +1019,22 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             }
         }
         // Moving one layer keeps old line backgrounds out of the text view's scrolling tiles.
-        if currentLineHighlight.frame != newLine { currentLineHighlight.frame = newLine }
+        if currentLineHighlight.frame != newLine {
+            currentLineHighlight.frame = newLine
+            invalidateOverscrollBackground()
+        }
+    }
+
+    func invalidateOverscrollBackground() {
+        (enclosingScrollView as? EditorScrollView)?.invalidateOverscrollBackground()
+    }
+
+    fileprivate func drawOverscrollBackground(in dirtyRect: NSRect) {
+        jjInlineDiff?.drawBackground(in: dirtyRect, includesText: false)
+        let line = currentLineHighlight.frame
+        let band = NSRect(x: dirtyRect.minX, y: line.minY, width: dirtyRect.width, height: line.height)
+        CurrentLineHighlight.color.setFill()
+        band.intersection(dirtyRect).fill()
     }
 
     private func currentLineBounds(at offset: Int) -> NSRect? {
@@ -1037,7 +1063,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     override func drawBackground(in dirtyRect: NSRect) {
         super.drawBackground(in: dirtyRect)
-        jjInlineDiff?.drawBackground(in: dirtyRect)
+        jjInlineDiff?.drawBackground(in: dirtyRect.intersection(bounds))
         occurrenceHighlighting.draw(in: dirtyRect)
         bracketNavigation.draw(in: dirtyRect)
         onDrawFindHighlights?(dirtyRect)
@@ -1047,6 +1073,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
 @MainActor
 private final class CurrentLineHighlight: NSView {
+    static var color: NSColor { NSColor.labelColor.withAlphaComponent(0.06) }
+
     override var wantsUpdateLayer: Bool { true }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -1055,15 +1083,34 @@ private final class CurrentLineHighlight: NSView {
     }
 
     override func updateLayer() {
-        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
+        layer?.backgroundColor = Self.color.cgColor
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 @MainActor
+private final class EditorOverscrollBackground: NSView {
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = dirtyRect.intersection(bounds)
+        guard !rect.isEmpty, let editor = superview as? EditorTextView,
+              let context = NSGraphicsContext.current?.cgContext else { return }
+        let origin = frame.origin
+        context.saveGState()
+        context.translateBy(x: -origin.x, y: -origin.y)
+        editor.drawOverscrollBackground(in: rect.offsetBy(dx: origin.x, dy: origin.y))
+        context.restoreGState()
+    }
+}
+
+@MainActor
 private final class EditorScrollView: NSScrollView {
     private var preservingViewport = false
+    private let leftOverscroll = EditorOverscrollBackground()
+    private let rightOverscroll = EditorOverscrollBackground()
 
     override var contentInsets: NSEdgeInsets {
         get { super.contentInsets }
@@ -1072,12 +1119,12 @@ private final class EditorScrollView: NSScrollView {
 
     override func tile() {
         super.tile()
-        refreshJJMarkers()
+        refreshScrollDecorations()
     }
 
     override func reflectScrolledClipView(_ clipView: NSClipView) {
         super.reflectScrolledClipView(clipView)
-        refreshJJMarkers()
+        refreshScrollDecorations()
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -1086,8 +1133,35 @@ private final class EditorScrollView: NSScrollView {
         return markers?.hitTest(in: self, at: convert(point, from: superview), nativeHit: nativeHit) ?? nativeHit
     }
 
-    private func refreshJJMarkers() {
-        (documentView as? EditorTextView)?.jjDecorations?.layout(in: self)
+    private func refreshScrollDecorations() {
+        guard let editor = documentView as? EditorTextView else { return }
+        editor.jjDecorations?.layout(in: self)
+        let clip = contentView
+        let viewport = clip.bounds
+        // NSTextView's drawing stops at the document edges. Cover only the space exposed beyond them.
+        func place(_ background: EditorOverscrollBackground, from start: CGFloat, to end: CGFloat) {
+            guard start < end else {
+                background.removeFromSuperview()
+                return
+            }
+            if background.superview == nil {
+                background.clipsToBounds = true
+                editor.addSubview(background, positioned: .below, relativeTo: nil)
+            }
+            let strip = NSRect(x: start, y: viewport.minY, width: end - start, height: viewport.height)
+            let frame = editor.convert(strip, from: clip)
+            if background.frame != frame {
+                background.frame = frame
+                background.needsDisplay = true
+            }
+        }
+        place(leftOverscroll, from: viewport.minX, to: min(viewport.maxX, editor.frame.minX))
+        place(rightOverscroll, from: max(viewport.minX, editor.frame.maxX), to: viewport.maxX)
+    }
+
+    func invalidateOverscrollBackground() {
+        if leftOverscroll.superview != nil { leftOverscroll.needsDisplay = true }
+        if rightOverscroll.superview != nil { rightOverscroll.needsDisplay = true }
     }
 
     func preserveViewport(_ change: () -> Void) {
