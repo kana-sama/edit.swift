@@ -40,9 +40,9 @@ Check the final history and current working state after any amend or squash. Ver
 
 ## Launch command
 
-When reporting a completed feature or change to the runnable app, include a copy-paste command to launch the build containing the change. Include a launch command when handing off an implementation for review or asking the owner to test. Build the app first and verify that the command points to the intended checkout or prepared app.
+When reporting a completed feature or change to the runnable app, handing off an implementation for review, or asking the owner to test, build the app first. Retain the concrete `Edit.app` bundle in a revision-specific or review-specific location so later builds leave it available. The bundle may live outside the current checkout. Verify that it contains the intended revision.
 
-Use a `bash` code block with absolute, quoted paths and no prompt or placeholders. If the command changes directory, use a subshell with `cd` followed by `&&`. Keep review targets available and give a separate command for each one. When asking the owner to test, state what to check.
+Give a copy-paste `open` command that launches the retained bundle directly. Use a `bash` code block with an absolute, quoted `.app` path and no prompt or placeholders. Give a separate command for each review target. When asking the owner to test, state what to check.
 
 ## README maintenance
 
