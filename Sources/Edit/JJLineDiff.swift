@@ -66,7 +66,8 @@ enum JJLineDiff {
             do {
                 let oldLines = try split(base, budget: &budget)
                 let (oldIDs, newIDs) = try textIDs(oldLines, newLines, normalizeCRLF: normalizeCRLF, budget: &budget)
-                let changes = try differences(oldIDs, newIDs, budget: &budget)
+                let unaligned = try differences(oldIDs, newIDs, budget: &budget)
+                let changes = conflicts.isEmpty ? alignRepeatedLines(unaligned, old: oldIDs, new: newIDs) : unaligned
                 ordinary = changes.map(\.mark)
                 hunks = try makeHunks(changes, oldLines: oldLines, newLines: newLines,
                                       base: base as NSString, current: current as NSString, conflicts: conflicts,
@@ -221,6 +222,35 @@ enum JJLineDiff {
         }
         recordEqual(old.count, new.count, count: 0)
         return changes
+    }
+
+    // Keep the earliest matching copies. A shift matches the leading pair in
+    // place of the trailing pair and preserves both documents and the edit cost.
+    private static func alignRepeatedLines(_ changes: [Change], old: [Int], new: [Int]) -> [Change] {
+        var aligned: [Change] = []
+        aligned.reserveCapacity(changes.count)
+        for index in changes.indices {
+            let change = changes[index]
+            // Each shift visits only the unchanged lines before the next original hunk.
+            let next = index + 1 < changes.count ? changes[index + 1] : nil
+            let nextOld = next?.before.lowerBound ?? old.count
+            let nextNew = next?.after.lowerBound ?? new.count
+            var shift = 0
+            while change.before.upperBound + shift < nextOld, change.after.upperBound + shift < nextNew,
+                  old[change.before.lowerBound + shift] == new[change.after.lowerBound + shift] {
+                shift += 1
+            }
+            let before = (change.before.lowerBound + shift)..<(change.before.upperBound + shift)
+            let after = (change.after.lowerBound + shift)..<(change.after.upperBound + shift)
+            if let previous = aligned.last, previous.before.upperBound == before.lowerBound,
+               previous.after.upperBound == after.lowerBound {
+                aligned[aligned.count - 1] = Change(before: previous.before.lowerBound..<before.upperBound,
+                                                     after: previous.after.lowerBound..<after.upperBound)
+            } else {
+                aligned.append(Change(before: before, after: after))
+            }
+        }
+        return aligned
     }
 
     private static func makeHunks(

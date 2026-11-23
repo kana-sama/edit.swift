@@ -274,6 +274,7 @@ enum JJInlineDiffCheck {
         undo.redo()
         guard editor.string == restored else { throw Failure("redo Restore") }
 
+        try checkRepeatedLineAlignment(in: document, controller: controller, undo: undo)
         try checkMouseNavigation(in: document, controller: controller)
         try checkMixedSelection(in: document, controller: controller, undo: undo)
         try checkWholeFileDeletion(in: document, controller: controller)
@@ -284,6 +285,58 @@ enum JJInlineDiffCheck {
             throw error
         }
         try captureViewport?(scroll)
+    }
+
+    private static func checkRepeatedLineAlignment(
+        in document: DocumentWindow, controller: JJInlineDiff, undo: UndoManager
+    ) throws {
+        let editor = document.editor
+        let header = "header\n\nbegin\n"
+        let removed = (1...4).map { "deleted \($0)\n" }.joined()
+        let prefix = (1...3).map { "before \($0)\n" }.joined()
+        let row = "repeated\n"
+        let middle = (1...5).map { "after \($0)\n" }.joined()
+        let tail = (1...4).map { "tail \($0)\n" }.joined()
+        let base = header + removed + prefix + row + middle + tail
+        let repeated = header + prefix + String(repeating: row, count: 3) + middle
+        let blank = "    \n"
+        let expected = JJLineMark(kind: .insertion, lines: 7..<9)
+
+        func refresh() throws -> JJDiffHunk {
+            let analysis = JJLineDiff.analyze(base: base, current: editor.string, isConflicted: false, recordedConflict: nil)
+            let hunk = try require(analysis.hunks.first { $0.mark == expected }, "mark the last two copies as added")
+            editor.setJJLineMarks(analysis.marks, lineStarts: analysis.lineStarts, hunks: analysis.hunks)
+            return hunk
+        }
+
+        controller.collapseAll()
+        undo.removeAllActions()
+        defer { undo.removeAllActions() }
+        editor.string = repeated + tail
+        document.window.makeFirstResponder(editor)
+        let original = try refresh()
+        controller.toggle(original.mark)
+        undo.beginUndoGrouping()
+        editor.insertText(blank, replacementRange: NSRange(location: repeated.utf16.count, length: 0))
+        undo.endUndoGrouping()
+        guard editor.string == repeated + blank + tail else { throw Failure("insert a blank line after the copies") }
+        let refreshed = try refresh()
+        guard refreshed == original else { throw Failure("keep the repeated-line ranges after inserting a separate blank line") }
+        guard controller.revealExpanded(refreshed.mark), controller.expandedRegion(for: refreshed.mark) != nil else {
+            throw Failure("keep the repeated-line hunk expanded after a refresh")
+        }
+
+        editor.setCaretSelections([NSRange(location: refreshed.currentRange.location, length: 0)], record: false)
+        controller.layout()
+        let restore = try button("Edit.Diff.Restore", in: document.scrollView)
+        undo.beginUndoGrouping()
+        restore.performClick(nil)
+        undo.endUndoGrouping()
+        guard editor.string == header + prefix + row + middle + blank + tail else {
+            throw Failure("restore the two added copies and keep the separate blank line")
+        }
+        undo.undo()
+        guard editor.string == repeated + blank + tail else { throw Failure("undo the repeated-line Restore") }
     }
 
     private static func checkWholeFileDeletion(in document: DocumentWindow, controller: JJInlineDiff) throws {
