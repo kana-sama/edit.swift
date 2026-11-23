@@ -1,0 +1,290 @@
+import CoreServices
+import Foundation
+
+struct JJWorktreeDecorations {
+    struct Override: Equatable {
+        let path: String
+        let status: JJPathStatus?
+    }
+
+    let contents: JJWorkspaceContents
+    let override: Override?
+
+    func status(at url: URL, directory: Bool) -> JJPathStatus? {
+        guard let path = contents.relativePath(to: url) else { return nil }
+        guard directory else {
+            return override?.path == path ? override?.status : contents.files[path]
+        }
+        var counts = contents.directories[path] ?? JJStatusCounts()
+        if let override, path.isEmpty || override.path.hasPrefix(path + "/") {
+            counts.add(contents.files[override.path], count: -1)
+            counts.add(override.status)
+        }
+        return counts.status
+    }
+}
+
+struct JJStatusCounts: Sendable {
+    private var added = 0
+    private var modified = 0
+    private var conflicts = 0
+
+    mutating func add(_ status: JJPathStatus?, count: Int = 1) {
+        switch status {
+        case .added: added += count
+        case .modified, .removed: modified += count
+        case .conflict: conflicts += count
+        case nil: break
+        }
+    }
+
+    var status: JJPathStatus? {
+        if conflicts > 0 { return .conflict }
+        if modified > 0 { return .modified }
+        return added > 0 ? .added : nil
+    }
+}
+
+struct JJWorkspaceContents: Sendable {
+    let repository: JJRepositoryState
+    let files: [String: JJPathStatus]
+    let directories: [String: JJStatusCounts]
+
+    func relativePath(to url: URL) -> String? {
+        let root = WorktreeFileOperations.path(repository.workspace.root)
+        let path = WorktreeFileOperations.path(url)
+        if path == root { return "" }
+        let prefix = root.hasSuffix("/") ? root : root + "/"
+        return path.hasPrefix(prefix) ? String(path.dropFirst(prefix.count)) : nil
+    }
+
+    @concurrent
+    static func prepare(_ repository: JJRepositoryState) async throws -> Self {
+        let root = repository.workspace.root
+        var nested: [String: Bool] = ["": false]
+
+        func parent(of path: String) -> String {
+            path.lastIndex(of: "/").map { String(path[..<$0]) } ?? ""
+        }
+
+        func inNestedWorkspace(_ path: String) -> Bool {
+            var directory = parent(of: path)
+            var unchecked: [String] = []
+            while nested[directory] == nil {
+                unchecked.append(directory)
+                directory = parent(of: directory)
+            }
+            var found = nested[directory] == true
+            for path in unchecked.reversed() {
+                if !found {
+                    let marker = root.appending(path: path, directoryHint: .isDirectory).appending(path: ".jj/repo")
+                    found = FileManager.default.fileExists(atPath: marker.path)
+                }
+                nested[path] = found
+            }
+            return found
+        }
+
+        var files: [String: JJPathStatus] = [:]
+        for (path, change) in repository.changes {
+            try Task.checkCancellation()
+            if !inNestedWorkspace(path) { files[path] = change.status }
+            if change.isRename, let source = change.sourcePath, !inNestedWorkspace(source) {
+                files[source] = files[source] ?? .removed
+            }
+        }
+        for path in repository.conflicts {
+            try Task.checkCancellation()
+            if !inNestedWorkspace(path) { files[path] = .conflict }
+        }
+
+        var directories: [String: JJStatusCounts] = [:]
+        for (path, status) in files {
+            try Task.checkCancellation()
+            var directory = parent(of: path)
+            while true {
+                directories[directory, default: JJStatusCounts()].add(status)
+                if directory.isEmpty { break }
+                directory = parent(of: directory)
+            }
+        }
+        return Self(repository: repository, files: files, directories: directories)
+    }
+}
+
+@MainActor
+final class JJChangeMonitor {
+    struct Subscription {
+        fileprivate let workspace: JJWorkspace
+        fileprivate let id: UUID
+    }
+
+    private final class Workspace {
+        let location: JJWorkspace
+        var contents: JJWorkspaceContents?
+        var observers: [UUID: Observer] = [:]
+        var task: Task<Void, Never>?
+        var paths: JJWorkspacePaths?
+        var mayNeedSnapshot = true
+        var diskGeneration: UInt64 = 0
+        var nextSnapshot: ContinuousClock.Instant
+
+        init(location: JJWorkspace, nextSnapshot: ContinuousClock.Instant) {
+            self.location = location
+            self.nextSnapshot = nextSnapshot
+        }
+    }
+
+    private struct Observer {
+        let updated: @MainActor (JJWorkspaceContents?) -> Void
+        let diskChanged: @MainActor (Set<String>?) -> Void
+    }
+
+    private let clock = ContinuousClock()
+    private let checkInterval: Duration
+    private let snapshotInterval: Duration
+    private var workspaces: [JJWorkspace: Workspace] = [:]
+    private var suspendedDeadlines: [JJWorkspace: (next: ContinuousClock.Instant, expires: ContinuousClock.Instant)] = [:]
+    private var snapshotting: Set<URL> = []
+
+    init(checkInterval: Duration = .seconds(2), snapshotInterval: Duration = .seconds(180)) {
+        self.checkInterval = checkInterval
+        self.snapshotInterval = snapshotInterval
+    }
+
+    func subscribe(
+        to location: JJWorkspace,
+        updated: @escaping @MainActor (JJWorkspaceContents?) -> Void,
+        diskChanged: @escaping @MainActor (Set<String>?) -> Void = { _ in }
+    ) -> Subscription {
+        let id = UUID()
+        let workspace: Workspace
+        if let existing = workspaces[location] {
+            workspace = existing
+        } else {
+            let now = clock.now
+            suspendedDeadlines = suspendedDeadlines.filter { $0.value.expires >= now }
+            let deadline = suspendedDeadlines.removeValue(forKey: location)?.next ?? now.advanced(by: snapshotInterval)
+            workspace = Workspace(location: location, nextSnapshot: deadline)
+            workspaces[location] = workspace
+            workspace.paths = JJWorkspacePaths(root: location.root) { [weak workspace] paths in
+                guard let workspace else { return }
+                workspace.mayNeedSnapshot = true
+                workspace.diskGeneration &+= 1
+                for observer in Array(workspace.observers.values) { observer.diskChanged(paths) }
+            }
+            workspace.task = Task { [weak self, weak workspace] in
+                while !Task.isCancelled, let self, let workspace {
+                    await self.refresh(workspace)
+                    do { try await Task.sleep(for: self.checkInterval) } catch { break }
+                }
+            }
+        }
+        workspace.observers[id] = Observer(updated: updated, diskChanged: diskChanged)
+        updated(workspace.contents)
+        return Subscription(workspace: location, id: id)
+    }
+
+    func unsubscribe(_ subscription: Subscription?) {
+        guard let subscription, let workspace = workspaces[subscription.workspace] else { return }
+        workspace.observers.removeValue(forKey: subscription.id)
+        if workspace.observers.isEmpty {
+            // File-to-file navigation can temporarily leave the workspace without an observer.
+            suspendedDeadlines[subscription.workspace] = (workspace.nextSnapshot, clock.now.advanced(by: .seconds(10)))
+            workspaces.removeValue(forKey: subscription.workspace)
+            workspace.paths = nil
+            workspace.task?.cancel()
+        }
+    }
+
+    func refreshSoon(_ subscription: Subscription?) {
+        guard let subscription, let workspace = workspaces[subscription.workspace] else { return }
+        // Recheck a file's disk revision on return even if no watcher event was delivered.
+        workspace.observers[subscription.id]?.diskChanged(nil)
+    }
+
+    private func refresh(_ workspace: Workspace) async {
+        let location = workspace.location
+        do {
+            var operation = try await JJRepository.operation(in: location)
+            try Task.checkCancellation()
+            if workspace.mayNeedSnapshot, clock.now >= workspace.nextSnapshot,
+               snapshotting.insert(location.repository).inserted {
+                defer { snapshotting.remove(location.repository) }
+                let generation = workspace.diskGeneration
+                workspace.nextSnapshot = clock.now.advanced(by: snapshotInterval)
+                try await JJRepository.snapshot(location)
+                if generation == workspace.diskGeneration { workspace.mayNeedSnapshot = workspace.paths == nil }
+                operation = try await JJRepository.operation(in: location)
+            }
+            guard workspace.contents?.repository.operationID != operation else { return }
+            let state = try await JJRepository.read(location, at: operation)
+            let contents = try await JJWorkspaceContents.prepare(state)
+            try Task.checkCancellation()
+            guard try await JJRepository.operation(in: location) == operation,
+                  !Task.isCancelled, workspaces[location] === workspace else { return }
+            install(contents, for: workspace)
+        } catch {
+            if !Task.isCancelled, workspace.contents != nil { install(nil, for: workspace) }
+        }
+    }
+
+    private func install(_ contents: JJWorkspaceContents?, for workspace: Workspace) {
+        workspace.contents = contents
+        for observer in Array(workspace.observers.values) { observer.updated(contents) }
+    }
+}
+
+@MainActor
+private final class JJWorkspacePaths {
+    private var stream: FSEventStreamRef?
+    private let prefix: String
+    private let changed: @MainActor (Set<String>?) -> Void
+
+    init?(root: URL, changed: @escaping @MainActor (Set<String>?) -> Void) {
+        let rootPath = WorktreeFileOperations.path(root)
+        prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        self.changed = changed
+        var context = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(),
+                                           retain: nil, release: nil, copyDescription: nil)
+        let flags = kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagWatchRoot
+        stream = FSEventStreamCreate(nil, { _, info, count, paths, flags, _ in
+            guard let info else { return }
+            let observer = Unmanaged<JJWorkspacePaths>.fromOpaque(info).takeUnretainedValue()
+            let paths = unsafeBitCast(paths, to: NSArray.self) as? [String] ?? []
+            MainActor.assumeIsolated { observer.receive(paths, flags: flags, count: count) }
+        }, &context, [root.path] as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.25,
+        FSEventStreamCreateFlags(flags))
+        guard let stream else { return nil }
+        FSEventStreamSetDispatchQueue(stream, .main)
+        guard FSEventStreamStart(stream) else {
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            self.stream = nil
+            return nil
+        }
+    }
+
+    private func receive(_ paths: [String], flags: UnsafePointer<FSEventStreamEventFlags>, count: Int) {
+        let mustScan = FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs | kFSEventStreamEventFlagRootChanged)
+        var touched: Set<String> = []
+        for index in 0..<min(count, paths.count) {
+            if flags[index] & mustScan != 0 {
+                changed(nil)
+                return
+            }
+            let path = WorktreeFileOperations.path(URL(filePath: paths[index]))
+            guard path.hasPrefix(prefix), let component = path.dropFirst(prefix.count).split(separator: "/").first,
+                  component != ".jj", component != ".git" else { continue }
+            touched.insert(path)
+        }
+        if !touched.isEmpty { changed(touched) }
+    }
+
+    isolated deinit {
+        guard let stream else { return }
+        FSEventStreamStop(stream)
+        FSEventStreamInvalidate(stream)
+        FSEventStreamRelease(stream)
+    }
+}

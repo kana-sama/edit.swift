@@ -49,6 +49,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     private var openFilePanel: OpenFilePanel?
     private weak var openPanelDocument: DocumentWindow?
     private(set) lazy var recentFiles = RecentFiles(url: recentHistoryURL)
+    lazy var jjChanges = JJChangeMonitor()
     lazy var scratchStore = ScratchStore(
         root: storageFolder.appending(path: "Scratches", directoryHint: .isDirectory),
         trashDirectoryForChecks: isAgentCheck ? storageFolder.appending(path: "ScratchTrash", directoryHint: .isDirectory) : nil
@@ -134,6 +135,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try checkWindow(folderWindow, screenshot: nil)
                     try await HeaderCheck.run(in: self)
                     try await WorktreeCheck.run(in: self)
+                    try await checkJJ()
                     try await FilesCheck.checkFilePreview(in: self)
                     try await ScratchCheck.run(in: self)
                     try await ScratchTreeCheck.run(in: self)
@@ -919,6 +921,17 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         app.mainMenu = menuBar
         app.windowsMenu = window
         app.helpMenu = help
+    }
+
+    private func checkJJ() async throws {
+        try JJEditorCheck.run(in: makeDocument())
+        try await JJIndicatorCheck.run(in: self) { window in
+            for name: NSAppearance.Name in [.aqua, .darkAqua] {
+                window.appearance = NSAppearance(named: name)
+                try checkWindow(window, screenshot: nil)
+            }
+        }
+        print("Edit passed its native Jujutsu indicator checks without activation.")
     }
 
     private func checkWindow(_ window: NSWindow, screenshot: String?) throws {

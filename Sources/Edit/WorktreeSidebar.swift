@@ -86,6 +86,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     private var scratchProject: String?
     private var currentScratchID: UUID?
     private var pendingScratchFiles: [ScratchFile]?
+    private var jjDecorations: JJWorktreeDecorations?
 
     private lazy var actions = WorktreeActions(
         document: document, app: app,
@@ -98,6 +99,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     var view: NSView { container }
     var outline: NSOutlineView { tree }
+    var isObservingWorktree: Bool { mode == .worktree && isActive }
     private(set) var showsHidden = false
 
     init(document: DocumentWindow, app: Edit, mode: Mode = .worktree) {
@@ -169,6 +171,7 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             if let nameEdit { finishNameEdit(nameEdit) }
         }
         startMonitoring()
+        if mode == .worktree { document.updateJJContext() }
         if active {
             pathToReveal = currentPath
             if mode == .scratches, !currentDirectories.isSubset(of: expanded) {
@@ -686,7 +689,24 @@ final class WorktreeSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         }
         let path = mode == .worktree ? item.path : item.isDirectory ? item.scratchCategory ?? "Global" : backingURL.path
         cell.configure(name: item.name, path: path, icon: icon, muted: muted)
+        cell.setJJStatus(jjStatus(for: item))
         return cell
+    }
+
+    func setJJDecorations(_ decorations: JJWorktreeDecorations?) {
+        jjDecorations = decorations
+        let rows = tree.rows(in: tree.visibleRect)
+        guard rows.location != NSNotFound, rows.length > 0 else { return }
+        for row in rows.location..<NSMaxRange(rows) {
+            guard let item = tree.item(atRow: row) as? Item,
+                  let cell = tree.view(atColumn: 0, row: row, makeIfNecessary: false) as? WorktreeCell else { continue }
+            cell.setJJStatus(jjStatus(for: item))
+        }
+    }
+
+    private func jjStatus(for item: Item) -> JJPathStatus? {
+        guard mode == .worktree, !item.outside, item !== provisionalEntry else { return nil }
+        return jjDecorations?.status(at: item.url, directory: item.isDirectory)
     }
 
     private var selectedItems: [Item] { tree.selectedRowIndexes.compactMap { tree.item(atRow: $0) as? Item } }
@@ -1402,11 +1422,17 @@ private final class WorktreeRow: NSTableRowView {
     private(set) weak var disclosureButton: NSButton?
 
     override var isSelected: Bool {
-        didSet { updateDisclosureImages() }
+        didSet {
+            updateDisclosureImages()
+            updateJJTextColor()
+        }
     }
 
     override var isEmphasized: Bool {
-        didSet { updateDisclosureImages() }
+        didSet {
+            updateDisclosureImages()
+            updateJJTextColor()
+        }
     }
 
     // AppKit updates these independently of the row's own selection.
@@ -1464,6 +1490,10 @@ private final class WorktreeRow: NSTableRowView {
         disclosureButton.alternateImage = images.expanded
     }
 
+    private func updateJJTextColor() {
+        for case let cell as WorktreeCell in subviews { cell.updateJJTextColor() }
+    }
+
     private static func chevrons(color: NSColor) -> (collapsed: NSImage?, expanded: NSImage?) {
         let configuration = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
         func image(_ symbol: String) -> NSImage? {
@@ -1487,6 +1517,8 @@ private final class WorktreeCell: NSTableCellView {
     static let iconSize: CGFloat = 15
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
+    private var muted = false
+    private var jjStatus: JJPathStatus?
     private lazy var labelLeading = label.leadingAnchor.constraint(equalTo: leadingAnchor)
 
     init() {
@@ -1529,6 +1561,7 @@ private final class WorktreeCell: NSTableCellView {
     }
 
     func configure(name: String, path: String, icon image: NSImage?, muted: Bool) {
+        self.muted = muted
         label.isHidden = false
         label.stringValue = name
         labelLeading.constant = image == nil ? 6 : Self.iconSize + 6
@@ -1542,6 +1575,62 @@ private final class WorktreeCell: NSTableCellView {
         }
         icon.contentTintColor = muted ? .secondaryLabelColor : .labelColor
         toolTip = path
+    }
+
+    func setJJStatus(_ status: JJPathStatus?) {
+        jjStatus = status
+        let name = label.stringValue
+        let detail: String?
+        switch status {
+        case .added: detail = "Added"
+        case .modified, .removed: detail = "Changed"
+        case .conflict: detail = "Unresolved conflict"
+        case nil: detail = nil
+        }
+        label.setAccessibilityLabel(detail.map { "\(name), \($0)" })
+        updateJJTextColor()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateJJTextColor()
+    }
+
+    func updateJJTextColor() {
+        let kind: JJLineMark.Kind
+        switch jjStatus {
+        case .added: kind = .insertion
+        case .modified, .removed: kind = .replacement
+        case .conflict: kind = .conflict
+        case nil:
+            label.textColor = muted ? .secondaryLabelColor : .labelColor
+            return
+        }
+        let row = superview as? WorktreeRow
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let emphasized = row?.isSelected == true && row?.isEmphasized == true
+            let selected: NSColor = emphasized ? .selectedContentBackgroundColor : .unemphasizedSelectedContentBackgroundColor
+            let background: NSColor = row?.isSelected == true ? selected : .windowBackgroundColor
+            let foreground: NSColor = emphasized ? .alternateSelectedControlTextColor : .labelColor
+            label.textColor = Self.readable(kind.color, over: background, toward: foreground)
+        }
+    }
+
+    private static func readable(_ color: NSColor, over background: NSColor, toward foreground: NSColor) -> NSColor {
+        func luminance(_ color: NSColor) -> Double? {
+            guard let rgb = color.usingColorSpace(.sRGB) else { return nil }
+            func linear(_ value: Double) -> Double {
+                value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * linear(rgb.redComponent) + 0.7152 * linear(rgb.greenComponent) + 0.0722 * linear(rgb.blueComponent)
+        }
+        guard let base = luminance(background) else { return foreground }
+        for fraction in [0.0, 0.25, 0.5, 0.75] {
+            guard let sample = color.blended(withFraction: fraction, of: foreground),
+                  let value = luminance(sample) else { continue }
+            if (max(value, base) + 0.05) / (min(value, base) + 0.05) >= 4.5 { return sample }
+        }
+        return foreground
     }
 }
 

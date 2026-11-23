@@ -43,10 +43,12 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var focusEditsAllowed = false
     var onFocusScopeChange: (() -> Void)?
     var onTextChange: (() -> Void)?
+    var onJJCompositionChange: (() -> Void)?
     var onBlur: (() -> Void)?
     var onFindEditorInteraction: (() -> Void)?
     var onFindViewportChange: (() -> Void)?
     var onDrawFindHighlights: ((NSRect) -> Void)?
+    fileprivate var jjDecorations: JJEditorDecorations?
     weak var syntaxHighlighting: SyntaxHighlighting?
     lazy var bracketNavigation = BracketNavigation(editor: self)
     lazy var occurrenceHighlighting = OccurrenceHighlighting(editor: self)
@@ -444,6 +446,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             commitMultiCaretComposition(preview)
         } else {
             super.unmarkText()
+            onJJCompositionChange?()
         }
     }
 
@@ -483,6 +486,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
                 setCaretSelections(composition.selections, record: false)
             }
         }
+        onJJCompositionChange?()
     }
 
     private func commitMultiCaretComposition(_ text: String) {
@@ -832,7 +836,9 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func textDidChange(_ notification: Notification) {
+        jjDecorations?.setMarks([], lineStarts: [])
         guard !updatingComposition else {
+            onJJCompositionChange?()
             occurrenceHighlighting.reset()
             requestLineRefresh()
             return
@@ -864,6 +870,13 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         requestLineRefresh()
     }
 
+    func setJJLineMarks(_ marks: [JJLineMark], lineStarts: [Int] = []) {
+        if jjDecorations == nil, !marks.isEmpty { jjDecorations = JJEditorDecorations(editor: self) }
+        jjDecorations?.setMarks(marks, lineStarts: lineStarts)
+    }
+
+    var jjLineMarks: [JJLineMark] { jjDecorations?.marks ?? [] }
+
     func requestLineRefresh() {
         guard !lineRefreshPending else { return }
         lineRefreshPending = true
@@ -873,6 +886,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             self.refreshCurrentLine()
             self.bracketNavigation.refresh()
             self.occurrenceHighlighting.layout()
+            if let scroll = self.enclosingScrollView { self.jjDecorations?.layout(in: scroll) }
             self.lineRefreshPending = false
             self.onFindViewportChange?()
         }
@@ -926,6 +940,26 @@ private final class EditorScrollView: NSScrollView {
     override var contentInsets: NSEdgeInsets {
         get { super.contentInsets }
         set { preserveViewport { super.contentInsets = newValue } }
+    }
+
+    override func tile() {
+        super.tile()
+        refreshJJMarkers()
+    }
+
+    override func reflectScrolledClipView(_ clipView: NSClipView) {
+        super.reflectScrolledClipView(clipView)
+        refreshJJMarkers()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let nativeHit = super.hitTest(point) else { return nil }
+        let markers = (documentView as? EditorTextView)?.jjDecorations
+        return markers?.hitTest(in: self, at: convert(point, from: superview), nativeHit: nativeHit) ?? nativeHit
+    }
+
+    private func refreshJJMarkers() {
+        (documentView as? EditorTextView)?.jjDecorations?.layout(in: self)
     }
 
     func preserveViewport(_ change: () -> Void) {

@@ -120,6 +120,11 @@ struct FileBuffer: Sendable {
 
     private static let encodingAttribute = "com.apple.TextEncoding"
 
+    static func revision(at url: URL) throws -> FileRevision {
+        guard let contents = try diskContents(at: url) else { return .missing }
+        return FileRevision(bytes: contents.bytes)
+    }
+
     static func canonicalURL(_ url: URL) -> URL {
         guard url.isFileURL else { return url }
         if let resolved = resolvedURL(url) {

@@ -161,6 +161,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
     var worktreeShowsHidden = false
     var worktreeSidebar: WorktreeSidebar? { findPanel?.worktree }
+    private var jjDocumentChanges: JJDocumentChanges?
     var scratchOutline: NSOutlineView? { findPanel?.scratchOutline }
     private var appearanceObservation: NSKeyValueObservation?
     private(set) var manualSyntaxLanguage: SyntaxLanguage?
@@ -645,6 +646,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         reportAutosaveFailure()
+        jjDocumentChanges?.recheck()
     }
 
     func windowDidEndSheet(_ notification: Notification) {
@@ -1159,6 +1161,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         updateEditedState()
         scheduleIdleAutosave()
         refreshSyntax(immediate: false)
+        jjDocumentChanges?.bufferChanged()
     }
 
     private func refreshSyntax(immediate: Bool, preparedSyntax: SyntaxSnapshot? = nil) {
@@ -1401,6 +1404,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         closeTerminalSessions()
+        jjDocumentChanges?.stop()
         rememberFilePosition()
         editor.exitFocus(notify: false)
         filePreviewView?.stop()
@@ -1465,6 +1469,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         updateTitle(revealInWorktree: revealInWorktree)
         updateEditedState()
         findPanel?.bufferReplaced()
+        jjDocumentChanges?.bufferChanged(immediately: true)
     }
 
     private func updateIdentity(from file: FileBuffer) {
@@ -1488,6 +1493,25 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         titleBar.update()
         findPanel?.updateName()
         findPanel?.updateCurrentFile(reveal: revealInWorktree)
+        updateJJContext()
+    }
+
+    func updateJJContext() {
+        let file = hasTextDocument && scratchFile == nil ? fileURL : nil
+        let folder = worktreeSidebar?.isObservingWorktree == true ? folderURL : nil
+        if jjDocumentChanges == nil {
+            guard file != nil || folder != nil else { return }
+            jjDocumentChanges = JJDocumentChanges(monitor: app.jjChanges, text: { [weak self] in
+                guard let editor = self?.editor, !editor.hasMarkedText() else { return nil }
+                return editor.string
+            }, showMarks: { [weak self] marks, starts in
+                self?.editor.setJJLineMarks(marks, lineStarts: starts)
+            }, showWorktree: { [weak self] decorations in
+                self?.worktreeSidebar?.setJJDecorations(decorations)
+            })
+            editor.onJJCompositionChange = { [weak self] in self?.jjDocumentChanges?.bufferChanged() }
+        }
+        jjDocumentChanges?.update(file: file, revision: revision, folder: folder)
     }
 
     private func updateEditedState() {
