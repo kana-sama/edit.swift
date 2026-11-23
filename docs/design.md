@@ -16,6 +16,8 @@ Use system appearance, semantic colors, text styles, control metrics, and SF Sym
 
 Show the pointing hand across the entire clickable area of an enabled button, a selectable row in a list or tree, or another explicit click target. Use the foreground control's click area when it overlaps the editor. Disabled actions and empty areas use the default cursor. Selectable text keeps its text cursor, including during inline renaming. Dragging and resizing use the corresponding system cursors.
 
+Keep the pointer image steady while moving between targets that use the same cursor or updating the content under a stationary pointer.
+
 ## Asynchronous updates
 
 Flicker is a rendering defect. Keep the last complete presentation visible while preparing its replacement, then install the new presentation in one update. When the visible result is temporarily out of date, give it a short, fixed timeout that repeated requests cannot extend. Suspend actions that need current information while the result is stale. At the timeout, show a stable pending or unavailable state until the current result is ready. Clear an old result immediately if it belongs to a different active context.

@@ -46,20 +46,34 @@ enum WorktreeCheck {
         let firstRow = tree.convert(tree.rect(ofRow: sources), to: clip)
         try expect(abs(firstRow.minY - clip.bounds.minY) < 0.5,
                    "the first Worktree row starts at the top of its scroll area")
+        var cursorImages: [NSCursor] = []
+        let cursorTracking = EditApplication.ClickCursorTracking(currentCursor: { cursorImages.last ?? .arrow },
+                                                                setCursor: { cursorImages.append($0) })
+        defer { cursorTracking.end() }
+        try expect(document.window.areCursorRectsEnabled, "start with native cursor tracking enabled")
         for row in [sources, log] {
             let frame = tree.rect(ofRow: row)
             // The split view owns the resize grip at the inside edge of the sidebar.
             for x in [frame.minX + 2, frame.midX, frame.maxX - 12] {
                 let point = tree.convert(NSPoint(x: x, y: frame.midY), to: nil)
-                try expect(EditApplication.clickCursor(in: document.window, at: point) === NSCursor.pointingHand,
-                           "use the pointing hand across a Worktree row")
+                let cursor = EditApplication.clickCursor(in: document.window, at: point)
+                try expect(cursor === NSCursor.pointingHand && cursorTracking.update(cursor, in: document.window) &&
+                           !document.window.areCursorRectsEnabled, "own the pointing hand across Worktree rows")
             }
         }
+        let disclose = try disclosure(at: sources, in: tree)
+        let disclosurePoint = disclose.convert(NSPoint(x: disclose.bounds.midX, y: disclose.bounds.midY), to: nil)
+        document.window.enableCursorRects()
+        let disclosureCursor = EditApplication.clickCursor(in: document.window, at: disclosurePoint)
+        try expect(disclosureCursor === NSCursor.pointingHand && cursorTracking.update(disclosureCursor, in: document.window) &&
+                   !document.window.areCursorRectsEnabled, "keep ownership of the cursor over a disclosure button after a native reset")
+        try expect(cursorImages == [.pointingHand], "moving between row targets keeps one cursor image")
         let lastRow = tree.rect(ofRow: tree.numberOfRows - 1)
         let belowRows = tree.convert(NSPoint(x: lastRow.midX, y: lastRow.maxY + 5), to: nil)
-        try expect(EditApplication.clickCursor(in: document.window, at: belowRows) == nil,
-                   "leave the empty Worktree area with its native cursor")
-        let disclose = try disclosure(at: sources, in: tree)
+        let blankCursor = EditApplication.clickCursor(in: document.window, at: belowRows)
+        try expect(blankCursor == nil && !cursorTracking.update(blankCursor, in: document.window) &&
+                   document.window.areCursorRectsEnabled && cursorImages == [.pointingHand, .arrow],
+                   "restore the native cursor and its tracking over the empty Worktree area")
         try checkDisclosureStyle(disclose)
         try checkDisclosureContrast(disclose, in: document.window)
         try checkSelectionShape(in: tree, window: document.window)
