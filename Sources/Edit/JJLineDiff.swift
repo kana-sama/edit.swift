@@ -1,7 +1,7 @@
 import Foundation
 
-struct JJLineMark: Equatable, Sendable {
-    enum Kind: Equatable, Sendable {
+struct JJLineMark: Hashable, Sendable {
+    enum Kind: Hashable, Sendable {
         case insertion, replacement, deletion, conflict
     }
 
@@ -15,6 +15,17 @@ struct JJTextAnalysis: Sendable {
     let lineStarts: [Int]
     let isChanged: Bool?
     let remainsConflicted: Bool?
+    let hunks: [JJDiffHunk]
+}
+
+struct JJDiffHunk: Equatable, Sendable {
+    let mark: JJLineMark
+    let baseRange: NSRange
+    let currentRange: NSRange
+    let removedText: String
+    let insertedText: String
+    let removedHighlights: [NSRange]
+    let insertedHighlights: [NSRange]
 }
 
 enum JJLineDiff {
@@ -31,11 +42,12 @@ enum JJLineDiff {
         }
         var remainsConflicted: Bool? = isConflicted ? true : nil
         guard changed == true || isConflicted else {
-            return JJTextAnalysis(marks: [], lineStarts: [], isChanged: changed, remainsConflicted: nil)
+            return JJTextAnalysis(marks: [], lineStarts: [], isChanged: changed, remainsConflicted: nil, hunks: [])
         }
         var budget = Budget()
         guard let newLines = try? split(current, budget: &budget) else {
-            return JJTextAnalysis(marks: [], lineStarts: [], isChanged: changed, remainsConflicted: remainsConflicted)
+            return JJTextAnalysis(marks: [], lineStarts: [], isChanged: changed,
+                                  remainsConflicted: remainsConflicted, hunks: [])
         }
 
         var conflicts: [Range<Int>] = []
@@ -49,25 +61,34 @@ enum JJLineDiff {
         }
 
         var ordinary: [JJLineMark] = []
+        var hunks: [JJDiffHunk] = []
         if changed == true, let base, hasReliableFraming {
             do {
                 let oldLines = try split(base, budget: &budget)
-                let (oldIDs, newIDs) = try lineIDs(oldLines, newLines, normalizeCRLF: normalizeCRLF, budget: &budget)
-                ordinary = try differences(oldIDs, newIDs, budget: &budget)
+                let (oldIDs, newIDs) = try textIDs(oldLines, newLines, normalizeCRLF: normalizeCRLF, budget: &budget)
+                let changes = try differences(oldIDs, newIDs, budget: &budget)
+                ordinary = changes.map(\.mark)
+                hunks = try makeHunks(changes, oldLines: oldLines, newLines: newLines,
+                                      base: base as NSString, current: current as NSString, conflicts: conflicts,
+                                      normalizeCRLF: normalizeCRLF, budget: &budget)
             } catch {
-                // File status and confirmed conflict marks remain available without a line diff.
+                // Keep known marks and status if the budget runs out before expansion data is ready.
             }
         }
         let marks = compose(ordinary, with: conflicts)
         return JJTextAnalysis(marks: marks, lineStarts: marks.isEmpty ? [] : newLines.map(\.start),
-                              isChanged: changed, remainsConflicted: remainsConflicted)
+                              isChanged: changed, remainsConflicted: remainsConflicted, hunks: hunks)
     }
 
     private enum Limit: Error { case exceeded }
 
     private struct Budget {
-        let deadline = ContinuousClock.now + .seconds(1)
+        let deadline: ContinuousClock.Instant
         private var work = 0
+
+        init(deadline: ContinuousClock.Instant = ContinuousClock.now + .seconds(1)) {
+            self.deadline = deadline
+        }
 
         mutating func check(immediately: Bool = false) throws {
             work += 1
@@ -77,12 +98,12 @@ enum JJLineDiff {
         }
     }
 
-    private struct Line {
+    private struct TextPart {
         let start: Int
         let text: String
     }
 
-    private struct ExactLine: Hashable {
+    private struct ExactText: Hashable {
         let text: String
 
         static func == (left: Self, right: Self) -> Bool {
@@ -95,34 +116,34 @@ enum JJLineDiff {
         }
     }
 
-    private static func split(_ text: String, budget: inout Budget) throws -> [Line] {
+    private static func split(_ text: String, budget: inout Budget) throws -> [TextPart] {
         try budget.check(immediately: true)
         guard text.utf8.count <= 8 * 1_024 * 1_024, !text.utf8.contains(0) else { throw Limit.exceeded }
         let source = text as NSString
         let length = source.length
-        var lines: [Line] = []
+        var lines: [TextPart] = []
         var start = 0
         while start < length {
             try budget.check()
             guard lines.count < 150_000 else { throw Limit.exceeded }
             let range = source.lineRange(for: NSRange(location: start, length: 0))
-            lines.append(Line(start: start, text: source.substring(with: range)))
+            lines.append(TextPart(start: start, text: source.substring(with: range)))
             start = NSMaxRange(range)
         }
         return lines
     }
 
-    private static func lineIDs(
-        _ old: [Line], _ new: [Line], normalizeCRLF: Bool, budget: inout Budget
+    private static func textIDs(
+        _ old: [TextPart], _ new: [TextPart], normalizeCRLF: Bool, budget: inout Budget
     ) throws -> ([Int], [Int]) {
-        var identifiers: [ExactLine: Int] = [:]
-        func encode(_ lines: [Line]) throws -> [Int] {
-            try lines.map { line in
+        var identifiers: [ExactText: Int] = [:]
+        func encode(_ parts: [TextPart]) throws -> [Int] {
+            try parts.map { part in
                 try budget.check()
                 // Only comparison keys normalize endings. Offsets still address the original buffer.
-                let content = normalizeCRLF && line.text.hasSuffix("\r\n")
-                    ? String(line.text.dropLast()) + "\n" : line.text
-                let key = ExactLine(text: content)
+                let content = normalizeCRLF && part.text.hasSuffix("\r\n")
+                    ? String(part.text.dropLast()) + "\n" : part.text
+                let key = ExactText(text: content)
                 if let existing = identifiers[key] { return existing }
                 let id = identifiers.count
                 identifiers[key] = id
@@ -133,23 +154,32 @@ enum JJLineDiff {
         return (oldIDs, try encode(new))
     }
 
+    private struct Change {
+        let before: Range<Int>
+        let after: Range<Int>
+
+        var mark: JJLineMark {
+            let kind: JJLineMark.Kind
+            if after.isEmpty { kind = .deletion }
+            else { kind = before.isEmpty ? .insertion : .replacement }
+            return JJLineMark(kind: kind, lines: after)
+        }
+    }
+
     private enum DiffStep {
         case compare(old: Range<Int>, new: Range<Int>)
         case equal(oldStart: Int, newStart: Int, count: Int)
     }
 
-    private static func differences(_ old: [Int], _ new: [Int], budget: inout Budget) throws -> [JJLineMark] {
+    private static func differences(_ old: [Int], _ new: [Int], budget: inout Budget) throws -> [Change] {
         var steps: [DiffStep] = [.compare(old: old.indices, new: new.indices)]
-        var marks: [JJLineMark] = []
+        var changes: [Change] = []
         var previousOldEnd = 0
         var previousNewEnd = 0
 
         func recordEqual(_ oldStart: Int, _ newStart: Int, count: Int) {
-            let removed = previousOldEnd < oldStart
-            if previousNewEnd < newStart {
-                marks.append(JJLineMark(kind: removed ? .replacement : .insertion, lines: previousNewEnd..<newStart))
-            } else if removed {
-                marks.append(JJLineMark(kind: .deletion, lines: newStart..<newStart))
+            if previousOldEnd < oldStart || previousNewEnd < newStart {
+                changes.append(Change(before: previousOldEnd..<oldStart, after: previousNewEnd..<newStart))
             }
             previousOldEnd = oldStart + count
             previousNewEnd = newStart + count
@@ -190,7 +220,97 @@ enum JJLineDiff {
             }
         }
         recordEqual(old.count, new.count, count: 0)
-        return marks
+        return changes
+    }
+
+    private static func makeHunks(
+        _ changes: [Change], oldLines: [TextPart], newLines: [TextPart], base: NSString, current: NSString,
+        conflicts: [Range<Int>], normalizeCRLF: Bool, budget: inout Budget
+    ) throws -> [JJDiffHunk] {
+        var hunks: [JJDiffHunk] = []
+        var firstConflict = 0
+        // Word details are optional. Keep the line ranges and restore data if fine-grained comparison runs out of time.
+        var wordBudget = Budget(deadline: min(budget.deadline, ContinuousClock.now + .milliseconds(80)))
+        for change in changes {
+            try budget.check()
+            let line = change.after.lowerBound
+            while firstConflict < conflicts.count, conflicts[firstConflict].upperBound <= line {
+                firstConflict += 1
+            }
+            if firstConflict < conflicts.count {
+                let conflict = conflicts[firstConflict]
+                if change.after.isEmpty ? conflict.contains(line) : conflict.overlaps(change.after) { continue }
+            }
+            let baseRange = textRange(change.before, in: oldLines, length: base.length)
+            let currentRange = textRange(change.after, in: newLines, length: current.length)
+            let removed = base.substring(with: baseRange)
+            let inserted = current.substring(with: currentRange)
+            let highlights = try? wordHighlights(removed, inserted, normalizeCRLF: normalizeCRLF, budget: &wordBudget)
+            hunks.append(JJDiffHunk(mark: change.mark, baseRange: baseRange, currentRange: currentRange,
+                                   removedText: removed, insertedText: inserted,
+                                   removedHighlights: highlights?.removed ?? [],
+                                   insertedHighlights: highlights?.inserted ?? []))
+        }
+        return hunks
+    }
+
+    private static func textRange(_ indices: Range<Int>, in parts: [TextPart], length: Int) -> NSRange {
+        let start = indices.lowerBound < parts.count ? parts[indices.lowerBound].start : length
+        let end = indices.upperBound < parts.count ? parts[indices.upperBound].start : length
+        return NSRange(location: start, length: end - start)
+    }
+
+    private static func wordHighlights(
+        _ removed: String, _ inserted: String, normalizeCRLF: Bool, budget: inout Budget
+    ) throws -> (removed: [NSRange], inserted: [NSRange]) {
+        let removedLength = removed.utf16.count
+        let insertedLength = inserted.utf16.count
+        guard removedLength > 0, insertedLength > 0, removedLength + insertedLength <= 8_192 else { return ([], []) }
+        let oldWords = try words(in: removed, budget: &budget)
+        let newWords = try words(in: inserted, budget: &budget)
+        let (oldIDs, newIDs) = try textIDs(oldWords, newWords, normalizeCRLF: normalizeCRLF, budget: &budget)
+        let changes = try differences(oldIDs, newIDs, budget: &budget)
+        let oldHighlights = changes.compactMap { change in
+            change.before.isEmpty ? nil : textRange(change.before, in: oldWords, length: removedLength)
+        }
+        let newHighlights = changes.compactMap { change in
+            change.after.isEmpty ? nil : textRange(change.after, in: newWords, length: insertedLength)
+        }
+        return (oldHighlights, newHighlights)
+    }
+
+    private enum WordGroup {
+        case identifier, whitespace
+
+        init?(_ character: Character) {
+            if character.isNewline { return nil }
+            if character.isWhitespace { self = .whitespace }
+            else if character.isLetter || character.isNumber || character == "_" { self = .identifier }
+            else { return nil }
+        }
+    }
+
+    private static func words(in text: String, budget: inout Budget) throws -> [TextPart] {
+        try budget.check(immediately: true)
+        var result: [TextPart] = []
+        var start = text.startIndex
+        var offset = 0
+        while start < text.endIndex {
+            try budget.check()
+            let group = WordGroup(text[start])
+            var end = text.index(after: start)
+            if let group {
+                while end < text.endIndex, WordGroup(text[end]) == group {
+                    try budget.check()
+                    text.formIndex(after: &end)
+                }
+            }
+            let word = text[start..<end]
+            result.append(TextPart(start: offset, text: String(word)))
+            offset += word.utf16.count
+            start = end
+        }
+        return result
     }
 
     // Linear-space Myers bisection. Frontiers meet when they reach the same diagonal.
@@ -298,7 +418,7 @@ enum JJLineDiff {
     }
 
     private static func conflictRanges(
-        in lines: [Line], matching reference: [Line], budget: inout Budget
+        in lines: [TextPart], matching reference: [TextPart], budget: inout Budget
     ) throws -> (ranges: [Range<Int>], uncertain: Bool) {
         var delimitersByWidth: [Int: Set<Delimiter>] = [:]
         var labelsByWidth: [Int: [Delimiter: Set<String>]] = [:]

@@ -19,7 +19,7 @@ final class JJDocumentChanges {
 
     private let monitor: JJChangeMonitor
     private let text: @MainActor () -> String?
-    private let showMarks: @MainActor ([JJLineMark], [Int]) -> Void
+    private let showMarks: @MainActor (JJTextAnalysis?, Bool) -> Void
     private let suspendMarkerNavigation: @MainActor () -> Void
     private let showWorktree: @MainActor (JJWorktreeDecorations?) -> Void
     private var file: File?
@@ -41,7 +41,7 @@ final class JJDocumentChanges {
     init(
         monitor: JJChangeMonitor,
         text: @escaping @MainActor () -> String?,
-        showMarks: @escaping @MainActor ([JJLineMark], [Int]) -> Void,
+        showMarks: @escaping @MainActor (JJTextAnalysis?, Bool) -> Void,
         suspendMarkerNavigation: @escaping @MainActor () -> Void,
         showWorktree: @escaping @MainActor (JJWorktreeDecorations?) -> Void
     ) {
@@ -207,7 +207,7 @@ final class JJDocumentChanges {
             guard let current = text() else { return }
             let result = await Self.analyze(pair, text: current)
             try Task.checkCancellation()
-            presentMarks(result.marks, lineStarts: result.lineStarts)
+            present(result, normalizeCRLF: pair.normalizeCRLF)
             let status: JJPathStatus?
             if pair.isConflicted && result.remainsConflicted != false {
                 status = .conflict
@@ -238,15 +238,15 @@ final class JJDocumentChanges {
         }
     }
 
-    private func presentMarks(_ marks: [JJLineMark], lineStarts: [Int]) {
+    private func present(_ result: JJTextAnalysis?, normalizeCRLF: Bool = false) {
         presentationExpiry?.cancel()
         presentationExpiry = nil
-        hasVisibleMarks = !marks.isEmpty
-        showMarks(marks, lineStarts)
+        hasVisibleMarks = result?.marks.isEmpty == false
+        showMarks(result, normalizeCRLF)
     }
 
     private func clearPresentation() {
-        presentMarks([], lineStarts: [])
+        present(nil)
         setLocalStatus(nil)
     }
 

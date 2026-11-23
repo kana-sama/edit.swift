@@ -1504,8 +1504,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             jjDocumentChanges = JJDocumentChanges(monitor: app.jjChanges, text: { [weak self] in
                 guard let editor = self?.editor, !editor.hasMarkedText() else { return nil }
                 return editor.string
-            }, showMarks: { [weak self] marks, starts in
-                self?.editor.setJJLineMarks(marks, lineStarts: starts)
+            }, showMarks: { [weak self] result, normalizeCRLF in
+                self?.editor.setJJLineMarks(result?.marks ?? [], lineStarts: result?.lineStarts ?? [],
+                                            hunks: result?.hunks ?? [], normalizeCRLF: normalizeCRLF)
             }, suspendMarkerNavigation: { [weak self] in
                 self?.editor.suspendJJMarkerNavigation()
             }, showWorktree: { [weak self] decorations in

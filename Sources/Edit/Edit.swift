@@ -103,6 +103,11 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             }
             if event.type == .keyDown {
                 let document = documents.first { $0.window === event.window }
+                if event.keyCode == 53, event.window?.attachedSheet == nil,
+                   event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+                   let editor = document?.editor, !editor.hasMarkedText(), editor.jjInlineDiff?.collapseAll() == true {
+                    return nil
+                }
                 return document?.handleTerminalKey(event) == true ? nil : event
             }
             return routeTitleClick(event)
@@ -953,6 +958,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     private func checkJJ() async throws {
         try JJEditorCheck.run(in: makeDocument())
+        try JJInlineDiffCheck.run(in: makeDocument())
         try await JJIndicatorCheck.run(in: self) { window in
             for name: NSAppearance.Name in [.aqua, .darkAqua] {
                 window.appearance = NSAppearance(named: name)

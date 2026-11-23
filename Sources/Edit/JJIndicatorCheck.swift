@@ -31,8 +31,10 @@ enum JJIndicatorCheck {
         document.toggleSidebarFocus(.worktree)
         guard let tree = document.worktreeSidebar?.outline else { throw Failure("open a jj worktree") }
         let operations = try operationObjects(in: folder)
+        let recordedMark = JJLineMark(kind: .replacement, lines: 70..<71)
         try await waitFor("show the recorded editor and collapsed folder status") {
-            document.editor.jjLineMarks.contains(JJLineMark(kind: .replacement, lines: 70..<71)) &&
+            document.editor.jjLineMarks.contains(recordedMark) &&
+                document.editor.jjInlineDiff?.canToggle(recordedMark) == true &&
                 hasStatus("Added, Added", in: tree) && hasStatus("Tracked.txt, Changed", in: tree)
         }
         try render(document.window)
@@ -76,8 +78,8 @@ enum JJIndicatorCheck {
         let file = try FileBuffer.read(tracked)
         let presentation = Presentation()
         presentation.text = file.text
-        let changes = JJDocumentChanges(monitor: app.jjChanges, text: { presentation.text }, showMarks: { marks, _ in
-            presentation.marks = marks
+        let changes = JJDocumentChanges(monitor: app.jjChanges, text: { presentation.text }, showMarks: { result, _ in
+            presentation.marks = result?.marks ?? []
         }, suspendMarkerNavigation: {}, showWorktree: { decorations in
             presentation.localStatus = decorations?.override
         })

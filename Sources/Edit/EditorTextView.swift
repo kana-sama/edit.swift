@@ -49,6 +49,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var onFindViewportChange: (() -> Void)?
     var onDrawFindHighlights: ((NSRect) -> Void)?
     fileprivate var jjDecorations: JJEditorDecorations?
+    private(set) var jjInlineDiff: JJInlineDiff?
     weak var syntaxHighlighting: SyntaxHighlighting?
     lazy var bracketNavigation = BracketNavigation(editor: self)
     lazy var occurrenceHighlighting = OccurrenceHighlighting(editor: self)
@@ -529,6 +530,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         if multiCaretComposition != nil {
             discardMultiCaretComposition()
             inputContext?.discardMarkedText()
+        } else if !hasMarkedText(), jjInlineDiff?.collapseAll() == true {
+            return
         } else if focusSession != nil && !hasMarkedText() {
             if let primary = caretSelections.last, hasSecondarySelections || primary.length > 0 {
                 setCaretSelections([NSRange(location: activeEnd(of: primary), length: 0)])
@@ -543,6 +546,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func doCommand(by selector: Selector) {
+        if focusSession == nil, caretSelections.count == 1, selectedRange().length == 0, !hasMarkedText(),
+           selector == #selector(moveUp(_:)) || selector == #selector(moveDown(_:)),
+           jjInlineDiff?.moveFromSource(forward: selector == #selector(moveDown(_:))) == true {
+            return
+        }
         let before = selectedRange()
         if !moveSecondarySelections(command: selector) {
             super.doCommand(by: selector)
@@ -836,6 +844,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             occurrenceHighlighting.selectionChanged()
         }
         requestLineRefresh()
+        jjInlineDiff?.selectionChanged()
     }
 
     func textDidChange(_ notification: Notification) {
@@ -872,8 +881,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         requestLineRefresh()
     }
 
-    func setJJLineMarks(_ marks: [JJLineMark], lineStarts: [Int] = []) {
+    func setJJLineMarks(_ marks: [JJLineMark], lineStarts: [Int] = [], hunks: [JJDiffHunk] = [], normalizeCRLF: Bool = false) {
         if jjDecorations == nil, !marks.isEmpty { jjDecorations = JJEditorDecorations(editor: self) }
+        if jjInlineDiff == nil, !hunks.isEmpty { jjInlineDiff = JJInlineDiff(editor: self) }
+        jjInlineDiff?.update(hunks, normalizeCRLF: normalizeCRLF)
         jjDecorations?.setMarks(marks, lineStarts: lineStarts)
     }
 
@@ -881,6 +892,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     func suspendJJMarkerNavigation() {
         jjDecorations?.allowsNavigation = false
+        jjInlineDiff?.suspend()
     }
 
     func requestLineRefresh() {
@@ -892,6 +904,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             self.refreshCurrentLine()
             self.bracketNavigation.refresh()
             self.occurrenceHighlighting.layout()
+            self.jjInlineDiff?.layout()
             if let scroll = self.enclosingScrollView { self.jjDecorations?.layout(in: scroll) }
             self.lineRefreshPending = false
             self.onFindViewportChange?()
@@ -935,6 +948,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     override func drawBackground(in dirtyRect: NSRect) {
         super.drawBackground(in: dirtyRect)
+        jjInlineDiff?.drawBackground(in: dirtyRect)
         occurrenceHighlighting.draw(in: dirtyRect)
         bracketNavigation.draw(in: dirtyRect)
         onDrawFindHighlights?(dirtyRect)
