@@ -200,6 +200,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     var worktreeSidebar: SidebarFileTree? { sidebar.worktree }
     var sourceControlSidebar: SourceControlSidebar? { sidebar.sourceControl }
     private var jjDocumentChanges: JJDocumentChanges?
+    var jjLiveFileStatus: JJWorkingCopyFileStatus? { jjDocumentChanges?.localStatus }
     private var pendingSourceControlDiffFile: URL?
     var scratchOutline: NSOutlineView? { sidebar.scratchOutline }
     private var appearanceObservation: NSKeyValueObservation?
@@ -1163,14 +1164,23 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     @discardableResult
     func performSourceControlMutation(
-        in workspace: JJWorkspace, operation: @MainActor () async throws -> Void
+        in workspace: JJWorkspace, discardingChangesTo files: [URL]? = nil, operation: @MainActor () async throws -> Void
     ) async throws -> Bool {
+        let paths = files ?? [workspace.root]
         let affected = app.documents.filter { document in
-            document.fileURL.map { Self.worktreePathSuffix(from: workspace.root, to: $0) != nil } == true
+            guard let file = document.fileURL else { return false }
+            return paths.contains { path in
+                guard let suffix = Self.worktreePathSuffix(from: path, to: file) else { return false }
+                return files == nil || suffix.isEmpty
+            }
         }
-        return try await app.performWorktreeMutation(affecting: [workspace.root]) {
+        return try await app.performWorktreeMutation(affecting: paths) {
             var discarded: Set<ObjectIdentifier> = []
             for document in affected where document.window.isDocumentEdited {
+                if files != nil {
+                    discarded.insert(ObjectIdentifier(document))
+                    continue
+                }
                 guard let folder = document.fileURL?.deletingLastPathComponent() else { continue }
                 if let owner = await JJRepository.discover(at: folder), owner != workspace { continue }
                 guard !Task.isCancelled, !app.isAgentCheck else { return false }
@@ -1718,6 +1728,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 self?.editor.suspendJJMarkerNavigation()
             }, showWorktree: { [weak self] decorations in
                 self?.worktreeSidebar?.setJJDecorations(decorations)
+            }, workingCopyStatusChanged: { [weak self] in
+                self?.sourceControlSidebar?.updateLiveFile()
             })
             editor.onJJCompositionChange = { [weak self] in self?.jjDocumentChanges?.bufferChanged() }
         }

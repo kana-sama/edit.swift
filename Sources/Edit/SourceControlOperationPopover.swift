@@ -5,12 +5,19 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
     typealias Direction = JJSourceControlOperations.Direction
     typealias Preview = JJSourceControlOperations.Preview
 
+    private static let inset: CGFloat = 14
+    private static let contentWidth: CGFloat = 390
+    private static let effectWidth = contentWidth - NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) - 2
+
     private weak var anchor: NSView?
     private let prepare: (Direction) async throws -> Preview
     private let apply: (Preview) async throws -> Bool
     private let popover = NSPopover()
+    private let layout = NSStackView()
     private let directionControl = NSSegmentedControl()
     private let scroll = NSScrollView()
+    private let scrollDocument = SourceControlOperationDocumentView()
+    private lazy var scrollHeight = scroll.heightAnchor.constraint(equalToConstant: 52)
     private let contents = NSStackView()
     private let notice = NSTextField(wrappingLabelWithString: "")
     private let command = NSTextField(labelWithString: "")
@@ -38,8 +45,8 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
         guard let anchor, anchor.window != nil else { return }
         direction = .undo
         diskExpanded = true
-        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxX)
         refresh()
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxX)
     }
 
     func close() {
@@ -86,36 +93,33 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
 
     private func showMessage(_ message: String) {
         clearContents()
-        contents.addArrangedSubview(label(message, secondary: true))
-        resize(to: 190)
+        addEffect(label(message, secondary: true))
+        fitContent()
     }
 
     private func render(_ preview: Preview) {
         clearContents()
         let description = label(preview.description)
         description.font = .systemFont(ofSize: 13, weight: .semibold)
-        contents.addArrangedSubview(description)
-        contents.addArrangedSubview(label([preview.origin, preview.time, String(preview.operationID.prefix(8))]
+        addEffect(description)
+        addEffect(label([preview.origin, preview.time, String(preview.operationID.prefix(8))]
             .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "), secondary: true))
 
-        addDivider()
-        contents.addArrangedSubview(label("Working Copy After \(preview.direction.title)", secondary: true))
+        addSection("Working Copy After \(preview.direction.title)")
         if preview.workingCopyChangeIDBefore == preview.workingCopyChangeIDAfter {
-            contents.addArrangedSubview(label("Stays on \(preview.workingCopyAfter)"))
+            addEffect(label("Stays on \(preview.workingCopyAfter)"))
         } else {
-            contents.addArrangedSubview(label("From \(preview.workingCopyBefore)"))
-            contents.addArrangedSubview(label("To \(preview.workingCopyAfter)"))
+            addEffect(label("From \(preview.workingCopyBefore)"))
+            addEffect(label("To \(preview.workingCopyAfter)"))
         }
 
-        addDivider()
-        contents.addArrangedSubview(label("Change Graph", secondary: true))
+        addSection("Change Graph")
         for effect in preview.revisionEffects.isEmpty ? ["No graph changes"] : preview.revisionEffects {
-            contents.addArrangedSubview(label(effect))
+            addEffect(label(effect))
         }
         if !preview.bookmarkEffects.isEmpty {
-            addDivider()
-            contents.addArrangedSubview(label("Bookmarks and Tags", secondary: true))
-            for effect in preview.bookmarkEffects { contents.addArrangedSubview(label(effect)) }
+            addSection("Bookmarks and Tags")
+            for effect in preview.bookmarkEffects { addEffect(label(effect)) }
         }
 
         addDivider()
@@ -125,18 +129,26 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
         toggle.imagePosition = .imageLeading
         toggle.font = .systemFont(ofSize: 11, weight: .semibold)
         filesToggle = toggle
-        contents.addArrangedSubview(toggle)
+        addEffect(toggle, fullWidth: false)
         let paths = NSStackView()
         paths.orientation = .vertical
-        paths.alignment = .width
-        paths.spacing = 3
+        paths.alignment = .leading
+        paths.spacing = 6
         if preview.fileEffects.isEmpty { paths.addArrangedSubview(label("No on-disk content changes", secondary: true)) }
         for file in preview.fileEffects {
-            let row = label("\(file.label)  \(file.path)")
-            row.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
+            let path = label(file.path)
+            path.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            path.lineBreakMode = .byCharWrapping
+            let status = label(file.label, secondary: true)
+            status.lineBreakMode = .byCharWrapping
+            let row = NSStackView(views: [path, status])
+            row.orientation = .vertical
+            row.alignment = .leading
+            row.spacing = 1
             paths.addArrangedSubview(row)
+            for view in [path, status, row] { view.widthAnchor.constraint(equalToConstant: Self.effectWidth).isActive = true }
         }
-        contents.addArrangedSubview(paths)
+        addEffect(paths)
         diskList = paths
         updateFilesDisclosure()
         scroll.contentView.scroll(to: .zero)
@@ -160,12 +172,16 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
         diskList?.isHidden = !diskExpanded
         filesToggle?.image = NSImage(systemSymbolName: diskExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 8, weight: .semibold))
-        let height = 130 + max(100, contents.fittingSize.height) + (notice.isHidden ? 0 : 34)
-        resize(to: min(510, max(280, height)))
+        fitContent()
     }
 
-    private func resize(to height: CGFloat) {
-        popover.contentSize = NSSize(width: 412, height: height)
+    private func fitContent() {
+        let documentHeight = max(1, ceil(contents.fittingSize.height))
+        scrollDocument.setFrameSize(NSSize(width: Self.effectWidth, height: documentHeight))
+        scrollHeight.constant = min(360, max(52, documentHeight + 1))
+        let size = NSSize(width: Self.contentWidth + 2 * Self.inset, height: ceil(layout.fittingSize.height) + 2 * Self.inset)
+        popover.contentSize = size
+        if !popover.isShown { popover.contentViewController?.view.setFrameSize(size) }
     }
 
     private func updateButtons() {
@@ -173,6 +189,7 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
         directionControl.isEnabled = !applying
         applyButton.title = "\(direction.title) Operation"
         applyButton.isEnabled = preview != nil && !applying
+        applyButton.bezelColor = applyButton.isEnabled ? .controlAccentColor : nil
         command.stringValue = "jj \(direction.rawValue)"
     }
 
@@ -206,25 +223,52 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
         field.alignment = .left
         field.textColor = secondary ? .secondaryLabelColor : .labelColor
         field.font = .systemFont(ofSize: secondary ? 11 : 12)
+        field.preferredMaxLayoutWidth = Self.effectWidth
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         return field
+    }
+
+    private func addEffect(_ view: NSView, fullWidth: Bool = true) {
+        contents.addArrangedSubview(view)
+        if fullWidth { view.widthAnchor.constraint(equalTo: contents.widthAnchor).isActive = true }
+    }
+
+    private func addSection(_ title: String) {
+        addDivider()
+        let heading = label(title, secondary: true)
+        heading.font = .systemFont(ofSize: 11, weight: .semibold)
+        addEffect(heading)
     }
 
     private func addDivider() {
         let divider = NSBox()
         divider.boxType = .separator
         divider.heightAnchor.constraint(equalToConstant: 1).isActive = true
-        contents.addArrangedSubview(divider)
+        addEffect(divider)
     }
 
     private func configure() {
-        let layout = NSView()
-        let title = label("Repository Operations")
+        let wrapper = NSView()
+        let title = NSTextField(labelWithString: "Repository Operations")
         title.font = .systemFont(ofSize: 14, weight: .semibold)
+        let dismiss = NSButton()
+        dismiss.isBordered = false
+        dismiss.imagePosition = .imageOnly
+        dismiss.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Repository Operations")?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+        dismiss.target = self
+        dismiss.action = #selector(dismissPopover)
+        dismiss.toolTip = "Close Repository Operations"
+        let header = NSView()
+        addRow(leading: title, trailing: dismiss, to: header)
+        dismiss.widthAnchor.constraint(equalToConstant: 20).isActive = true
+        dismiss.heightAnchor.constraint(equalToConstant: 20).isActive = true
+
         directionControl.segmentCount = 2
         directionControl.setLabel("Undo", forSegment: 0)
         directionControl.setLabel("Redo", forSegment: 1)
         directionControl.trackingMode = .selectOne
+        directionControl.segmentDistribution = .fillEqually
         directionControl.target = self
         directionControl.action = #selector(changeDirection(_:))
         directionControl.setAccessibilityLabel("Operation Direction")
@@ -236,44 +280,73 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
         notice.textColor = .systemOrange
         notice.maximumNumberOfLines = 3
         notice.font = .systemFont(ofSize: 11)
+        notice.preferredMaxLayoutWidth = Self.contentWidth
         notice.isHidden = true
-        let footer = NSStackView(views: [command, NSView(), applyButton])
-        let stack = NSStackView(views: [title, directionControl, notice, scroll, footer])
-        stack.orientation = .vertical
-        stack.alignment = .width
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 13, left: 13, bottom: 13, right: 13)
-        layout.addSubview(stack)
-        stack.translatesAutoresizingMaskIntoConstraints = false
+        let footer = NSView()
+        addRow(leading: command, trailing: applyButton, to: footer)
+        layout.orientation = .vertical
+        layout.alignment = .leading
+        layout.spacing = 10
+        for view in [header, directionControl, notice, scroll, footer] {
+            layout.addArrangedSubview(view)
+            view.widthAnchor.constraint(equalToConstant: Self.contentWidth).isActive = true
+        }
+        wrapper.addSubview(layout)
+        layout.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: layout.leadingAnchor), stack.trailingAnchor.constraint(equalTo: layout.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: layout.topAnchor), stack.bottomAnchor.constraint(equalTo: layout.bottomAnchor)
+            layout.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: Self.inset),
+            layout.topAnchor.constraint(equalTo: wrapper.topAnchor, constant: Self.inset),
+            scrollHeight
         ])
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         contents.orientation = .vertical
-        contents.alignment = .width
+        contents.alignment = .leading
         contents.spacing = 5
-        let documentView = SourceControlOperationDocumentView()
-        documentView.addSubview(contents)
-        scroll.documentView = documentView
-        documentView.translatesAutoresizingMaskIntoConstraints = false
+        scrollDocument.addSubview(contents)
+        scroll.documentView = scrollDocument
         contents.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            documentView.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
-            documentView.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-            contents.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
-            contents.trailingAnchor.constraint(equalTo: documentView.trailingAnchor, constant: -4),
-            contents.topAnchor.constraint(equalTo: documentView.topAnchor), contents.bottomAnchor.constraint(equalTo: documentView.bottomAnchor)
+            contents.leadingAnchor.constraint(equalTo: scrollDocument.leadingAnchor),
+            contents.topAnchor.constraint(equalTo: scrollDocument.topAnchor),
+            contents.widthAnchor.constraint(equalToConstant: Self.effectWidth)
         ])
         let controller = NSViewController()
-        controller.view = layout
+        controller.view = wrapper
         popover.behavior = .transient
         popover.delegate = self
         popover.contentViewController = controller
-        resize(to: 190)
+        updateButtons()
+        fitContent()
     }
+
+    private func addRow(leading: NSView, trailing: NSView, to row: NSView) {
+        for view in [leading, trailing] {
+            row.addSubview(view)
+            view.translatesAutoresizingMaskIntoConstraints = false
+        }
+        NSLayoutConstraint.activate([
+            leading.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            leading.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            trailing.leadingAnchor.constraint(greaterThanOrEqualTo: leading.trailingAnchor, constant: 8),
+            trailing.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            trailing.topAnchor.constraint(equalTo: row.topAnchor),
+            trailing.bottomAnchor.constraint(equalTo: row.bottomAnchor)
+        ])
+    }
+
+    @objc private func dismissPopover() { close() }
+
+#if EDIT_AGENT_CHECKS
+    func viewForCheck(_ preview: Preview) -> NSView {
+        direction = preview.direction
+        self.preview = preview
+        updateButtons()
+        render(preview)
+        return popover.contentViewController!.view
+    }
+#endif
 }
 
 @MainActor

@@ -1,7 +1,7 @@
 import AppKit
 
 @MainActor
-final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
+final class SourceControlSidebar: NSObject {
     let view: NSView = SourceControlFocusView()
     let graphView = SourceControlGraphView()
     private(set) lazy var fileTree = SidebarFileTree(document: document, app: app, mode: .sourceControl)
@@ -17,25 +17,15 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
     private let actionsButton = NSButton()
     private let graphMessage = NSTextField(wrappingLabelWithString: "")
     private let graphLimit = NSTextField(labelWithString: "")
-    private let detailTitle = NSTextField(wrappingLabelWithString: "")
-    private let detailMetadata = NSTextField(labelWithString: "")
-    private let detailDescription = NSTextField(wrappingLabelWithString: "")
+    private let detailTitle = NSButton()
+    private let detailMetadata = SourceControlRevisionIdentity()
     private let fileCount = NSTextField(labelWithString: "")
     private let fileHeading = NSTextField(labelWithString: "Changed Files")
     private let fileMessage = NSTextField(wrappingLabelWithString: "")
-    private let describeField = NSTextView()
-    private let describeScroll = NSScrollView()
-    private let describeButtons = NSStackView()
-    private let describeNotice = NSTextField(wrappingLabelWithString: "The description changed in Jujutsu. Reopen Describe to edit the current version.")
-    private let cancelDescribe = NSButton()
-    private let saveDescription = NSButton()
-
-    private let filterPopover = NSPopover()
-    private let scopePicker = NSPopUpButton()
-    private let searchField = NSSearchField()
-    private let revsetField = NSTextField()
-    private let applyRevsetButton = NSButton()
-    private let filterError = NSTextField(wrappingLabelWithString: "")
+    private lazy var descriptionPopover = SourceControlDescriptionPopover(anchor: detailTitle) { [weak self] in self?.saveDescription($0) }
+    private lazy var filter = SourceControlFilterPopover(anchor: filterButton,
+        onScopeChange: { [weak self] in self?.setScope($0) },
+        onQueryChange: { [weak self] in self?.setQuery($0) })
     private lazy var operations = SourceControlOperationPopover(
         anchor: operationsButton,
         prepare: { [weak self] direction in
@@ -60,10 +50,10 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
     private var includeWorkingCopy = false
     private var revealWorkingCopy = false
     private var query = ""
-    private var editing: DescriptionDraft?
     private(set) var graph: JJSourceControlGraph?
     private(set) var selection: JJSourceControlRevision?
     private(set) var detail: JJSourceControlDetail?
+    private var displayedFiles: [JJSourceControlFile] = []
     private var hasPresentedGraph = false
     private let graphBody = NSView()
     private let changeBody = NSView()
@@ -79,11 +69,6 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
     private enum PanelError: LocalizedError {
         case noWorkspace
         var errorDescription: String? { "Open a Jujutsu workspace to use this sidebar." }
-    }
-
-    private struct DescriptionDraft {
-        let changeID: String
-        let original: String
     }
 
     init(document: DocumentWindow, app: Edit) {
@@ -112,8 +97,7 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
         hasPresentedGraph = false
         selection = nil
         detail = nil
-        editing = nil
-        filterPopover.close()
+        displayedFiles = []
         graphView.install([], selected: nil)
         fileTree.clearSourceControl()
         renderDetail()
@@ -128,7 +112,6 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
             if let workspace { observe(workspace) } else { discover() }
         } else {
             stopObserving()
-            filterPopover.close()
         }
     }
 
@@ -149,6 +132,8 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
         app.jjChanges.unsubscribe(subscription)
         subscription = nil
         operations.close()
+        filter.close()
+        descriptionPopover.close()
     }
 
     private func discover() {
@@ -178,7 +163,7 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
     }
 
     private func observe(_ workspace: JJWorkspace) {
-        subscription = app.jjChanges.subscribe(to: workspace) { [weak self] contents in
+        subscription = app.jjChanges.subscribe(to: workspace, liveSnapshots: true) { [weak self] contents in
             guard let self, active else { return }
             if let contents {
                 guard contents.repository.operationID != graph?.operationID else { return }
@@ -215,16 +200,14 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
             do {
                 let result = try await JJSourceControlRepository.graph(in: workspace, scope: scope, includeWorkingCopy: includeWorkingCopy)
                 guard let self, !Task.isCancelled, active, self.workspace == workspace else { return }
-                filterError.isHidden = true
+                filter.setError(nil)
                 publish(result, scope: scope)
             } catch {
                 guard let self, !Task.isCancelled, active, self.workspace == workspace else { return }
                 if case .revset = scope {
                     let current = try? await JJRepository.operation(in: workspace)
                     guard !Task.isCancelled else { return }
-                    filterError.stringValue = error.localizedDescription
-                    filterError.isHidden = false
-                    sizeFilterPopover()
+                    filter.setError(error.localizedDescription)
                     if let graph, current == graph.operationID {
                         finishGraphRequest()
                         displayGraph(forceDetail: false)
@@ -242,6 +225,7 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
                 graph = nil
                 selection = nil
                 detail = nil
+                displayedFiles = []
                 graphView.install([], selected: nil)
                 fileTree.clearSourceControl()
                 renderDetail()
@@ -294,7 +278,9 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
         }
         hasPresentedGraph = true
         revealWorkingCopy = false
-        if next?.id != old?.id || forceDetail || detail == nil { requestDetail() }
+        if next?.id != old?.id || forceDetail || detail == nil {
+            requestDetail(keepingFiles: next?.changeID == old?.changeID && !fileTree.view.isHidden)
+        }
         else { renderDetail() }
         updateControls()
     }
@@ -329,13 +315,14 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
     private func choose(_ revision: JJSourceControlRevision) {
         guard !busy, !stale, revision.id != selection?.id else { return }
         selection = revision
-        editing = nil
+        descriptionPopover.close()
         requestDetail()
     }
 
-    private func requestDetail() {
+    private func requestDetail(keepingFiles: Bool = false) {
         detailRequest?.cancel()
         detail = nil
+        if !keepingFiles { displayedFiles = [] }
         renderDetail()
         updateControls()
         guard let workspace, let graph, let revision = selection else { return }
@@ -345,11 +332,12 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
                 let result = try await JJSourceControlRepository.detail(for: revision, in: workspace, at: operation)
                 guard let self, !Task.isCancelled, selection?.id == revision.id, self.graph?.operationID == operation else { return }
                 detail = result
-                fileTree.updateSourceControl(revision: revision, workspace: workspace, operationID: operation, files: result.files)
                 renderDetail()
                 updateControls()
             } catch {
                 guard let self, !Task.isCancelled else { return }
+                displayedFiles = []
+                renderFiles()
                 fileMessage.stringValue = error.localizedDescription
                 fileMessage.isHidden = false
             }
@@ -358,24 +346,34 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
 
     private func renderDetail() {
         let revision = selection
-        detailTitle.stringValue = revision?.subject ?? "Select a change"
-        detailMetadata.stringValue = [revision?.shortID, revision.map {
-            $0.isWorkingCopy ? "@ Working copy" : ($0.isImmutable ? "Immutable" : "Revision")
-        }].compactMap { $0 }.joined(separator: " · ")
-        let description = revision?.description.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
-        detailDescription.stringValue = description?.dropFirst().first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        detailDescription.toolTip = detailDescription.stringValue
-        let isEditing = editing != nil && editing?.changeID == revision?.changeID
-        detailTitle.isHidden = isEditing
+        detailTitle.title = revision?.subject ?? "Select a change"
+        detailTitle.image = revision.flatMap { Self.symbol($0.isImmutable ? "chevron.right" : "pencil", size: 10) }
+        detailTitle.toolTip = revision.map { $0.isImmutable ? "View change description" : "Edit change description" }
+        if let revision { detailMetadata.update(revision, showsBookmarks: false) }
         detailMetadata.isHidden = revision == nil
-        detailDescription.isHidden = isEditing || detailDescription.stringValue.isEmpty
-        describeScroll.isHidden = !isEditing
-        describeButtons.isHidden = !isEditing
-        describeNotice.isHidden = !isEditing || editing?.original == revision?.description
         fileHeading.isHidden = revision == nil
-        fileCount.stringValue = detail.map { String($0.files.count) } ?? ""
-        fileTree.view.isHidden = detail?.files.isEmpty != false
-        fileMessage.isHidden = revision == nil || detail?.files.isEmpty == false
+        renderFiles()
+    }
+
+    func updateLiveFile() {
+        guard active, !stale, selection?.isWorkingCopy == true, detail != nil else { return }
+        renderFiles()
+    }
+
+    private func renderFiles() {
+        if let detail, let revision = selection, let workspace, let graph {
+            let live = document.jjLiveFileStatus
+            if revision.isWorkingCopy, let live, live.workspace == workspace,
+               live.operationID == graph.operationID, live.commitID == revision.id {
+                displayedFiles = live.applying(to: detail.files)
+            } else {
+                displayedFiles = detail.files
+            }
+            fileTree.updateSourceControl(revision: revision, workspace: workspace, operationID: graph.operationID, files: displayedFiles)
+        }
+        fileCount.stringValue = detail == nil && displayedFiles.isEmpty ? "" : String(displayedFiles.count)
+        fileTree.view.isHidden = displayedFiles.isEmpty
+        fileMessage.isHidden = selection == nil || !displayedFiles.isEmpty
         fileMessage.stringValue = detail == nil ? "Loading changed files…" : "No changed files"
     }
 
@@ -394,8 +392,8 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
         newButton.isEnabled = canAct
         workingCopyButton.isEnabled = canAct
         actionsButton.isEnabled = canAct && selection != nil
-        saveDescription.isEnabled = canAct && editing != nil && selection?.changeID == editing?.changeID &&
-            selection?.description == editing?.original
+        detailTitle.isEnabled = canAct && selection != nil
+        descriptionPopover.update(selection, canMutate: canAct)
         graphView.table.isEnabled = canAct
         fileTree.outline.isEnabled = canAct && detail != nil
         if document.window.firstResponder === view, focusResponder === graphView.table {
@@ -436,12 +434,12 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
                 try await JJSourceControlRepository.mutate(command, in: workspace, expectedOperation: operationID)
             }
             if ran {
-                editing = nil
+                descriptionPopover.close()
                 if selectingWorkingCopy {
                     includeWorkingCopy = true
                     revealWorkingCopy = true
                     query = ""
-                    searchField.stringValue = ""
+                    filter.setQuery("")
                 }
             }
         } catch {
@@ -527,27 +525,22 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
     }
 
     @objc private func describe(_ item: NSMenuItem) {
-        guard let revision = revision(for: item) else { return }
-        editing = DescriptionDraft(changeID: revision.changeID, original: revision.description)
-        describeField.string = revision.description
+        guard revision(for: item) != nil else { return }
+        showDescription(item)
+    }
+
+    @objc private func showDescription(_ sender: Any?) {
+        guard let selection else { return }
         panes.setChangeExpanded(true)
         updateDisclosures()
-        renderDetail()
-        updateControls()
-        document.window.makeFirstResponder(describeField)
+        view.layoutSubtreeIfNeeded()
+        descriptionPopover.show(selection)
     }
 
-    @objc private func cancelDescription(_ sender: Any?) {
-        editing = nil
-        renderDetail()
-        document.window.makeFirstResponder(actionsButton)
-    }
-
-    @objc private func saveDescription(_ sender: Any?) {
-        guard let selection, let editing, selection.changeID == editing.changeID,
-              selection.description == editing.original, let operation = graph?.operationID else { return }
-        let description = describeField.string
-        Task { await mutate(.describe(selection.id, description), expectedOperation: operation) }
+    private func saveDescription(_ text: String) {
+        guard let selection, let draft = descriptionPopover.draft, selection.changeID == draft.changeID,
+              selection.description == draft.description, let operation = graph?.operationID else { return }
+        Task { await mutate(.describe(selection.id, text), expectedOperation: operation) }
     }
 
     @objc private func squash(_ item: NSMenuItem) {
@@ -575,7 +568,7 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
         let text = NSTextView(frame: NSRect(origin: .zero, size: scroll.contentSize))
         text.font = .systemFont(ofSize: NSFont.systemFontSize)
         text.string = parent.description.trimmingCharacters(in: .newlines) + "\n\n" + change.description
-        Self.configureDescriptionEditor(text, in: scroll)
+        SourceControlDescriptionPopover.configureEditor(text, in: scroll)
         alert.accessoryView = scroll
         alert.addButton(withTitle: "Squash into Parent")
         alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
@@ -611,13 +604,28 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
         Task { await mutate(.new(working.id), selectingWorkingCopy: true) }
     }
 
+    private func discard(_ restore: SourceControlFileRestore) async {
+        guard active, !busy, !stale, workspace == restore.workspace else { return }
+        let document = document
+        busy = true
+        updateControls()
+        do {
+            if try await restore.confirmAndDiscard(in: document) { requestGraph() }
+        } catch {
+            await document.showError("Could Not Discard File Changes", detail: error.localizedDescription)
+            requestGraph()
+        }
+        busy = false
+        updateControls()
+    }
+
     @objc private func goToWorkingCopy(_ sender: Any?) {
         guard let graph else { return }
         panes.setGraphExpanded(true)
         updateDisclosures()
         revealWorkingCopy = true
         query = ""
-        searchField.stringValue = ""
+        filter.setQuery("")
         if graph.revisions.contains(where: { $0.id == graph.workingCopy.id }) { displayGraph(forceDetail: false) }
         else {
             includeWorkingCopy = true
@@ -645,30 +653,7 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
 
     @objc private func showOperations(_ sender: Any?) { operations.show() }
 
-    @objc private func showFilter(_ sender: NSButton) {
-        if filterPopover.isShown { filterPopover.close(); return }
-        filterPopover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
-        searchField.window?.makeFirstResponder(searchField)
-    }
-
-    @objc private func changeScope(_ sender: NSPopUpButton) {
-        applyRevsetButton.isHidden = sender.indexOfSelectedItem != 2
-        revsetField.isHidden = applyRevsetButton.isHidden
-        filterError.isHidden = true
-        sizeFilterPopover()
-        if sender.indexOfSelectedItem == 2 {
-            revsetField.window?.makeFirstResponder(revsetField)
-            applyRevset(sender)
-        } else {
-            setScope(sender.indexOfSelectedItem == 1 ? .stack : .log)
-        }
-    }
-
-    @objc private func applyRevset(_ sender: Any?) {
-        let value = revsetField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return }
-        setScope(.revset(value))
-    }
+    @objc private func showFilter(_ sender: NSButton) { filter.show() }
 
     private func setScope(_ scope: JJSourceControlScope) {
         self.scope = scope
@@ -676,9 +661,8 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
         requestGraph()
     }
 
-    func controlTextDidChange(_ notification: Notification) {
-        guard notification.object as? NSSearchField === searchField else { return }
-        query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func setQuery(_ text: String) {
+        query = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !stale { displayGraph(forceDetail: false) }
     }
 
@@ -701,7 +685,6 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
         }
         configureGraph()
         configureDetail()
-        configureFilter()
         view.addSubview(panes)
         panes.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -740,39 +723,27 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
     }
 
     private func configureDetail() {
+        configure(detailTitle, action: #selector(showDescription(_:)))
         detailTitle.font = .systemFont(ofSize: 14, weight: .semibold)
         detailTitle.alignment = .left
-        detailTitle.maximumNumberOfLines = 2
+        detailTitle.imagePosition = .imageTrailing
+        detailTitle.cell?.usesSingleLineMode = true
         detailTitle.lineBreakMode = .byTruncatingTail
-        detailDescription.maximumNumberOfLines = 2
-        detailDescription.lineBreakMode = .byTruncatingTail
-        for label in [detailMetadata, detailDescription, fileHeading, fileCount, fileMessage] {
+        detailTitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        detailMetadata.heightAnchor.constraint(equalToConstant: 14).isActive = true
+        for label in [fileHeading, fileCount, fileMessage] {
             label.textColor = .secondaryLabelColor
             label.font = .systemFont(ofSize: 11)
         }
-        detailMetadata.alignment = .left
-        detailDescription.alignment = .left
-        Self.configureDescriptionEditor(describeField, in: describeScroll)
-        describeScroll.heightAnchor.constraint(equalToConstant: 60).isActive = true
-        configure(cancelDescribe, title: "Cancel", action: #selector(cancelDescription(_:)), bordered: true)
-        configure(saveDescription, title: "Save", action: #selector(saveDescription(_:)), bordered: true)
-        describeButtons.orientation = .horizontal
-        describeButtons.spacing = 5
-        describeButtons.addArrangedSubview(NSView())
-        describeButtons.addArrangedSubview(cancelDescribe)
-        describeButtons.addArrangedSubview(saveDescription)
         let fileHeader = NSStackView(views: [fileHeading, NSView(), fileCount])
         fileHeader.orientation = .horizontal
-        describeNotice.textColor = .systemOrange
-        describeNotice.font = .systemFont(ofSize: 11)
-        describeNotice.maximumNumberOfLines = 3
-        let metadata = NSStackView(views: [detailMetadata, detailTitle, detailDescription, describeNotice, describeScroll, describeButtons, fileHeader, fileMessage])
+        let metadata = NSStackView(views: [detailTitle, detailMetadata, fileHeader, fileMessage])
         metadata.orientation = .vertical
         metadata.alignment = .leading
-        metadata.spacing = 4
-        metadata.setCustomSpacing(7, after: detailDescription)
-        metadata.setCustomSpacing(7, after: describeButtons)
+        metadata.spacing = 2
+        metadata.setCustomSpacing(9, after: detailMetadata)
         for child in metadata.arrangedSubviews { child.widthAnchor.constraint(equalTo: metadata.widthAnchor).isActive = true }
+        fileTree.onDiscardSourceControlFile = { [weak self] restore in Task { await self?.discard(restore) } }
         let tree = fileTree.view
         for child in [metadata, tree] {
             changeBody.addSubview(child)
@@ -789,76 +760,14 @@ final class SourceControlSidebar: NSObject, NSSearchFieldDelegate {
         ])
     }
 
-    private static func configureDescriptionEditor(_ text: NSTextView, in scroll: NSScrollView) {
-        text.isRichText = false
-        text.isVerticallyResizable = true
-        text.isHorizontallyResizable = false
-        text.autoresizingMask = [.width]
-        text.textContainer?.widthTracksTextView = true
-        text.textContainerInset = NSSize(width: 3, height: 3)
-        text.font = .systemFont(ofSize: 12)
-        text.setAccessibilityLabel("Change Description")
-        scroll.borderType = .bezelBorder
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.documentView = text
-    }
-
-    private func configureFilter() {
-        let filterTitle = NSTextField(labelWithString: "Filter Changes")
-        filterTitle.font = .systemFont(ofSize: 13, weight: .semibold)
-        scopePicker.addItems(withTitles: ["Default Log", "Current Stack", "Revset"])
-        scopePicker.target = self
-        scopePicker.action = #selector(changeScope(_:))
-        scopePicker.setAccessibilityLabel("Graph Scope")
-        searchField.placeholderString = "Description, change ID, bookmark"
-        searchField.setAccessibilityLabel("Find in Graph")
-        searchField.delegate = self
-        searchField.sendsSearchStringImmediately = true
-        revsetField.stringValue = "mutable() | trunk()"
-        revsetField.setAccessibilityLabel("Revset")
-        revsetField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        revsetField.target = self
-        revsetField.action = #selector(applyRevset(_:))
-        configure(applyRevsetButton, title: "Apply Revset", action: #selector(applyRevset(_:)), bordered: true)
-        filterError.textColor = .systemRed
-        filterError.maximumNumberOfLines = 6
-        filterError.font = .systemFont(ofSize: 11)
-        let stack = NSStackView(views: [filterTitle, scopePicker, searchField, revsetField, applyRevsetButton, filterError])
-        stack.orientation = .vertical
-        stack.alignment = .width
-        stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
-        stack.spacing = 8
-        let controller = NSViewController()
-        let wrapper = NSView(frame: NSRect(x: 0, y: 0, width: 290, height: 120))
-        wrapper.addSubview(stack)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor), stack.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: wrapper.topAnchor), stack.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor)
-        ])
-        controller.view = wrapper
-        filterPopover.contentViewController = controller
-        filterPopover.behavior = .transient
-        revsetField.isHidden = true
-        applyRevsetButton.isHidden = true
-        filterError.isHidden = true
-        sizeFilterPopover()
-    }
-
-    private func sizeFilterPopover() {
-        let height: CGFloat = filterError.isHidden ? (revsetField.isHidden ? 112 : 172) : 242
-        filterPopover.contentSize = NSSize(width: 290, height: height)
-    }
-
     private func configure(_ button: NSButton, title: String = "", action: Selector, symbol: String? = nil,
-                           label: String? = nil, bordered: Bool = false) {
+                           label: String? = nil) {
         button.title = title
         button.target = self
         button.action = action
         button.controlSize = .small
         button.bezelStyle = .rounded
-        button.isBordered = bordered
+        button.isBordered = false
         button.font = .systemFont(ofSize: 11.5)
         if let symbol {
             button.image = Self.symbol(symbol, size: title.isEmpty ? 12 : 8)

@@ -173,7 +173,7 @@ private struct SourceControlGraphRow {
 private final class SourceControlGraphCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("SourceControlRevision")
     private let subject = NSTextField(labelWithString: "")
-    private let metadata = NSTextField(labelWithString: "")
+    private let metadata = SourceControlRevisionIdentity()
     private let graph = SourceControlGraphGutter()
     private var graphWidth: NSLayoutConstraint!
     private var revision: JJSourceControlRevision?
@@ -182,14 +182,10 @@ private final class SourceControlGraphCell: NSTableCellView {
         super.init(frame: frame)
         identifier = Self.identifier
         subject.font = .systemFont(ofSize: 12, weight: .medium)
+        subject.maximumNumberOfLines = 1
+        subject.cell?.usesSingleLineMode = true
         subject.lineBreakMode = .byTruncatingTail
-        metadata.font = .systemFont(ofSize: 10.5)
-        metadata.lineBreakMode = .byTruncatingTail
-        let labels = NSStackView(views: [subject, metadata])
-        labels.orientation = .vertical
-        labels.alignment = .leading
-        labels.spacing = 1
-        for view in [graph, labels] {
+        for view in [graph, subject, metadata] {
             addSubview(view)
             view.translatesAutoresizingMaskIntoConstraints = false
         }
@@ -197,10 +193,11 @@ private final class SourceControlGraphCell: NSTableCellView {
         NSLayoutConstraint.activate([
             graph.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6), graph.topAnchor.constraint(equalTo: topAnchor),
             graph.bottomAnchor.constraint(equalTo: bottomAnchor), graphWidth,
-            labels.leadingAnchor.constraint(equalTo: graph.trailingAnchor, constant: 4),
-            labels.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8), labels.centerYAnchor.constraint(equalTo: centerYAnchor),
-            subject.widthAnchor.constraint(lessThanOrEqualTo: labels.widthAnchor),
-            metadata.widthAnchor.constraint(lessThanOrEqualTo: labels.widthAnchor)
+            subject.leadingAnchor.constraint(equalTo: graph.trailingAnchor, constant: 4),
+            subject.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            subject.bottomAnchor.constraint(equalTo: centerYAnchor, constant: -1), subject.heightAnchor.constraint(equalToConstant: 15),
+            metadata.leadingAnchor.constraint(equalTo: subject.leadingAnchor), metadata.trailingAnchor.constraint(equalTo: subject.trailingAnchor),
+            metadata.topAnchor.constraint(equalTo: centerYAnchor, constant: 1), metadata.heightAnchor.constraint(equalToConstant: 14)
         ])
     }
 
@@ -216,8 +213,9 @@ private final class SourceControlGraphCell: NSTableCellView {
         graph.isWorkingCopy = revision.isWorkingCopy
         graph.isImmutable = revision.isImmutable
         graph.isConflicted = revision.isConflicted
+        metadata.update(revision)
         updateColors()
-        setAccessibilityLabel([revision.subject, metadata.stringValue].joined(separator: ", "))
+        setAccessibilityLabel([revision.subject, metadata.accessibilityLabel() ?? ""].joined(separator: ", "))
     }
 
     override var backgroundStyle: NSView.BackgroundStyle {
@@ -225,25 +223,10 @@ private final class SourceControlGraphCell: NSTableCellView {
     }
 
     private func updateColors() {
-        guard let revision else { return }
+        guard revision != nil else { return }
         let emphasized = backgroundStyle == .emphasized
-        let foreground: NSColor = emphasized ? .alternateSelectedControlTextColor : .labelColor
-        let secondary: NSColor = emphasized ? foreground : .secondaryLabelColor
-        subject.textColor = foreground
-        let result = NSMutableAttributedString(string: revision.shortID, attributes: [
-            .foregroundColor: secondary, .font: NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular)
-        ])
-        let flags: [(String, NSColor)] = (revision.isWorkingCopy ? [("Working copy", .controlAccentColor)] : []) +
-            revision.bookmarks.map { ($0, .controlAccentColor) } +
-            (revision.isImmutable ? [("Immutable", secondary)] : []) +
-            (revision.isConflicted ? [("Conflict", .systemPurple)] : []) +
-            (revision.isDivergent ? [("Divergent", .systemOrange)] : [])
-        for (flag, color) in flags {
-            result.append(NSAttributedString(string: "   " + flag, attributes: [
-                .foregroundColor: emphasized ? foreground : color, .font: metadata.font ?? NSFont.systemFont(ofSize: 10.5)
-            ]))
-        }
-        metadata.attributedStringValue = result
+        subject.textColor = emphasized ? .alternateSelectedControlTextColor : .labelColor
+        metadata.setEmphasized(emphasized)
         graph.emphasized = emphasized
         graph.needsDisplay = true
     }
@@ -306,7 +289,7 @@ private final class SourceControlGraphGutter: NSView {
         } else {
             let circle = NSBezierPath(ovalIn: NSRect(x: nodeX - 4, y: center - 4, width: 8, height: 8))
             color.setStroke()
-            (isImmutable ? color : NSColor.controlBackgroundColor).setFill()
+            (isImmutable ? (emphasized ? color : NSColor.systemTeal) : NSColor.controlBackgroundColor).setFill()
             circle.fill()
             if !isImmutable { circle.stroke() }
         }

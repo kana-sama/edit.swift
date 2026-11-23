@@ -137,6 +137,7 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     var outline: NSOutlineView { tree }
     var isObservingWorktree: Bool { mode == .worktree && isActive }
     var showsHidden: Bool { worktreeSource?.showsHidden == true }
+    var onDiscardSourceControlFile: ((SourceControlFileRestore) -> Void)?
 
     init(document: DocumentWindow, app: Edit, mode: Mode) {
         self.document = document
@@ -1062,6 +1063,7 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         if row >= 0, !tree.selectedRowIndexes.contains(row) {
             tree.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
+        if mode == .sourceControl { return sourceControlMenu(for: item) }
         if let scratchSource { return scratchMenu(for: item, in: root, actions: scratchSource.actions) }
         guard let url = item.fileURL, let folder = root.fileURL, let actions = worktreeSource?.actions else { return nil }
         let urls = row >= 0 ? selectedItems.filter { $0 !== provisionalEntry }.compactMap(\.fileURL) : []
@@ -1070,6 +1072,25 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             document.window.makeFirstResponder(tree)
             actions.trash(urls, within: folder, updateSelection: fileSelectionUpdate(in: folder))
         }
+    }
+
+    private func sourceControlMenu(for item: Item) -> NSMenu? {
+        guard isActive, tree.isEnabled, onDiscardSourceControlFile != nil, let file = item.sourceControlFile,
+              let selection = revisionSelection,
+              let restore = SourceControlFileRestore(file: file, in: selection.revision, workspace: selection.workspace) else { return nil }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let discard = menu.addItem(withTitle: "Discard File Changes…", action: #selector(discardSourceControlFile(_:)), keyEquivalent: "")
+        discard.target = self
+        discard.representedObject = restore
+        return menu
+    }
+
+    @objc private func discardSourceControlFile(_ sender: NSMenuItem) {
+        guard isActive, tree.isEnabled, let restore = sender.representedObject as? SourceControlFileRestore,
+              let selection = revisionSelection, restore.matchesSelection(selection.revision, in: selection.workspace),
+              revisionFiles.contains(restore.file) else { return }
+        onDiscardSourceControlFile?(restore)
     }
 
     private func scratchMenu(for item: Item, in root: Item, actions: ScratchWorktreeActions) -> NSMenu {

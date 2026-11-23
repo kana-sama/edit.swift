@@ -1,5 +1,38 @@
 import Foundation
 
+struct JJWorkingCopyFileStatus: Equatable {
+    let workspace: JJWorkspace
+    let operationID: String
+    let commitID: String
+    let path: String
+    let status: JJPathStatus?
+
+    func applying(to files: [JJSourceControlFile]) -> [JJSourceControlFile] {
+        let index = files.firstIndex { $0.path == path }
+        let recorded = index.map { files[$0] }
+        guard recorded?.status != status else { return files }
+        var result = files
+        if let index { result.remove(at: index) }
+        guard let status else { return result }
+
+        let file: JJSourceControlFile
+        switch status {
+        case .added:
+            file = .init(path: path, sourcePath: nil, kind: .added, source: .absent, target: .file)
+        case .modified:
+            file = .init(path: path, sourcePath: recorded?.sourcePath, kind: .modified,
+                         source: recorded?.source ?? .file, target: .file)
+        case .removed:
+            file = .init(path: path, sourcePath: nil, kind: .deleted, source: recorded?.source ?? .file, target: .absent)
+        case .conflict:
+            file = .init(path: path, sourcePath: recorded?.sourcePath, kind: .conflict,
+                         source: recorded?.source ?? .file, target: .conflict)
+        }
+        result.insert(file, at: index ?? result.endIndex)
+        return result
+    }
+}
+
 @MainActor
 final class JJDocumentChanges {
     private struct File {
@@ -12,16 +45,12 @@ final class JJDocumentChanges {
         let value: JJFileComparison?
     }
 
-    private struct LocalStatus: Equatable {
-        let operation: String
-        let override: JJWorktreeDecorations.Override
-    }
-
     private let monitor: JJChangeMonitor
     private let text: @MainActor () -> String?
     private let showMarks: @MainActor (JJTextAnalysis?, Bool) -> Void
     private let suspendMarkerNavigation: @MainActor () -> Void
     private let showWorktree: @MainActor (JJWorktreeDecorations?) -> Void
+    private let workingCopyStatusChanged: @MainActor () -> Void
     private var file: File?
     private var folder: URL?
     private var fileSubscription: JJChangeMonitor.Subscription?
@@ -37,20 +66,22 @@ final class JJDocumentChanges {
     private var folderContents: JJWorkspaceContents?
     private var comparison: Comparison?
     private var diskMatchesBuffer: Bool?
-    private var localStatus: LocalStatus?
+    private(set) var localStatus: JJWorkingCopyFileStatus?
 
     init(
         monitor: JJChangeMonitor,
         text: @escaping @MainActor () -> String?,
         showMarks: @escaping @MainActor (JJTextAnalysis?, Bool) -> Void,
         suspendMarkerNavigation: @escaping @MainActor () -> Void,
-        showWorktree: @escaping @MainActor (JJWorktreeDecorations?) -> Void
+        showWorktree: @escaping @MainActor (JJWorktreeDecorations?) -> Void,
+        workingCopyStatusChanged: @escaping @MainActor () -> Void = {}
     ) {
         self.monitor = monitor
         self.text = text
         self.showMarks = showMarks
         self.suspendMarkerNavigation = suspendMarkerNavigation
         self.showWorktree = showWorktree
+        self.workingCopyStatusChanged = workingCopyStatusChanged
     }
 
     func update(file url: URL?, revision: FileRevision?, folder: URL?) {
@@ -236,7 +267,8 @@ final class JJDocumentChanges {
             } else {
                 status = state.changes[path]?.status
             }
-            setLocalStatus(LocalStatus(operation: state.operationID, override: .init(path: path, status: status)))
+            setLocalStatus(JJWorkingCopyFileStatus(workspace: state.workspace, operationID: state.operationID,
+                                                  commitID: state.commitID, path: path, status: status))
         } catch {
             if !Task.isCancelled { clearPresentation() }
         }
@@ -279,10 +311,11 @@ final class JJDocumentChanges {
                            normalizeCRLF: pair.normalizeCRLF)
     }
 
-    private func setLocalStatus(_ status: LocalStatus?) {
+    private func setLocalStatus(_ status: JJWorkingCopyFileStatus?) {
         guard localStatus != status else { return }
         localStatus = status
         publishWorktree()
+        workingCopyStatusChanged()
     }
 
     private func publishWorktree() {
@@ -290,8 +323,13 @@ final class JJDocumentChanges {
             showWorktree(nil)
             return
         }
-        let override = fileContents?.repository.workspace == folderContents.repository.workspace &&
-            localStatus?.operation == folderContents.repository.operationID ? localStatus?.override : nil
+        let override: JJWorktreeDecorations.Override?
+        if let localStatus, localStatus.workspace == folderContents.repository.workspace,
+           localStatus.operationID == folderContents.repository.operationID {
+            override = .init(path: localStatus.path, status: localStatus.status)
+        } else {
+            override = nil
+        }
         showWorktree(JJWorktreeDecorations(contents: folderContents, override: override))
     }
 

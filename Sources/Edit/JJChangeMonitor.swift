@@ -131,7 +131,12 @@ final class JJChangeMonitor {
         var paths: JJWorkspacePaths?
         var mayNeedSnapshot = true
         var diskGeneration: UInt64 = 0
+        var capturedDiskGeneration: UInt64 = 0
         var nextSnapshot: ContinuousClock.Instant
+        var liveSnapshotDebounce: (deadline: ContinuousClock.Instant, task: Task<Void, Never>)?
+        var liveSnapshotPending = false
+
+        var observesLiveSnapshots: Bool { observers.values.contains { $0.liveSnapshots } }
 
         init(location: JJWorkspace, nextSnapshot: ContinuousClock.Instant) {
             self.location = location
@@ -143,12 +148,20 @@ final class JJChangeMonitor {
             refreshRequests.continuation.finish()
             task?.cancel()
             polling?.cancel()
+            clearLiveSnapshot()
+        }
+
+        func clearLiveSnapshot() {
+            liveSnapshotDebounce?.task.cancel()
+            liveSnapshotDebounce = nil
+            liveSnapshotPending = false
         }
 
         isolated deinit { stop() }
     }
 
     private struct Observer {
+        let liveSnapshots: Bool
         let updated: @MainActor (JJWorkspaceContents?) -> Void
         let diskChanged: @MainActor (Set<String>?) -> Void
     }
@@ -177,6 +190,7 @@ final class JJChangeMonitor {
 
     func subscribe(
         to location: JJWorkspace,
+        liveSnapshots: Bool = false,
         updated: @escaping @MainActor (JJWorkspaceContents?) -> Void,
         diskChanged: @escaping @MainActor (Set<String>?) -> Void = { _ in }
     ) -> Subscription {
@@ -190,11 +204,12 @@ final class JJChangeMonitor {
             let deadline = suspendedDeadlines.removeValue(forKey: location)?.next ?? now.advanced(by: snapshotInterval)
             workspace = Workspace(location: location, nextSnapshot: deadline)
             workspaces[location] = workspace
-            workspace.paths = JJWorkspacePaths(root: location.root) { [weak workspace] paths in
-                guard let workspace else { return }
+            workspace.paths = JJWorkspacePaths(root: location.root) { [weak self, weak workspace] paths in
+                guard let self, let workspace else { return }
                 workspace.mayNeedSnapshot = true
                 workspace.diskGeneration &+= 1
                 for observer in Array(workspace.observers.values) { observer.diskChanged(paths) }
+                enqueueLiveSnapshot(for: workspace)
             }
             workspace.task = Task { [weak self, weak workspace, stream = workspace.refreshRequests.stream] in
                 for await _ in stream {
@@ -211,7 +226,8 @@ final class JJChangeMonitor {
             }
             workspace.refreshRequests.continuation.yield()
         }
-        workspace.observers[id] = Observer(updated: updated, diskChanged: diskChanged)
+        workspace.observers[id] = Observer(liveSnapshots: liveSnapshots, updated: updated, diskChanged: diskChanged)
+        if liveSnapshots, workspace.diskGeneration != workspace.capturedDiskGeneration { enqueueLiveSnapshot(for: workspace) }
         updated(workspace.contents)
         return Subscription(workspace: location, id: id)
     }
@@ -219,6 +235,7 @@ final class JJChangeMonitor {
     func unsubscribe(_ subscription: Subscription?) {
         guard let subscription, let workspace = workspaces[subscription.workspace] else { return }
         workspace.observers.removeValue(forKey: subscription.id)
+        if !workspace.observesLiveSnapshots { workspace.clearLiveSnapshot() }
         if workspace.observers.isEmpty {
             // File-to-file navigation can temporarily leave the workspace without an observer.
             suspendedDeadlines[subscription.workspace] = (workspace.nextSnapshot, clock.now.advanced(by: .seconds(10)))
@@ -294,8 +311,9 @@ final class JJChangeMonitor {
 
     private func scheduleSnapshot(for workspace: Workspace) {
         let location = workspace.location
-        guard workspace.mayNeedSnapshot, clock.now >= workspace.nextSnapshot,
+        guard workspace.mayNeedSnapshot, workspace.liveSnapshotPending || clock.now >= workspace.nextSnapshot,
               snapshotting.insert(location.repository).inserted else { return }
+        workspace.clearLiveSnapshot()
         let generation = workspace.diskGeneration
         workspace.nextSnapshot = clock.now.advanced(by: snapshotInterval)
         // Let an in-flight repository write finish even if its last observer closes.
@@ -303,9 +321,29 @@ final class JJChangeMonitor {
             defer { self?.snapshotting.remove(location.repository) }
             do { try await writeSnapshot(location) }
             catch { return }
-            if let workspace, generation == workspace.diskGeneration { workspace.mayNeedSnapshot = workspace.paths == nil }
+            if let workspace {
+                workspace.capturedDiskGeneration = generation
+                if generation == workspace.diskGeneration { workspace.mayNeedSnapshot = workspace.paths == nil }
+            }
             self?.requestRefreshes(in: location.repository)
         }
+    }
+
+    private func enqueueLiveSnapshot(for workspace: Workspace) {
+        guard workspace.observesLiveSnapshots, !workspace.liveSnapshotPending else { return }
+        // A burst of disk writes usually comes from one save. Bound the wait when writes continue.
+        let now = clock.now
+        let deadline = workspace.liveSnapshotDebounce?.deadline ?? now.advanced(by: .milliseconds(1500))
+        let next = min(deadline, now.advanced(by: .milliseconds(350)))
+        workspace.liveSnapshotDebounce?.task.cancel()
+        let task = Task { [clock, weak workspace] in
+            do { try await clock.sleep(until: next) } catch { return }
+            guard let workspace, !Task.isCancelled else { return }
+            workspace.liveSnapshotDebounce = nil
+            workspace.liveSnapshotPending = true
+            workspace.refreshRequests.continuation.yield()
+        }
+        workspace.liveSnapshotDebounce = (deadline, task)
     }
 
     private func install(_ contents: JJWorkspaceContents?, for workspace: Workspace) {
@@ -391,8 +429,9 @@ private final class JJWorkspacePaths {
                 return
             }
             let path = WorktreeFileOperations.path(URL(filePath: paths[index]))
-            guard path.hasPrefix(prefix), let component = path.dropFirst(prefix.count).split(separator: "/").first,
-                  component != ".jj", component != ".git" else { continue }
+            guard path.hasPrefix(prefix) else { continue }
+            let components = path.dropFirst(prefix.count).split(separator: "/")
+            guard !components.isEmpty, !components.contains(".jj"), !components.contains(".git") else { continue }
             touched.insert(path)
         }
         if !touched.isEmpty { changed(touched) }

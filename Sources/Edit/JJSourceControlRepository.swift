@@ -368,7 +368,7 @@ enum JJSourceControlRepository {
         })
     }
 
-    private static func changedFiles(
+    static func changedFiles(
         _ revision: String, in workspace: JJWorkspace, at operationID: String
     ) async throws -> [JJSourceControlFile] {
         async let diff = JJRepository.readCommand([

@@ -12,16 +12,19 @@ enum SourceControlCheck {
         defer { try? FileManager.default.removeItem(at: fixture) }
         try FileManager.default.createDirectory(at: plain, withIntermediateDirectories: false)
         let file = nested.appending(path: "Tracked.txt")
+        let liveFile = nested.appending(path: "Live.txt")
         let removed = folder.appending(path: "Removed.txt")
         let original = (1...18).map { "Line \($0)\n" }.joined()
         try await command(executable, folder, ["git", "init", "--colocate"])
         try original.write(to: file, atomically: true, encoding: .utf8)
+        try "Clean working file\n".write(to: liveFile, atomically: true, encoding: .utf8)
         try "Removed from the working change\n".write(to: removed, atomically: true, encoding: .utf8)
         try await command(executable, folder, ["describe", "-m", "Base"])
         try await command(executable, folder, ["new", "-m", "Historical change"])
         let historical = original.replacingOccurrences(of: "Line 8\n", with: "Historical line\n")
         try historical.write(to: file, atomically: true, encoding: .utf8)
-        try await command(executable, folder, ["new", "-m", "Working change"])
+        try await command(executable, folder, ["new", "-m", "Working change\n\n" + String(repeating: "A long description stays in the popover.\n", count: 12)])
+        try await command(executable, folder, ["bookmark", "create", "review/jj-sidebar-layout-with-a-long-bookmark", "-r", "@"])
         let working = historical.replacingOccurrences(of: "Line 3\n", with: "Working line 3\n")
             .replacingOccurrences(of: "Line 14\n", with: "Working line 14\n")
         try working.write(to: file, atomically: true, encoding: .utf8)
@@ -81,9 +84,14 @@ enum SourceControlCheck {
             throw Failure("\(error.localizedDescription) (file \(document.fileURL?.path ?? "none"), editable \(document.editor.isEditable), marks \(marks), expanded \(expanded))")
         }
         try expect(document.sourceControlRevisionBanner == nil, "leave the ordinary editor free of a revision banner")
-        try expect(try await JJRepository.operation(in: workspace) == head, "leave repository history unchanged by inspection")
         try render(document.window)
-
+        try expect(try await JJRepository.operation(in: workspace) == head, "leave repository history unchanged by inspection")
+        let fileUndo = try await JJSourceControlOperations.preview(.undo, in: workspace)
+        try expect(fileUndo.fileEffects.count == 2, "preview both working-copy file effects for Undo")
+        try SourceControlPopoverCheck.run(preview: fileUndo)
+        guard let currentFileRow = row(named: "Tracked.txt", in: tree) else { throw Failure("find a working file for the context menu") }
+        try expect(panel.fileTree.menu(at: currentFileRow)?.item(withTitle: "Discard File Changes…")?.isEnabled == true,
+                   "offer to discard changes to a file in @")
         try open("Removed.txt", in: panel.fileTree)
         try await waitFor("open the deleted working-copy file as read-only") {
             document.sourceControlRevisionBanner != nil && !document.editor.isEditable &&
@@ -105,6 +113,9 @@ enum SourceControlCheck {
         try await waitFor("open historical text with a revision banner and expanded diff") {
             document.sourceControlRevisionBanner != nil && !document.editor.isEditable &&
                 document.editor.string == historical && document.editor.jjInlineDiff?.hasExpandedHunks == true
+        }
+        if let historicalFileRow = row(named: "Tracked.txt", in: tree) {
+            try expect(panel.fileTree.menu(at: historicalFileRow) == nil, "keep historical file rows free of working-copy mutations")
         }
 
         try await command(executable, folder, ["describe", "-m", "Renamed at the terminal"])
@@ -131,6 +142,33 @@ enum SourceControlCheck {
         try await waitFor("return from the revision preview to the live editor") {
             document.editor.isEditable && document.sourceControlRevisionBanner == nil && document.editor.string == working
         }
+        _ = try await app.openFile(liveFile, in: document)
+        let beforeTyping = try await JJRepository.operation(in: workspace)
+        let typedAt = ContinuousClock.now
+        document.editor.insertText("Unsaved\n", replacementRange: NSRange(location: 0, length: 0))
+        try await waitFor("show an unsaved edit in the changed-file outline") { row(named: "Live.txt", in: tree) != nil }
+        print("Jujutsu unsaved file row: \(typedAt.duration(to: .now)).")
+        try expect(try await JJRepository.operation(in: workspace) == beforeTyping, "leave history untouched while showing a buffer edit")
+        document.editor.undoManager?.undo()
+        try await waitFor("remove the working file from the outline after undoing its buffer edit") { row(named: "Live.txt", in: tree) == nil }
+
+        let external = folder.appending(path: "External.txt")
+        let savedAt = ContinuousClock.now
+        try "Saved outside the editor\n".write(to: external, atomically: true, encoding: .utf8)
+        try await waitFor("show a disk change without a terminal command") {
+            row(named: "External.txt", in: tree) != nil && tree.isEnabled
+        }
+        print("Jujutsu on-disk file row: \(savedAt.duration(to: .now)).")
+        guard let externalRow = row(named: "External.txt", in: tree),
+              let discard = panel.fileTree.menu(at: externalRow)?.item(withTitle: "Discard File Changes…")?.representedObject as? SourceControlFileRestore else {
+            throw Failure("offer a path-scoped restore for an added file")
+        }
+        try await discard.discardChanges()
+        try await waitFor("remove only the discarded path from the changed-file outline") {
+            row(named: "External.txt", in: tree) == nil && row(named: "Tracked.txt", in: tree) != nil && tree.isEnabled
+        }
+        try expect(!FileManager.default.fileExists(atPath: external.path) && (try? String(contentsOf: file, encoding: .utf8)) == working,
+                   "discard the selected added file and preserve unrelated changes")
         document.setFolder(plain)
         try expect(document.isSidebarVisible && document.sidebarMode == .worktree && sidebarMenu.menu.item(withTitle: "Jujutsu")?.isEnabled == false,
                    "leave Jujutsu and disable its switcher item when leaving the workspace")
@@ -167,6 +205,17 @@ enum SourceControlCheck {
         }
         try expect(!create.isHiddenOrHasHiddenAncestor && panel.view.convert(create.bounds, from: create).maxX <= panel.view.bounds.maxX,
                    "fit the graph controls at minimum sidebar width")
+        guard let title = button(in: panel.view, where: { $0.title == "Working change" }),
+              let graphRow = panel.graphView.table.view(atColumn: 0, row: panel.graphView.table.selectedRow, makeIfNecessary: true) else {
+            throw Failure("find the collapsed title and the selected graph row")
+        }
+        try expect(title.cell?.usesSingleLineMode == true && title.bounds.height <= 24 && title.image != nil,
+                   "make the compact change title a one-line description action")
+        let graphLabels = graphRow.subviews.flatMap { child in
+            [child as? NSTextField].compactMap { $0 } + child.subviews.compactMap { $0 as? NSTextField }
+        }
+        try expect(graphLabels.count == 3 && graphLabels.allSatisfy { $0.cell?.usesSingleLineMode == true && $0.maximumNumberOfLines == 1 },
+                   "keep the graph subject, change ID, and long bookmark on two lines")
         graph.performClick(nil)
         document.window.layoutIfNeeded()
         try expect(panel.graphView.view.isHiddenOrHasHiddenAncestor && !panel.fileTree.view.isHiddenOrHasHiddenAncestor,
