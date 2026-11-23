@@ -116,6 +116,11 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         if isAgentCheck {
             Task { @MainActor in
                 do {
+                    let arguments = CommandLine.arguments.dropFirst(2)
+                    if arguments.first == "--only" {
+                        try await checkOnly(arguments.dropFirst(), in: initial)
+                        exit(EXIT_SUCCESS)
+                    }
                     try EditorCheck.run(in: initial.window, editor: initial.editor, scrollView: initial.scrollView)
                     // The text editor check uses its own undo grouping and sample text.
                     initial.window.close()
@@ -130,11 +135,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try await OccurrenceCheck.run(in: self)
                     try await FindCheck.run(in: self)
                     try await FocusCheck.run(in: self)
-                    try checkWindow(sample.window, screenshot: CommandLine.arguments.dropFirst(2).first)
+                    try checkWindow(sample.window, screenshot: arguments.first)
                     try MultiCaretCheck.runComposition(in: sample.editor)
-                    try await EditorCheck.checkViewportResize(in: makeDocument())
-                    try await EditorCheck.checkCurrentLinePaint(in: makeDocument())
-                    try await EditorCheck.checkScrolledZoom(in: makeDocument())
+                    try await checkEditorViewport()
                     receivedInitialSession = true
                     let folderWindow = try await FolderCheck.run(in: self)
                     try checkWindow(folderWindow, screenshot: nil)
@@ -956,6 +959,36 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         app.helpMenu = help
     }
 
+    private func checkOnly(_ arguments: ArraySlice<String>, in document: DocumentWindow) async throws {
+        guard let scope = arguments.first, arguments.count <= 2 else { throw CheckError.unknownScope }
+        let screenshot = arguments.dropFirst().first
+        switch scope {
+        case "editor":
+            try EditorCheck.run(in: document.window, editor: document.editor, scrollView: document.scrollView)
+            try checkWindow(document.window, screenshot: screenshot)
+            try MultiCaretCheck.runComposition(in: document.editor)
+            document.window.close()
+            try await checkEditorViewport()
+        case "inline-diff":
+            if let screenshot {
+                try JJInlineDiffCheck.run(in: document) { view in
+                    try self.captureCheckView(view, screenshot: screenshot)
+                }
+            } else {
+                try JJInlineDiffCheck.run(in: document)
+            }
+        default:
+            throw CheckError.unknownScope
+        }
+        print("Edit passed its native \(scope) checks without activation.")
+    }
+
+    private func checkEditorViewport() async throws {
+        try await EditorCheck.checkViewportResize(in: makeDocument())
+        try await EditorCheck.checkCurrentLinePaint(in: makeDocument())
+        try await EditorCheck.checkScrolledZoom(in: makeDocument())
+    }
+
     private func checkJJ() async throws {
         try JJEditorCheck.run(in: makeDocument())
         try JJInlineDiffCheck.run(in: makeDocument())
@@ -976,11 +1009,15 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         }
 
         window.layoutIfNeeded()
-        let bounds = frameView.bounds
-        guard let bitmap = frameView.bitmapImageRepForCachingDisplay(in: bounds) else {
+        try captureCheckView(frameView, screenshot: screenshot)
+    }
+
+    private func captureCheckView(_ view: NSView, screenshot: String?) throws {
+        let bounds = view.bounds
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: bounds) else {
             throw CheckError.unrenderableWindow
         }
-        frameView.cacheDisplay(in: bounds, to: bitmap)
+        view.cacheDisplay(in: bounds, to: bitmap)
         if let screenshot {
             guard let png = bitmap.representation(using: .png, properties: [:]) else {
                 throw CheckError.unrenderableWindow
@@ -990,11 +1027,14 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     private enum CheckError: LocalizedError {
+        case unknownScope
         case unexpectedWindow
         case unrenderableWindow
 
         var errorDescription: String? {
             switch self {
+            case .unknownScope:
+                "Expected an editor or inline-diff check scope."
             case .unexpectedWindow:
                 "Expected a hidden, non-activating window."
             case .unrenderableWindow:

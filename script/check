@@ -1,13 +1,24 @@
 #!/bin/bash
 set -euo pipefail
-if (( $# > 1 )); then
-    printf 'Usage: %s [screenshot-path]\n' "$0" >&2
+usage() {
+    printf 'Usage: %s [--only editor|inline-diff] [screenshot-path]\n' "$0" >&2
     exit 2
+}
+
+agent_args=(--agent-check)
+if [[ "${1:-}" == --only ]]; then
+    case "${2:-}" in
+        editor|inline-diff) agent_args+=(--only "$2") ;;
+        *) usage ;;
+    esac
+    shift 2
 fi
+if (( $# > 1 )); then usage; fi
 
 screenshot="${1:-}"
-if [[ -n "$screenshot" && "$screenshot" != /* ]]; then
-    screenshot="$PWD/$screenshot"
+if [[ -n "$screenshot" ]]; then
+    if [[ "$screenshot" != /* ]]; then screenshot="$PWD/$screenshot"; fi
+    agent_args+=("$screenshot")
 fi
 cd "$(dirname "$0")/.."
 
@@ -16,8 +27,4 @@ agent_app="${EDIT_BUILD_DIR:-$PWD/.build}/app/debug/Edit Agent.app"
 profile="$(mktemp -d)"
 trap 'rm -rf -- "$profile"' EXIT
 export JJ_CONFIG= JJ_USER="Edit Agent" JJ_EMAIL=edit-agent@example.invalid GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
-if [[ -n "$screenshot" ]]; then
-    TMPDIR="$profile/" "$agent_app/Contents/MacOS/Edit" --agent-check "$screenshot"
-else
-    TMPDIR="$profile/" "$agent_app/Contents/MacOS/Edit" --agent-check
-fi
+TMPDIR="$profile/" "$agent_app/Contents/MacOS/Edit" "${agent_args[@]}"

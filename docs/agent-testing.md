@@ -15,6 +15,13 @@ Building or installing a replacement keeps the previous bundle on disk so macOS 
 
 Use separate fresh directories via `EDIT_BUILD_DIR` and `EDIT_SDK_CACHE_DIR` to measure a fully cold build. Setting just `EDIT_BUILD_DIR` to a fresh directory measures rebuilding the project with the existing SDK cache. Report incremental build times separately. For cold launch, measure first launch to the first usable window and record the machine, OS, and cache conditions.
 
+## Focused checks
+
+- `./script/check --only editor [screenshot-path]` checks editing, multiple carets, viewport resizing, zoom, and active-line painting. The optional PNG captures the initial editor fixture.
+- `./script/check --only inline-diff [screenshot-path]` checks the inline diff, Escape priority, sidebar geometry, and overscroll. The optional PNG captures the viewport at the final right overscroll position, or the viewport where the geometry check failed.
+
+These commands use the same hidden agent app and disposable profile as the full check. Reuse the build directory so repeated checks of the same code launch the existing bundle. On a timing-sensitive regression, capture the failing state during the focused run. Run the full suite on the final patch.
+
 ## Quiet agent checks
 
 Prefer process or model checks when a window is unnecessary. Test the real implementation through its ordinary entry points where practical. When startup, layout, or drawing requires AppKit, use a dedicated test instance and disposable data with an identity separate from the owner's app.

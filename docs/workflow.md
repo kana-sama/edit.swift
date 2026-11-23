@@ -6,6 +6,10 @@ A direct request to implement a defined change authorizes specification updates,
 
 Apply an explicitly requested, clear correction directly and check the affected scenario. Update the feature specification or shared design when the correction changes a documented decision. Review and verify the affected behavior before recording the correction. See [Correcting a feature](jj-workflow.md#correcting-a-feature).
 
+For a narrow fix, start with the failing interaction and the code that owns it. Run the smallest relevant check first. For drawing and geometry bugs, verify that the test reaches the failing state and inspect one native capture or measurement before choosing a rendering change. If a check fails, determine whether the fixture reached the intended state before revising the implementation.
+
+Reuse the checkout, build directory, and test bundle across iterations. Keep the first feedback loop to a few minutes. If two attempts leave the cause unclear, isolate the failing interaction or gather a diagnostic that distinguishes the remaining explanations before trying another implementation. See [focused checks](agent-testing.md#focused-checks).
+
 ## Feature specification
 
 Use `docs/features/<feat-id>/spec.md` for each feature. Give it a stable, descriptive directory name. Record the feature's purpose and scope, user actions and expected results, relevant states and edge cases, and checkable acceptance criteria. Keep it understandable from the repository without the chat. Describe the feature as it exists at its own revision and update the same specification when its contract changes.
@@ -34,7 +38,7 @@ If repeated attempts uncover a concrete blocker or the implementation calls for 
 
 ## Verification and completion
 
-Review the diff against the request and the specification. Choose checks for the actual change. Review text and links for documentation, exercise affected scenarios for behavior, inspect the native UI for visual changes, and measure the reported workload for performance changes. Run `./script/check` before completing a code change. Each completed revision must build, run, and satisfy the specifications it contains.
+Review the diff against the request and the specification. Choose checks for the actual change. Review text and links for documentation, exercise affected scenarios for behavior, inspect the native UI for visual changes, and measure the reported workload for performance changes. Run the focused check during iteration and the full `./script/check` on the final code before recording the change. Build the review bundle once the last code change has passed. Each completed revision must build, run, and satisfy the specifications it contains.
 
 Check the final history and current working state after any amend or squash. Verify affected descendants when rewriting a mutable ancestor. Report the changed behavior, relevant commit or change ID, checks completed, and any specific limitation that remains.
 

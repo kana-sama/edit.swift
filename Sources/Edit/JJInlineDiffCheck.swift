@@ -7,7 +7,7 @@ enum JJInlineDiffCheck {
         init(_ message: String) { errorDescription = "JJ inline diff: " + message }
     }
 
-    static func run(in document: DocumentWindow) throws {
+    static func run(in document: DocumentWindow, captureViewport: ((NSView) throws -> Void)? = nil) throws {
         guard NSApp is EditApplication else { throw Failure("launch with the shared click cursor handler") }
         let window = document.window
         let editor = document.editor
@@ -267,7 +267,13 @@ enum JJInlineDiffCheck {
         try checkMouseNavigation(in: document, controller: controller)
         try checkMixedSelection(in: document, controller: controller, undo: undo)
         try checkWholeFileDeletion(in: document, controller: controller)
-        try checkSidebarGeometry(in: document, controller: controller)
+        do {
+            try checkSidebarGeometry(in: document, controller: controller)
+        } catch {
+            try? captureViewport?(scroll)
+            throw error
+        }
+        try captureViewport?(scroll)
     }
 
     private static func checkWholeFileDeletion(in document: DocumentWindow, controller: JJInlineDiff) throws {
