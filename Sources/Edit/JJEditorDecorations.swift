@@ -76,10 +76,12 @@ final class JJEditorDecorations {
         let clip = scroll.contentView.frame
         let exposedOrigin = editor.convert(scroll.visibleContentOrigin, to: scroll)
         let gutterFrame = NSRect(x: max(clip.minX, exposedOrigin.x), y: clip.minY, width: 7, height: clip.height)
-        if gutter.superview !== scroll {
-            scroll.addSubview(gutter, positioned: .above, relativeTo: scroll.contentView)
+        // Compose the gutter with the text so both pass under the same native titlebar material.
+        if gutter.superview !== editor {
+            editor.addSubview(gutter, positioned: .above, relativeTo: nil)
         }
-        if gutter.frame != gutterFrame { gutter.frame = gutterFrame }
+        let gutterInEditor = editor.convert(gutterFrame, from: scroll)
+        if gutter.frame != gutterInEditor { gutter.frame = gutterInEditor }
         gutter.needsDisplay = true
 
         let scroller = scroll.verticalScroller

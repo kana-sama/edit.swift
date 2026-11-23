@@ -112,6 +112,49 @@ enum JJEditorCheck {
         guard try gutterPixel() == painted else { throw Failure("keep the gutter painted before a new diff arrives") }
 
         try checkTrackAfterResize(in: document)
+        try checkGutterUnderTitlebar(in: document)
+    }
+
+    private static func checkGutterUnderTitlebar(in document: DocumentWindow) throws {
+        let window = document.window
+        let editor = document.editor
+        let scroll = document.scrollView
+        let row = String(repeating: "long test line ", count: 24) + "\n"
+        let starts = (0..<80).map { $0 * row.utf16.count }
+        let marker = JJLineMark(kind: .replacement, lines: 0..<6)
+        editor.string = String(repeating: row, count: starts.count)
+        window.layoutIfNeeded()
+        scroll.scrollToVisibleContentOrigin(.zero)
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        guard let splitLine = editor.lineBounds(at: starts[3]) else {
+            throw Failure("lay out a changed range that can scroll under the titlebar")
+        }
+
+        let gutterX = scroll.safeAreaRect.minX + 3
+        for horizontalOffset: CGFloat in [0, 55] {
+            editor.setJJLineMarks([])
+            scroll.scrollToVisibleContentOrigin(NSPoint(x: horizontalOffset, y: splitLine.minY))
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            guard let covered = editor.lineBounds(at: starts[2]), let exposed = editor.lineBounds(at: starts[4]),
+                  abs(scroll.visibleContentOrigin.x - horizontalOffset) < 1 else {
+                throw Failure("scroll a changed range with the sidebars open")
+            }
+            let titlebarBottom = window.contentLayoutRect.maxY
+            guard editor.convert(covered, to: nil).midY > titlebarBottom,
+                  editor.convert(exposed, to: nil).midY < titlebarBottom else {
+                throw Failure("straddle the titlebar edge with the marked text")
+            }
+            let documentX = editor.convert(NSPoint(x: gutterX, y: 0), from: scroll).x
+            let samples = [covered, exposed].map { NSRect(x: documentX, y: $0.midY, width: 1, height: 1) }
+            let barePixels = try samples.map { try capture(editor, in: $0).colorAt(x: 0, y: 0) }
+            editor.setJJLineMarks([marker], lineStarts: starts)
+            for (sample, barePixel) in zip(samples, barePixels) {
+                guard let barePixel, let painted = try capture(editor, in: sample).colorAt(x: 0, y: 0),
+                      painted != barePixel else {
+                    throw Failure("paint the same document gutter above and below the titlebar edge")
+                }
+            }
+        }
     }
 
     private static func checkTrackAfterResize(in document: DocumentWindow) throws {
