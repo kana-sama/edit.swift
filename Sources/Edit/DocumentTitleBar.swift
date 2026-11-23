@@ -17,8 +17,8 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     private weak var languageIcon: TitleBarIcon?
     private weak var folderItem: NSToolbarItem?
     private weak var fileItem: NSToolbarItem?
-    private weak var folderWidthLimit: NSLayoutConstraint?
-    private weak var fileWidthLimit: NSLayoutConstraint?
+    private weak var folderWidth: NSLayoutConstraint?
+    private weak var fileWidth: NSLayoutConstraint?
     private let fullScreenDividers = TitleBarDividers(frame: .zero)
     private var isFullScreen = false
     private var siblingRequest: Task<Void, Never>?
@@ -98,7 +98,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         if identifier == Self.folderItemIdentifier {
             item.label = "Folder"
             let label = makeLabel()
-            folderWidthLimit = constrainWidth(of: label, to: 160)
+            folderWidth = constrainWidth(of: label)
             folderLabel = label
             folderItem = item
             let title = NSStackView(views: [label])
@@ -111,7 +111,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             item.label = "File"
             item.visibilityPriority = .high
             let label = makeLabel()
-            fileWidthLimit = constrainWidth(of: label, to: document.window.frame.width)
+            fileWidth = constrainWidth(of: label)
             let icon = TitleBarIcon()
             icon.imageScaling = .scaleProportionallyDown
             icon.setAccessibilityLabel("Change Language Mode")
@@ -148,10 +148,10 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         return label
     }
 
-    private func constrainWidth(of label: NSTextField, to maximum: CGFloat) -> NSLayoutConstraint {
-        let limit = label.widthAnchor.constraint(lessThanOrEqualToConstant: maximum)
-        limit.isActive = true
-        return limit
+    private func constrainWidth(of label: NSTextField) -> NSLayoutConstraint {
+        let width = label.widthAnchor.constraint(equalToConstant: 0)
+        width.isActive = true
+        return width
     }
 
     func resize() {
@@ -219,11 +219,11 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         let controls = zoom.map { $0.convert($0.bounds, to: nil).maxX + 8 } ?? 84
         // Keep the icon and a compact file name inside the editor pane as the divider moves.
         let width = max(0, floor(exposed.maxX - max(exposed.minX, controls) - 40))
-        let folder = document.folderURL == nil ? 0 : min(160, width * 0.4)
-        let folderUsed = min(folderLabel?.intrinsicContentSize.width ?? 0, folder)
-        let file = max(0, width - folderUsed)
-        if folderWidthLimit?.constant != folder { folderWidthLimit?.constant = folder }
-        if fileWidthLimit?.constant != file { fileWidthLimit?.constant = file }
+        // Explicit widths let the toolbar grow the labels again after compressing them.
+        let folder = document.folderURL == nil ? 0 : min(folderLabel?.intrinsicContentSize.width ?? 0, 160, width * 0.4)
+        let file = min(fileLabel?.intrinsicContentSize.width ?? 0, width - folder)
+        if folderWidth?.constant != folder { folderWidth?.constant = folder }
+        if fileWidth?.constant != file { fileWidth?.constant = file }
     }
 
     func update() {

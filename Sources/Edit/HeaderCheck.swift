@@ -168,14 +168,14 @@ enum HeaderCheck {
 
     private static func checkFileTitleWidth(in app: Edit, folder: URL) async throws {
         let short = folder.appending(path: "build.zig")
-        let longer = folder.appending(path: "build.zig.zon")
+        let longer = folder.appending(path: "windows_tests.zig")
         let wide = folder.appending(path: "project-configuration-for-a-wide-editor.zig.zon")
         for url in [short, longer, wide] { try Data("Sample\n".utf8).write(to: url) }
 
         let document = app.makeDocument()
         let window = document.window
         defer { window.close() }
-        window.setFrame(NSRect(x: -10_000, y: -10_000, width: 1186, height: 630), display: false)
+        window.setFrame(NSRect(x: -10_000, y: -10_000, width: 1072, height: 630), display: false)
         _ = try await app.openFile(folder, in: document)
         _ = try await app.openFile(short, in: document)
         document.toggleSidebarFocus(.worktree)
@@ -189,9 +189,12 @@ enum HeaderCheck {
               let leading = split.arrangedSubviews.first, let terminal = split.arrangedSubviews.last else {
             throw Failure("put the file title between Worktree and the terminal sidebar")
         }
+        let divider = split.arrangedSubviews.count - 2
+        split.setPosition(219, ofDividerAt: 0)
+        split.setPosition(636, ofDividerAt: divider)
+        window.layoutIfNeeded()
         let leadingEdge = split.convert(leading.bounds, from: leading).maxX
         let terminalDivider = split.convert(terminal.bounds, from: terminal).minX - split.dividerThickness
-        let divider = split.arrangedSubviews.count - 2
 
         func expectTitle(_ url: URL, fits: Bool) throws {
             window.layoutIfNeeded()
@@ -209,13 +212,21 @@ enum HeaderCheck {
             _ = try await app.openFile(url, in: document)
             try expectTitle(url, fits: true)
         }
-        split.setPosition(leadingEdge + 200, ofDividerAt: divider)
+        split.setPosition(leadingEdge + 270, ofDividerAt: divider)
         try expectTitle(wide, fits: false)
         _ = try await app.openFile(longer, in: document)
         split.setPosition(terminalDivider, ofDividerAt: divider)
         try expectTitle(longer, fits: true)
         _ = try await app.openFile(wide, in: document)
         try expectTitle(wide, fits: true)
+
+        // Resize in both directions with the same file open, without flushing the toolbar between moves.
+        _ = try await app.openFile(longer, in: document)
+        split.setPosition(leadingEdge + 170, ofDividerAt: divider)
+        try expect(split.convert(terminal.bounds, from: terminal).minX < terminalDivider - 100,
+                   "widen the terminal enough to compress the editor title")
+        split.setPosition(terminalDivider, ofDividerAt: divider)
+        try expectTitle(longer, fits: true)
     }
 
     private static func checkDetachedToolbar(in document: DocumentWindow, app: Edit) async throws {
