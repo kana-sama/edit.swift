@@ -130,6 +130,7 @@ enum FilesCheck {
         try checkSaveMetadata(in: directory)
         try await checkAutosaveAndNewBuffer(in: app, directory: directory)
         try await checkRememberedPosition(in: app, directory: directory)
+        try await checkInterruptedDrafts(in: app, directory: directory)
 
         let preview = directory.appendingPathComponent("Meeting Notes.txt")
         let sampleText = "Meeting notes\n\nTuesday\n    Review the new editor\n    Bring a sample project\n"
@@ -148,6 +149,39 @@ enum FilesCheck {
         sample.editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         sample.editor.refreshCurrentLine()
         return sample
+    }
+
+    private static func checkInterruptedDrafts(in app: Edit, directory: URL) async throws {
+        let first = app.makeDocument()
+        let second = app.makeDocument()
+        defer { first.window.close() }
+        first.editor.insertText("Old draft", replacementRange: NSRange(location: 0, length: 0))
+        second.editor.insertText("Independent draft", replacementRange: NSRange(location: 0, length: 0))
+        let saved = EditorSession(documents: [first.sessionDocument(), second.sessionDocument()], activeIndex: 0, lastWindow: nil)
+        let firstID = try resolve(saved.documents[0].draftRecovery?.id)
+        let secondID = try resolve(saved.documents[1].draftRecovery?.id)
+        first.editor.insertText(" updated", replacementRange: NSRange(location: 9, length: 0))
+
+        let deadline = ContinuousClock.now + .seconds(3)
+        var entries: [DraftCheckpoint] = []
+        repeat {
+            entries = try await app.draftRecovery.read().checkpoints.filter { [firstID, secondID].contains($0.revision.id) }
+            if entries.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        } while ContinuousClock.now < deadline
+        let recovered = EditorSession.recovering(entries, into: saved)
+        try expect(entries.count == 2 && recovered?.documents.map(\.draft) == ["Old draft updated", "Independent draft"],
+                   "recover the latest checkpoint next to the other untitled draft without duplicating either")
+        try expect(EditorSession.recovering(entries, into: nil)?.documents.count == 2,
+                   "recover both untitled drafts even when the regular session is missing")
+
+        let target = directory.appending(path: "Saved recovery draft.txt")
+        let savedDraft = await first.save(to: target)
+        second.window.close()
+        let retired = try await app.draftRecovery.read().checkpoints.filter { [firstID, secondID].contains($0.revision.id) }
+        try expect(savedDraft && retired.count == 2 && retired.allSatisfy { $0.text == nil } &&
+                   EditorSession.recovering(retired, into: saved)?.documents.isEmpty == true,
+                   "saving and discarding retire their copies from both the journal and the previous session")
     }
 
     private static func checkReopeningClosedFiles(in app: Edit, directory: URL) async throws {

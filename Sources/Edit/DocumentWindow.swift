@@ -182,6 +182,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var queuedAutosave: AutosaveRequest?
     private var writingGeneration: UInt?
     private var autosaveFailure: (generation: UInt, detail: String, reported: Bool)?
+    private var draftRecoveryRevision: DraftRecoveryRevision?
+    var draftRecoveryID: UUID? { draftRecoveryRevision?.id }
+    private var draftCheckpoint: Task<Void, Never>?
+    private var showedDraftRecoveryError = false
     private var syntaxHighlighting: SyntaxHighlighting?
     private(set) lazy var sidebar = DocumentSidebar(document: self, app: app)
     var findSettings = FindSettings() {
@@ -770,6 +774,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         manualSyntaxLanguage = record.syntaxLanguage.flatMap(SyntaxLanguage.init(rawValue:))
             ?? app.syntaxOverrides.language(for: fileURL)
         installText(text)
+        if fileURL == nil {
+            draftRecoveryRevision = record.draftRecovery
+            scheduleDraftCheckpoint()
+        }
     }
 
     func sessionDocument() -> SessionDocument {
@@ -788,7 +796,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             worktreeShowsHidden: sidebar.worktreeShowsHidden ? true : nil,
             isFilePreview: isShowingFilePreview ? true : nil,
             showsEmptyFolder: folderURL != nil && displayedFileURL == nil ? showsEmptyFolder : nil,
-            terminal: terminalSessionState()
+            terminal: terminalSessionState(),
+            draftRecovery: draftRecoveryRevision
         )
     }
 
@@ -939,6 +948,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func adoptSavedFile(_ file: FileBuffer, scratch: ScratchFile? = nil) {
         let changedPath = fileURL != file.url
+        if changedPath { discardDraftCheckpoint() }
         if changedPath { rememberFilePosition() }
         let previousLanguage = resolvedSyntaxLanguage
         updateIdentity(from: file)
@@ -1164,6 +1174,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private func textDidChange() {
         editGeneration &+= 1
         updateEditedState()
+        scheduleDraftCheckpoint()
         scheduleIdleAutosave()
         refreshSyntax(immediate: false)
         jjDocumentChanges?.bufferChanged()
@@ -1432,6 +1443,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        if !app.isQuitting { discardDraftCheckpoint() }
         closeTerminalSessions()
         jjDocumentChanges?.stop()
         rememberFilePosition()
@@ -1483,6 +1495,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private func installText(
         _ text: String, preparedSyntax: SyntaxSnapshot? = nil, revealInWorktree: Bool = true
     ) {
+        discardDraftCheckpoint()
         editor.exitFocus(notify: false)
         editor.preferredLineEnding = format.lineEnding
         editor.resetMultiCarets()
@@ -1549,6 +1562,44 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         let isEdited = savedText.map { !(editor.textStorage?.mutableString.isEqual($0) ?? false) } ?? true
         if isEdited != window.isDocumentEdited {
             window.isDocumentEdited = isEdited
+        }
+    }
+
+    private func scheduleDraftCheckpoint() {
+        guard !app.isQuitting, !editor.hasMarkedText() else { return }
+        guard hasTextDocument, fileURL == nil, window.isDocumentEdited else {
+            discardDraftCheckpoint()
+            return
+        }
+        let previous = draftRecoveryRevision
+        draftRecoveryRevision = DraftRecoveryRevision(id: previous?.id ?? UUID(), version: (previous?.version ?? 0) + 1)
+        guard draftCheckpoint == nil else { return }
+        // Start the interval with the first edit so continuous typing is checkpointed too.
+        draftCheckpoint = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+            guard let self else { return }
+            draftCheckpoint = nil
+            guard !app.isQuitting, !editor.hasMarkedText(), let revision = draftRecoveryRevision else { return }
+            writeDraftCheckpoint(DraftCheckpoint(revision: revision, text: editor.string,
+                                                 folderPath: folderURL?.path, placement: placement))
+        }
+    }
+
+    private func discardDraftCheckpoint() {
+        draftCheckpoint?.cancel()
+        draftCheckpoint = nil
+        guard let previous = draftRecoveryRevision else { return }
+        draftRecoveryRevision = nil
+        // This also retires the same draft from the last saved session after an interrupted run.
+        let revision = DraftRecoveryRevision(id: previous.id, version: previous.version + 1)
+        writeDraftCheckpoint(DraftCheckpoint(revision: revision, text: nil))
+    }
+
+    private func writeDraftCheckpoint(_ checkpoint: DraftCheckpoint) {
+        app.draftRecovery.write(checkpoint) { [weak self] detail in
+            guard let self, !showedDraftRecoveryError, !app.isQuitting, window.isVisible, window.attachedSheet == nil else { return }
+            showedDraftRecoveryError = true
+            Task { await showError("Could Not Update Draft Recovery", detail: detail) }
         }
     }
 }

@@ -55,6 +55,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     let isAgentCheck = CommandLine.arguments.dropFirst().first == "--agent-check"
     private lazy var sessionStore = SessionStore.application()
+    lazy var draftRecovery = DraftRecoveryStore(directory: storageFolder.appending(path: "DraftRecovery", directoryHint: .isDirectory))
     lazy var syntaxOverrides = SyntaxLanguageOverrides(defaults: isAgentCheck ? nil : .standard)
     private weak var recentMenu: NSMenu?
     private var controlPanel: ControlPanel?
@@ -174,15 +175,31 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             await recentFiles.load()
             Task { await recentFiles.prune() }
             let store = sessionStore
+            var saved: EditorSession?
             do {
-                if let previous = try await Task.detached(operation: { try store.read() }).value {
-                    await restore(previous, reusing: initial)
-                }
+                saved = try await Task.detached(operation: { try store.read() }).value
             } catch {
                 sessionReadFailed = true
                 if !isQuitting {
                     Task { await activeDocument?.showError("Could Not Restore Session", detail: error.localizedDescription) }
                 }
+            }
+            var checkpoints: [DraftCheckpoint] = []
+            var recoveryError: String?
+            do {
+                let result = try await draftRecovery.read()
+                checkpoints = result.checkpoints
+                if result.unreadable > 0 { recoveryError = "Some draft recovery files could not be read." }
+            } catch {
+                recoveryError = error.localizedDescription
+            }
+            let activeDraftIDs = Set(documents.compactMap(\.draftRecoveryID))
+            checkpoints.removeAll { activeDraftIDs.contains($0.revision.id) }
+            if let previous = EditorSession.recovering(checkpoints, into: saved) {
+                await restore(previous, reusing: initial)
+            }
+            if let recoveryError, !isQuitting {
+                Task { await activeDocument?.showError("Could Not Recover Some Drafts", detail: recoveryError) }
             }
             startup = nil
             receivedInitialSession = true
@@ -566,6 +583,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     }
                     try store.write(session)
                 }.value
+                await draftRecovery.removeSaved(in: session)
                 if sender.isActive, let document = activeDocument {
                     let failures = documents.compactMap { $0.takeAutosaveFailure() }
                     if !failures.isEmpty {

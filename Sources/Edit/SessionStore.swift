@@ -96,6 +96,7 @@ struct SessionDocument: Codable, Sendable {
     var isFilePreview: Bool? = nil
     var showsEmptyFolder: Bool? = nil
     var terminal: DocumentTerminalState? = nil
+    var draftRecovery: DraftRecoveryRevision? = nil
 }
 
 struct EditorSession: Codable, Sendable {
@@ -125,11 +126,14 @@ struct SessionStore: Sendable {
     }
 
     func write(_ session: EditorSession) throws {
-        let data = try JSONEncoder().encode(session)
+        try Self.writePrivate(JSONEncoder().encode(session), to: url)
+    }
+
+    static func writePrivate(_ data: Data, to url: URL) throws {
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let temporary = directory.appendingPathComponent(".edit-session-\(UUID().uuidString)")
-        // Create the replacement privately from the start, since the document can include terminal output.
+        // Drafts and terminal output can contain private text.
         let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
         guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { try? FileManager.default.removeItem(at: temporary) }
