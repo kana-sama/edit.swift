@@ -110,7 +110,7 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     private var isActive = false
     private var monitor: WorktreeMonitor?
     private var reloading = false
-    private var pendingOpen: OpenTarget?
+    private var pendingOpen: (target: OpenTarget, focusSelectionRevision: UInt64?)?
     private var openingFile: Task<Void, Never>?
     private var nameEdit: NameEdit?
     private var scratchFiles: [ScratchFile] = []
@@ -160,8 +160,6 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         tree.dataSource = self
         tree.delegate = self
         tree.owner = self
-        tree.target = self
-        tree.doubleAction = #selector(activateClickedDirectory(_:))
         tree.registerForDraggedTypes([.fileURL])
         tree.setDraggingSourceOperationMask([.move, .copy], forLocal: true)
         tree.setDraggingSourceOperationMask(.copy, forLocal: false)
@@ -745,46 +743,64 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     private var selectedItems: [Item] { tree.selectedRowIndexes.compactMap { tree.item(atRow: $0) as? Item } }
 
-    func openFile(at row: Int) {
+    func openFile(at row: Int, focusContent: Bool = false) {
         guard let item = tree.item(atRow: row) as? Item, !item.isDirectory, item !== provisionalEntry else { return }
+        let target: OpenTarget
+        if let file = item.scratchFile { target = .scratch(file.id) }
+        else if let url = item.fileURL { target = .file(url) }
+        else { return }
+        if focusContent && openingFile == nil && item.id == currentRow {
+            document.focusContent()
+            return
+        }
         if mode == .scratches && !tree.selectedRowIndexes.contains(row) {
             selectRows(IndexSet(integer: row))
         }
         rowToReveal = nil
-        if let file = item.scratchFile { pendingOpen = .scratch(file.id) }
-        else if let url = item.fileURL { pendingOpen = .file(url) }
-        else { return }
+        pendingOpen = (target, focusContent ? selectionRevision : nil)
         guard openingFile == nil else { return }
         openingFile = Task { [weak self, app, document] in
             defer { self?.openingFile = nil }
-            while let self, let target = self.pendingOpen {
+            while let self, let (target, focusSelectionRevision) = self.pendingOpen {
                 self.pendingOpen = nil
+                let opened: Bool
                 switch target {
                 case .scratch(let id):
                     guard let scratch = self.scratchFiles.first(where: { $0.id == id }) else { continue }
-                    _ = await document.openScratch(scratch, focusEditor: false) {
-                        self.isActive && (self.pendingOpen == nil || self.pendingOpen == target)
+                    opened = await document.openScratch(scratch, focusEditor: false) {
+                        self.isActive && (self.pendingOpen == nil || self.pendingOpen?.target == target)
                     }
                 case .file(let url):
                     let folder = document.folderURL
-                    await app.openFiles([url], in: document, focusEditor: false) {
-                        self.isActive && self.document.folderURL == folder && (self.pendingOpen == nil || self.pendingOpen == target)
+                    opened = await app.openFiles([url], in: document, focusEditor: false) {
+                        self.isActive && document.folderURL == folder &&
+                            (self.pendingOpen == nil || self.pendingOpen?.target == target)
                     }
+                }
+                if opened && focusSelectionRevision == self.selectionRevision && self.pendingOpen == nil &&
+                    self.isActive && document.window.firstResponder === self.tree {
+                    document.focusContent()
                 }
             }
         }
     }
 
-    @objc private func activateClickedDirectory(_ sender: NSOutlineView) {
-        guard tree.isPlainPrimaryClick else { return }
-        toggleFolder(at: sender.clickedRow, animated: true)
+    func activateClickedRow(_ row: Int) {
+        if (tree.item(atRow: row) as? Item)?.isDirectory == true {
+            toggleFolder(at: row, animated: true)
+        } else {
+            openFile(at: row)
+        }
     }
 
     func activateSelection() {
-        if let item = tree.item(atRow: tree.selectedRow) as? Item, item.isDirectory {
-            toggleFolder(at: tree.selectedRow, animated: false)
+        let row = tree.selectedRow
+        if row < 0 {
+            document.focusContent()
+        } else if (tree.item(atRow: row) as? Item)?.isDirectory == true {
+            toggleFolder(at: row, animated: false)
         } else {
-            focusEditor()
+            openFile(at: row, focusContent: true)
         }
     }
 
@@ -1009,18 +1025,6 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             installScratchFiles(pendingScratchFiles, current: document.scratchFile?.id, preserving: kept)
         } else {
             reloadTree(keeping: kept)
-        }
-    }
-
-    private func focusEditor() {
-        guard let openingFile else {
-            document.focusContent()
-            return
-        }
-        Task { [weak self] in
-            await openingFile.value
-            guard let self, document.window.firstResponder === tree else { return }
-            document.focusContent()
         }
     }
 
@@ -1336,7 +1340,6 @@ private final class WorktreeOutline: NSOutlineView, NSMenuItemValidation {
     private var disclosureActions: [NSUserInterfaceItemIdentifier: Selector] = [:]
     private var pointerTrackingArea: NSTrackingArea?
     weak var owner: SidebarFileTree?
-    private(set) var isPlainPrimaryClick = false
     var didStartDrag = false
 
     override func becomeFirstResponder() -> Bool {
@@ -1361,18 +1364,19 @@ private final class WorktreeOutline: NSOutlineView, NSMenuItemValidation {
     }
 
     override func mouseDown(with event: NSEvent) {
-        isPlainPrimaryClick = event.modifierFlags.intersection([.command, .shift, .control, .option]).isEmpty
         didStartDrag = false
-        defer { isPlainPrimaryClick = false }
-        let clicked = row(at: convert(event.locationInWindow, from: nil))
+        let point = convert(event.locationInWindow, from: nil)
+        let clicked = row(at: point)
+        let disclosure = clicked >= 0 && frameOfOutlineCell(atRow: clicked).contains(point)
         super.mouseDown(with: event)
 
         // A table's action can skip already selected rows. Use the release from its native tracking.
-        guard isPlainPrimaryClick, !didStartDrag, clicked >= 0, event.clickCount == 1,
+        guard !didStartDrag, clicked >= 0, !disclosure, event.clickCount == 1,
+              event.modifierFlags.intersection([.command, .shift, .control, .option]).isEmpty,
               let release = NSApp.currentEvent, release.type == .leftMouseUp,
               release.window === window, release.timestamp >= event.timestamp,
               row(at: convert(release.locationInWindow, from: nil)) == clicked else { return }
-        owner?.openFile(at: clicked)
+        owner?.activateClickedRow(clicked)
     }
 
     override func frameOfOutlineCell(atRow row: Int) -> NSRect {

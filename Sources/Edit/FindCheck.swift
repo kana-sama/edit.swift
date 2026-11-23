@@ -25,10 +25,22 @@ enum FindCheck {
         )
         replacement.insertText("dog", replacementRange: NSRange(location: 0, length: replacement.string.utf16.count))
         table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        func previewIsVisible() -> Bool {
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            return editor.subviews.contains { !$0.isHidden && $0.accessibilityLabel()?.hasPrefix("Replace ") == true }
+        }
         await Task.yield()
-        try expect(editor.subviews.contains { !$0.isHidden && $0.accessibilityLabel()?.hasPrefix("Replace ") == true },
-                   "inline preview is visible")
+        try expect(previewIsVisible(), "inline preview is visible")
+        window.layoutIfNeeded()
+        let editorArea = editor.visibleRect
+        try click(NSPoint(x: editorArea.maxX - 40, y: editorArea.minY + 80), in: editor)
+        try expect(window.firstResponder === editor && !previewIsVisible() && table.selectedRow == 0,
+                   "clicking in the editor clears the preview and keeps the result selected")
+        let result = table.frameOfCell(atColumn: 0, row: 0)
+        try click(NSPoint(x: result.minX + 25, y: result.midY), in: table)
+        try expect(window.firstResponder === table && table.selectedRow == 0, "click keeps focus on the same result")
+        try expect(previewIsVisible(),
+                   "clicking the same result restores its replacement preview")
         try expect(editor.string == "cat cat\ncat", "preview never edits the document")
         document.performFind(.dismissSelected)
         try expect(table.numberOfRows == 2, "dismiss removes only the chosen occurrence")
@@ -693,6 +705,26 @@ enum FindCheck {
                    "the excerpt uses the available width before the action symbol (gap \(gap))")
     }
 
+    private static func click(_ point: NSPoint, in view: NSView) throws {
+        let window = try require(view.window, "click window")
+        let location = view.convert(point, to: nil)
+        func event(_ type: NSEvent.EventType) throws -> NSEvent {
+            try require(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                                         timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                         context: nil, eventNumber: 1, clickCount: 1, pressure: 1), "click event")
+        }
+        window.makeFirstResponder(view)
+        let press = try event(.leftMouseDown)
+        NSApp.postEvent(try event(.leftMouseUp), atStart: true)
+        NSApp.postEvent(press, atStart: true)
+        let down = try require(NSApp.nextEvent(matching: .leftMouseDown, until: .distantPast,
+                                              inMode: .default, dequeue: true), "queued click")
+        view.mouseDown(with: down)
+        if NSApp.currentEvent === down {
+            _ = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: true)
+        }
+    }
+
     private static func hoverEvent(_ type: NSEvent.EventType, at location: NSPoint, in window: NSWindow) throws -> NSEvent {
         try require(NSEvent.enterExitEvent(with: type, location: location, modifierFlags: [], timestamp: 0,
                                           windowNumber: window.windowNumber, context: nil,
@@ -821,18 +853,24 @@ enum FindCheck {
         try expect(viewMenu.performKeyEquivalent(with: focusScratches) && document.sidebarMode == .scratches &&
                    document.isSidebarVisible && window.firstResponder === document.scratchOutline,
                    "Shift-Command-W focuses Scratches through the View menu")
-        try expect(viewMenu.performKeyEquivalent(with: focusScratches) && document.sidebarMode == .search &&
-                   window.firstResponder === findField, "repeating Shift-Command-W restores the previous sidebar focus")
+        try expect(viewMenu.performKeyEquivalent(with: focusScratches) && document.sidebarMode == .scratches &&
+                   document.isSidebarVisible && window.firstResponder === document.editor,
+                   "repeating Shift-Command-W keeps Scratches visible and returns to the editor")
+        app.openFind(nil)
         app.toggleWorktreeSidebar(nil)
         let outline = try require(document.worktreeSidebar?.outline, "Command-Shift-E focuses Worktree")
         try expect(document.isSidebarVisible && document.sidebarMode == .worktree && window.firstResponder === outline,
                    "Command-Shift-E switches from Find to Worktree")
         app.toggleWorktreeSidebar(nil)
-        try expect(document.isSidebarVisible && document.sidebarMode == .search && window.firstResponder === findField,
-                   "repeating Command-Shift-E returns to the previously focused Search field")
+        try expect(document.isSidebarVisible && document.sidebarMode == .worktree && window.firstResponder === document.editor,
+                   "repeating Shift-Command-E keeps Worktree visible and returns to the editor")
+        app.toggleWorktreeSidebar(nil)
         app.openFind(nil)
-        try expect(document.isSidebarVisible && window.firstResponder === document.editor,
-                   "repeating Command-F after returning from Worktree restores editor focus")
+        try expect(document.sidebarMode == .search && window.firstResponder === findField,
+                   "Command-F switches from focused Worktree to Find")
+        app.openFind(nil)
+        try expect(document.isSidebarVisible && document.sidebarMode == .search && window.firstResponder === document.editor,
+                   "repeating Command-F keeps Search visible and returns to the editor")
         app.openFind(nil)
         window.layoutIfNeeded()
         let ellipsis = try sidebarMenu(in: window)

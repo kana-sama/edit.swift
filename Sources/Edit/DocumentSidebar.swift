@@ -171,8 +171,6 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     private var installed = false
     private weak var sidebarHeader: SidebarMenuItem?
     private weak var focusBeforeSidebar: NSView?
-    private weak var focusBeforeMode: NSView?
-    private var previousMode: SidebarMode?
     private(set) var rememberedMode: SidebarMode?
     private(set) var isVisible = false
     var width = SessionFindSettings.defaultWidth
@@ -224,7 +222,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         case .find:
             toggleFocus(of: .search)
         case .replace:
-            rememberFocus(entering: .search)
+            rememberFocus()
             searchPanel().openField(replace: true, reveal: revealSearch)
         case .toggleSidebar:
             if isVisible { hide() }
@@ -245,7 +243,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     private func searchPanel() -> FindSidebar {
         if let search { return search }
         let search = FindSidebar(document: document) { [weak self] in
-            self?.returnFocus(allowingModeChange: false)
+            self?.returnFocus()
         }
         self.search = search
         installContent(search.view)
@@ -269,10 +267,11 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     func toggleFocus(of mode: SidebarMode) {
         guard mode != .worktree || document.folderURL != nil else { return }
         if isVisible && self.mode == mode && focusIsInSidebar {
-            returnFocus(allowingModeChange: true)
+            focusBeforeSidebar = nil
+            returnFocus()
             return
         }
-        rememberFocus(entering: mode)
+        rememberFocus()
         switch mode {
         case .search: searchPanel().focusSearch(reveal: revealSearch)
         case .worktree: showWorktree()
@@ -280,40 +279,13 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         }
     }
 
-    private func rememberFocus(entering mode: SidebarMode) {
-        let responder = document.window.firstResponder as? NSView
-        if focusIsInSidebar {
-            if self.mode != mode {
-                focusBeforeMode = responder
-                previousMode = self.mode
-            }
-        } else {
-            focusBeforeSidebar = responder
-            focusBeforeMode = nil
-            previousMode = nil
-        }
+    private func rememberFocus() {
+        if !focusIsInSidebar { focusBeforeSidebar = document.window.firstResponder as? NSView }
     }
 
-    private func returnFocus(allowingModeChange: Bool) {
+    private func returnFocus() {
         let window = document.window
-        let priorMode = previousMode
-        let priorView = focusBeforeMode
-        previousMode = nil
-        focusBeforeMode = nil
         search?.clearTransientFocus()
-
-        if allowingModeChange, let priorMode, let priorView,
-           priorMode != .worktree || document.folderURL != nil {
-            switch priorMode {
-            case .search: showSearch()
-            case .worktree: showWorktree(focus: false)
-            case .scratches: showScratches(focus: false)
-            }
-            if priorView.window === window && !priorView.isHiddenOrHasHiddenAncestor && window.makeFirstResponder(priorView) {
-                search?.refreshDecorations()
-                return
-            }
-        }
         let responder = focusBeforeSidebar
         focusBeforeSidebar = nil
         if let responder, responder.window === window, !responder.isHiddenOrHasHiddenAncestor,
@@ -522,7 +494,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         scratches?.setActive(scratchesVisible)
         if !isVisible {
             search?.clearTransientFocus()
-            if focusIsInSidebar { returnFocus(allowingModeChange: false) }
+            if focusIsInSidebar { returnFocus() }
         }
         search?.refreshDecorations()
     }
@@ -556,7 +528,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
 
     private func hide() {
         guard installed && isVisible else { return }
-        if focusIsInSidebar { returnFocus(allowingModeChange: false) }
+        if focusIsInSidebar { returnFocus() }
         setVisible(false)
         worktree?.setActive(false)
         scratches?.setActive(false)
@@ -590,18 +562,18 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     }
 
     @objc private func selectSearchSidebar(_ sender: Any?) {
-        rememberFocus(entering: .search)
+        rememberFocus()
         document.requestAutosave()
         showSearch(focusingQuery: true)
     }
 
     @objc private func selectWorktreeSidebar(_ sender: Any?) {
-        rememberFocus(entering: .worktree)
+        rememberFocus()
         showWorktree()
     }
 
     @objc private func selectScratchSidebar(_ sender: Any?) {
-        rememberFocus(entering: .scratches)
+        rememberFocus()
         showScratches()
     }
 

@@ -731,25 +731,29 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         }
     }
 
+    @discardableResult
     func openFiles(
         _ urls: [URL], allowMissing: Bool = false, in sourceDocument: DocumentWindow? = nil,
         focusEditor: Bool = true, shouldOpen: @escaping () -> Bool = { true }
-    ) async {
-        guard !urls.isEmpty, let request = beginOpening(in: sourceDocument, while: shouldOpen) else { return }
+    ) async -> Bool {
+        guard !urls.isEmpty, let request = beginOpening(in: sourceDocument, while: shouldOpen) else { return false }
         let document = request.document
+        var allOpened = true
         for url in urls {
             do {
                 guard try await openFile(url, allowMissing: allowMissing, request: request, focusEditor: focusEditor) != nil
-                else { break }
+                else { return false }
             } catch is CancellationError {
-                break
+                return false
             } catch {
+                allOpened = false
                 await recentFiles.removeIfMissing(url)
                 if !isAgentCheck && isCurrent(request, at: url) && document.canReplaceBuffer {
                     await document.showError("Could Not Open “\(url.lastPathComponent)”", detail: error.localizedDescription)
                 }
             }
         }
+        return allOpened
     }
 
     @discardableResult

@@ -104,6 +104,12 @@ enum WorktreeCheck {
         try expect(!tree.isItemExpanded(folder) && document.window.firstResponder === tree &&
                    document.fileURL?.lastPathComponent == "README.md",
                    "Space collapses the folder and preserves the open file")
+        try click(sources, in: tree)
+        try await waitFor("a single folder row click expands and keeps tree focus") {
+            tree.isItemExpanded(folder) && document.window.firstResponder === tree
+        }
+        try click(sources, in: tree)
+        try await waitFor("a second single click collapses the selected folder") { !tree.isItemExpanded(folder) }
 
         try click(log, in: tree, modifiers: [.command])
         try expect(tree.selectedRowIndexes.contains(log), "Command-click selects the file")
@@ -148,6 +154,14 @@ enum WorktreeCheck {
         try await waitFor("Space waits for the selected file and moves focus there without typing") {
             document.fileURL?.lastPathComponent == "README.md" && document.window.firstResponder === document.editor &&
                 document.editor.string == "Sample\n"
+        }
+        tree.deselectAll(nil)
+        try click(log, in: tree, modifiers: .command)
+        try expect(tree.selectedRow == log && document.fileURL?.lastPathComponent == "README.md",
+                   "selecting another file with Command-click leaves the old buffer open")
+        try press(" ", code: 49, in: tree)
+        try await waitFor("Space opens a selected file without a pending open") {
+            document.fileURL?.lastPathComponent == "Build.log" && document.window.firstResponder === document.editor
         }
 
         guard let sourceMenu = sidebar.menu(at: sources) else { throw Failure("a folder has a contextual menu") }
@@ -786,7 +800,7 @@ enum WorktreeCheck {
 
         try await waitFor("render the collapsed rows") { abs((displayedY() ?? -1) - collapsedY) < 0.5 }
         sampleDisclosureCursor()
-        try clickChevron()
+        try click(0, in: tree)
         try await waitFor("the first mouse expansion slides the children and sibling together") {
             sampleDisclosureCursor()
             return tree.isItemExpanded(item) && childrenMoveWithSibling(tree.rowView(atRow: childCount, makeIfNecessary: false))

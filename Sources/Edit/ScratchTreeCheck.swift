@@ -81,6 +81,15 @@ enum ScratchTreeCheck {
         try expect(categoryMenu.item(withTitle: "New File…") != nil && categoryMenu.item(withTitle: "New Folder…") == nil,
                    "the category permits new scratches and omits folder creation")
 
+        tree.selectRowIndexes(IndexSet(integer: gamma), byExtendingSelection: false)
+        let space = try require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                 windowNumber: window.window.windowNumber, context: nil, characters: " ",
+                                                 charactersIgnoringModifiers: " ", isARepeat: false, keyCode: 49),
+                                "the Scratches Space event is available")
+        tree.keyDown(with: space)
+        try await waitFor("Space opens the selected scratch and focuses its buffer") {
+            window.scratchFile?.id == members[2].id && window.window.firstResponder === window.editor
+        }
         try click(beta, in: tree)
         try await waitFor("opening a different scratch changes the active document") { window.scratchFile?.id == members[1].id }
         tree.collapseItem(sourceItem)

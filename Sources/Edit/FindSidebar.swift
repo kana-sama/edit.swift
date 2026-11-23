@@ -340,6 +340,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         results.delegate = self
         results.target = self
         results.doubleAction = #selector(openClickedResult(_:))
+        results.onClickSelectedRow = { [weak self] row in
+            guard let self, settings.showsReplacement, !previewRequested else { return }
+            selectRow(row, reveal: true, preview: true)
+        }
         results.onReturn = { [weak self] in self?.activateResult() }
         results.onSpace = { [weak self] in
             guard let self, let selected else { return }
