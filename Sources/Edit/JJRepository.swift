@@ -1,6 +1,4 @@
-import Darwin
 import Foundation
-import Synchronization
 
 enum JJPathStatus: Equatable, Sendable {
     case added, modified, removed, conflict
@@ -49,12 +47,8 @@ private struct JJChangedEntry: Equatable, Sendable {
 
 enum JJRepository {
     private enum Failure: Error {
-        case unavailable, invalidResponse, staleWorkspace, timedOut, outputTooLarge
+        case unavailable, invalidResponse, staleWorkspace
         case command(String)
-    }
-
-    private final class CommandCancellation: Sendable {
-        let cancelled = Mutex(false)
     }
 
     private static let processQueue = DispatchQueue(label: "Edit.Jujutsu", qos: .utility, attributes: .concurrent)
@@ -90,17 +84,16 @@ enum JJRepository {
               fields.dropFirst(2).allSatisfy(isRelativePath) else { throw Failure.invalidResponse }
         let commitID = fields[0]
         let normalizesCRLF = fields[1] == "input" || fields[1] == "input-output"
-        try await requireCurrentWorkingCopy(workspace, operationID: operationID, commitID: commitID)
-
-        let output = try await readCommand(
+        async let diff = readCommand(
             ["diff", "-r", "@", "-T", template([
                 "status", "path", "source.path()", kind("source"), kind("target"),
                 #"if(source.file_type() == "file" && target.file_type() == "file", source.executable() != target.executable(), false)"#,
             ])], in: workspace, at: operationID
         )
+        try await requireCurrentWorkingCopy(workspace, operationID: operationID, commitID: commitID)
         var changes: [String: JJChange] = [:]
         var entries: [String: JJChangedEntry] = [:]
-        for row in try records(in: output, width: 6) {
+        for row in try await records(in: diff, width: 6) {
             let path = row[1]
             guard isRelativePath(path), isRelativePath(row[2]),
                   let source = JJEntryKind(rawValue: row[3]), let target = JJEntryKind(rawValue: row[4]) else {
@@ -122,7 +115,6 @@ enum JJRepository {
             entries[path] = JJChangedEntry(source: source, target: target)
         }
 
-        guard try await operation(in: workspace) == operationID else { throw Failure.staleWorkspace }
         return JJRepositoryState(workspace: workspace, operationID: operationID, commitID: commitID,
                                  changes: changes, conflicts: Set(fields.dropFirst(2)), entries: entries,
                                  normalizesCRLF: normalizesCRLF)
@@ -151,17 +143,15 @@ enum JJRepository {
             source = kind
             target = kind
         }
-        let recorded: Data?
-        if target == .file || target == .conflict {
-            recorded = try await readCommand(
-                ["file", "show", "-r", "@", fileset], in: workspace, at: pin, limit: fileLimit
-            )
-        } else {
-            recorded = nil
-        }
+        // A tracked modification can compare its parent directly with the editor buffer.
+        // Keep the recorded text for conflicts, unchanged paths, and EOL detection.
+        let needsRecorded = target == .conflict || (target == .file && (changed == nil || state.normalizesCRLF))
+        async let recorded: Data? = needsRecorded ? readCommand(
+            ["file", "show", "-r", "@", fileset], in: workspace, at: pin, limit: fileLimit
+        ) : nil
         let base: Data?
         if changed == nil {
-            base = source == .file ? recorded : nil
+            base = source == .file ? try await recorded : nil
         } else if source == .file {
             // A one-file native diff materializes the merged parent on the left.
             // Passing a fixed program and arguments avoids user diff tools and shell interpolation.
@@ -175,8 +165,9 @@ enum JJRepository {
             base = nil
         }
         // jj skips EOL conversion for blobs containing NUL, including encoded text such as UTF-16.
-        let normalizeCRLF = state.normalizesCRLF && base?.contains(0) != true && recorded?.contains(0) != true
-        return JJFileComparison(base: base.flatMap(fileText), recorded: recorded.flatMap(fileText),
+        let recordedText = try await recorded
+        let normalizeCRLF = state.normalizesCRLF && base?.contains(0) != true && recordedText?.contains(0) != true
+        return JJFileComparison(base: base.flatMap(fileText), recorded: recordedText.flatMap(fileText),
                                 isConflicted: target == .conflict, existsInBase: source != .absent,
                                 normalizeCRLF: normalizeCRLF)
     }
@@ -256,18 +247,15 @@ enum JJRepository {
     private static func command(
         _ arguments: [String], in workspace: JJWorkspace, limit: Int = readLimit, timeout: TimeInterval? = 12
     ) async throws -> Data {
-        let cancellation = CommandCancellation()
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                processQueue.async {
-                    continuation.resume(with: Result {
-                        try run(arguments, in: workspace, limit: limit, timeout: timeout, cancellation: cancellation)
-                    })
-                }
-            }
-        } onCancel: {
-            cancellation.cancelled.withLock { $0 = true }
+        guard let executable = await onProcessQueue(body: { Self.executable }) else { throw Failure.unavailable }
+        let output = try await JJCommand.run(
+            executable, arguments: ["--no-pager", "--color=never", "--config", "snapshot.auto-update-stale=false"] + arguments,
+            in: workspace.root, limit: limit, timeout: timeout
+        )
+        guard output.status == 0 else {
+            throw Failure.command(String(decoding: output.stderr, as: UTF8.self))
         }
+        return output.stdout
     }
 
     private static func onProcessQueue<T: Sendable>(body: @escaping @Sendable () -> T) async -> T {
@@ -286,66 +274,6 @@ enum JJRepository {
             if FileManager.default.isExecutableFile(atPath: candidate.path) { return candidate }
         }
         return nil
-    }
-
-    private static func run(
-        _ arguments: [String], in workspace: JJWorkspace, limit: Int, timeout: TimeInterval?,
-        cancellation: CommandCancellation
-    ) throws -> Data {
-        guard !cancellation.cancelled.withLock({ $0 }) else { throw CancellationError() }
-        let environment = ProcessInfo.processInfo.environment
-        guard let executable = executable(in: environment) else { throw Failure.unavailable }
-        let process = Process()
-        process.executableURL = executable
-        process.currentDirectoryURL = workspace.root
-        process.arguments = ["--no-pager", "--color=never", "--config", "snapshot.auto-update-stale=false"] + arguments
-        process.standardInput = FileHandle.nullDevice
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-        try process.run()
-        defer {
-            if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) }
-        }
-        try? stdout.fileHandleForWriting.close()
-        try? stderr.fileHandleForWriting.close()
-
-        // Read both pipes as they become ready, including diagnostics emitted before stdout ends.
-        var descriptors = [stdout, stderr].map {
-            pollfd(fd: $0.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)
-        }
-        var output = [Data(), Data()]
-        var buffer = [UInt8](repeating: 0, count: 32 * 1024)
-        let start = ProcessInfo.processInfo.systemUptime
-        while descriptors.contains(where: { $0.fd >= 0 }) || process.isRunning {
-            if let timeout {
-                if cancellation.cancelled.withLock({ $0 }) { throw CancellationError() }
-                if ProcessInfo.processInfo.systemUptime - start > timeout { throw Failure.timedOut }
-            }
-            let ready = poll(&descriptors, nfds_t(descriptors.count), 100)
-            if ready == -1 && errno == EINTR { continue }
-            guard ready >= 0 else { throw Failure.invalidResponse }
-            for index in descriptors.indices where descriptors[index].fd >= 0 && descriptors[index].revents != 0 {
-                let count = Darwin.read(descriptors[index].fd, &buffer, buffer.count)
-                if count == 0 {
-                    descriptors[index].fd = -1
-                } else if count > 0 {
-                    let space = (index == 0 ? limit : 2 * 1024 * 1024) - output[index].count
-                    if count > space && timeout != nil {
-                        throw Failure.outputTooLarge
-                    }
-                    output[index].append(contentsOf: buffer.prefix(min(count, space)))
-                } else if errno != EINTR {
-                    throw Failure.invalidResponse
-                }
-            }
-        }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw Failure.command(String(decoding: output[1], as: UTF8.self))
-        }
-        return output[0]
     }
 
     private static func fileText(_ data: Data) -> String? {

@@ -1107,6 +1107,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case "files" where screenshot == nil:
             _ = try await FilesCheck.run(in: self)
             try await FilesCheck.checkFilePreview(in: self)
+        case "jj":
+            try await checkJJ(screenshot: screenshot)
         case "worktree" where screenshot == nil:
             try await WorktreeCheck.run(in: self)
         default:
@@ -1121,13 +1123,13 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         try await EditorCheck.checkScrolledZoom(in: makeDocument())
     }
 
-    private func checkJJ() async throws {
+    private func checkJJ(screenshot: String? = nil) async throws {
         try JJEditorCheck.run(in: makeDocument())
         try JJInlineDiffCheck.run(in: makeDocument())
         try await JJIndicatorCheck.run(in: self) { window in
             for name: NSAppearance.Name in [.aqua, .darkAqua] {
                 window.appearance = NSAppearance(named: name)
-                try checkWindow(window, screenshot: nil)
+                try checkWindow(window, screenshot: name == .darkAqua ? screenshot : nil)
             }
         }
         print("Edit passed its native Jujutsu indicator checks without activation.")

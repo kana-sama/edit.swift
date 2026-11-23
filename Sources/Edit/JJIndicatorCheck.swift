@@ -11,6 +11,7 @@ enum JJIndicatorCheck {
         let folder = fixture.appending(path: "Project")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: fixture) }
+        try await JJCommandCheck.run(in: fixture)
         try await command(executable, in: folder, ["git", "init", "--colocate"])
 
         let added = folder.appending(path: "Added")
@@ -26,22 +27,38 @@ enum JJIndicatorCheck {
 
         let document = app.makeDocument()
         defer { document.window.close() }
+        let openedAt = ContinuousClock.now
         _ = try await app.openFile(folder, in: document)
         _ = try await app.openFile(tracked, in: document)
         document.toggleSidebarFocus(.worktree)
         guard let tree = document.worktreeSidebar?.outline else { throw Failure("open a jj worktree") }
         let operations = try operationObjects(in: folder)
         let recordedMark = JJLineMark(kind: .replacement, lines: 70..<71)
-        try await waitFor("show the recorded editor and collapsed folder status") {
-            document.editor.jjLineMarks.contains(recordedMark) &&
-                document.editor.jjInlineDiff?.canToggle(recordedMark) == true &&
-                hasStatus("Added, Added", in: tree) && hasStatus("Tracked.txt, Changed", in: tree)
+        var worktreeLatency: Duration?
+        var lineLatency: Duration?
+        try await waitFor("show the recorded editor and collapsed folder status", interval: .milliseconds(10)) {
+            if worktreeLatency == nil, hasStatus("Added, Added", in: tree), hasStatus("Tracked.txt, Changed", in: tree) {
+                worktreeLatency = openedAt.duration(to: .now)
+            }
+            if lineLatency == nil, document.editor.jjLineMarks.contains(recordedMark),
+               document.editor.jjInlineDiff?.canToggle(recordedMark) == true {
+                lineLatency = openedAt.duration(to: .now)
+            }
+            return worktreeLatency != nil && lineLatency != nil
+        }
+        if let worktreeLatency, let lineLatency {
+            print("Jujutsu opening: Worktree \(worktreeLatency), editor \(lineLatency).")
         }
         try render(document.window)
 
         let previousMarks = document.editor.jjLineMarks
+        let typedAt = ContinuousClock.now
         document.editor.insertText("First line\n", replacementRange: NSRange(location: 0, length: 0))
         try expect(document.editor.jjLineMarks == previousMarks, "typing keeps the last rendered marks while refreshing")
+        try await waitFor("update the diff after typing", interval: .milliseconds(10)) {
+            document.editor.jjLineMarks.contains(JJLineMark(kind: .insertion, lines: 0..<1))
+        }
+        print("Jujutsu typing: editor \(typedAt.duration(to: .now)).")
         for _ in 0..<7 {
             try await Task.sleep(for: .milliseconds(45))
             document.editor.insertText(">", replacementRange: NSRange(location: 0, length: 0))
@@ -66,6 +83,38 @@ enum JJIndicatorCheck {
         try await checkPresentationDeadline(in: app, tracked: tracked)
         try await checkSnapshotCadence(executable, in: folder, tracked: tracked)
         try await checkRefreshDuringSnapshot(executable, in: folder)
+        try await checkOperationWatch(executable, in: folder)
+    }
+
+    private static func checkOperationWatch(_ executable: URL, in folder: URL) async throws {
+        let secondary = folder.deletingLastPathComponent().appending(path: "Secondary")
+        try await command(executable, in: folder, ["workspace", "add", secondary.path])
+        guard let primary = await JJRepository.discover(at: folder),
+              let shared = await JJRepository.discover(at: secondary), primary.repository == shared.repository else {
+            throw Failure("resolve the shared repository from both workspaces")
+        }
+        let monitor = JJChangeMonitor(checkInterval: .seconds(20))
+        var primaryOperation: String?
+        var sharedOperation: String?
+        let first = monitor.subscribe(to: primary, updated: { primaryOperation = $0?.repository.operationID })
+        let second = monitor.subscribe(to: shared, updated: { sharedOperation = $0?.repository.operationID })
+        defer {
+            monitor.unsubscribe(first)
+            monitor.unsubscribe(second)
+        }
+        let before = try await JJRepository.operation(in: primary)
+        try await waitFor("read the initial operation in both workspaces") {
+            primaryOperation == before && sharedOperation == before
+        }
+        let publishedAt = ContinuousClock.now
+        try await command(executable, in: secondary, ["describe", "-m", "Published in the second workspace"])
+        let after = try await JJRepository.operation(in: primary)
+        try expect(before != after, "the shared workspace publishes its own operation")
+        try await waitFor("follow the operation event in both workspaces before polling", timeout: .seconds(3),
+                          interval: .milliseconds(10)) {
+            primaryOperation == after && sharedOperation == after
+        }
+        print("Jujutsu shared operation: Worktree status \(publishedAt.duration(to: .now)).")
     }
 
     private static func checkRefreshDuringSnapshot(_ executable: URL, in folder: URL) async throws {
@@ -185,11 +234,13 @@ enum JJIndicatorCheck {
         return output
     }
 
-    private static func waitFor(_ message: String, _ condition: () throws -> Bool) async throws {
-        for _ in 0..<160 {
+    private static func waitFor(_ message: String, timeout: Duration = .seconds(8), interval: Duration = .milliseconds(50),
+                                _ condition: () throws -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        repeat {
             if try condition() { return }
-            try await Task.sleep(for: .milliseconds(50))
-        }
+            try await Task.sleep(for: interval)
+        } while ContinuousClock.now < deadline
         throw Failure(message)
     }
 

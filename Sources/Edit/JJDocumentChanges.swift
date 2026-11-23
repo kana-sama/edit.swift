@@ -30,6 +30,7 @@ final class JJDocumentChanges {
     private var findingFolder: Task<Void, Never>?
     private var pendingBufferRefresh: Task<Void, Never>?
     private var rendering: Task<Void, Never>?
+    private var analyzingBuffer = false
     private var presentationExpiry: Task<Void, Never>?
     private var hasVisibleMarks = false
     private var fileContents: JJWorkspaceContents?
@@ -71,7 +72,12 @@ final class JJDocumentChanges {
 
     func bufferChanged() {
         guard fileContents != nil else { return }
-        rendering?.cancel()
+        // A baseline already loading is still valid and will use the newest buffer.
+        if analyzingBuffer {
+            rendering?.cancel()
+            rendering = nil
+            analyzingBuffer = false
+        }
         retainPresentation()
         // Batch edits from the first change so steady typing still gets periodic updates.
         guard pendingBufferRefresh == nil else { return }
@@ -79,7 +85,7 @@ final class JJDocumentChanges {
             do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
             guard let self, !Task.isCancelled else { return }
             pendingBufferRefresh = nil
-            render()
+            if rendering == nil { render() }
         }
     }
 
@@ -168,12 +174,18 @@ final class JJDocumentChanges {
         pendingBufferRefresh = nil
         rendering?.cancel()
         rendering = nil
+        analyzingBuffer = false
         guard let file, let contents = fileContents, let path = contents.relativePath(to: file.url),
               !path.isEmpty else { return }
         retainPresentation()
         let state = contents.repository
         rendering = Task { [weak self] in
-            if let self, !Task.isCancelled { await self.render(file, path: path, in: state) }
+            guard let self, !Task.isCancelled else { return }
+            await self.render(file, path: path, in: state)
+            if !Task.isCancelled {
+                rendering = nil
+                analyzingBuffer = false
+            }
         }
     }
 
@@ -204,7 +216,11 @@ final class JJDocumentChanges {
                 clearPresentation()
                 return
             }
+            // The current text already includes every edit queued during the read.
+            pendingBufferRefresh?.cancel()
+            pendingBufferRefresh = nil
             guard let current = text() else { return }
+            analyzingBuffer = true
             let result = await Self.analyze(pair, text: current)
             try Task.checkCancellation()
             present(result, normalizeCRLF: pair.normalizeCRLF)

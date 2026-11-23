@@ -1,4 +1,5 @@
 import CoreServices
+import Darwin
 import Foundation
 
 struct JJWorktreeDecorations {
@@ -119,11 +120,14 @@ final class JJChangeMonitor {
         fileprivate let id: UUID
     }
 
+    @MainActor
     private final class Workspace {
         let location: JJWorkspace
+        let refreshRequests = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         var contents: JJWorkspaceContents?
         var observers: [UUID: Observer] = [:]
         var task: Task<Void, Never>?
+        var polling: Task<Void, Never>?
         var paths: JJWorkspacePaths?
         var mayNeedSnapshot = true
         var diskGeneration: UInt64 = 0
@@ -133,6 +137,15 @@ final class JJChangeMonitor {
             self.location = location
             self.nextSnapshot = nextSnapshot
         }
+
+        func stop() {
+            paths = nil
+            refreshRequests.continuation.finish()
+            task?.cancel()
+            polling?.cancel()
+        }
+
+        isolated deinit { stop() }
     }
 
     private struct Observer {
@@ -140,11 +153,18 @@ final class JJChangeMonitor {
         let diskChanged: @MainActor (Set<String>?) -> Void
     }
 
+    private enum OperationWatch {
+        case opening(Task<Void, Never>)
+        case active(JJOperationWatcher)
+        case unavailable
+    }
+
     private let clock = ContinuousClock()
     private let checkInterval: Duration
     private let snapshotInterval: Duration
     private let writeSnapshot: @MainActor (JJWorkspace) async throws -> Void
     private var workspaces: [JJWorkspace: Workspace] = [:]
+    private var operationWatchers: [URL: OperationWatch] = [:]
     private var suspendedDeadlines: [JJWorkspace: (next: ContinuousClock.Instant, expires: ContinuousClock.Instant)] = [:]
     private var snapshotting: Set<URL> = []
 
@@ -176,12 +196,20 @@ final class JJChangeMonitor {
                 workspace.diskGeneration &+= 1
                 for observer in Array(workspace.observers.values) { observer.diskChanged(paths) }
             }
-            workspace.task = Task { [weak self, weak workspace] in
-                while !Task.isCancelled, let self, let workspace {
+            workspace.task = Task { [weak self, weak workspace, stream = workspace.refreshRequests.stream] in
+                for await _ in stream {
+                    guard !Task.isCancelled, let self, let workspace else { return }
                     await self.refresh(workspace)
-                    do { try await Task.sleep(for: self.checkInterval) } catch { break }
                 }
             }
+            // Keep checking when file events are unavailable and advance scheduled snapshots.
+            workspace.polling = Task { [checkInterval, requests = workspace.refreshRequests.continuation] in
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: checkInterval) } catch { return }
+                    requests.yield()
+                }
+            }
+            workspace.refreshRequests.continuation.yield()
         }
         workspace.observers[id] = Observer(updated: updated, diskChanged: diskChanged)
         updated(workspace.contents)
@@ -195,8 +223,12 @@ final class JJChangeMonitor {
             // File-to-file navigation can temporarily leave the workspace without an observer.
             suspendedDeadlines[subscription.workspace] = (workspace.nextSnapshot, clock.now.advanced(by: .seconds(10)))
             workspaces.removeValue(forKey: subscription.workspace)
-            workspace.paths = nil
-            workspace.task?.cancel()
+            workspace.stop()
+            let repository = workspace.location.repository
+            if !workspaces.keys.contains(where: { $0.repository == repository }) {
+                let watch = operationWatchers.removeValue(forKey: repository)
+                if case .opening(let task) = watch { task.cancel() }
+            }
         }
     }
 
@@ -204,10 +236,40 @@ final class JJChangeMonitor {
         guard let subscription, let workspace = workspaces[subscription.workspace] else { return }
         // Recheck a file's disk revision on return even if no watcher event was delivered.
         workspace.observers[subscription.id]?.diskChanged(nil)
+        workspace.refreshRequests.continuation.yield()
+    }
+
+    private func watchOperations(in repository: URL) {
+        guard operationWatchers[repository] == nil else { return }
+        let opening = Task { [weak self] in
+            guard !Task.isCancelled else { return }
+            let descriptor = await JJOperationWatcher.openHeads(in: repository)
+            guard !Task.isCancelled, let self else {
+                if descriptor >= 0 { close(descriptor) }
+                return
+            }
+            guard descriptor >= 0 else {
+                operationWatchers[repository] = .unavailable
+                return
+            }
+            operationWatchers[repository] = .active(JJOperationWatcher(descriptor: descriptor) { [weak self] ended in
+                guard let self else { return }
+                if ended { operationWatchers.removeValue(forKey: repository) }
+                requestRefreshes(in: repository)
+            })
+        }
+        operationWatchers[repository] = .opening(opening)
+    }
+
+    private func requestRefreshes(in repository: URL) {
+        for workspace in workspaces.values where workspace.location.repository == repository {
+            workspace.refreshRequests.continuation.yield()
+        }
     }
 
     private func refresh(_ workspace: Workspace) async {
         let location = workspace.location
+        watchOperations(in: location.repository)
         scheduleSnapshot(for: workspace)
         do {
             let operation = try await JJRepository.operation(in: location)
@@ -216,8 +278,12 @@ final class JJChangeMonitor {
             let state = try await JJRepository.read(location, at: operation)
             let contents = try await JJWorkspaceContents.prepare(state)
             try Task.checkCancellation()
-            guard try await JJRepository.operation(in: location) == operation,
-                  !Task.isCancelled, workspaces[location] === workspace else { return }
+            let latest = try await JJRepository.operation(in: location)
+            guard !Task.isCancelled, workspaces[location] === workspace else { return }
+            guard latest == operation else {
+                workspace.refreshRequests.continuation.yield()
+                return
+            }
             install(contents, for: workspace)
         } catch {
             if !Task.isCancelled, !snapshotting.contains(location.repository), workspace.contents != nil {
@@ -238,6 +304,7 @@ final class JJChangeMonitor {
             do { try await writeSnapshot(location) }
             catch { return }
             if let workspace, generation == workspace.diskGeneration { workspace.mayNeedSnapshot = workspace.paths == nil }
+            self?.requestRefreshes(in: location.repository)
         }
     }
 
@@ -245,6 +312,44 @@ final class JJChangeMonitor {
         workspace.contents = contents
         for observer in Array(workspace.observers.values) { observer.updated(contents) }
     }
+}
+
+@MainActor
+private final class JJOperationWatcher {
+    private let source: DispatchSourceFileSystemObject
+
+    nonisolated static func openHeads(in repository: URL) async -> Int32 {
+        // The standard jj op-head store publishes operations as directory entries.
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let heads = repository.appending(path: "op_heads/heads", directoryHint: .isDirectory)
+                let descriptor = heads.withUnsafeFileSystemRepresentation { path in
+                    path.map { open($0, O_EVTONLY | O_CLOEXEC | O_DIRECTORY) } ?? -1
+                }
+                continuation.resume(returning: descriptor)
+            }
+        }
+    }
+
+    init(descriptor: Int32, changed: @escaping @MainActor (Bool) -> Void) {
+        let invalidation: DispatchSource.FileSystemEvent = [.delete, .rename, .revoke]
+        source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, invalidation], queue: .main)
+        source.setCancelHandler { close(descriptor) }
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                if let self { changed(!self.source.data.intersection(invalidation).isEmpty) }
+            }
+        }
+        // Recheck if an operation was published while opening or registering the watch.
+        source.setRegistrationHandler { [weak self] in
+            MainActor.assumeIsolated {
+                if self != nil { changed(false) }
+            }
+        }
+        source.activate()
+    }
+
+    deinit { source.cancel() }
 }
 
 @MainActor
