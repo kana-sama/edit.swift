@@ -28,6 +28,12 @@ struct TrashedScratch: Sendable {
     let trashedURL: URL
 }
 
+struct ScratchJournal: Codable {
+    enum Change: String, Codable { case add, trash }
+    let change: Change
+    let files: [ScratchFile]
+}
+
 actor ScratchStore {
     private let root: URL
     private let trashDirectoryForChecks: URL?
@@ -66,18 +72,68 @@ actor ScratchStore {
     }
 
     private var indexURL: URL { root.appending(path: "index.json", directoryHint: .notDirectory) }
+    private var journalURL: URL { root.appending(path: "pending.json", directoryHint: .notDirectory) }
 
     func files() throws -> [ScratchFile] {
-        let data: Data
+        let files = try readIndex()
+        let journal: ScratchJournal
         do {
-            data = try Data(contentsOf: indexURL)
+            journal = try JSONDecoder().decode(ScratchJournal.self, from: Data(contentsOf: journalURL))
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
+            return files
+        }
+        try validate(journal.files)
+        var recovered = files
+        let indexed = Set(files.map(\.id))
+        switch journal.change {
+        case .add:
+            for file in journal.files where !indexed.contains(file.id) {
+                if try backingFileExists(file) { recovered.append(file) }
+            }
+        case .trash:
+            var missing: Set<UUID> = []
+            for file in journal.files where indexed.contains(file.id) {
+                if try !backingFileExists(file) { missing.insert(file.id) }
+            }
+            recovered.removeAll { missing.contains($0.id) }
+        }
+        if recovered != files { try save(recovered) }
+        try? FileManager.default.removeItem(at: journalURL)
+        return recovered
+    }
+
+    private func readIndex() throws -> [ScratchFile] {
+        let files: [ScratchFile]
+        do {
+            files = try JSONDecoder().decode([ScratchFile].self, from: Data(contentsOf: indexURL))
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
             return []
         }
-        let files = try JSONDecoder().decode([ScratchFile].self, from: data)
+        try validate(files)
+        return files
+    }
+
+    private func validate(_ files: [ScratchFile]) throws {
         guard files.allSatisfy({ Self.isFilename($0.name) && Self.isFilename($0.storedName) }),
               Set(files.map(\.id)).count == files.count else { throw Failure.invalidIndex }
-        return files
+    }
+
+    private func backingFileExists(_ file: ScratchFile) throws -> Bool {
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: url(for: file).path)
+            guard attributes[.type] as? FileAttributeType == .typeRegular else { throw Failure.invalidIndex }
+            return true
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
+            return false
+        }
+    }
+
+    private func withJournal<T>(_ change: ScratchJournal.Change, _ files: [ScratchFile], perform: () throws -> T) throws -> T {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try JSONEncoder().encode(ScratchJournal(change: change, files: files)).write(to: journalURL, options: .atomic)
+        let result = try perform()
+        try? FileManager.default.removeItem(at: journalURL)
+        return result
     }
 
     func create(name: String, text: String, format: FileFormat, in folder: URL?, openedAt: Date? = nil) throws -> (ScratchFile, FileBuffer) {
@@ -86,14 +142,16 @@ actor ScratchStore {
         let path = Self.folderPath(for: folder)
         let name = availableName(name, avoiding: names(in: path, files: files))
         let file = ScratchFile(name: name, folderPath: path, openedAt: openedAt)
-        let buffer = try write(file, text: text, format: format)
-        do {
-            files.append(file)
-            try save(files)
-            return (file, buffer)
-        } catch {
-            removeUnpublishedFile(file)
-            throw error
+        return try withJournal(.add, [file]) {
+            let buffer = try write(file, text: text, format: format)
+            do {
+                files.append(file)
+                try save(files)
+                return (file, buffer)
+            } catch {
+                removeUnpublishedFile(file)
+                throw error
+            }
         }
     }
 
@@ -194,21 +252,26 @@ actor ScratchStore {
         guard !inputs.isEmpty else { return [] }
 
         var reserved = names(in: folderPath, files: files)
-        var imported: [ScratchFile] = []
-        do {
-            for (sourceName, buffer) in inputs {
-                let name = availableName(sourceName, avoiding: reserved)
-                let file = ScratchFile(name: name, folderPath: folderPath)
-                _ = try write(file, text: buffer.text, format: buffer.format)
-                imported.append(file)
-                reserved.insert(Self.nameKey(name))
+        let planned = inputs.map { sourceName, _ in
+            let name = availableName(sourceName, avoiding: reserved)
+            reserved.insert(Self.nameKey(name))
+            return ScratchFile(name: name, folderPath: folderPath)
+        }
+        return try withJournal(.add, planned) {
+            var imported: [ScratchFile] = []
+            do {
+                for (file, input) in zip(planned, inputs) {
+                    let (_, buffer) = input
+                    _ = try write(file, text: buffer.text, format: buffer.format)
+                    imported.append(file)
+                }
+                files.append(contentsOf: imported)
+                try save(files)
+                return imported
+            } catch {
+                for file in imported { removeUnpublishedFile(file) }
+                throw error
             }
-            files.append(contentsOf: imported)
-            try save(files)
-            return imported
-        } catch {
-            for file in imported { removeUnpublishedFile(file) }
-            throw error
         }
     }
 
@@ -217,22 +280,24 @@ actor ScratchStore {
         let selected = try indices(for: ids, in: files).map { files[$0] }
         guard !selected.isEmpty else { return [] }
         let removed = Set(selected.map(\.id))
-        var trashed: [TrashedScratch] = []
-        do {
-            for file in selected {
-                let destination = try recycle(url(for: file))
-                trashed.append(TrashedScratch(file: file, trashedURL: destination))
+        return try withJournal(.trash, selected) {
+            var trashed: [TrashedScratch] = []
+            do {
+                for file in selected {
+                    let destination = try recycle(url(for: file))
+                    trashed.append(TrashedScratch(file: file, trashedURL: destination))
+                }
+                files.removeAll { removed.contains($0.id) }
+                try save(files)
+                for file in selected {
+                    // Do not unlink unrecognized items that may have appeared in the directory.
+                    let directory = url(for: file).deletingLastPathComponent()
+                    _ = directory.withUnsafeFileSystemRepresentation { $0.map(rmdir) }
+                }
+                return trashed
+            } catch {
+                try rollBack(trashed.map { (from: $0.trashedURL, to: url(for: $0.file)) }, after: error)
             }
-            files.removeAll { removed.contains($0.id) }
-            try save(files)
-            for file in selected {
-                // Do not unlink unrecognized items that may have appeared in the directory.
-                let directory = url(for: file).deletingLastPathComponent()
-                _ = directory.withUnsafeFileSystemRepresentation { $0.map(rmdir) }
-            }
-            return trashed
-        } catch {
-            try rollBack(trashed.map { (from: $0.trashedURL, to: url(for: $0.file)) }, after: error)
         }
     }
 
@@ -247,21 +312,23 @@ actor ScratchStore {
             guard reserved.insert(NameSlot(record.file)).inserted else { throw Failure.nameConflict(record.file.name) }
         }
 
-        let manager = FileManager.default
-        var restored: [TrashedScratch] = []
-        do {
-            for record in records {
-                let target = url(for: record.file)
-                try manager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try manager.moveItem(at: record.trashedURL, to: target)
-                restored.append(record)
+        return try withJournal(.add, records.map(\.file)) {
+            let manager = FileManager.default
+            var restored: [TrashedScratch] = []
+            do {
+                for record in records {
+                    let target = url(for: record.file)
+                    try manager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try manager.moveItem(at: record.trashedURL, to: target)
+                    restored.append(record)
+                }
+                let recovered = restored.map(\.file)
+                files.append(contentsOf: recovered)
+                try save(files)
+                return recovered
+            } catch {
+                try rollBack(restored.map { (from: url(for: $0.file), to: $0.trashedURL) }, after: error)
             }
-            let recovered = restored.map(\.file)
-            files.append(contentsOf: recovered)
-            try save(files)
-            return recovered
-        } catch {
-            try rollBack(restored.map { (from: url(for: $0.file), to: $0.trashedURL) }, after: error)
         }
     }
 

@@ -14,6 +14,7 @@ enum ScratchCheck {
         let original = Data("\u{feff}Project notes\r\n".utf8)
         try original.write(to: source)
         defer { try? FileManager.default.removeItem(at: root) }
+        try await checkInterruptedChanges(in: root.appending(path: "Interrupted", directoryHint: .isDirectory))
 
         let document = app.makeDocument()
         let folderless = app.makeDocument()
@@ -121,6 +122,26 @@ enum ScratchCheck {
         try expect(folderless.scratchFile?.id == global.id && folderless.editor.string == textAtClose
                    && ScratchStore.folderPath(for: folderless.folderURL) == projectPath,
                    "reopening a scratch replaces the empty screen in the same folder")
+    }
+
+    private static func checkInterruptedChanges(in root: URL) async throws {
+        let manager = FileManager.default
+        let store = ScratchStore(root: root)
+        let written = ScratchFile(name: "Written.txt", folderPath: "/project")
+        let pending = ScratchFile(name: "Pending.txt", folderPath: nil)
+        let target = store.url(for: written)
+        let journal = root.appending(path: "pending.json")
+        try manager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(ScratchJournal(change: .add, files: [written, pending])).write(to: journal)
+        try Data("Recovered".utf8).write(to: target)
+        try expect(try await store.files() == [written] && !manager.fileExists(atPath: journal.path),
+                   "recover only files published before an interrupted import or restore")
+        let (kept, _) = try await store.create(name: "Still in the list.txt", text: "Kept", format: FileFormat(), in: nil)
+        try JSONEncoder().encode(ScratchJournal(change: .trash, files: [written, kept])).write(to: journal)
+        let trash = root.appending(path: "Trashed.txt")
+        try manager.moveItem(at: target, to: trash)
+        try expect(try await store.files() == [kept] && Data(contentsOf: trash) == Data("Recovered".utf8),
+                   "reconcile a partial Trash operation without removing the remaining scratch")
     }
 
     private static func waitForAutosave(_ document: DocumentWindow, at url: URL) async throws {

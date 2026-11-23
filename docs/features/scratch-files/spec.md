@@ -12,6 +12,8 @@ Save the current editable document as a scratch and return to it later from the 
 
 ## Storage and editing
 
+Record pending file changes before creating, importing, trashing, or restoring scratches. The next read after an interruption reconciles those records with the files that reached their destination. Files moved into the system Trash stay there. Scratch metadata already in the index remains available for files still in storage.
+
 - Keep scratch contents and their folder associations under `~/Library/Application Support/dev.edit-swift.Edit/Scratches/`. Each scratch has a stable identity and belongs to exactly one category. The folder association persists as a path, including when the folder is unavailable. Folder aliases that resolve to the same directory share a category.
 - Open a scratch as a regular editable document in the current window, with the existing draft protection when replacing the current buffer. Opening it preserves the window’s folder context. The scratch remains available after the window closes or Edit restarts. Restore scratch documents and any unsaved edits through the existing session rules.
 - Apply [autosave](../autosave/spec.md) to scratch edits, including the one-second idle trigger, focus loss, and the flush before replacing the buffer, closing, or quitting. On a write failure, preserve the edits through the existing prompt and draft recovery. **Save As…** saves a regular file and continues editing at its chosen path. The saved scratch stays in its category.
