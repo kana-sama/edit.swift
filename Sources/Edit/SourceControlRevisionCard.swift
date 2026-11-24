@@ -22,8 +22,11 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
         let metadata = Self.stack()
         metadata.spacing = 3
         if !revision.author.isEmpty {
-            let name = revision.authorEmail.isEmpty || revision.author == revision.authorEmail
-                ? revision.author : "\(revision.author) (\(revision.authorEmail))"
+            var name = revision.author
+            if !revision.authorEmail.isEmpty {
+                let address = "<\(revision.authorEmail)>"
+                name = name == revision.authorEmail ? address : "\(name) \(address)"
+            }
             let author = Self.label(name, id: "Author", font: .systemFont(ofSize: 11, weight: .medium),
                                     lines: 2, width: Self.textWidth - 18)
             let authorRow = NSStackView(views: [Self.icon("person.crop.circle", color: .secondaryLabelColor), author])
@@ -209,7 +212,7 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
 }
 
 @MainActor
-private final class SourceControlRevisionCardText: NSTextView {
+final class SourceControlRevisionCardText: NSTextView {
     private let storage: NSTextStorage
     private var measuredSize = NSSize.zero
 
@@ -241,4 +244,17 @@ private final class SourceControlRevisionCardText: NSTextView {
     override var intrinsicContentSize: NSSize { measuredSize }
     override var needsPanelToBecomeKey: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    func hasLink(at point: NSPoint) -> Bool {
+        guard bounds.contains(point), let layoutManager, let textContainer else { return false }
+        let origin = textContainerOrigin
+        let location = NSPoint(x: point.x - origin.x, y: point.y - origin.y)
+        let glyph = layoutManager.glyphIndex(for: location, in: textContainer)
+        guard NSLocationInRange(glyph, layoutManager.glyphRange(for: textContainer)),
+              !NSLocationInRange(glyph, layoutManager.truncatedGlyphRange(inLineFragmentForGlyphAt: glyph)),
+              layoutManager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: textContainer).contains(location)
+        else { return false }
+        let character = layoutManager.characterIndexForGlyph(at: glyph)
+        return character < storage.length && storage.attribute(.link, at: character, effectiveRange: nil) != nil
+    }
 }

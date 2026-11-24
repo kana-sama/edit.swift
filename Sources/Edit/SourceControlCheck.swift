@@ -856,7 +856,7 @@ enum SourceControlCheck {
         }) else { throw Failure("find the selectable title and description") }
         let author = revisions[working]
         try expect(subject.string == "Working change" &&
-                   label("Author", in: content)?.stringValue == "\(author.author) (\(author.authorEmail))" &&
+                   label("Author", in: content)?.stringValue == "\(author.author) <\(author.authorEmail)>" &&
                    label("Bookmarks", in: content)?.stringValue.contains("review/jj-sidebar-layout-with-a-long-bookmark") == true &&
                    description.string.hasPrefix("A long description"),
                    "show the subject, author, full bookmark name, and body as distinct parts of the card")
@@ -872,10 +872,40 @@ enum SourceControlCheck {
                    (description.textStorage?.attribute(.link, at: plain.location, effectiveRange: nil) as? URL)?.absoluteString == "https://example.com/plain",
                    "detect both Markdown and plain web links")
 
+        guard let layout = description.layoutManager, let container = description.textContainer else {
+            throw Failure("lay out the card’s links for pointer hit testing")
+        }
+        func cursor(over range: NSRange) -> NSCursor? {
+            let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            let frame = layout.boundingRect(forGlyphRange: glyphs, in: container)
+            let origin = description.textContainerOrigin
+            let point = description.convert(NSPoint(x: frame.midX + origin.x, y: frame.midY + origin.y), to: nil)
+            return EditApplication.clickCursor(in: preview, at: point)
+        }
+        let ordinary = (description.string as NSString).range(of: "starts")
+        try expect(cursor(over: guide) === NSCursor.pointingHand && cursor(over: ordinary) === NSCursor.iBeam,
+                   "show a pointing hand exactly on the link and a text cursor beside it")
+        let exampleRow = NSRect(x: 0, y: 100, width: 240, height: 38)
+        let exampleCard = NSRect(x: 248, y: 9, width: 332, height: 220)
+        let crossing = SourceControlRevisionCorridor(anchor: exampleRow, card: exampleCard)
+        let start = NSPoint(x: 120, y: 119)
+        try expect(crossing.contains(NSPoint(x: 242, y: 20)) && crossing.contains(NSPoint(x: 242, y: 220)) &&
+                   crossing.isApproach(NSPoint(x: 180, y: 68), from: start) &&
+                   crossing.isApproach(NSPoint(x: 180, y: 170), from: start) &&
+                   !crossing.isApproach(NSPoint(x: 120, y: 170), from: start) &&
+                   !crossing.contains(NSPoint(x: 242, y: 270)),
+                   "allow diagonal approaches to both ends while distinguishing vertical browsing and leaving the card")
+
         let anchor = window.convertToScreen(graph.table.convert(graph.table.rect(ofRow: working), to: nil))
         let gap = NSPoint(x: (anchor.maxX + preview.frame.minX) / 2, y: (anchor.midY + preview.frame.midY) / 2)
         try expect(SourceControlRevisionCorridor(anchor: anchor, card: preview.frame).contains(gap),
                    "connect the row and the card across their gap")
+        let row = graph.table.rect(ofRow: working)
+        let adjacent = NSPoint(x: row.midX + 15, y: working + 1 < revisions.count ? row.maxY + 2 : row.minY - 2)
+        let adjacentRow = graph.table.row(at: adjacent)
+        try expect(revisions.indices.contains(adjacentRow), "find the neighboring graph row")
+        graph.table.hoverRowChanged?(adjacentRow, window.convertPoint(toScreen: graph.table.convert(adjacent, to: nil)))
+        try expect(card() === preview, "keep the card when the diagonal approach crosses a neighboring row")
         graph.table.hoverPointerLeft?(gap)
         try expect(card() === preview, "keep the card during pointer travel across the gap")
         let inside = NSPoint(x: content.bounds.midX, y: content.bounds.midY)

@@ -187,6 +187,9 @@ final class EditApplication: NSApplication {
                 return .arrow
             case let field as NSTextField where field.isEditable || field.isSelectable:
                 return background
+            case let text as SourceControlRevisionCardText:
+                if titlebar { return .arrow }
+                return text.hasLink(at: text.convert(location, from: nil)) ? .pointingHand : .iBeam
             case is NSTextView:
                 return background
             case let table as NSTableView:

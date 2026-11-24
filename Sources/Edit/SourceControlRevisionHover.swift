@@ -7,7 +7,7 @@ final class SourceControlRevisionHover: NSObject {
         let operationID: String
     }
 
-    private static let delay: Duration = .milliseconds(450)
+    static let settleDelay: Duration = .milliseconds(450)
     private static let departureGrace: Duration = .milliseconds(180)
     private var pending: Task<Void, Never>?
     private var departure: Task<Void, Never>?
@@ -19,12 +19,14 @@ final class SourceControlRevisionHover: NSObject {
     private var revision: JJSourceControlRevision?
     private var linkContext: LinkContext?
     private var corridor: SourceControlRevisionCorridor?
+    private var rowPointer: NSPoint?
     private var selectingText = false
     private var eventMonitor: Any?
     private(set) var row: Int?
 
-    func track(_ revision: JJSourceControlRevision, row: Int, in table: NSTableView, linkContext: LinkContext?) {
-        guard self.row != row else { return }
+    func track(_ revision: JJSourceControlRevision, row: Int, at point: NSPoint, in table: NSTableView,
+               linkContext: LinkContext?, settled: Bool = false) {
+        guard self.row != row else { rowPointer = point; return }
         dismiss()
         guard let window = table.window, window.isKeyWindow, window.isVisible,
               let clip = table.enclosingScrollView?.contentView else { return }
@@ -32,6 +34,7 @@ final class SourceControlRevisionHover: NSObject {
         self.row = row
         self.revision = revision
         self.linkContext = linkContext
+        rowPointer = point
         owner = window
         clip.postsBoundsChangedNotifications = true
         let center = NotificationCenter.default
@@ -48,12 +51,21 @@ final class SourceControlRevisionHover: NSObject {
             guard let self else { return event }
             return handle(event)
         }
+        if settled {
+            show(revision, row: row, in: table)
+            return
+        }
         pending = Task { [weak self, weak table] in
-            do { try await Task.sleep(for: Self.delay) } catch { return }
+            do { try await Task.sleep(for: Self.settleDelay) } catch { return }
             guard let self, !Task.isCancelled, let table else { return }
             pending = nil
             show(revision, row: row, in: table)
         }
+    }
+
+    func isApproachingCard(at point: NSPoint) -> Bool {
+        guard let corridor, let rowPointer else { return false }
+        return corridor.isApproach(point, from: rowPointer)
     }
 
     func updateLinkContext(_ context: LinkContext?) {
@@ -106,6 +118,7 @@ final class SourceControlRevisionHover: NSObject {
         revision = nil
         linkContext = nil
         corridor = nil
+        rowPointer = nil
         selectingText = false
         row = nil
     }
@@ -140,7 +153,7 @@ final class SourceControlRevisionHover: NSObject {
     func pointerLeft(at point: NSPoint) {
         guard let corridor, let owner else { dismiss(); return }
         pointerMoved(to: point)
-        if corridor.contains(point) || !owner.frame.contains(point) { watchCrossing() }
+        if corridor.contains(point, from: rowPointer) || !owner.frame.contains(point) { watchCrossing() }
     }
 
     private func watchCrossing() {
@@ -152,7 +165,8 @@ final class SourceControlRevisionHover: NSObject {
                 guard let self, let corridor = self.corridor else { return }
                 let location = NSEvent.mouseLocation
                 pointerMoved(to: location)
-                if corridor.anchor.contains(location) || corridor.card.contains(location) || !corridor.contains(location) { break }
+                if corridor.anchor.contains(location) || corridor.card.contains(location) ||
+                    !corridor.contains(location, from: rowPointer) { break }
             }
             if !Task.isCancelled { self?.crossing = nil }
         }
@@ -160,7 +174,8 @@ final class SourceControlRevisionHover: NSObject {
 
     private func pointerMoved(to point: NSPoint) {
         guard let corridor, !selectingText else { return }
-        if corridor.contains(point) {
+        if corridor.anchor.contains(point) { rowPointer = point }
+        if corridor.contains(point, from: rowPointer) {
             departure?.cancel()
             departure = nil
             if corridor.anchor.contains(point) || corridor.card.contains(point) {
@@ -281,24 +296,41 @@ struct SourceControlRevisionCorridor {
     let anchor: NSRect
     let card: NSRect
 
-    func contains(_ point: NSPoint) -> Bool {
+    private static let edgePadding: CGFloat = 24
+
+    func contains(_ point: NSPoint, from origin: NSPoint? = nil) -> Bool {
         if anchor.contains(point) || card.contains(point) { return true }
-        if anchor.maxX < card.minX { return Self.between(point, left: anchor, right: card) }
-        if card.maxX < anchor.minX { return Self.between(point, left: card, right: anchor) }
-        // A narrow display can put the card above or below the row instead.
-        let row = NSRect(x: anchor.minY, y: anchor.minX, width: anchor.height, height: anchor.width)
-        let popup = NSRect(x: card.minY, y: card.minX, width: card.height, height: card.width)
-        let transposed = NSPoint(x: point.y, y: point.x)
-        if row.maxX < popup.minX { return Self.between(transposed, left: row, right: popup) }
-        if popup.maxX < row.minX { return Self.between(transposed, left: popup, right: row) }
-        return false
+        guard let direction else { return false }
+        let row = anchor.applying(direction)
+        let popup = card.applying(direction)
+        let target = point.applying(direction)
+        let lower = min(row.minY, popup.minY) - Self.edgePadding
+        let upper = max(row.maxY, popup.maxY) + Self.edgePadding
+        // Permit reaching either end of the card throughout the gap, including at the row edge.
+        if (row.maxX...popup.minX).contains(target.x) { return (lower...upper).contains(target.y) }
+        guard let origin else { return false }
+        let start = origin.applying(direction).x
+        guard target.x >= start, target.x < row.maxX else { return false }
+        // Open the approach toward the card starting at the pointer, even over an adjacent row.
+        let fraction = (target.x - start) / (row.maxX - start)
+        let bottom = row.minY - Self.edgePadding
+        let top = row.maxY + Self.edgePadding
+        let minY = bottom + (lower - bottom) * fraction
+        let maxY = top + (upper - top) * fraction
+        return (minY...maxY).contains(target.y)
     }
 
-    private static func between(_ point: NSPoint, left: NSRect, right: NSRect) -> Bool {
-        guard (left.maxX...right.minX).contains(point.x) else { return false }
-        let fraction = (point.x - left.maxX) / (right.minX - left.maxX)
-        let lower = left.minY + (right.minY - left.minY) * fraction
-        let upper = left.maxY + (right.maxY - left.maxY) * fraction
-        return (lower...upper).contains(point.y)
+    func isApproach(_ point: NSPoint, from origin: NSPoint) -> Bool {
+        guard let direction, point.applying(direction).x > origin.applying(direction).x else { return false }
+        return contains(point, from: origin)
+    }
+
+    // Normalize the supported placements so that travel toward the card increases x.
+    private var direction: CGAffineTransform? {
+        if anchor.maxX < card.minX { return .identity }
+        if card.maxX < anchor.minX { return CGAffineTransform(scaleX: -1, y: 1) }
+        if anchor.maxY < card.minY { return CGAffineTransform(a: 0, b: 1, c: 1, d: 0, tx: 0, ty: 0) }
+        if card.maxY < anchor.minY { return CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: 0, ty: 0) }
+        return nil
     }
 }
