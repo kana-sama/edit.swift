@@ -8,7 +8,7 @@ enum EditorHoverPresentation: Sendable {
             case documentation = "Description"
             case references = "References"
 
-            var isCode: Bool { self == .declaration || self == .type }
+            var isDetail: Bool { self == .type || self == .references }
         }
 
         let kind: Kind
@@ -32,12 +32,12 @@ enum EditorHoverPresentation: Sendable {
         }
 
         var sections = [Section(kind: .declaration, content: EditorHoverContent(zigCode: [hover.declaration]))]
+        if let documentation = hover.documentation {
+            sections.append(Section(kind: .documentation, content: EditorHoverContent(text: documentation, isMarkdown: true)))
+        }
         if !hover.types.isEmpty {
             let types = hover.hasMoreTypes ? hover.types + ["…"] : hover.types
             sections.append(Section(kind: .type, content: EditorHoverContent(zigCode: types)))
-        }
-        if let documentation = hover.documentation {
-            sections.append(Section(kind: .documentation, content: EditorHoverContent(text: documentation, isMarkdown: true)))
         }
         if !hover.references.isEmpty {
             sections.append(Section(kind: .references, content: EditorHoverContent(references: hover.references)))
@@ -78,69 +78,98 @@ private final class HoverSectionsView: NSView {
     override var isFlipped: Bool { true }
 
     init?(_ sections: [EditorHoverPresentation.Section], maximumWidth: CGFloat) {
-        let inset: CGFloat = 12
-        let rowSpacing: CGFloat = 8
+        let inset: CGFloat = 16
         let columnSpacing: CGFloat = 14
-        let codePadding = NSSize(width: 6, height: 4)
-        let rows: [(label: NSTextField, body: HoverTextView, isCode: Bool)] = sections.map { section in
-            let name = section.kind.rawValue
-            let label = NSTextField(labelWithString: name)
-            label.identifier = .init("EditorLanguageHover.\(name).label")
-            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
-            label.textColor = .secondaryLabelColor
-            label.alignment = .right
-            label.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
+        let availableWidth = maximumWidth - 2 * inset
+        let rows = sections.map { section in
+            let kind = section.kind
+            let name = kind.rawValue
+            let label: NSTextField?
+            if kind.isDetail {
+                let field = NSTextField(labelWithString: name)
+                field.identifier = .init("EditorLanguageHover.\(name).label")
+                field.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+                field.textColor = .labelColor
+                field.alignment = .right
+                field.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
+                label = field
+            } else {
+                label = nil
+            }
 
-            let body = HoverTextView(width: maximumWidth, text: section.content.attributedText(), inset: .zero)
+            let isDeclaration = kind == .declaration
+            let attributed = section.content.attributedText(
+                proseSize: kind == .documentation ? 14 : 13,
+                codeFont: isDeclaration ? NSFontManager.shared.convert(EditorTextView.defaultFont, toSize: 13)
+                    : EditorTextView.defaultFont
+            )
+            let padding = isDeclaration ? NSSize(width: 10, height: 8) : .zero
+            let body = HoverTextView(width: maximumWidth, text: attributed, inset: padding)
             body.identifier = .init("EditorLanguageHover.\(name).body")
-            return (label: label, body: body, isCode: section.kind.isCode)
+            if label == nil { body.setAccessibilityLabel(name) }
+            return (kind: kind, label: label, body: body)
         }
-        let labelWidth = rows.map { row in
-            let insets = row.label.alignmentRectInsets
-            return ceil(row.label.fittingSize.width - insets.left - insets.right)
+        let labelWidth = rows.compactMap(\.label).map { label in
+            let insets = label.alignmentRectInsets
+            return ceil(label.fittingSize.width - insets.left - insets.right)
         }.max() ?? 0
-        let bodyLeading = inset + labelWidth + columnSpacing
-        let trailingInset = inset + codePadding.width
-        let availableWidth = maximumWidth - bodyLeading - trailingInset
-        guard availableWidth > 0 else { return nil }
-        var preferredWidth: CGFloat = 104
+        let detailOffset = labelWidth + columnSpacing
+        guard availableWidth > detailOffset else { return nil }
+        var preferredWidth: CGFloat = 172
         for row in rows {
-            guard let size = row.body.measure(at: availableWidth) else { return nil }
-            preferredWidth = max(preferredWidth, size.width)
+            let offset = row.kind.isDetail ? detailOffset : 0
+            guard let size = row.body.measure(at: availableWidth - offset) else { return nil }
+            preferredWidth = max(preferredWidth, size.width + offset)
         }
         let bodyWidth = min(availableWidth, preferredWidth)
         textViews = rows.map { $0.body }
         super.init(frame: .zero)
 
         var top = inset
+        var inDetails = false
         for (index, row) in rows.enumerated() {
-            guard let size = row.body.measure(at: bodyWidth), let bodyBaseline = row.body.firstTextBaseline else { return nil }
-            let padding = row.isCode ? codePadding : .zero
-            let labelHeight = ceil(row.label.fittingSize.height)
-            let labelBaseline = row.label.firstBaselineOffsetFromTop
-            let baseline = top + max(labelBaseline, padding.height + bodyBaseline)
-            let labelFrame = NSRect(x: inset, y: baseline - labelBaseline, width: labelWidth, height: labelHeight)
-            row.label.frame = row.label.frame(forAlignmentRect: labelFrame)
-            addSubview(row.label)
+            if row.kind.isDetail && !inDetails {
+                top += 12
+                let separator = NSBox(frame: NSRect(x: inset, y: top, width: bodyWidth, height: 1))
+                separator.identifier = .init("EditorLanguageHover.separator")
+                separator.boxType = .separator
+                addSubview(separator)
+                top += 11
+                inDetails = true
+            } else if index > 0 {
+                top += inDetails ? 5 : 10
+            }
 
-            let bodyFrame = NSRect(x: bodyLeading, y: baseline - bodyBaseline, width: bodyWidth, height: size.height)
-            let paddedBody = bodyFrame.insetBy(dx: -padding.width, dy: -padding.height)
-            if row.isCode {
-                let background = NSBox(frame: paddedBody)
+            let offset = row.kind.isDetail ? detailOffset : 0
+            let width = bodyWidth - offset
+            guard let size = row.body.measure(at: width) else { return nil }
+            var bodyFrame = NSRect(x: inset + offset, y: top, width: width, height: size.height)
+            if let label = row.label {
+                guard let bodyBaseline = row.body.firstTextBaseline else { return nil }
+                let labelBaseline = label.firstBaselineOffsetFromTop
+                let baseline = top + max(labelBaseline, bodyBaseline)
+                let labelFrame = NSRect(x: inset, y: baseline - labelBaseline, width: labelWidth,
+                                        height: ceil(label.fittingSize.height))
+                label.frame = label.frame(forAlignmentRect: labelFrame)
+                addSubview(label)
+                bodyFrame.origin.y = baseline - bodyBaseline
+                top = labelFrame.maxY
+            }
+            if row.kind == .declaration {
+                let background = NSBox(frame: bodyFrame)
                 background.boxType = .custom
                 background.titlePosition = .noTitle
                 background.borderWidth = 0
-                background.cornerRadius = 6
-                background.fillColor = .labelColor.withAlphaComponent(0.065)
+                background.cornerRadius = 7
+                background.fillColor = .labelColor.withAlphaComponent(0.055)
                 background.setAccessibilityElement(false)
                 addSubview(background)
             }
             row.body.frame = bodyFrame
             addSubview(row.body)
-            top = max(labelFrame.maxY, paddedBody.maxY)
-            if index < rows.count - 1 { top += rowSpacing }
+            top = max(top, bodyFrame.maxY)
         }
-        setFrameSize(NSSize(width: bodyLeading + bodyWidth + trailingInset, height: top + inset))
+        setFrameSize(NSSize(width: bodyWidth + 2 * inset, height: top + inset))
     }
 
     required init?(coder: NSCoder) { fatalError("Hover sections are created in code.") }

@@ -424,15 +424,24 @@ enum LanguageServerCheck {
                                               presentation: presentation, onNavigate: { _ in }, onEnter: {}, onExit: {}),
               let view = panel.window.contentView else { throw Failure("show the structured hover") }
         defer { panel.close(restoreFocus: false) }
-        let kinds: [EditorHoverPresentation.Section.Kind] = [.declaration, .type, .documentation, .references]
-        let headingPositions = try kinds.map { kind in
-            guard let label = descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHover.\(kind.rawValue).label" }) as? NSTextField,
-                  label.stringValue == kind.rawValue && label.accessibilityRole()?.rawValue == "AXHeading"
-            else { throw Failure("show the native \(kind.rawValue) heading") }
-            return label.convert(label.bounds, to: nil).midY
+        for kind in [EditorHoverPresentation.Section.Kind.declaration, .documentation] {
+            try expect(descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHover.\(kind.rawValue).label" }) == nil &&
+                       hoverBody(kind, in: view)?.accessibilityLabel() == kind.rawValue,
+                       "give the \(kind.rawValue) an accessible name without a visible label")
         }
-        try expect(zip(headingPositions, headingPositions.dropFirst()).allSatisfy { earlier, later in earlier > later },
-                   "order the declaration, type, documentation and links")
+        let kinds: [EditorHoverPresentation.Section.Kind] = [.declaration, .documentation, .type, .references]
+        let frames = try kinds.map { kind in
+            guard let body = hoverBody(kind, in: view) else { throw Failure("find the \(kind.rawValue) content") }
+            return body.convert(body.bounds, to: nil)
+        }
+        try expect(zip(frames, frames.dropFirst()).allSatisfy { earlier, later in earlier.minY >= later.maxY },
+                   "order the signature, description, type and references")
+        guard let separator = descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHover.separator" }) as? NSBox
+        else { throw Failure("find the divider above hover metadata") }
+        let separatorFrame = separator.convert(separator.bounds, to: nil)
+        try expect(frames[1].minY > separatorFrame.maxY && separatorFrame.minY > frames[2].maxY &&
+                   frames[0].minX == frames[1].minX && frames[1].minX == separatorFrame.minX,
+                   "align the signature and description and divide them from metadata")
         try expect(hoverBody(.declaration, in: view)?.string == "fn debug(\n    comptime format: []const u8,\n    args: anytype,\n) void" &&
                    hoverBody(.type, in: view)?.string == "fn (comptime []const u8, anytype) void",
                    "dedent the signature and remove only the outer type parentheses")
@@ -454,12 +463,13 @@ enum LanguageServerCheck {
             try capture(lightView, "hover-sections-light")
         }
 
-        let columns = try kinds.map { kind in
+        let columns = try [EditorHoverPresentation.Section.Kind.type, .references].map { kind in
             guard let label = descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHover.\(kind.rawValue).label" }) as? NSTextField,
                   let body = hoverBody(kind, in: view)
             else { throw Failure("find both columns in the \(kind.rawValue) row") }
-            try expect(label.alignment == .right && label.textColor == .secondaryLabelColor,
-                       "right-align and mute the \(kind.rawValue) label")
+            try expect(label.stringValue == kind.rawValue && label.accessibilityRole()?.rawValue == "AXHeading" &&
+                       label.alignment == .right && label.textColor == .labelColor,
+                       "show the aligned native \(kind.rawValue) label")
             let labelEdge = label.convert(label.alignmentRect(forFrame: label.bounds), to: nil).maxX
             let bodyStart = body.convert(body.textContainerOrigin, to: nil).x
             let labelBaseline = label.convert(NSPoint(x: 0, y: label.isFlipped ? label.firstBaselineOffsetFromTop :
