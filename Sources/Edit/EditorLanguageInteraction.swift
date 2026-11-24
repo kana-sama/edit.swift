@@ -332,9 +332,16 @@ final class EditorLanguageInteraction: NSObject {
         guard let rect = preferred ?? original else { return }
         let windowRect = editor.convert(rect.intersection(editor.visibleRect), to: nil)
         let anchor = window.convertToScreen(windowRect.intersection(window.contentLayoutRect))
-        popover = EditorHoverPopover(owner: window, appearance: editor.effectiveAppearance, anchor: anchor, text: text,
-                                     onEnter: { [weak self] in self?.pointerEnteredPopover() },
-                                     onExit: { [weak self] in self?.scheduleDeparture() })
+        popover = EditorHoverPopover(
+            owner: window, appearance: editor.effectiveAppearance, anchor: anchor, text: text,
+            onNavigate: { [weak self] location in
+                guard let self, popoverWord == fallback, let follow = self.editor?.languageFollowHoverLink else { return }
+                _ = dismissHover()
+                follow(location, fallback)
+            },
+            onEnter: { [weak self] in self?.pointerEnteredPopover() },
+            onExit: { [weak self] in self?.scheduleDeparture() }
+        )
         if let popover {
             NotificationCenter.default.addObserver(self, selector: #selector(popoverResignedKey),
                                                    name: NSWindow.didResignKeyNotification, object: popover.window)

@@ -6,6 +6,31 @@ struct EditorLanguageHover: Sendable {
     let range: NSRange?
 }
 
+private enum HoverLink {
+    case external(URL)
+    case definition(LSPLocation)
+
+    init?(_ url: URL) {
+        switch url.scheme?.lowercased() {
+        case "http", "https", "mailto":
+            self = .external(url)
+        case "file":
+            guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                  ["", "localhost"].contains(components.host?.lowercased() ?? ""),
+                  components.user == nil, components.password == nil, components.port == nil, components.query == nil,
+                  components.path.hasPrefix("/"), !components.path.utf8.contains(0), !url.hasDirectoryPath,
+                  let fragment = components.fragment, fragment.first == "L" else { return nil }
+            let digits = fragment.dropFirst()
+            guard digits.utf8.allSatisfy({ (48...57).contains($0) }), let line = Int(digits), line > 0 else { return nil }
+            let position = LSPPosition(line: line - 1, character: 0)
+            let file = URL(filePath: components.path, directoryHint: .notDirectory)
+            self = .definition(LSPLocation(url: file, range: LSPRange(start: position, end: position)))
+        default:
+            return nil
+        }
+    }
+}
+
 struct EditorHoverContent: Sendable {
     private struct Run: Sendable {
         let text: String
@@ -60,9 +85,7 @@ struct EditorHoverContent: Sendable {
             }
 
             let attributes = run.inlinePresentationIntent ?? []
-            let link = run.link.flatMap { url in
-                ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") ? url : nil
-            }
+            let link = run.link.flatMap { HoverLink($0) == nil ? nil : $0 }
             blocks[blocks.count - 1].runs.append(Run(text: String(value[run.range].characters),
                                                      emphasis: attributes.contains(.emphasized),
                                                      strong: attributes.contains(.stronglyEmphasized),
@@ -141,7 +164,7 @@ final class EditorHoverPopover {
     var isSelecting: Bool { content.selecting }
 
     init?(owner: NSWindow, appearance: NSAppearance, anchor: NSRect, text: NSAttributedString,
-          onEnter: @escaping () -> Void, onExit: @escaping () -> Void) {
+          onNavigate: @escaping (LSPLocation) -> Void, onEnter: @escaping () -> Void, onExit: @escaping () -> Void) {
         guard !anchor.isEmpty, text.length > 0, let screen = owner.screen ?? NSScreen.main else { return nil }
         let area = screen.visibleFrame.insetBy(dx: 8, dy: 8)
         let inset: CGFloat = 12
@@ -166,7 +189,7 @@ final class EditorHoverPopover {
         self.anchor = anchor
         panel = HoverPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         content = HoverSurface(size: frame.size, contentHeight: contentHeight, text: text, inset: inset,
-                               onEnter: onEnter, onExit: onExit)
+                               onNavigate: onNavigate, onEnter: onEnter, onExit: onExit)
         panel.contentView = content
         panel.setFrame(frame, display: false)
         panel.isReleasedWhenClosed = false
@@ -197,6 +220,7 @@ private final class HoverPanel: NSPanel {
 }
 
 private final class HoverSurface: NSVisualEffectView, NSTextViewDelegate {
+    private let onNavigate: (LSPLocation) -> Void
     private let onEnter: () -> Void
     private let onExit: () -> Void
     private var area: NSTrackingArea?
@@ -205,7 +229,8 @@ private final class HoverSurface: NSVisualEffectView, NSTextViewDelegate {
     var selecting: Bool { richText.selecting }
 
     init(size: NSSize, contentHeight: CGFloat, text: NSAttributedString, inset: CGFloat,
-         onEnter: @escaping () -> Void, onExit: @escaping () -> Void) {
+         onNavigate: @escaping (LSPLocation) -> Void, onEnter: @escaping () -> Void, onExit: @escaping () -> Void) {
+        self.onNavigate = onNavigate
         self.onEnter = onEnter
         self.onExit = onExit
         richText = HoverTextView(frame: NSRect(x: 0, y: 0, width: size.width, height: max(size.height, contentHeight)))
@@ -256,7 +281,12 @@ private final class HoverSurface: NSVisualEffectView, NSTextViewDelegate {
     override func mouseExited(with event: NSEvent) { onExit() }
 
     func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
-        if let url = link as? URL { NSWorkspace.shared.open(url) }
+        if let url = link as? URL, let destination = HoverLink(url) {
+            switch destination {
+            case .external(let url): NSWorkspace.shared.open(url)
+            case .definition(let location): onNavigate(location)
+            }
+        }
         return true
     }
 }

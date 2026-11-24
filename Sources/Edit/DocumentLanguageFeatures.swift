@@ -51,6 +51,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         document.editor.languageProbe = { [weak self] offset, word in await self?.probe(at: offset, word: word) }
         document.editor.languageHover = { [weak self] offset, word in await self?.hover(at: offset, word: word) }
         document.editor.languageFollowLink = { [weak self] offset, word in self?.followLink(at: offset, word: word) }
+        document.editor.languageFollowHoverLink = { [weak self] location, word in self?.followHoverLink(location, from: word) }
     }
 
     func updateDocument() {
@@ -168,6 +169,12 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
               isCurrent(query) else { return nil }
         return EditorLanguageHover(text: result.content, isMarkdown: result.isMarkdown,
                                    range: result.range?.nsRange(in: query.text) ?? word)
+    }
+
+    private func followHoverLink(_ location: LSPLocation, from word: NSRange) {
+        guard session.supportsHover, query() != nil else { return }
+        let origin = document.navigationLocation(at: NSRange(location: word.location, length: 0))
+        navigate(location, source: word, origin: origin)
     }
 
     func followLink(at offset: Int, word: NSRange) {
@@ -345,10 +352,18 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
 
     @objc private func openDefinition(_ item: NSMenuItem) {
         guard let choice = item.representedObject as? DefinitionChoice else { return }
+        navigate(choice.location, source: nil, origin: choice.origin)
+    }
+
+    private func navigate(_ location: LSPLocation, source: NSRange?, origin: NavigationHistory.Location?) {
         cancelLookup()
         navigationID &+= 1
         let id = navigationID
-        Task { [weak self] in await self?.open(choice.location, id: id, source: nil, navigationOrigin: choice.origin) }
+        let generation = document.openRequestGeneration
+        Task { [weak self] in
+            guard let self, document.openRequestGeneration == generation else { return }
+            await open(location, id: id, source: source, navigationOrigin: origin)
+        }
     }
 
     private func open(_ location: LSPLocation, id: UInt64, source: NSRange?, navigationOrigin: NavigationHistory.Location?) async {

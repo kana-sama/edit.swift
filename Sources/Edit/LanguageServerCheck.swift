@@ -25,6 +25,8 @@ enum LanguageServerCheck {
         let third = root.appending(path: "other use.zig")
         let solo = root.appending(path: "solo.zig")
         let notes = root.appending(path: "Notes.txt")
+        let font = root.appending(path: "Font Types #é.zig")
+        let typed = root.appending(path: "Typed.zig")
         let mainText = """
             const helper = @import("helper.zig");
             const third = @import("other use.zig");
@@ -52,6 +54,16 @@ enum LanguageServerCheck {
         for (url, text) in [(main, mainText), (helper, helperText), (third, thirdText), (solo, soloText), (notes, "Notes\n")] {
             try text.write(to: url, atomically: true, encoding: .utf8)
         }
+        let fontText = "/// Display variant.\r\n\r\npub const FontVariant = struct { bold: bool };\r\n"
+        let typedText = """
+            const text_mod = @import("Font Types #é.zig");
+            pub fn select() void {
+                const variant = text_mod.FontVariant{ .bold = true };
+                _ = variant;
+            }
+            """
+        try fontText.write(to: font, atomically: true, encoding: .utf8)
+        try typedText.write(to: typed, atomically: true, encoding: .utf8)
 
         let lsp = document.languageFeatures
         document.setFolder(empty)
@@ -78,7 +90,7 @@ enum LanguageServerCheck {
         let hover = await lsp.hover(at: use.location + 2, word: use)
         try expect(hover?.isMarkdown == true && hover?.text.contains("Returns a value.") == true && hover?.range == use,
                    "ZLS returns fenced Markdown and the symbol range")
-        try await checkEditorHoverAndClick(in: document, word: use, capture: captureHover)
+        try await checkEditorHoverAndClick(in: document, word: use)
         let declaration = (helperText as NSString).range(of: "identify")
         try await wait("open cross-file definition at its start") {
             document.fileURL == helper && document.editor.selectedRange().location == declaration.location
@@ -131,6 +143,15 @@ enum LanguageServerCheck {
         try await wait("follow the single use without opening a new References view") {
             document.editor.selectedRange().location == last.location
         }
+
+        try expect(try await app.openFile(typed, in: document) === document, "open the referenced-type fixture")
+        try await wait("synchronize the referenced-type fixture") { lsp.session.supportsHover }
+        let variant = (typedText as NSString).range(of: "variant")
+        let typeLine = (fontText as NSString).range(of: "pub const FontVariant").location
+        try await checkHoverDefinitionLink(in: document, word: variant, file: font, lineOffset: typeLine, capture: captureHover)
+        await app.navigate(.back)
+        try expect(document.fileURL == typed && document.editor.selectedRange().location == variant.location,
+                   "Go Back returns to the word whose hover was followed")
 
         lsp.perform(.stop)
         try await wait("stop the server") { lsp.session.state.title == "Stopped" }
@@ -222,8 +243,7 @@ enum LanguageServerCheck {
         return event
     }
 
-    private static func checkEditorHoverAndClick(in document: DocumentWindow, word: NSRange,
-                                                 capture: (NSView) throws -> Void) async throws {
+    private static func checkEditorHoverAndClick(in document: DocumentWindow, word: NSRange) async throws {
         let editor = document.editor
         document.window.layoutIfNeeded()
         if let layout = editor.textLayoutManager { layout.ensureLayout(for: layout.documentRange) }
@@ -247,7 +267,6 @@ enum LanguageServerCheck {
         else { throw Failure("find the rich hover text view") }
         try expect(text.isSelectable && !text.isEditable && text.string.contains("Returns a value.") && text.string.contains("fn identify()"),
                    "show selectable documentation and its signature")
-        try capture(view)
         editor.cancelOperation(nil)
         try expect(editor.languageHoverWindowForCheck == nil, "Escape dismisses language documentation")
         editor.mouseMoved(with: try event(.mouseMoved, .command))
@@ -255,6 +274,52 @@ enum LanguageServerCheck {
         let down = try event(.leftMouseDown, .command, clicks: 1)
         NSApp.postEvent(try event(.leftMouseUp, .command, clicks: 1), atStart: true)
         editor.mouseDown(with: down)
+    }
+
+    private static func checkHoverDefinitionLink(in document: DocumentWindow, word: NSRange, file: URL, lineOffset: Int,
+                                                 capture: (NSView) throws -> Void) async throws {
+        let editor = document.editor
+        document.window.layoutIfNeeded()
+        if let layout = editor.textLayoutManager { layout.ensureLayout(for: layout.documentRange) }
+        guard let symbol = editor.highlightRects(for: [word]).first else { throw Failure("layout the inferred-type use") }
+        let location = editor.convert(NSPoint(x: symbol.midX, y: symbol.midY), to: nil)
+        func event(_ type: NSEvent.EventType, at point: NSPoint, in window: NSWindow) throws -> NSEvent {
+            guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                                 timestamp: ProcessInfo.processInfo.systemUptime,
+                                                 windowNumber: window.windowNumber, context: nil,
+                                                 eventNumber: 1, clickCount: type == .mouseMoved ? 0 : 1, pressure: 1)
+            else { throw Failure("create a hover link event") }
+            return event
+        }
+        editor.mouseMoved(with: try event(.mouseMoved, at: location, in: document.window))
+        try await wait("show the inferred-type hover from ZLS") { editor.languageHoverWindowForCheck != nil }
+        guard let panel = editor.languageHoverWindowForCheck, let view = panel.contentView,
+              let text = descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHoverText" }) as? NSTextView
+        else { throw Failure("find the inferred-type hover content") }
+        let link = (text.string as NSString).range(of: "FontVariant", options: .backwards)
+        guard link.location != NSNotFound,
+              let url = text.textStorage?.attribute(.link, at: link.location, effectiveRange: nil) as? URL
+        else { throw Failure("make the FontVariant name in Go to clickable") }
+        let linkedFile = FileBuffer.canonicalURL(URL(filePath: url.path))
+        try expect(linkedFile.path == file.path && url.fragment == "L3",
+                   "retain the local line link from the actual ZLS Markdown (\(url.absoluteString), expected \(file.absoluteString)#L3)")
+        try capture(view)
+        let screen = text.firstRect(forCharacterRange: NSRange(location: link.location + 2, length: 1), actualRange: nil)
+        try expect(!screen.isEmpty, "lay out the hover link target")
+        let point = panel.convertPoint(fromScreen: NSPoint(x: screen.midX, y: screen.midY))
+        let press = try event(.leftMouseDown, at: point, in: panel)
+        NSApp.postEvent(try event(.leftMouseUp, at: point, in: panel), atStart: true)
+        NSApp.postEvent(press, atStart: true)
+        guard let down = NSApp.nextEvent(matching: .leftMouseDown, until: .distantPast, inMode: .default, dequeue: true)
+        else { throw Failure("queue the link click") }
+        text.mouseDown(with: down)
+        if NSApp.currentEvent === down {
+            _ = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: true)
+        }
+        try await wait("open the definition at the linked line in Edit") {
+            document.fileURL == file && editor.selectedRange().location == lineOffset &&
+                document.window.firstResponder === editor && editor.languageHoverWindowForCheck == nil
+        }
     }
 
     private static func descend(_ view: NSView?, matching predicate: (NSView) -> Bool) -> NSView? {

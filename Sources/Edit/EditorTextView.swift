@@ -70,6 +70,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var languageProbe: ((Int, NSRange) async -> NSRange?)?
     var languageHover: ((Int, NSRange) async -> EditorLanguageHover?)?
     var languageFollowLink: ((Int, NSRange) -> Void)?
+    var languageFollowHoverLink: ((LSPLocation, NSRange) -> Void)?
     var languageInteractionEnabled = false {
         didSet {
             guard languageInteractionEnabled != oldValue else { return }
