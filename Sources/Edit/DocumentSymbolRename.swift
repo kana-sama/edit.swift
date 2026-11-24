@@ -20,6 +20,58 @@ final class DocumentSymbolRename {
         let spelling: String
     }
 
+    private struct Submission {
+        let draft: String
+        let caretOffset: Int
+        let name: String
+        private let namePrefixBytes: Int
+
+        init(draft: String, caretOffset: Int, quoted: Bool) {
+            self.draft = draft
+            self.caretOffset = caretOffset
+            let caret = String.Index(utf16Offset: caretOffset, in: draft)
+            let draftPrefixBytes = draft[..<caret].utf8.count
+            var decodedPrefixBytes = 0
+            if quoted, let decoded = ZigRenameName.decoded("@\"\(draft)\"", onQuoteBoundary: { spellingBytes, nameBytes in
+                if spellingBytes <= draftPrefixBytes { decodedPrefixBytes = nameBytes }
+            }) {
+                name = decoded
+                namePrefixBytes = decodedPrefixBytes
+            } else {
+                name = draft
+                namePrefixBytes = draftPrefixBytes
+            }
+        }
+
+        func offset(in spelling: String) -> Int {
+            guard spelling.hasPrefix("@\"") else {
+                return min(namePrefixBytes, spelling.utf16.count)
+            }
+            // ZLS can add quotes and escapes to the spelling shown in the draft.
+            let body = spelling.utf8.dropFirst(2).dropLast()
+            if body.elementsEqual(draft.utf8) { return 2 + caretOffset }
+            var spellingPrefixBytes = 0
+            _ = ZigRenameName.decoded(spelling, onQuoteBoundary: { spellingBytes, nameBytes in
+                if nameBytes <= namePrefixBytes { spellingPrefixBytes = spellingBytes }
+            })
+            let index = spelling.utf8.index(body.startIndex, offsetBy: spellingPrefixBytes)
+            return index.utf16Offset(in: spelling)
+        }
+
+        func selection(in target: NSRange, after edits: [EditorTextEdit]) -> NSRange? {
+            var delta = 0
+            for edit in edits {
+                guard edit.range.location <= target.location else { break }
+                if target.upperBound <= edit.range.upperBound {
+                    let replacement = edit.result(at: delta)
+                    return NSRange(location: replacement.location + offset(in: edit.text), length: 0)
+                }
+                delta += edit.lengthChange
+            }
+            return nil
+        }
+    }
+
     private struct FileChange: Sendable {
         let url: URL
         let original: String
@@ -130,13 +182,17 @@ final class DocumentSymbolRename {
     }
 
     func submit() {
-        guard let target, let id = operation, let document, let draft = document.editor.symbolRenameText,
-              isCurrent(id, source: target.source) else {
+        guard let target, let id = operation, let document, isCurrent(id, source: target.source),
+              let draft = document.editor.symbolRenameText, let range = document.editor.renameRange else {
             cancel()
             return
         }
-        let name = target.spelling.hasPrefix("@\"")
-            ? ZigRenameName.decoded("@\"\(draft)\"") ?? draft : draft
+        let editor = document.editor
+        let selection = editor.selectedRange()
+        let caret = editor.selectionAffinity == .upstream ? selection.location : selection.upperBound
+        let offset = min(max(caret, range.location), range.upperBound) - range.location
+        let submission = Submission(draft: draft, caretOffset: offset, quoted: target.spelling.hasPrefix("@\""))
+        let name = submission.name
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             NSSound.beep()
@@ -144,16 +200,19 @@ final class DocumentSymbolRename {
         }
         guard !name.utf8.elementsEqual(target.name.utf8) else {
             finish()
+            let quotePrefix = target.spelling.utf16.count == target.range.length ? 0 : 2
+            let location = target.range.location + submission.offset(in: target.spelling) - quotePrefix
+            editor.setCaretSelections(editor.caretSelections.dropLast() + [NSRange(location: location, length: 0)], record: false)
             return
         }
-        document.editor.endSymbolRename()
+        guard editor.lockSymbolRename() else { return }
         task = Task { [weak self] in
             guard let self else { return }
             defer { if operation == id { finish() } }
             do {
                 guard let edit = try await session.rename(at: target.source.offset, to: name),
                       !edit.documents.isEmpty else { throw RenameFailure("ZLS found no edits for this symbol.") }
-                try await apply(edit, to: target, newName: name, id: id)
+                try await apply(edit, to: target, submission: submission, id: id)
             } catch {
                 if operation == id, !Task.isCancelled {
                     finish()
@@ -163,10 +222,11 @@ final class DocumentSymbolRename {
         }
     }
 
-    private func apply(_ edit: LSPWorkspaceEdit, to target: Target, newName: String, id: UUID) async throws {
+    private func apply(_ edit: LSPWorkspaceEdit, to target: Target, submission: Submission, id: UUID) async throws {
         let source = target.source
         let spelling = target.spelling
         let oldName = target.name
+        let newName = submission.name
         let build = Task.detached(priority: .userInitiated) {
             try Self.plan(edit, source: source, spelling: spelling, oldName: oldName, newName: newName)
         }
@@ -174,7 +234,7 @@ final class DocumentSymbolRename {
             try await build.value
         } onCancel: { build.cancel() }
         guard let app, isCurrent(id, source: source) else { throw CancellationError() }
-        try await app.performWorktreeMutation(affecting: files.map(\.url)) {
+        try await app.performWorktreeMutation(affecting: files.map(\.url), preservingRenameIn: document) {
             guard isCurrent(id, source: source) else { throw CancellationError() }
             var open: [(DocumentWindow, FileChange)] = []
             var closed: [FileChange] = []
@@ -188,10 +248,10 @@ final class DocumentSymbolRename {
                     let editor = document.editor
                     guard editor.textStorage != nil, !editor.hasMarkedText(), editor.conflictEdits.isEmpty,
                           editor.jjInlineDiff?.projectedEditRange == nil,
-                          editor.string.utf8.elementsEqual(file.original.utf8) else {
+                          editor.sourceString.utf8.elementsEqual(file.original.utf8) else {
                         throw RenameFailure("“\(file.url.lastPathComponent)” has edits that ZLS has not seen.")
                     }
-                    guard editor.focusAllowsEdits(file.edits.map(\.range)) else {
+                    guard editor.focusAllowsSourceEdits(file.edits.map(\.range)) else {
                         throw RenameFailure("Exit Focus in “\(file.url.lastPathComponent)” to rename this symbol.")
                     }
                     open.append((document, file))
@@ -208,7 +268,13 @@ final class DocumentSymbolRename {
             }
             for (document, file) in open {
                 let editor = document.editor
-                let selections = MultiCaretEditing.mapped(editor.caretSelections, after: file.edits)
+                if document === self.document { editor.endSymbolRename() }
+                let current = editor.caretSelections
+                var selections = MultiCaretEditing.mapped(current, after: file.edits)
+                if document === self.document, current.last == source.selection,
+                   let caret = submission.selection(in: target.range, after: file.edits) {
+                    selections[selections.count - 1] = caret
+                }
                 editor.applyMultiEdits(file.edits, selections: selections, validate: false, actionName: "Rename Symbol")
             }
         }
@@ -306,7 +372,7 @@ private enum ZigRenameName {
         comptime_int f16 f32 f64 f80 f128 false isize noreturn null true type undefined usize void
         """.split(whereSeparator: \.isWhitespace).map(String.init))
 
-    static func decoded(_ spelling: String) -> String? {
+    static func decoded(_ spelling: String, onQuoteBoundary: ((Int, Int) -> Void)? = nil) -> String? {
         let bytes = spelling.utf8
         guard bytes.starts(with: [64, 34]) else {
             guard let first = bytes.first, isLetter(first), bytes.dropFirst().allSatisfy({
@@ -323,11 +389,17 @@ private enum ZigRenameName {
         // same name can be written with either a bare identifier or an escaped spelling.
         var source = bytes.dropFirst(2).dropLast().makeIterator()
         var result: [UInt8] = []
-        while let byte = source.next() {
+        var spellingBytes = 0
+        func nextByte() -> UInt8? {
+            guard let byte = source.next() else { return nil }
+            spellingBytes += 1
+            return byte
+        }
+        while let byte = nextByte() {
             switch byte {
             case 34, 0...31, 127: return nil
             case 92:
-                switch source.next() {
+                switch nextByte() {
                 case 34: result.append(34)
                 case 39: result.append(39)
                 case 92: result.append(92)
@@ -335,18 +407,18 @@ private enum ZigRenameName {
                 case 114: result.append(13)
                 case 116: result.append(9)
                 case 120:
-                    guard let first = source.next(), let high = hexValue(first),
-                          let second = source.next(), let low = hexValue(second) else { return nil }
+                    guard let first = nextByte(), let high = hexValue(first),
+                          let second = nextByte(), let low = hexValue(second) else { return nil }
                     result.append(UInt8(16 * high + low))
                 case 117:
-                    guard source.next() == 123 else { return nil }
+                    guard nextByte() == 123 else { return nil }
                     var digits = 0
                     var value: UInt32 = 0
-                    var next = source.next()
+                    var next = nextByte()
                     while let byte = next, let digit = hexValue(byte), digits < 6 {
                         digits += 1
                         value = 16 * value + digit
-                        next = source.next()
+                        next = nextByte()
                     }
                     guard next == 125, digits > 0, let scalar = UnicodeScalar(value) else { return nil }
                     result.append(contentsOf: String(scalar).utf8)
@@ -355,6 +427,7 @@ private enum ZigRenameName {
             default:
                 result.append(byte)
             }
+            onQuoteBoundary?(spellingBytes, result.count)
         }
         return String(validating: result, as: UTF8.self)
     }

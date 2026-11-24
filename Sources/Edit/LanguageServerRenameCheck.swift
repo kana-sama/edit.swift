@@ -118,10 +118,12 @@ enum LanguageServerRenameCheck {
 
         editor.keyDown(with: f2)
         try await waitForRename(in: document, range: name, phase: "F2 after cancelling IME")
+        let unchangedCaret = NSRange(location: name.location + 4, length: 0)
+        editor.setSelectedRange(unchangedCaret)
         editor.keyDown(with: try keyEvent(36, characters: "\r", modifiers: [], in: document.window))
-        guard !editor.isRenamingSymbol, editor.renameRange == nil, editor.selectedRange() == originalCaret,
+        guard !editor.isRenamingSymbol, editor.renameRange == nil, editor.selectedRange() == unchangedCaret,
               editor.string == sourceText, document.textForSaving == sourceText else {
-            throw Failure("close rename without edits on Return and restore the original caret")
+            throw Failure("close rename without edits and keep the caret used to submit")
         }
         try checkVerticalRoundTrip(in: editor, window: document.window, phase: "after unmodified Return")
 
@@ -130,7 +132,14 @@ enum LanguageServerRenameCheck {
         let newName = "compute \"value\""
         let newSpelling = "@\"compute \\\"value\\\"\""
         editor.insertText(newName, replacementRange: editor.selectedRange())
+        let typedPrefix = "compute \""
+        let draftCaret = NSRange(location: name.location + typedPrefix.utf16.count, length: 0)
+        editor.setSelectedRange(draftCaret)
+        let submittedDraft = editor.string
         editor.insertNewline(nil)
+        guard editor.string == submittedDraft, editor.selectedRange() == draftCaret, document.textForSaving == sourceText else {
+            throw Failure("keep the draft and caret visible while waiting for Rename")
+        }
         let expected = sourceText.replacingOccurrences(of: "pub fn calculate", with: "pub fn \(newSpelling)")
             .replacingOccurrences(of: "return calculate()", with: "return \(newSpelling)()")
         let expectedCaller = callerText.replacingOccurrences(of: "source.calculate", with: "source.\(newSpelling)")
@@ -140,6 +149,11 @@ enum LanguageServerRenameCheck {
         }
         guard document.window.firstResponder === editor, editor.undoManager?.undoActionName == "Rename Symbol" else {
             throw Failure("restore focus and give the editor a named Undo")
+        }
+        let escapedPrefix = "@\"compute \\\""
+        let committedCaret = NSRange(location: name.location + escapedPrefix.utf16.count, length: 0)
+        guard editor.selectedRange() == committedCaret else {
+            throw Failure("keep the position at Return inside the renamed symbol (\(editor.selectedRange()), expected \(committedCaret))")
         }
         try checkVerticalRoundTrip(in: editor, window: document.window, phase: "after submitting rename")
         let renamed = (editor.string as NSString).range(of: newSpelling)
@@ -154,6 +168,28 @@ enum LanguageServerRenameCheck {
             throw Failure("focus the exact source spelling inside an escaped Zig identifier")
         }
         editor.cancelOperation(nil)
+
+        let local = (expected as NSString).range(of: "localCall")
+        editor.setCaretSelections([NSRange(location: local.location + 2, length: 0)], record: false)
+        try await wait("resolve the document after the quoted rename") {
+            document.languageFeatures.session.supportsRename && document.canReplaceBuffer && editor.isEditable
+        }
+        editor.keyDown(with: f2)
+        try await waitForRename(in: document, range: local, phase: "F2 on a local symbol")
+        let localName = "local_call_longer"
+        editor.insertText(localName, replacementRange: editor.selectedRange())
+        let localCaret = editor.selectedRange()
+        guard localCaret == NSRange(location: local.location + localName.utf16.count, length: 0) else {
+            throw Failure("type to the end of the new name")
+        }
+        let localResult = (expected as NSString).replacingCharacters(in: local, with: localName)
+        editor.insertNewline(nil)
+        guard editor.string == localResult, editor.selectedRange() == localCaret else {
+            throw Failure("keep the new name and end caret visible immediately after Return")
+        }
+        try await wait("commit a longer name and leave the caret at its end") {
+            editor.string == localResult && editor.selectedRange() == localCaret && !editor.isRenamingSymbol
+        }
         await document.flushAutosave()
         await secondary.flushAutosave()
     }

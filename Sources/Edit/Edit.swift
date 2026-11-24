@@ -825,7 +825,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     func performWorktreeMutation<T>(
-        affecting sources: [URL], operation: @MainActor () async throws -> T
+        affecting sources: [URL], preservingRenameIn renameOrigin: DocumentWindow? = nil,
+        operation: @MainActor () async throws -> T
     ) async throws -> T {
         let affected = documents.filter { $0.worktreeMutationAffects(sources) }
         guard !isQuitting, worktreeMutationPaths.isEmpty, affected.allSatisfy(\.canReplaceBuffer) else {
@@ -833,7 +834,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         }
         worktreeMutationPaths = sources
         worktreeMutationGeneration &+= 1
-        for document in affected { document.beginWorktreeMutation() }
+        for document in affected { document.beginWorktreeMutation(preservingRename: document === renameOrigin) }
         defer {
             worktreeMutationPaths = []
             for document in affected { document.finishWorktreeMutation() }

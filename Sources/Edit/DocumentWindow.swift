@@ -1469,8 +1469,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    func beginWorktreeMutation() {
-        if editor.renameRange != nil { _ = editor.onCancelSymbolRename?() }
+    func beginWorktreeMutation(preservingRename: Bool) {
+        if !preservingRename, editor.renameRange != nil { _ = editor.onCancelSymbolRename?() }
         if editor.hasMarkedText() { editor.unmarkText() }
         activity.beginMutation(wasEditable: editor.isEditable)
         editor.isEditable = false

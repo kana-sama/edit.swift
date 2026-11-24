@@ -16,8 +16,9 @@ final class EditorFocusSession {
 
     var snapshot: Snapshot { Snapshot(session: id, ranges: ranges) }
 
-    func contains(_ range: NSRange) -> Bool {
-        range.location >= 0 && range.length >= 0 && ranges.contains {
+    func contains(_ range: NSRange, in snapshot: Snapshot? = nil) -> Bool {
+        let scope = snapshot?.session == id ? snapshot?.ranges ?? ranges : ranges
+        return range.location >= 0 && range.length >= 0 && scope.contains {
             range.location >= $0.location && range.location <= NSMaxRange($0) &&
                 range.length <= NSMaxRange($0) - range.location
         }
@@ -155,9 +156,9 @@ extension EditorTextView {
         if notify { onFocusScopeChange?() }
     }
 
-    func focusAllowsEdits(_ ranges: [NSRange]) -> Bool {
+    func focusAllowsEdits(_ ranges: [NSRange], in snapshot: EditorFocusSession.Snapshot? = nil) -> Bool {
         guard let focusSession else { return true }
-        return ranges.allSatisfy(focusSession.contains)
+        return ranges.allSatisfy { focusSession.contains($0, in: snapshot) }
     }
 
     func withFocusEditsAllowed<T>(_ change: () -> T) -> T {

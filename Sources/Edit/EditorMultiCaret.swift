@@ -451,7 +451,7 @@ extension EditorTextView {
         let selections = renaming ? [selectedRange()] : caretSelections
         let hidesLiveCaret = jjInlineDiff?.projectedEditRange?.length == 0
         let projectedCaret = hidesLiveCaret ? jjInlineDiff?.projectedCaretRect : nil
-        let showCarets = (hidesLiveCaret ? projectedCaret != nil && isSelectable : isEditable)
+        let showCarets = (hidesLiveCaret ? projectedCaret != nil && isSelectable : isEditable || renaming)
             && !hasMarkedText() && hasBufferFocus
         let old = multiCaret.highlights
         var highlights: [NSRect] = []

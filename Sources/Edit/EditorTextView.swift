@@ -37,6 +37,7 @@ private struct EditorRenameDraft {
     let affinity: NSSelectionAffinity
     let focus: EditorFocusSession.Snapshot?
     let undoManager = UndoManager()
+    var isSubmitted = false
 
     func contains(_ range: NSRange) -> Bool {
         range.location >= self.range.location && range.location <= self.range.upperBound &&
@@ -234,6 +235,17 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         return storage.mutableString.substring(with: range)
     }
 
+    func lockSymbolRename() -> Bool {
+        guard renameDraft?.isSubmitted == false else { return false }
+        renameDraft?.isSubmitted = true
+        renameDraft?.undoManager.removeAllActions()
+        return true
+    }
+
+    func focusAllowsSourceEdits(_ ranges: [NSRange]) -> Bool {
+        focusAllowsEdits(ranges, in: renameDraft?.focus)
+    }
+
     func endSymbolRename() {
         guard let draft = renameDraft else { return }
         withTransientComposition {
@@ -256,7 +268,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     private func allowsRenameEdit(_ range: NSRange, _ replacement: String?, in draft: EditorRenameDraft) -> Bool {
-        draft.contains(range) && replacement?.rangeOfCharacter(from: .newlines) == nil
+        !draft.isSubmitted && draft.contains(range) && replacement?.rangeOfCharacter(from: .newlines) == nil
     }
 
     override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
@@ -615,6 +627,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        if renameDraft?.isSubmitted == true { return }
         guard !updatingComposition, renameDraft == nil else {
             super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
             return
