@@ -121,7 +121,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private weak var terminalTitleWidthLimit: NSLayoutConstraint?
     private var terminalSidebarWidth = TerminalDockSizes().rightWidth
     private(set) var isTerminalVisible = false
-    private var pendingTerminalRestore: DocumentTerminalState?
+    private var pendingTerminalFocus: Bool?
     private(set) lazy var titleBar = DocumentTitleBar(document: self, app: app)
 
     private unowned let app: Edit
@@ -240,7 +240,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     var canReplaceBuffer: Bool { !isBusy && window.attachedSheet == nil }
     var canRequestOpen: Bool { window.attachedSheet == nil && activity.acceptsOpenRequest }
     var canRestoreSession: Bool {
-        folderURL == nil && displayedFileURL == nil && !sidebar.hasContent && terminalPanel == nil && pendingTerminalRestore == nil &&
+        folderURL == nil && displayedFileURL == nil && !sidebar.hasContent && terminalPanel == nil &&
             !window.isDocumentEdited && autosave.generation == 0 && openRequestGeneration == 0 &&
             !editor.hasMarkedText() && canReplaceBuffer
     }
@@ -363,52 +363,54 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func showTerminal() {
         guard !app.isQuitting, window.attachedSheet == nil else { return }
-        _ = attachTerminal(focusing: true)
+        attachTerminal(focusing: true)
     }
 
     func restoreTerminal(_ state: DocumentTerminalState?) {
         guard let state else { return }
-        pendingTerminalRestore = state
-        if pendingFullScreen, state.isVisible, state.panel.dock == .right {
-            _ = installDocumentSplit()
+        let panel = prepareTerminal(restoring: state)
+        if state.isVisible {
+            pendingTerminalFocus = state.wasFocused
+            if pendingFullScreen && state.panel.dock == .right { _ = installDocumentSplit() }
+            restoreVisibleTerminalIfReady()
         }
-        restoreVisibleTerminalIfReady()
+        panel.startSavedShells()
     }
 
     private func restoreVisibleTerminalIfReady() {
         // The normal frame can be smaller than the saved full-screen layout.
-        guard !pendingFullScreen, let state = pendingTerminalRestore, state.isVisible else { return }
-        let panel = attachTerminal()
-        if state.wasFocused { panel.focusLastTerminal() }
+        guard !pendingFullScreen, let shouldFocus = pendingTerminalFocus else { return }
+        attachTerminal(focusing: shouldFocus)
     }
 
-    private func attachTerminal(focusing: Bool = false) -> TerminalPanel {
-        let panel: TerminalPanel
-        if let terminalPanel {
-            panel = terminalPanel
-        } else {
-            let saved = pendingTerminalRestore
-            panel = TerminalPanel(
-                directory: { [weak self] in
-                    self?.folderURL ?? self?.displayedFileURL?.deletingLastPathComponent()
-                        ?? FileManager.default.homeDirectoryForCurrentUser
-                },
-                onDockChange: { [weak self] dock in self?.moveTerminal(to: dock) },
-                onLastShellExit: { [weak self] panelHadFocus in
-                    guard let self, self.isTerminalVisible, !self.app.isQuitting else { return }
-                    self.hideTerminal(restoringContentFocus: panelHadFocus)
-                },
-                launchShell: !app.isAgentCheck,
-                restoredState: saved?.panel
-            )
-            terminalPanel = panel
-            let sizes = saved?.sizes ?? TerminalDockSizes()
-            terminalDockView = TerminalDockView(terminal: panel.view, height: sizes.belowHeight) { [weak self] height in
-                self?.setEditorBottomInset(height)
-            }
-            if sizes.rightWidth.isFinite && sizes.rightWidth > 0 { terminalSidebarWidth = sizes.rightWidth }
-            pendingTerminalRestore = nil
+    private func prepareTerminal(restoring saved: DocumentTerminalState? = nil) -> TerminalPanel {
+        if let terminalPanel { return terminalPanel }
+        let panel = TerminalPanel(
+            directory: { [weak self] in
+                self?.folderURL ?? self?.displayedFileURL?.deletingLastPathComponent()
+                    ?? FileManager.default.homeDirectoryForCurrentUser
+            },
+            onDockChange: { [weak self] dock in self?.moveTerminal(to: dock) },
+            onLastShellExit: { [weak self] panelHadFocus in
+                guard let self, !self.app.isQuitting else { return }
+                self.pendingTerminalFocus = nil
+                self.hideTerminal(restoringContentFocus: panelHadFocus)
+            },
+            shell: TerminalPanel.loginShell(forAgentCheck: app.isAgentCheck),
+            restoredState: saved?.panel
+        )
+        terminalPanel = panel
+        let sizes = saved?.sizes ?? TerminalDockSizes()
+        terminalDockView = TerminalDockView(terminal: panel.view, height: sizes.belowHeight) { [weak self] height in
+            self?.setEditorBottomInset(height)
         }
+        if sizes.rightWidth.isFinite && sizes.rightWidth > 0 { terminalSidebarWidth = sizes.rightWidth }
+        return panel
+    }
+
+    private func attachTerminal(focusing: Bool) {
+        let panel = prepareTerminal()
+        pendingTerminalFocus = nil
         if focusing { panel.prepareSpace() }
         if !isTerminalVisible {
             isTerminalVisible = true
@@ -416,15 +418,15 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             panel.setVisible(true)
         }
         if focusing { panel.focusLastTerminal() }
-        return panel
     }
 
     private func terminalSessionState() -> DocumentTerminalState? {
-        guard let terminalPanel, let terminalDockView else { return pendingTerminalRestore }
+        guard let terminalPanel, let terminalDockView else { return nil }
         let rightWidth = currentTerminalSidebarWidth
         let sizes = TerminalDockSizes(belowHeight: terminalDockView.savedHeight, rightWidth: rightWidth)
         return DocumentTerminalState(panel: terminalPanel.snapshot(), sizes: sizes,
-                                     isVisible: isTerminalVisible, wasFocused: terminalHasFocus(window.firstResponder))
+                                     isVisible: isTerminalVisible || pendingTerminalFocus != nil,
+                                     wasFocused: pendingTerminalFocus ?? terminalHasFocus(window.firstResponder))
     }
 
     private func moveTerminal(to dock: TerminalDock) {

@@ -16,6 +16,10 @@ enum TerminalZoom {
 
 @MainActor
 final class TerminalPanel: NSObject {
+#if EDIT_AGENT_CHECKS
+    static var shellForCheck: String?
+#endif
+
     private enum HeaderMetrics {
         static let inset: CGFloat = 8
         static let buttonSize: CGFloat = 24
@@ -40,7 +44,7 @@ final class TerminalPanel: NSObject {
     private let directory: () -> URL
     private let onDockChange: (TerminalDock) -> Void
     private let onLastShellExit: (Bool) -> Void
-    private let launchShell: Bool
+    private let shell: String?
     private var spaces: [TerminalSpace] = []
     private var selectedSpace: TerminalSpace?
     private var refreshSpaceNames: Task<Void, Never>?
@@ -48,14 +52,32 @@ final class TerminalPanel: NSObject {
 
     init(directory: @escaping () -> URL, onDockChange: @escaping (TerminalDock) -> Void,
          onLastShellExit: @escaping (Bool) -> Void,
-         launchShell: Bool = true, restoredState: TerminalPanelState? = nil) {
+         shell: String?, restoredState: TerminalPanelState? = nil) {
         self.directory = directory
         self.onDockChange = onDockChange
         self.onLastShellExit = onLastShellExit
-        self.launchShell = launchShell
+        self.shell = shell
         super.init()
         configureView()
         if let restoredState { restore(restoredState) }
+    }
+
+    static func loginShell(forAgentCheck isAgentCheck: Bool) -> String? {
+#if EDIT_AGENT_CHECKS
+        if isAgentCheck { return shellForCheck }
+#endif
+        let configuredShell = getpwuid(getuid()).flatMap { entry -> String? in
+            guard let path = entry.pointee.pw_shell else { return nil }
+            return String(cString: path)
+        }
+        let shell = configuredShell ?? "/bin/zsh"
+        return FileManager.default.isExecutableFile(atPath: shell) ? shell : "/bin/zsh"
+    }
+
+    func startSavedShells() {
+        for space in spaces {
+            for pane in space.panes { pane.startShellIfNeeded() }
+        }
     }
 
     func snapshot() -> TerminalPanelState {
@@ -286,7 +308,7 @@ final class TerminalPanel: NSObject {
     }
 
     private func makePane(in directory: URL, restoredState: TerminalPaneState? = nil) -> TerminalPane {
-        let pane = TerminalPane(directory: directory, launchShell: launchShell, restoredState: restoredState)
+        let pane = TerminalPane(directory: directory, shell: shell, restoredState: restoredState)
         pane.onClose = { [weak self] pane in self?.removePane(pane) }
         pane.onSplit = { [weak self] pane, direction in self?.split(direction, pane: pane) }
         pane.onTitleChange = { [weak self] in self?.updatePickerNames() }
@@ -300,8 +322,7 @@ final class TerminalPanel: NSObject {
     }
 
     private func removePane(_ pane: TerminalPane) {
-        guard !closed, let spaceIndex = spaces.firstIndex(where: { $0.panes.contains { $0 === pane } }),
-              let slot = pane.superview as? TerminalSlot else { return }
+        guard !closed, let spaceIndex = spaces.firstIndex(where: { $0.panes.contains { $0 === pane } }) else { return }
         let space = spaces[spaceIndex]
         guard let paneIndex = space.panes.firstIndex(where: { $0 === pane }) else { return }
         let window = view.window
@@ -309,7 +330,7 @@ final class TerminalPanel: NSObject {
         let paneHadFocus = responder?.isDescendant(of: pane) == true
 
         pane.close()
-        slot.removePane()
+        (pane.superview as? TerminalSlot)?.removePane()
         space.panes.remove(at: paneIndex)
         if !space.panes.isEmpty {
             if space.last === pane { space.last = space.panes[min(paneIndex, space.panes.count - 1)] }
@@ -751,28 +772,29 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
     }
     var wrapsLines: Bool { fixedColumns == nil }
 
-    private let launchShell: Bool
+    private let shell: String?
     private let scrollView = TerminalScrollView()
-    private let stoppedActions = NSStackView()
     private let border = TerminalPaneBorder()
     private var fixedColumns: Int?
     private var pendingHorizontalOffset: CGFloat?
-    private var running = false
+    private var startedShell = false
     private var closed = false
-    private var pendingHistory: (transcript: TerminalTranscript, scrollbackOffset: Int)?
+    private var pendingTranscript: TerminalTranscript?
+    private var pendingScrollbackOffset: Int?
 
-    init(directory: URL, launchShell: Bool, restoredState: TerminalPaneState?) {
+    init(directory: URL, shell: String?, restoredState: TerminalPaneState?) {
         id = restoredState?.id ?? UUID()
         workingDirectory = directory
         foregroundCommand = restoredState?.foregroundCommand
-        self.launchShell = launchShell
+        self.shell = shell
         if let restoredState, !restoredState.wrapsLines {
             fixedColumns = min(Self.maximumFixedColumns, max(1, restoredState.fixedColumns ?? Self.defaultFixedColumns))
             pendingHorizontalOffset = restoredState.horizontalOffset
         }
-        pendingHistory = restoredState.map {
-            (TerminalTranscript(text: $0.transcript, styles: $0.transcriptStyles ?? []), $0.scrollbackOffset)
+        pendingTranscript = restoredState.map {
+            TerminalTranscript(text: $0.transcript, styles: $0.transcriptStyles ?? [])
         }
+        pendingScrollbackOffset = restoredState?.scrollbackOffset
         super.init(frame: .zero)
         identifier = .init("Edit.Terminal.Pane")
         clipsToBounds = true
@@ -789,26 +811,6 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
         scrollView.documentView = terminal
         addSubview(scrollView)
 
-        let restartButton = NSButton(title: "Restart Shell", target: self, action: #selector(restart(_:)))
-        restartButton.identifier = .init("Edit.Terminal.RestartShell")
-        restartButton.controlSize = .small
-        let closeButton = NSButton(title: "Close", target: self, action: #selector(closeStoppedPane(_:)))
-        closeButton.identifier = .init("Edit.Terminal.CloseShell")
-        closeButton.controlSize = .small
-        stoppedActions.orientation = .horizontal
-        stoppedActions.alignment = .centerY
-        stoppedActions.spacing = 6
-        stoppedActions.addArrangedSubview(restartButton)
-        stoppedActions.addArrangedSubview(closeButton)
-        // Reopening the saved history leaves the shell stopped until explicitly restarted.
-        stoppedActions.isHidden = restoredState == nil
-        stoppedActions.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stoppedActions)
-        NSLayoutConstraint.activate([
-            stoppedActions.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 8),
-            stoppedActions.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            stoppedActions.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
-        ])
         // SwiftTerm clears its viewport while drawing. Keep the inward curves above it.
         border.pane = self
         border.frame = bounds
@@ -899,8 +901,8 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
         super.viewDidMoveToWindow()
         guard window != nil else { return }
         layoutTerminal()
-        restoreTranscriptIfReady()
-        if !running, stoppedActions.isHidden { startShell() }
+        restoreScrollPositionIfReady()
+        startShellIfNeeded()
     }
 
     override func viewDidChangeBackingProperties() {
@@ -911,7 +913,7 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
     override func layout() {
         super.layout()
         layoutTerminal()
-        restoreTranscriptIfReady()
+        restoreScrollPositionIfReady()
     }
 
     override func resizeSubviews(withOldSize oldSize: NSSize) {
@@ -949,13 +951,14 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
     }
 
     func snapshot() -> TerminalPaneState {
-        let history = pendingHistory ?? currentHistory()
+        let history = pendingTranscript.map { (transcript: $0, scrollbackOffset: 0) } ?? currentHistory()
         return TerminalPaneState(id: id, workingDirectory: workingDirectory, foregroundCommand: foregroundCommand,
                                  pointSize: terminal.font.pointSize,
                                  wrapsLines: wrapsLines,
                                  transcript: history.transcript.text,
                                  transcriptStyles: history.transcript.styles.isEmpty ? nil : history.transcript.styles,
-                                 scrollbackOffset: history.scrollbackOffset, fixedColumns: fixedColumns,
+                                 scrollbackOffset: pendingScrollbackOffset ?? history.scrollbackOffset,
+                                 fixedColumns: fixedColumns,
                                  horizontalOffset: fixedColumns.map { _ in
                                      pendingHorizontalOffset ?? scrollView.contentView.bounds.minX
                                  })
@@ -980,16 +983,23 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
         return (transcript, scrollbackOffset)
     }
 
-    private func restoreTranscriptIfReady() {
-        guard window != nil, terminal.bounds.width > 0, terminal.bounds.height > 0, let pendingHistory else { return }
-        self.pendingHistory = nil
-        let transcript = pendingHistory.transcript.replayText
-        if !transcript.isEmpty {
-            // A narrower restored pane can reflow the saved text into more physical rows.
-            terminal.changeScrollback(Self.maximumSavedScrollbackRows)
-            terminal.feed(text: "\u{1B}[?7h" + transcript + "\r\n")
+    private func restoreTranscript() {
+        guard let pendingTranscript else { return }
+        self.pendingTranscript = nil
+        let transcript = pendingTranscript.replayText
+        guard !transcript.isEmpty else { return }
+        // A narrower restored pane can reflow the saved text into more physical rows.
+        terminal.changeScrollback(Self.maximumSavedScrollbackRows)
+        terminal.feed(text: "\u{1B}[?7h" + transcript + "\r\n")
+    }
+
+    private func restoreScrollPositionIfReady() {
+        guard window != nil, !bounds.isEmpty, !terminal.bounds.isEmpty else { return }
+        restoreTranscript()
+        if let pendingScrollbackOffset {
+            self.pendingScrollbackOffset = nil
             terminal.scrollTo(row: Int.max, notifyAccessibility: false)
-            terminal.scrollUp(lines: min(Self.maximumSavedScrollbackRows, max(0, pendingHistory.scrollbackOffset)))
+            terminal.scrollUp(lines: min(Self.maximumSavedScrollbackRows, max(0, pendingScrollbackOffset)))
         }
         if let pendingHorizontalOffset {
             self.pendingHorizontalOffset = nil
@@ -1055,7 +1065,8 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
     }
 
     func clear() {
-        pendingHistory = nil
+        pendingTranscript = nil
+        pendingScrollbackOffset = nil
         pendingHorizontalOffset = nil
         terminal.selectNone()
         let cursor = terminal.terminalContentSnapshot(region: .rows(0..<0))
@@ -1096,16 +1107,16 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
         layoutTerminal()
     }
 
-    private func startShell() {
-        guard launchShell, !closed else { return }
-        let fileManager = FileManager.default
-        let configuredShell = getpwuid(getuid()).flatMap { entry -> String? in
-            guard let path = entry.pointee.pw_shell else { return nil }
-            return String(cString: path)
+    func startShellIfNeeded() {
+        guard let shell, !startedShell, !closed else { return }
+        startedShell = true
+        // Replay history before the new PTY can emit output, including in detached spaces.
+        if pendingTranscript != nil && terminal.bounds.isEmpty {
+            scrollView.layoutViewport(terminal.getOptimalFrameSize(), minimumColumns: fixedColumns)
         }
-        let shell = configuredShell ?? "/bin/zsh"
-        let executable = fileManager.isExecutableFile(atPath: shell) ? shell : "/bin/zsh"
-        shellName = URL(fileURLWithPath: executable).lastPathComponent
+        restoreTranscript()
+        let fileManager = FileManager.default
+        shellName = URL(fileURLWithPath: shell).lastPathComponent
         foregroundCommand = nil
         var isDirectory: ObjCBool = false
         if !fileManager.fileExists(atPath: workingDirectory.path, isDirectory: &isDirectory) || !isDirectory.boolValue {
@@ -1116,27 +1127,13 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
             "TERM": "xterm-256color",
             "COLORTERM": "truecolor",
             "TERM_PROGRAM": "Edit",
-            "SHELL": executable,
+            "SHELL": shell,
             "PWD": workingDirectory.path,
             "LANG": inheritedEnvironment["LANG"] ?? "en_US.UTF-8",
         ]) { _, value in value }
-        running = true
-        stoppedActions.isHidden = true
-        terminal.startProcess(executable: executable, environment: environment.map { "\($0.key)=\($0.value)" },
+        terminal.startProcess(executable: shell, environment: environment.map { "\($0.key)=\($0.value)" },
                               execName: shellName.map { "-" + $0 },
                               currentDirectory: workingDirectory.path)
-    }
-
-    @objc private func restart(_ sender: NSButton) {
-        guard !running else { return }
-        restoreTranscriptIfReady()
-        startShell()
-        focus()
-    }
-
-    @objc private func closeStoppedPane(_ sender: NSButton) {
-        guard !running, !closed else { return }
-        onClose?(self)
     }
 
     func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
@@ -1161,7 +1158,8 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
     }
 
     func processFailedToStart(source: TerminalView, error: LocalProcessError) {
-        running = false
-        stoppedActions.isHidden = false
+        guard !closed else { return }
+        NSLog("Could not start terminal shell: %@", String(describing: error))
+        onClose?(self)
     }
 }

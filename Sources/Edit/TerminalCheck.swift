@@ -939,6 +939,20 @@ enum TerminalCheck {
 
     private static func checkRestoration(in app: Edit, visible: DocumentWindow, controller: TerminalPanel,
                                          pane: LocalProcessTerminalView) async throws {
+        let fixture = FileManager.default.temporaryDirectory.appending(path: "terminal-restore-\(UUID())", directoryHint: .isDirectory)
+        let hiddenDirectory = fixture.appending(path: "hidden", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: hiddenDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+        let shell = fixture.appending(path: "shell")
+        let launches = fixture.appending(path: "launches")
+        try """
+        #!/bin/sh
+        printf '%s\\n' "$PWD" >> "${0%/*}/launches"
+        printf 'RestoredShell\\n'
+        exec /bin/cat
+        """.write(to: shell, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: shell.path)
+
         let dock = try bottomDock(in: visible)
         dock.setPosition(dock.bounds.height - dock.dividerThickness - 172, ofDividerAt: 0)
         try expect(dockAction(.right, in: controller), "set the saved dock side")
@@ -959,6 +973,7 @@ enum TerminalCheck {
 
         let hidden = app.makeDocument()
         defer { hidden.window.close() }
+        hidden.setFolder(hiddenDirectory)
         hidden.showTerminal()
         let hiddenPane = try require(hidden.window.firstResponder as? LocalProcessTerminalView, "focus the second window's terminal")
         hiddenPane.feed(text: "HiddenHistory\r\n")
@@ -984,7 +999,9 @@ enum TerminalCheck {
         try await waitFor("stop the saved shell process") { !pane.process.running }
 
         let offset = app.documents.count
+        TerminalPanel.shellForCheck = shell.path
         await app.restore(snapshot, reusing: app.makeDocument())
+        TerminalPanel.shellForCheck = nil
         let restored = Array(app.documents.dropFirst(offset))
         defer { restored.forEach { $0.window.close() } }
         try expect(restored.count == 3, "reopen all terminal windows")
@@ -1006,31 +1023,55 @@ enum TerminalCheck {
         try expect(restoredPane.font.pointSize == 13 &&
                    contextMenu(for: restoredPane).item(withTitle: "Wrap Lines")?.state == .off, "restore per-pane zoom and wrap")
         try expect(restoredPane.enclosingScrollView?.contentView.bounds.minX == 90, "restore the horizontal scroll position")
-        try await waitFor("restore history in a stopped terminal") {
-            !restoredPane.process.running && containsText("EditHistory", in: restoredPane)
+        let savedPaneCount = [visibleRecord, hiddenRecord, fullScreenRecord].reduce(0) { count, record in
+            count + (record.terminal?.panel.spaces.reduce(0) { $0 + paneCount(in: $1.layout) } ?? 0)
         }
-        let styledRow = try require(restoredPane.terminalContentSnapshot(region: .history(maximumScrollbackRows: 128))?
-            .rows.first { $0.text.contains("EditHistory色✓") }, "restore colored text and the wide glyph together")
+        try await waitFor("launch every saved shell, including the hidden and unselected panes, before revealing them") {
+            let directories = (try? String(contentsOf: launches, encoding: .utf8))?.split(separator: "\n") ?? []
+            return directories.count == savedPaneCount && directories.contains(Substring(hiddenDirectory.path))
+        }
+        try await waitFor("restore history and start a shell in the active pane") {
+            restoredPane.process.running && containsText("EditHistory", in: restoredPane) &&
+                containsText("RestoredShell", in: restoredPane)
+        }
+        let rows = try require(restoredPane.terminalContentSnapshot(region: .history(maximumScrollbackRows: 128))?.rows,
+                               "read the saved output and the new prompt together")
+        let historyRow = try require(rows.firstIndex { $0.text.contains("EditHistory色✓") }, "restore colored text and the wide glyph together")
+        let promptRow = try require(rows.firstIndex { $0.text.contains("RestoredShell") }, "record output from the new shell")
+        try expect(historyRow < promptRow, "replay history before the new shell writes to the terminal")
+        let styledRow = rows[historyRow]
         try expect(styledRow.cells.first { $0.text == "E" }?.attribute.fg == .trueColor(red: 34, green: 85, blue: 136) &&
                    styledRow.cells.first { $0.text == "色" }?.attribute.fg == .trueColor(red: 17, green: 34, blue: 51) &&
                    styledRow.cells.first { $0.text == "✓" }?.attribute.fg == .defaultColor,
                    "restore indexed and RGB color runs and the reset to the default color after reopening")
         try expect(!inactive.isTerminalVisible && view("Edit.Terminal.Panel", in: inactive.window.contentView) == nil,
-                   "restore a hidden panel lazily")
+                   "keep the running hidden panel detached from the window")
         let hiddenAgain = inactive.sessionDocument()
         try expect(hiddenAgain.terminal?.isVisible == false, "retain unopened terminal state for a second quit")
         inactive.showTerminal()
         let reopened = try require(inactive.window.firstResponder as? LocalProcessTerminalView, "show the previously hidden session")
-        try await waitFor("recover stopped history from the hidden panel") {
-            !reopened.process.running && containsText("HiddenHistory", in: reopened)
+        try await waitFor("reveal the running shell with its saved history") {
+            reopened.process.running && containsText("HiddenHistory", in: reopened) && containsText("RestoredShell", in: reopened)
         }
+        try expect(view("Edit.Terminal.RestartShell", in: restoredPanel) == nil &&
+                   view("Edit.Terminal.CloseShell", in: restoredPanel) == nil,
+                   "present the restored terminal without stopped-shell controls")
         try await checkFullScreenRestoration(in: restored[2], saved: saved)
-        try closeStoppedPane(restoredPane, in: active.window)
+        try expect(menuAction("Kill Terminal", in: contextMenu(for: restoredPane)) && restoredPane.window == nil,
+                   "close a restored pane through the terminal menu")
         try expect(active.isTerminalVisible && active.window.firstResponder is LocalProcessTerminalView,
-                   "close one stopped pane and focus a survivor in the split")
-        try closeStoppedPane(reopened, in: inactive.window)
+                   "focus a survivor after closing one restored pane")
+        try expect(menuAction("Kill Terminal", in: contextMenu(for: reopened)) && reopened.window == nil,
+                   "close the restored pane in the previously hidden panel")
         try expect(!inactive.isTerminalVisible && inactive.window.firstResponder === inactive.editor,
-                   "hide the panel and return focus to the editor after closing the final stopped pane")
+                   "hide the panel and return focus to the editor after closing the final pane")
+    }
+
+    private static func paneCount(in layout: TerminalLayoutState) -> Int {
+        switch layout {
+        case .pane: 1
+        case .split(_, _, let first, let second): paneCount(in: first) + paneCount(in: second)
+        }
     }
 
     private static func checkFullScreenRestoration(in document: DocumentWindow, saved: DocumentTerminalState) async throws {
@@ -1038,8 +1079,9 @@ enum TerminalCheck {
         try expect(!document.isTerminalVisible && view("Edit.Terminal.Panel", in: window.contentView) == nil,
                    "wait for full screen before mounting the restored terminal")
         let pending = try require(document.sessionDocument().terminal, "keep the pending terminal available for another save")
-        try expect(pending.sizes == saved.sizes && pending.isVisible && pending.wasFocused && pending.panel == saved.panel,
-                   "save the original terminal state while full-screen restoration is pending")
+        try expect(pending.sizes == saved.sizes && pending.isVisible && pending.wasFocused &&
+                   pending.panel.selectedSpace == saved.panel.selectedSpace,
+                   "save the pending presentation alongside the running terminal state")
 
         // Deliver the layout and callback without switching the user's macOS Spaces.
         let proposed: NSApplication.PresentationOptions = [.fullScreen, .autoHideMenuBar, .autoHideToolbar]
@@ -1063,22 +1105,9 @@ enum TerminalCheck {
         let nested = view("Edit.Terminal.Split", in: layout.arrangedSubviews[1]) as? NSSplitView
         try expect(layout.isVertical && nested?.isVertical == false, "restore both full-screen split axes")
         let focused = try require(window.firstResponder as? LocalProcessTerminalView, "focus the restored full-screen pane")
-        try await waitFor("restore full-screen terminal history without a process") {
-            !focused.process.running && containsText("EditHistory", in: focused)
+        try await waitFor("show full-screen terminal history and the running shell") {
+            focused.process.running && containsText("EditHistory", in: focused) && containsText("RestoredShell", in: focused)
         }
-    }
-
-    private static func closeStoppedPane(_ terminal: LocalProcessTerminalView, in window: NSWindow) throws {
-        let pane = try require(terminal.enclosingScrollView?.superview, "find the stopped pane")
-        let restart = try require(view("Edit.Terminal.RestartShell", in: pane) as? NSButton, "find Restart Shell")
-        let close = try require(view("Edit.Terminal.CloseShell", in: pane) as? NSButton, "find Close")
-        try expect(!terminal.process.running && !restart.isHiddenOrHasHiddenAncestor && !close.isHiddenOrHasHiddenAncestor &&
-                   restart.superview === close.superview && abs(windowPosition(of: restart).midY - windowPosition(of: close).midY) < 1,
-                   "show Close beside Restart Shell")
-        try expect(window.makeFirstResponder(terminal), "focus the stopped pane before closing it")
-        let action = try require(close.action, "connect the Close button")
-        try expect(NSApp.sendAction(action, to: close.target, from: close) && terminal.window == nil,
-                   "remove the stopped pane from the window")
     }
 
     private static func containsText(_ needle: String, in terminal: LocalProcessTerminalView) -> Bool {
