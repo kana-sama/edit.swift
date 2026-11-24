@@ -33,6 +33,21 @@ struct JJWorkingCopyFileStatus: Equatable {
     }
 }
 
+struct JJOpeningConflicts: Sendable {
+    let blocks: [JJConflict]
+    let operation: String
+
+    @concurrent
+    static func prepare(_ text: String, at url: URL?) async -> Self? {
+        guard let url, text.range(of: "<<<<<<<", options: .literal) != nil,
+              text.range(of: ">>>>>>>", options: .literal) != nil,
+              let recorded = try? await JJRepository.openingConflict(at: url),
+              !Task.isCancelled else { return nil }
+        let blocks = JJLineDiff.analyze(base: nil, current: text, isConflicted: true, recordedConflict: recorded.text).conflicts
+        return blocks.isEmpty ? nil : Self(blocks: blocks, operation: recorded.operation)
+    }
+}
+
 @MainActor
 final class JJDocumentChanges {
     private struct File {
@@ -66,6 +81,7 @@ final class JJDocumentChanges {
     private var folderContents: JJWorkspaceContents?
     private var comparison: Comparison?
     private var diskMatchesBuffer: Bool?
+    private var openingConflictOperation: String?
     private(set) var localStatus: JJWorkingCopyFileStatus?
 
     init(
@@ -120,7 +136,8 @@ final class JJDocumentChanges {
         }
     }
 
-    func bufferReplaced() {
+    func bufferReplaced(openingConflictOperation: String? = nil) {
+        self.openingConflictOperation = openingConflictOperation
         clearPresentation()
         render()
     }
@@ -143,7 +160,9 @@ final class JJDocumentChanges {
             guard let self, !Task.isCancelled else { return }
             findingFile = nil
             guard let workspace else { return }
-            fileSubscription = monitor.subscribe(to: workspace) { [weak self] contents in
+            let openingOperation = openingConflictOperation
+            openingConflictOperation = nil
+            fileSubscription = monitor.subscribe(to: workspace, openingOperation: openingOperation) { [weak self] contents in
                 self?.updateFileContents(contents)
             } diskChanged: { [weak self] paths in
                 self?.filesChanged(paths)

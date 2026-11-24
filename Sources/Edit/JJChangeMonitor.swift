@@ -52,11 +52,7 @@ struct JJWorkspaceContents: Sendable {
     let directories: [String: JJStatusCounts]
 
     func relativePath(to url: URL) -> String? {
-        let root = WorktreeFileOperations.path(repository.workspace.root)
-        let path = WorktreeFileOperations.path(url)
-        if path == root { return "" }
-        let prefix = root.hasSuffix("/") ? root : root + "/"
-        return path.hasPrefix(prefix) ? String(path.dropFirst(prefix.count)) : nil
+        repository.workspace.relativePath(to: url)
     }
 
     @concurrent
@@ -126,6 +122,7 @@ final class JJChangeMonitor {
         let refreshRequests = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         var contents: JJWorkspaceContents?
         var observers: [UUID: Observer] = [:]
+        var awaitingCurrentContents: Set<UUID> = []
         var task: Task<Void, Never>?
         var polling: Task<Void, Never>?
         var paths: JJWorkspacePaths?
@@ -191,6 +188,7 @@ final class JJChangeMonitor {
     func subscribe(
         to location: JJWorkspace,
         liveSnapshots: Bool = false,
+        openingOperation: String? = nil,
         updated: @escaping @MainActor (JJWorkspaceContents?) -> Void,
         diskChanged: @escaping @MainActor (Set<String>?) -> Void = { _ in }
     ) -> Subscription {
@@ -228,13 +226,20 @@ final class JJChangeMonitor {
         }
         workspace.observers[id] = Observer(liveSnapshots: liveSnapshots, updated: updated, diskChanged: diskChanged)
         if liveSnapshots, workspace.diskGeneration != workspace.capturedDiskGeneration { enqueueLiveSnapshot(for: workspace) }
-        updated(workspace.contents)
+        if let openingOperation, workspace.contents?.repository.operationID != openingOperation {
+            // Validate the cached operation before it can overwrite the opening presentation.
+            workspace.awaitingCurrentContents.insert(id)
+            workspace.refreshRequests.continuation.yield()
+        } else {
+            updated(workspace.contents)
+        }
         return Subscription(workspace: location, id: id)
     }
 
     func unsubscribe(_ subscription: Subscription?) {
         guard let subscription, let workspace = workspaces[subscription.workspace] else { return }
         workspace.observers.removeValue(forKey: subscription.id)
+        workspace.awaitingCurrentContents.remove(subscription.id)
         if !workspace.observesLiveSnapshots { workspace.clearLiveSnapshot() }
         if workspace.observers.isEmpty {
             // File-to-file navigation can temporarily leave the workspace without an observer.
@@ -291,7 +296,12 @@ final class JJChangeMonitor {
         do {
             let operation = try await JJRepository.operation(in: location)
             try Task.checkCancellation()
-            guard workspace.contents?.repository.operationID != operation else { return }
+            if let contents = workspace.contents, contents.repository.operationID == operation {
+                let waiting = workspace.awaitingCurrentContents
+                workspace.awaitingCurrentContents.removeAll()
+                for id in waiting { workspace.observers[id]?.updated(contents) }
+                return
+            }
             let state = try await JJRepository.read(location, at: operation)
             let contents = try await JJWorkspaceContents.prepare(state)
             try Task.checkCancellation()
@@ -348,6 +358,7 @@ final class JJChangeMonitor {
 
     private func install(_ contents: JJWorkspaceContents?, for workspace: Workspace) {
         workspace.contents = contents
+        workspace.awaitingCurrentContents.removeAll()
         for observer in Array(workspace.observers.values) { observer.updated(contents) }
     }
 }

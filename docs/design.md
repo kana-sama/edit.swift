@@ -12,6 +12,8 @@ Document windows use the compact unified AppKit toolbar with a fixed icon-only d
 
 Overlay editor status strips below the native toolbar. Reserve their height in the scrolling surface’s safe area so the same document surface extends behind the toolbar in windowed and full-screen layouts.
 
+When opening or switching buffers, prepare geometry-changing status strips before showing the new text. Present the text, strips, and restored scroll position together in the first rendered frame.
+
 Use system appearance, semantic colors, text styles, control metrics, and SF Symbols for interface chrome. Respect platform preferences for contrast and reduced transparency. Keep persistent controls focused on actions the owner needs.
 
 ## Pointer cursor
@@ -22,7 +24,9 @@ Keep the pointer image steady while clicking, moving between targets that use th
 
 ## Asynchronous updates
 
-Flicker is a rendering defect. Keep the last complete presentation visible while preparing its replacement, then install the new presentation in one update. Keep titles, counts, and the content they describe together during the transition. When the visible result is temporarily out of date, give it a short, fixed timeout that repeated requests cannot extend. Suspend actions that need current information while the result is stale. At the timeout, show a stable pending or unavailable state until the current result is ready. Clear an old result immediately if it belongs to a different active context.
+Flicker, jumps, and unexpected displacement are rendering defects. Keep the last complete presentation visible while preparing its replacement, then install the new presentation in one update. Keep titles, counts, and the content they describe together during the transition. When the visible result is temporarily out of date, give it a short, fixed timeout that repeated requests cannot extend. Suspend actions that need current information while the result is stale. At the timeout, show a stable pending or unavailable state until the current result is ready. Clear an old result immediately if it belongs to a different active context.
+
+Keep line heights, wrapping, and visible text positions stable as background decorations arrive. Put CodeLens and other per-line actions beside their line, outside the text layout. Keep a line’s space for the document text itself.
 
 File Preview keeps the current document and title together until the next preview is ready. Syntax highlighting keeps the existing colors while a new parse runs. Go to File keeps previous results visible and disables opening them while the next query runs. [File Preview](features/file-preview/spec.md) · [Syntax highlighting](features/syntax-highlighting/spec.md) · [Go to File](features/control/spec.md)
 

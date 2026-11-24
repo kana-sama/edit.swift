@@ -239,12 +239,15 @@ enum SourceControlCheck {
         try await command(executable, folder, ["git", "init", "--colocate"])
         let file = folder.appending(path: "Conflict.swift")
         let finalLine = folder.appending(path: "End.txt")
+        let literal = folder.appending(path: "Marker Example.txt")
         func source(_ value: String) -> String {
             "let first = \"\(value)\"\n" + (1...9).map { "// Unchanged \($0)\n" }.joined() +
                 "let last = (x: \(value == "Alpha" ? 1 : 0), y: \(value == "Beta" ? 2 : 0), z: \(value == "Gamma" ? 3 : 0))\n"
         }
         try source("Base").write(to: file, atomically: true, encoding: .utf8)
         try "Base".write(to: finalLine, atomically: true, encoding: .utf8)
+        let example = "<<<<<<< example\n+++++++ First\na\n------- Base\nb\n+++++++ Second\nc\n>>>>>>> example ends\n"
+        try example.write(to: literal, atomically: true, encoding: .utf8)
         try await command(executable, folder, ["bookmark", "create", "base"])
         for side in ["Alpha", "Beta", "Gamma"] {
             try await command(executable, folder, ["new", "base", "-m", side])
@@ -269,17 +272,46 @@ enum SourceControlCheck {
         let preserved = try await JJRepository.read(workspace, at: snapshotOperation)
         try expect(preserved.commitID == graph.workingCopy.id, "keep the same jj commit after a marker-only rewrite")
 
+        var cachedOperation: String?
+        let warmObserver = app.jjChanges.subscribe(to: workspace) { cachedOperation = $0?.repository.operationID }
+        defer { app.jjChanges.unsubscribe(warmObserver) }
+        try await waitFor("warm the repository observer cache") { cachedOperation == snapshotOperation }
+        var validatedOperation: String?
+        let validatedObserver = app.jjChanges.subscribe(to: workspace, openingOperation: String(repeating: "0", count: 128)) {
+            validatedOperation = $0?.repository.operationID
+        }
+        defer { app.jjChanges.unsubscribe(validatedObserver) }
+        try expect(validatedOperation == nil, "avoid applying a different cached operation to the opening presentation")
+        try await waitFor("deliver the current operation after validating the observer cache") { validatedOperation == snapshotOperation }
+
         let document = app.makeDocument()
         defer { document.window.close() }
         _ = try await app.openFile(folder, in: document)
         document.toggleSidebarFocus(.sourceControl)
-        _ = try await app.openFile(file, in: document)
-        try await waitFor("open a conflict panel for the editable working copy") {
-            document.editor.isEditable && document.conflictPanel != nil
+        _ = try await app.openFile(literal, in: document)
+        try expect(document.editor.string == example && document.conflictPanel == nil &&
+                   document.scrollView.additionalSafeAreaInsets.top == 0,
+                   "open a regular jj file containing literal markers without a conflict strip")
+        guard case .text(let buffer) = try await Edit.readForOpening(file) else {
+            throw Failure("read the conflicted text fixture")
         }
+        try expect(await document.open(.buffer(buffer)) { true }, "open the working-copy conflict through the editor")
         guard let panel = document.conflictPanel,
               let format: NSSegmentedControl = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictFormat" }),
-              let sidebar = document.sourceControlSidebar else { throw Failure("find the conflict controls") }
+              let sidebar = document.sourceControlSidebar else {
+            throw Failure("install the conflict strip before presenting the opened buffer")
+        }
+        try checkEditorPanelLayout([panel], above: document.scrollView, in: document)
+        func firstLineY() -> CGFloat? {
+            guard let firstLine = document.editor.laidOutLineBounds(at: 0) else { return nil }
+            return document.editor.convert(firstLine, to: document.editorContentView).midY
+        }
+        guard let openingLineY = firstLineY() else { throw Failure("lay out the conflict text in its first frame") }
+        try await waitFor("install live editor marks after opening the conflict") {
+            document.editor.isEditable && document.editor.jjLineMarks.contains { $0.kind == .conflict }
+        }
+        try expect(document.conflictPanel === panel && firstLineY().map { abs($0 - openingLineY) < 1 } == true,
+                   "keep the original conflict strip and line position when the live analysis arrives")
         try await waitFor("show the conflict cross next to the selected change ID") {
             guard let identity: NSView = descendant(of: sidebar.view, where: { $0.identifier?.rawValue == "JujutsuSelectedChangeID" }),
                   let icon: NSImageView = descendant(of: identity, where: { $0.identifier?.rawValue == "JujutsuConflictIcon" }) else {

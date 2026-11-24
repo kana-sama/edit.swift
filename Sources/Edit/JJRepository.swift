@@ -7,6 +7,14 @@ enum JJPathStatus: Equatable, Sendable {
 struct JJWorkspace: Hashable, Sendable {
     let root: URL
     let repository: URL
+
+    func relativePath(to url: URL) -> String? {
+        let root = WorktreeFileOperations.path(self.root)
+        let path = WorktreeFileOperations.path(url)
+        if path == root { return "" }
+        let prefix = root.hasSuffix("/") ? root : root + "/"
+        return path.hasPrefix(prefix) ? String(path.dropFirst(prefix.count)) : nil
+    }
 }
 
 struct JJChange: Equatable, Sendable {
@@ -206,6 +214,27 @@ enum JJRepository {
         return JJFileComparison(base: base.flatMap(fileText), recorded: recordedText.flatMap(fileText),
                                 isConflicted: target == .conflict, existsInBase: source != .absent,
                                 normalizeCRLF: normalizeCRLF)
+    }
+
+    static func openingConflict(at url: URL) async throws -> (text: String, operation: String)? {
+        guard let workspace = await discover(at: url.deletingLastPathComponent()),
+              let path = workspace.relativePath(to: url), isRelativePath(path) else { return nil }
+        let fileset = literalFileset(path)
+        for _ in 0..<2 {
+            let head = try await operation(in: workspace)
+            let entry = try await readCommand(["file", "list", "-r", "@", "-T", "file_type", fileset], in: workspace, at: head)
+            guard String(decoding: entry, as: UTF8.self) == JJEntryKind.conflict.rawValue else { return nil }
+            do {
+                async let recorded = readCommand(["file", "show", "-r", "@", fileset], in: workspace, at: head, limit: fileLimit)
+                let checkout = try await workingCopy(in: workspace, at: head)
+                try await requireCurrentWorkingCopy(workspace, operationID: head, commitID: checkout.commitID)
+                guard let text = fileText(try await recorded) else { return nil }
+                if try await operation(in: workspace) == head { return (text, head) }
+            } catch Failure.staleWorkspace {
+                guard try await operation(in: workspace) != head else { throw Failure.staleWorkspace }
+            }
+        }
+        return nil
     }
 
     static func readMergedParent(

@@ -772,18 +772,24 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             let folder = record.folderPath.map { URL(fileURLWithPath: $0, isDirectory: true) }
             let identity: FileIdentity?
             let syntax: SyntaxSnapshot?
-            if record.draft != nil {
+            let openingConflicts: JJOpeningConflicts?
+            if let draft = record.draft {
+                async let conflicts = JJOpeningConflicts.prepare(draft, at: isScratch ? nil : url)
                 identity = await Task.detached {
                     record.path.flatMap { FileIdentity.at(URL(fileURLWithPath: $0)) }
                 }.value
                 syntax = nil
+                openingConflicts = await conflicts
             } else {
                 identity = nil
                 if case .text(let file) = opened, folder == nil || file.identity != nil {
+                    async let conflicts = JJOpeningConflicts.prepare(file.text, at: isScratch ? nil : file.url)
                     syntax = await placeholder.prepareOpeningSyntax(file, position: record.editorPosition,
                                                                     storedSyntaxLanguage: record.syntaxLanguage, scratch: scratch)
+                    openingConflicts = await conflicts
                 } else {
                     syntax = nil
+                    openingConflicts = nil
                 }
             }
 
@@ -793,11 +799,12 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             document.restorePlacement(record.placement)
             if let folder { document.setFolder(folder) }
             if let draft = record.draft {
-                document.restoreDraft(record, text: draft, identity: identity, scratch: scratch)
+                document.restoreDraft(record, text: draft, identity: identity, scratch: scratch, openingConflicts: openingConflicts)
             } else if let opened, document.folderURL == nil || opened.identity != nil {
                 switch opened {
                 case .text(let file):
-                    document.load(file, storedSyntaxLanguage: record.syntaxLanguage, preparedSyntax: syntax, scratch: scratch)
+                    document.load(file, storedSyntaxLanguage: record.syntaxLanguage, preparedSyntax: syntax,
+                                  openingConflicts: openingConflicts, scratch: scratch)
                 case .preview(let preview):
                     document.loadPreview(preview)
                     document.focusContent()

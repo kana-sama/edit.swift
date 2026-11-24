@@ -753,14 +753,17 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func load(
-        _ file: FileBuffer, storedSyntaxLanguage: String? = nil, preparedSyntax: SyntaxSnapshot? = nil, scratch: ScratchFile? = nil
+        _ file: FileBuffer, storedSyntaxLanguage: String? = nil, preparedSyntax: SyntaxSnapshot? = nil,
+        openingConflicts: JJOpeningConflicts? = nil, scratch: ScratchFile? = nil
     ) {
         clearSourceControlFile()
-        installBuffer(file, storedSyntaxLanguage: storedSyntaxLanguage, preparedSyntax: preparedSyntax, scratch: scratch)
+        installBuffer(file, storedSyntaxLanguage: storedSyntaxLanguage, preparedSyntax: preparedSyntax,
+                      openingConflicts: openingConflicts, scratch: scratch)
     }
 
     private func installBuffer(
-        _ file: FileBuffer, storedSyntaxLanguage: String? = nil, preparedSyntax: SyntaxSnapshot? = nil, scratch: ScratchFile? = nil
+        _ file: FileBuffer, storedSyntaxLanguage: String? = nil, preparedSyntax: SyntaxSnapshot? = nil,
+        openingConflicts: JJOpeningConflicts? = nil, scratch: ScratchFile? = nil
     ) {
         removeSourceControlRevision()
         removeFilePreview()
@@ -770,7 +773,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if let scratch { detectedSyntaxLanguage = SyntaxLanguage.detected(at: scratch.filenameURL) }
         manualSyntaxLanguage = storedSyntaxLanguage.flatMap(SyntaxLanguage.init(rawValue:))
             ?? app.syntaxOverrides.language(for: fileURL)
-        installText(file.text, preparedSyntax: preparedSyntax)
+        installText(file.text, preparedSyntax: preparedSyntax, openingConflicts: openingConflicts)
     }
 
     func prepareOpeningSyntax(
@@ -948,12 +951,18 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         do {
             let preview: SourceControlRevisionPreview?
             let live: OpenedFile?
+            let openingConflicts: JJOpeningConflicts?
             if selection.ownsWorkingCopy(state) && state.changes[selection.file.path]?.status != .removed {
                 let opened = try await Edit.readForOpening(selection.url, within: selection.workspace.root)
                 // A sparse or missing path has no writable working-copy representation.
                 guard opened.identity != nil else { return }
                 live = opened
                 preview = nil
+                if case .text(let file) = opened {
+                    openingConflicts = await JJOpeningConflicts.prepare(file.text, at: file.url)
+                } else {
+                    openingConflicts = nil
+                }
             } else {
                 let (file, revision, contents) = try await JJSourceControlRepository.departedFile(
                     selection.file, from: selection.revision, lastCommitID: lastLiveSourceControlCheckout?.commitID ?? selection.revision.id,
@@ -962,6 +971,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 )
                 preview = try await SourceControlRevisionPreview.prepare(contents, file: file, revision: revision, at: selection.url)
                 live = nil
+                openingConflicts = nil
             }
             guard isCurrent(), try await JJRepository.operation(in: selection.workspace) == state.operationID,
                   isCurrent() else { return }
@@ -974,10 +984,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 } else if let live {
                     switch live {
                     case .text(let file):
-                        installBuffer(file)
+                        installBuffer(file, openingConflicts: openingConflicts)
                         pendingSourceControlDiffFile = file.url
                         activity.restoreEditabilityAfterMutation()
                         editor.isEditable = !duringMutation
+                        if conflictPresentationCurrent { updateConflictActions() }
                     case .preview(let details):
                         removeSourceControlRevision()
                         installFilePreview(details, revealInWorktree: false)
@@ -1110,7 +1121,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    func restoreDraft(_ record: SessionDocument, text: String, identity: FileIdentity? = nil, scratch: ScratchFile? = nil) {
+    func restoreDraft(_ record: SessionDocument, text: String, identity: FileIdentity? = nil, scratch: ScratchFile? = nil,
+                      openingConflicts: JJOpeningConflicts? = nil) {
         clearSourceControlFile()
         removeSourceControlRevision()
         fileRefresh.stop()
@@ -1123,7 +1135,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         revision = record.revision
         manualSyntaxLanguage = record.syntaxLanguage.flatMap(SyntaxLanguage.init(rawValue:))
             ?? app.syntaxOverrides.language(for: fileURL)
-        installText(text)
+        installText(text, openingConflicts: openingConflicts)
         if fileURL == nil {
             draftRecoveryRevision = record.draftRecovery
             scheduleDraftCheckpoint()
@@ -1685,6 +1697,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.isEditable = false
         defer {
             editor.isEditable = hasEditableTextDocument && wasEditable
+            if conflictPresentationCurrent { updateConflictActions() }
             activity.endReplacement()
             if folderURL != previousFolder { sidebar.folderChanged() }
             autosave.resume()
@@ -1745,11 +1758,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                     rememberFilePosition()
                     position = await app.recentFiles.position(for: file.url, identity: file.identity)
                     guard isCurrent(), !Task.isCancelled else { return false }
-                    let preparedSyntax = await prepareOpeningSyntax(file, position: position, scratch: scratch)
+                    async let syntax = prepareOpeningSyntax(file, position: position, scratch: scratch)
+                    async let conflicts = JJOpeningConflicts.prepare(file.text, at: scratch == nil ? file.url : nil)
+                    let (preparedSyntax, openingConflicts) = await (syntax, conflicts)
                     guard isCurrent(), !Task.isCancelled else { return false }
                     rememberFileUndoHistory()
                     installContent(in: folder) {
-                        load(file, preparedSyntax: preparedSyntax, scratch: scratch)
+                        load(file, preparedSyntax: preparedSyntax, openingConflicts: openingConflicts, scratch: scratch)
                     }
                     undoHistory = takeFileUndoHistory(for: file)
                     if let undoHistory { editor.editorUndoManager = undoHistory.manager }
@@ -1940,7 +1955,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func installText(
-        _ text: String, preparedSyntax: SyntaxSnapshot? = nil, revealInWorktree: Bool = true
+        _ text: String, preparedSyntax: SyntaxSnapshot? = nil, openingConflicts: JJOpeningConflicts? = nil, revealInWorktree: Bool = true
     ) {
         conflictStyleTask?.cancel()
         showEditorConflicts([])
@@ -1956,12 +1971,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         refreshSyntax(immediate: true, preparedSyntax: preparedSyntax)
         editor.setSelectedRange(NSRange(location: 0, length: 0))
         editor.requestLineRefresh()
-        editor.scrollRangeToVisible(editor.selectedRange())
         editor.undoManager?.removeAllActions()
         updateTitle(revealInWorktree: revealInWorktree)
         updateEditedState()
         sidebar.editorBufferReplaced()
-        jjDocumentChanges?.bufferReplaced()
+        jjDocumentChanges?.bufferReplaced(openingConflictOperation: openingConflicts?.operation)
+        if let openingConflicts { showEditorConflicts(openingConflicts.blocks) }
+        editor.scrollRangeToVisible(editor.selectedRange())
     }
 
     private func updateIdentity(from file: FileBuffer) {
