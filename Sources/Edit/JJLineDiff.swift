@@ -16,6 +16,7 @@ struct JJTextAnalysis: Sendable {
     let isChanged: Bool?
     let remainsConflicted: Bool?
     let hunks: [JJDiffHunk]
+    var conflicts: [JJConflict] = []
 }
 
 struct JJDiffHunk: Equatable, Sendable {
@@ -78,7 +79,8 @@ enum JJLineDiff {
         }
         let marks = compose(ordinary, with: conflicts)
         return JJTextAnalysis(marks: marks, lineStarts: marks.isEmpty ? [] : newLines.map(\.start),
-                              isChanged: changed, remainsConflicted: remainsConflicted, hunks: hunks)
+                              isChanged: changed, remainsConflicted: remainsConflicted, hunks: hunks,
+                              conflicts: conflicts.compactMap { JJConflict.parse(newLines[$0]) })
     }
 
     private enum Limit: Error { case exceeded }
@@ -99,7 +101,7 @@ enum JJLineDiff {
         }
     }
 
-    private struct TextPart {
+    struct TextPart {
         let start: Int
         let text: String
     }
@@ -153,6 +155,23 @@ enum JJLineDiff {
         }
         let oldIDs = try encode(old)
         return (oldIDs, try encode(new))
+    }
+
+    static func conflictDelta(from base: String, to side: String) -> String? {
+        var budget = Budget()
+        guard let old = try? split(base, budget: &budget), let new = try? split(side, budget: &budget),
+              let (oldIDs, newIDs) = try? textIDs(old, new, normalizeCRLF: false, budget: &budget),
+              let changes = try? differences(oldIDs, newIDs, budget: &budget) else { return nil }
+        var result = ""
+        var previous = 0
+        for change in changes {
+            for line in old[previous..<change.before.lowerBound] { result += " " + line.text }
+            for line in old[change.before] { result += "-" + line.text }
+            for line in new[change.after] { result += "+" + line.text }
+            previous = change.before.upperBound
+        }
+        for line in old[previous...] { result += " " + line.text }
+        return result
     }
 
     private struct Change {
@@ -415,28 +434,6 @@ enum JJLineDiff {
         return nil
     }
 
-    private enum Delimiter: UInt8 {
-        case open = 60, close = 62, snapshot = 43, ancestor = 45
-        case diff = 37, diffTo = 92, gitAncestor = 124, gitSeparator = 61
-    }
-
-    private struct Token {
-        let delimiter: Delimiter
-        let width: Int
-        let label: String
-
-        init?(_ text: String) {
-            let bytes = text.utf8
-            guard let first = bytes.first, let delimiter = Delimiter(rawValue: first) else { return nil }
-            let end = bytes.firstIndex { $0 != first } ?? bytes.endIndex
-            let width = bytes.distance(from: bytes.startIndex, to: end)
-            guard end == bytes.endIndex || [9, 10, 13, 32].contains(bytes[end]) else { return nil }
-            self.delimiter = delimiter
-            self.width = width
-            label = String(decoding: bytes[end...], as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-    }
-
     private struct ConflictBlock {
         let start: Int
         let width: Int
@@ -450,12 +447,12 @@ enum JJLineDiff {
     private static func conflictRanges(
         in lines: [TextPart], matching reference: [TextPart], budget: inout Budget
     ) throws -> (ranges: [Range<Int>], uncertain: Bool) {
-        var delimitersByWidth: [Int: Set<Delimiter>] = [:]
-        var labelsByWidth: [Int: [Delimiter: Set<String>]] = [:]
+        var delimitersByWidth: [Int: Set<JJConflict.Delimiter>] = [:]
+        var labelsByWidth: [Int: [JJConflict.Delimiter: Set<String>]] = [:]
         var markerWidth = 0
         for line in reference {
             try budget.check()
-            guard let token = Token(line.text), token.width >= 7 else { continue }
+            guard let token = JJConflict.Marker(line.text), token.width >= 7 else { continue }
             if token.delimiter == .open { markerWidth = max(markerWidth, token.width) }
             delimitersByWidth[token.width, default: []].insert(token.delimiter)
             if !token.label.isEmpty {
@@ -473,7 +470,7 @@ enum JJLineDiff {
         var uncertain = false
         for (index, line) in lines.enumerated() {
             try budget.check()
-            guard let token = Token(line.text) else { continue }
+            guard let token = JJConflict.Marker(line.text) else { continue }
 
             if token.width < markerWidth {
                 // An edited marker can lose part of its prefix while keeping its jj label.

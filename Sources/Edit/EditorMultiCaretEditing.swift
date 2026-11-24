@@ -401,7 +401,7 @@ extension EditorTextView {
     func applyMultiEdits(
         _ replacements: [MultiCaretEditing.Replacement], selections: [NSRange], validate: Bool = true,
         restoreFocus: EditorFocusSession.Snapshot? = nil,
-        restoreNavigation: [FocusNavigationSelection]? = nil
+        restoreNavigation: [FocusNavigationSelection]? = nil, actionName: String? = nil
     ) -> Bool {
         let edits = replacements.filter { $0.range.length > 0 || !$0.text.isEmpty }
         guard !edits.isEmpty, let storage = textStorage else { return false }
@@ -425,6 +425,14 @@ extension EditorTextView {
         } else {
             breakUndoCoalescing()
         }
+
+        // A named editor action remains separate from pending typing and other toolbar actions.
+        let isolatesAction = actionName != nil && manager?.groupsByEvent == true
+        if isolatesAction, let manager {
+            while manager.groupingLevel > 0 { manager.endUndoGrouping() }
+            manager.groupsByEvent = false
+        }
+        defer { if isolatesAction { manager?.groupsByEvent = true } }
 
         var delta = 0
         let inverse = edits.map { replacement in
@@ -460,6 +468,7 @@ extension EditorTextView {
                                        restoreNavigation: previousFocusNavigation)
             }
         }
+        if let actionName { manager?.setActionName(actionName) }
         if ownsUndoGroup { manager?.endUndoGrouping() }
         return true
     }

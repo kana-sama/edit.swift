@@ -231,6 +231,116 @@ enum SourceControlCheck {
         try expect(document.sidebarMode == .worktree, "ignore a direct focus command outside a workspace")
         try await checkImmutableActivation(executable: executable, workspace: workspace, changeID: history.changeID, file: file)
         try await checkPublishedLinks(executable: executable, folder: fixture.appending(path: "Origin links"))
+        try await checkConflicts(in: app, executable: executable, folder: fixture.appending(path: "Conflicts"), render: render)
+    }
+
+    private static func checkConflicts(in app: Edit, executable: URL, folder: URL, render: (NSWindow) throws -> Void) async throws {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        try await command(executable, folder, ["git", "init", "--colocate"])
+        let file = folder.appending(path: "Conflict.swift")
+        let finalLine = folder.appending(path: "End.txt")
+        func source(_ value: String) -> String {
+            "let first = \"\(value)\"\n" + (1...9).map { "// Unchanged \($0)\n" }.joined() + "let last = \"\(value)\"\n"
+        }
+        try source("Base").write(to: file, atomically: true, encoding: .utf8)
+        try "Base".write(to: finalLine, atomically: true, encoding: .utf8)
+        try await command(executable, folder, ["bookmark", "create", "base"])
+        for side in ["Alpha", "Beta", "Gamma"] {
+            try await command(executable, folder, ["new", "base", "-m", side])
+            try source(side).write(to: file, atomically: true, encoding: .utf8)
+            try (side == "Alpha" ? side + "\n" : side).write(to: finalLine, atomically: true, encoding: .utf8)
+            try await command(executable, folder, ["bookmark", "create", side])
+        }
+        try await command(executable, folder, ["new", "Alpha", "Beta", "Gamma", "-m", "Conflicting merge"])
+        guard let workspace = await JJRepository.discover(at: folder) else { throw Failure("discover the conflict fixture") }
+        let graph = try await JJSourceControlRepository.graph(in: workspace, revset: "all()")
+        func blocks(_ text: String) -> [JJConflict] {
+            JJLineDiff.analyze(base: nil, current: text, isConflicted: true, recordedConflict: text).conflicts
+        }
+        let noFinalNewline = try String(contentsOf: finalLine, encoding: .utf8)
+        guard let end = blocks(noFinalNewline).first, let snapshot = end.rendered(as: .snapshot),
+              let back = blocks(snapshot).first?.rendered(as: .diff) else { throw Failure("convert a conflict at EOF") }
+        try expect(end.sides.map(\.text) == ["Alpha\n", "Beta", "Gamma"] && blocks(back).first?.sides == end.sides,
+                   "preserve all sides and their final newlines when changing format")
+        try back.write(to: finalLine, atomically: true, encoding: .utf8)
+        try await command(executable, folder, ["util", "snapshot"])
+        let snapshotOperation = try await JJRepository.operation(in: workspace)
+        let preserved = try await JJRepository.read(workspace, at: snapshotOperation)
+        try expect(preserved.commitID == graph.workingCopy.id, "keep the same jj commit after a marker-only rewrite")
+
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        _ = try await app.openFile(folder, in: document)
+        document.toggleSidebarFocus(.sourceControl)
+        _ = try await app.openFile(file, in: document)
+        try await waitFor("open a conflict panel for the editable working copy") {
+            document.editor.isEditable && document.conflictPanel != nil
+        }
+        guard let panel = document.conflictPanel,
+              let format: NSPopUpButton = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictFormat" }),
+              let sidebar = document.sourceControlSidebar else { throw Failure("find the conflict controls") }
+        try await waitFor("show the conflict cross next to the selected change ID") {
+            guard let identity: NSView = descendant(of: sidebar.view, where: { $0.identifier?.rawValue == "JujutsuSelectedChangeID" }),
+                  let icon: NSImageView = descendant(of: identity, where: { $0.identifier?.rawValue == "JujutsuConflictIcon" }) else {
+                return false
+            }
+            identity.layoutSubtreeIfNeeded()
+            return !icon.isHiddenOrHasHiddenAncestor && icon.frame.width >= 10
+        }
+        let editor = document.editor
+        guard let undo = editor.undoManager else { throw Failure("find the conflict editor's undo manager") }
+        let original = editor.string
+        let originalBlocks = blocks(original)
+        try expect(originalBlocks.count == 2 && originalBlocks.allSatisfy { $0.sides.count == 3 && $0.style == .diff },
+                   "read every block and every side from a jj diff conflict")
+        try await waitFor("paint purple markers, red removals, and green additions over syntax colors") {
+            let roles: [(JJConflict.Role, SyntaxColor)] = [
+                (.marker, .conflictMarker), (.removal, .conflictRemoval), (.addition, .conflictAddition),
+            ]
+            return roles.allSatisfy { role, color in
+                guard let range = originalBlocks[0].highlights.first(where: { $0.role == role })?.range else { return false }
+                return editor.textStorage?.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? NSColor == color.nativeColor
+            }
+        }
+        document.window.appearance = NSAppearance(named: .darkAqua)
+        document.window.layoutIfNeeded()
+        try render(document.window)
+        panel.onNavigate?(1)
+        try expect(editor.selectedRange().location == originalBlocks[1].range.location, "navigate to the next conflict")
+        format.selectItem(withTitle: "Snapshot")
+        if let action = format.action { format.sendAction(action, to: format.target) }
+        try await waitFor("switch all open conflict blocks to Snapshot") {
+            let current = blocks(editor.string)
+            return current.count == 2 && current.allSatisfy { $0.style == .snapshot } && format.isEnabled
+        }
+        let snapshotBlocks = blocks(editor.string)
+        try expect(zip(snapshotBlocks, originalBlocks).allSatisfy { $0.sides == $1.sides },
+                   "retain each side when changing the editable representation")
+        panel.onResolve?(snapshotBlocks[0], 2)
+        try await waitFor("resolve only the selected block with the third side") {
+            editor.string.hasPrefix("let first = \"Gamma\"\n") && blocks(editor.string).count == 1
+        }
+        undo.undo()
+        try await waitFor("undo a resolution and recover all three sides") { blocks(editor.string) == snapshotBlocks }
+        undo.undo()
+        try await waitFor("undo a format switch") { editor.string == original }
+        try expect(await document.save(), "save the restored conflict before opening its history")
+
+        try await command(executable, folder, ["new", "-m", "Review child"])
+        let history = try await JJSourceControlRepository.graph(in: workspace, revset: "all()")
+        guard let historical = history.revisions.first(where: { $0.subject == "Conflicting merge" }) else {
+            throw Failure("find the historical conflict")
+        }
+        let details = try await JJSourceControlRepository.detail(for: historical, in: workspace, at: history.operationID)
+        guard let path = details.files.first(where: { $0.path == "Conflict.swift" }) else { throw Failure("list the conflicted file") }
+        try expect(await document.openSourceControlFile(path, in: historical, workspace: workspace, operationID: history.operationID) { true },
+                   "open the historical conflict as a read-only file")
+        let disk = try Data(contentsOf: file)
+        document.conflictPanel?.onChangeStyle?(.snapshot)
+        try await waitFor("show Snapshot in a read-only revision") {
+            !editor.isEditable && blocks(editor.string).first?.style == .snapshot
+        }
+        try expect(try Data(contentsOf: file) == disk, "leave the working file untouched when switching a historical preview")
     }
 
     private static func checkPublishedLinks(executable: URL, folder: URL) async throws {
@@ -1010,11 +1120,22 @@ enum SourceControlCheck {
         clip.scroll(to: NSPoint(x: 0, y: graph.table.rowHeight))
         try expect(card() == nil, "dismiss the card when its graph scrolls")
         clip.scroll(to: .zero)
-        graph.table.mouseMoved(with: try pointer(at: historical))
-        try await waitFor("show both creation dates in the historical card") {
-            guard let content = card()?.contentView, let created = text("Created", in: content)?.string,
-                  let modified = text("Modified", in: content)?.string else { return false }
-            return created != modified
+        graph.table.scrollRowToVisible(historical)
+        graph.view.reflectScrolledClipView(clip)
+        window.layoutIfNeeded()
+        await Task.yield()
+        do {
+            try await waitFor("show both creation dates in the historical card") {
+                if let content = card()?.contentView, let created = text("Created", in: content)?.string,
+                   let modified = text("Modified", in: content)?.string, created != modified { return true }
+                // Keep sending pointer movement while AppKit settles the post-scroll viewport.
+                if let event = try? pointer(at: historical) { graph.table.mouseMoved(with: event) }
+                return false
+            }
+        } catch {
+            let subject = card()?.contentView.flatMap { text("Subject", in: $0)?.string } ?? "none"
+            let row = graph.table.rect(ofRow: historical)
+            throw Failure("show both historical creation dates (card \(subject), row \(row), viewport \(graph.table.visibleRect), key \(window.isKeyWindow))")
         }
         graph.table.mouseExited(with: try pointer(at: working))
         try await waitFor("dismiss the card after leaving the row and its corridor") { card() == nil }

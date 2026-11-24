@@ -4,9 +4,11 @@ import Foundation
 
 enum SyntaxColor: Sendable, Hashable, CaseIterable {
     case keyword, control, type, function, string, number, comment, property, markup, attribute
+    case conflictMarker, conflictAddition, conflictRemoval
 
     fileprivate var priority: Int {
         switch self {
+        case .conflictMarker, .conflictAddition, .conflictRemoval: 4
         case .property, .attribute, .function, .control: 3
         case .comment, .markup, .type: 2
         case .keyword, .string, .number: 1
@@ -50,7 +52,7 @@ enum SyntaxColor: Sendable, Hashable, CaseIterable {
     }
 }
 
-struct SyntaxSpan: Sendable {
+struct SyntaxSpan: Equatable, Sendable {
     let start: Int
     let end: Int
     let color: SyntaxColor

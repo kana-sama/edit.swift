@@ -161,6 +161,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var editorTopConstraint: NSLayoutConstraint?
     private var filePreviewTopConstraint: NSLayoutConstraint?
     private var previewTopConstraint: NSLayoutConstraint?
+    private(set) var conflictPanel: JJConflictPanel?
+    private var conflictEditorTop: NSLayoutConstraint?
+    private var conflictBlocks: [JJConflict] = []
+    private var conflictPresentationCurrent = false
+    private var conflictStyleTask: Task<Void, Never>?
     var isShowingFilePreview: Bool { filePreview != nil }
     var showsEmptyFolder: Bool { emptyFolderView != nil }
     var hasTextDocument: Bool { !isShowingFilePreview && !showsEmptyFolder }
@@ -283,6 +288,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         window.initialFirstResponder = editor
         window.makeFirstResponder(editor)
         editor.onTextChange = { [weak self] in self?.textDidChange() }
+        editor.onConflictSelectionChange = { [weak self] in self?.updateConflictControls() }
         editor.onFocusScopeChange = { [weak self] in
             guard let self else { return }
             self.sidebar.editorBufferReplaced()
@@ -975,7 +981,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         autosave.reset()
         sourceControlRevision = preview
         switch preview.content {
-        case .text(let text, let format, let analysis):
+        case .text(let text, let format, let analysis, _):
             fileURL = nil
             fileIdentity = nil
             revision = nil
@@ -1006,10 +1012,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             banner.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
             newTop,
         ])
+        if case .text(_, _, let analysis, _) = preview.content { showEditorConflicts(analysis.conflicts) }
     }
 
     private func removeSourceControlRevision() {
         guard sourceControlRevision != nil else { return }
+        showEditorConflicts([])
         sourceControlRevision = nil
         editor.setJJLineMarks([])
         previewTopConstraint?.isActive = false
@@ -1538,6 +1546,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func textDidChange() {
+        if conflictPanel != nil {
+            conflictStyleTask?.cancel()
+            conflictPresentationCurrent = false
+            conflictPanel?.suspend()
+        }
         pendingSourceControlDiffFile = nil
         autosave.noteEdit()
         updateEditedState()
@@ -1859,6 +1872,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private func installText(
         _ text: String, preparedSyntax: SyntaxSnapshot? = nil, revealInWorktree: Bool = true
     ) {
+        conflictStyleTask?.cancel()
+        showEditorConflicts([])
         pendingSourceControlDiffFile = nil
         discardDraftCheckpoint()
         editor.exitFocus(notify: false)
@@ -1915,12 +1930,16 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 guard let self, sourceControlRevision == nil else { return }
                 editor.setJJLineMarks(result?.marks ?? [], lineStarts: result?.lineStarts ?? [],
                                       hunks: result?.hunks ?? [], normalizeCRLF: normalizeCRLF)
+                showEditorConflicts(result?.conflicts ?? [])
                 if result != nil, pendingSourceControlDiffFile != nil, pendingSourceControlDiffFile == fileURL {
                     pendingSourceControlDiffFile = nil
                     editor.jjInlineDiff?.expandAll()
                 }
             }, suspendMarkerNavigation: { [weak self] in
-                self?.editor.suspendJJMarkerNavigation()
+                guard let self else { return }
+                editor.suspendJJMarkerNavigation()
+                conflictPresentationCurrent = false
+                conflictPanel?.suspend()
             }, showWorktree: { [weak self] decorations in
                 self?.worktreeSidebar?.setJJDecorations(decorations)
             }, workingCopyStatusChanged: { [weak self] in
@@ -1929,6 +1948,146 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             editor.onJJCompositionChange = { [weak self] in self?.jjDocumentChanges?.bufferChanged() }
         }
         jjDocumentChanges?.update(file: file, revision: revision, folder: folder)
+    }
+
+    private func showEditorConflicts(_ conflicts: [JJConflict]) {
+        conflictBlocks = conflicts
+        conflictPresentationCurrent = !conflicts.isEmpty
+        if !conflicts.isEmpty, syntaxHighlighting == nil {
+            syntaxHighlighting = SyntaxHighlighting(editor: editor)
+        }
+        syntaxHighlighting?.setConflictHighlights(conflicts.flatMap(\.highlights))
+        guard !conflicts.isEmpty else {
+            if let panel = conflictPanel {
+                conflictEditorTop?.isActive = false
+                conflictEditorTop = nil
+                panel.suspend()
+                panel.removeFromSuperview()
+                conflictPanel = nil
+                (previewTopConstraint ?? editorTopConstraint)?.isActive = true
+            }
+            return
+        }
+
+        if conflictPanel == nil {
+            let panel = JJConflictPanel()
+            conflictPanel = panel
+            panel.onNavigate = { [weak self] offset in self?.revealConflict(offsetBy: offset) }
+            panel.onEdit = { [weak self] in self?.revealConflict(offsetBy: 0) }
+            panel.onResolve = { [weak self] block, side in self?.resolveConflict(block, using: side) }
+            panel.onChangeStyle = { [weak self] style in self?.changeConflictStyle(to: style) }
+            editorContentView.addSubview(panel)
+            let guide = editorContentView.safeAreaLayoutGuide
+            let top = sourceControlRevisionBanner?.bottomAnchor ?? guide.topAnchor
+            (previewTopConstraint ?? editorTopConstraint)?.isActive = false
+            let editorTop = scrollView.topAnchor.constraint(equalTo: panel.bottomAnchor)
+            conflictEditorTop = editorTop
+            NSLayoutConstraint.activate([
+                panel.topAnchor.constraint(equalTo: top),
+                panel.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
+                panel.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
+                editorTop,
+            ])
+        }
+        updateConflictControls()
+    }
+
+    private var selectedConflictIndex: Int? {
+        guard !conflictBlocks.isEmpty else { return nil }
+        let caret = editor.selectedRange().location
+        return conflictBlocks.firstIndex { NSMaxRange($0.range) > caret } ?? conflictBlocks.count - 1
+    }
+
+    private func updateConflictControls() {
+        guard conflictPresentationCurrent, let index = selectedConflictIndex else { return }
+        conflictPanel?.update(conflictBlocks, selected: index, editable: editor.isEditable)
+    }
+
+    private func revealConflict(offsetBy offset: Int) {
+        guard conflictPresentationCurrent, let index = selectedConflictIndex else { return }
+        let count = conflictBlocks.count
+        let block = conflictBlocks[(index + offset + count) % count]
+        let target = NSRange(location: block.range.location, length: 0)
+        editor.setCaretSelections([target])
+        focusContent()
+        editor.scrollRangeToVisible(target)
+    }
+
+    private func resolveConflict(_ conflict: JJConflict, using side: Int) {
+        guard conflictPresentationCurrent, editor.isEditable, !editor.hasMarkedText(),
+              conflictBlocks.contains(conflict), conflict.sides.indices.contains(side),
+              Self.conflictMatches(conflict, in: editor.string as NSString) else { return }
+        let edit = EditorTextEdit(range: conflict.range, text: conflict.sides[side].text)
+        let caret = NSRange(location: conflict.range.location, length: 0)
+        if editor.applyMultiEdits([edit], selections: [caret], actionName: "Resolve Conflict") {
+            focusContent()
+        }
+    }
+
+    private func changeConflictStyle(to style: JJConflict.Style) {
+        guard conflictPresentationCurrent, !editor.hasMarkedText(), editor.isEditable || sourceControlRevision != nil else { return }
+        let original = editor.string
+        guard conflictBlocks.allSatisfy({ Self.conflictMatches($0, in: original as NSString) }) else { return }
+        let blocks = conflictBlocks
+        conflictStyleTask?.cancel()
+        conflictPresentationCurrent = false
+        conflictPanel?.suspend()
+        conflictStyleTask = Task { [weak self] in
+            let edits = await Self.conflictStyleEdits(blocks, style: style)
+            guard let self, !Task.isCancelled, editor.string.utf8.elementsEqual(original.utf8) else { return }
+            guard let edits, !edits.isEmpty else {
+                conflictStyleTask = nil
+                conflictPresentationCurrent = true
+                updateConflictControls()
+                return
+            }
+            if let preview = sourceControlRevision, case .text(_, _, _, let baseline) = preview.content {
+                let updated = NSMutableString(string: original)
+                for edit in edits.reversed() { updated.replaceCharacters(in: edit.range, with: edit.text) }
+                let text = updated as String
+                let analysis = await Self.analyzeConflictPreview(text, baseline: baseline)
+                guard !Task.isCancelled, editor.string.utf8.elementsEqual(original.utf8) else { return }
+                conflictStyleTask = nil
+                let position = editor.capturePosition()
+                PanelLayout.withoutAnimation {
+                    savedText = text as NSString
+                    installText(text, revealInWorktree: false)
+                    editor.setJJLineMarks(analysis.marks, lineStarts: analysis.lineStarts, hunks: analysis.hunks)
+                    showEditorConflicts(analysis.conflicts)
+                    editor.jjInlineDiff?.expandAll()
+                    restoreEditorPosition(position)
+                }
+            } else {
+                conflictStyleTask = nil
+                let mapped = MultiCaretEditing.mapped(editor.caretSelections, after: edits)
+                if editor.applyMultiEdits(edits, selections: mapped, actionName: "Change Conflict Format") {
+                    focusContent()
+                } else {
+                    conflictPresentationCurrent = true
+                    updateConflictControls()
+                }
+            }
+        }
+    }
+
+    private static func conflictMatches(_ conflict: JJConflict, in buffer: NSString) -> Bool {
+        NSMaxRange(conflict.range) <= buffer.length &&
+            buffer.substring(with: conflict.range).utf8.elementsEqual(conflict.source.utf8)
+    }
+
+    @concurrent
+    private static func conflictStyleEdits(_ blocks: [JJConflict], style: JJConflict.Style) async -> [EditorTextEdit]? {
+        var edits: [EditorTextEdit] = []
+        for block in blocks where block.style != style {
+            guard !Task.isCancelled, let text = block.rendered(as: style) else { return nil }
+            edits.append(EditorTextEdit(range: block.range, text: text))
+        }
+        return edits
+    }
+
+    @concurrent
+    private static func analyzeConflictPreview(_ text: String, baseline: String?) async -> JJTextAnalysis {
+        JJLineDiff.analyze(base: baseline, current: text, isConflicted: true, recordedConflict: text)
     }
 
     private func updateEditedState() {

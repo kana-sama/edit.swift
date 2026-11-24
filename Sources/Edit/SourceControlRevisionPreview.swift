@@ -2,7 +2,7 @@ import AppKit
 
 struct SourceControlRevisionPreview: Sendable {
     enum Content: Sendable {
-        case text(String, FileFormat, JJTextAnalysis)
+        case text(String, FileFormat, JJTextAnalysis, baseline: String?)
         case media(OpenFilePreview)
     }
 
@@ -31,7 +31,7 @@ struct SourceControlRevisionPreview: Sendable {
             let conflict = contents.isConflict && !file.isDeleted
             let analysis = JJLineDiff.analyze(base: baseline, current: current, isConflicted: conflict,
                                               recordedConflict: conflict ? current : nil)
-            content = .text(current, format, analysis)
+            content = .text(current, format, analysis, baseline: baseline)
         } else if let bytes {
             let (details, backing) = await FilePreviewDetails.loadRevision(bytes, at: url)
             let reason = details.image == nil && !details.playableVideo ? "A text diff is unavailable for this file." : ""

@@ -1,6 +1,6 @@
 # Jujutsu change indicators
 
-When a user opens a folder or file in a Jujutsu workspace, Edit shows what the workspace's current change adds, changes, deletes, or leaves in conflict. The user can find changed files in Worktree, read changed lines beside the text, and use the vertical scrollbar to find changes elsewhere in the document. Indicators are available by default when a compatible installed `jj` is available. Edit uses Jujutsu as its source of repository state. The scope is inspection and navigation within the editor and Worktree.
+When a user opens a folder or file in a Jujutsu workspace, Edit shows what the workspace's current change adds, changes, deletes, or leaves in conflict. The user can find changed files in Worktree, read changed lines beside the text, and use the vertical scrollbar to find changes elsewhere in the document. Indicators are available by default when a compatible installed `jj` is available. Edit uses Jujutsu as its source of repository state.
 
 ## Workspace and comparison
 
@@ -56,6 +56,8 @@ Use the [shared design](../../design.md) and native [NSScroller](https://develop
 Take conflict status from metadata for the entire current jj tree. This includes inherited conflicts and add/add conflicts. Derive textual ranges from the known materialized conflict using the user's jj format, including `diff`, `snapshot`, and jj's `git` marker style, long delimiters, multiple sides, and missing final newlines. Marker-like text in a regular file has its normal diff meaning. If a conflict is binary or its bounds are uncertain, retain purple Worktree status and omit ambiguous line ranges.
 
 Within a confirmed conflict block, the conflict marker takes precedence over ordinary diff. Outside it, show ordinary marks where the comparison is reliable. Resolving one block in the buffer removes its marker. Remaining blocks retain their markers and keep the file and ancestors purple. Resolving the last block restores the ordinary status of the file and its ancestors, taking other descendants into account. Undo restores the unresolved state. While a block is being edited, incomplete delimiters alone are insufficient evidence of resolution. Reconcile the provisional buffer state with jj after the text reaches disk.
+
+The [Jujutsu text conflict panel](../jj-text-conflicts/spec.md) adds highlighting, navigation, and resolution for confirmed text blocks.
 
 See [Jujutsu's materialized conflict formats](https://docs.jj-vcs.dev/latest/conflicts/).
 

@@ -46,6 +46,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var onFocusScopeChange: (() -> Void)?
     var onTextChange: (() -> Void)?
     var onJJCompositionChange: (() -> Void)?
+    var onConflictSelectionChange: (() -> Void)?
     var onBlur: (() -> Void)?
     var onFindEditorInteraction: (() -> Void)?
     var onFindViewportChange: (() -> Void)?
@@ -977,6 +978,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         }
         requestLineRefresh()
         jjInlineDiff?.selectionChanged()
+        onConflictSelectionChange?()
     }
 
     func withTextEdits(_ edits: [EditorTextEdit], _ apply: () -> Void) {
