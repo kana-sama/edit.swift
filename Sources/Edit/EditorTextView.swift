@@ -36,7 +36,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     private let currentLineHighlight = CurrentLineHighlight()
     private var lineRefreshPending = false
     let multiCaret = MultiCaretState()
-    private weak var multiCaretWindow: NSWindow?
+    private weak var observedWindow: NSWindow?
     private var multiCaretComposition: MultiCaretComposition?
     private var updatingComposition = false
     let editorUndoManager = EditorUndoManager()
@@ -60,6 +60,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     lazy var bracketNavigation = BracketNavigation(editor: self)
     lazy var occurrenceHighlighting = OccurrenceHighlighting(editor: self)
     var preferredLineEnding = "\n"
+
+    var hasBufferFocus: Bool { window?.isKeyWindow == true && window?.firstResponder === self }
+
+    override var shouldDrawInsertionPoint: Bool { hasBufferFocus && super.shouldDrawInsertionPoint }
 
 
     private static func codeFont(ofSize size: CGFloat) -> NSFont {
@@ -122,20 +126,26 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         super.viewDidMoveToWindow()
         let center = NotificationCenter.default
         let events = [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification]
-        if let previous = multiCaretWindow {
+        if let previous = observedWindow {
             for event in events { center.removeObserver(self, name: event, object: previous) }
         }
-        multiCaretWindow = window
+        observedWindow = window
         if let window {
             for event in events {
                 center.addObserver(self, selector: #selector(windowFocusChanged(_:)), name: event, object: window)
             }
         }
+        windowFocusChanged(nil)
     }
 
-    @objc private func windowFocusChanged(_ notification: Notification) {
+    @objc private func windowFocusChanged(_ notification: NSNotification?) {
         hideCaretDecorations()
-        occurrenceHighlighting.focusChanged(window?.isKeyWindow == true && window?.firstResponder === self)
+        let focused = hasBufferFocus
+        if !focused {
+            setCurrentLine(.zero)
+            bracketNavigation.clearHighlights()
+        }
+        occurrenceHighlighting.focusChanged(focused)
         requestLineRefresh()
     }
 
@@ -170,7 +180,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     override func becomeFirstResponder() -> Bool {
         guard super.becomeFirstResponder() else { return false }
-        occurrenceHighlighting.focusChanged(true)
+        // AppKit assigns the window's first responder after this callback returns.
+        Task { [weak self] in
+            guard let self, hasBufferFocus else { return }
+            occurrenceHighlighting.focusChanged(true)
+        }
         requestLineRefresh()
         return true
     }
@@ -180,6 +194,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         multiCaret.pendingSkip = false
         if multiCaretComposition != nil { unmarkText() }
         hideCaretDecorations()
+        setCurrentLine(.zero)
         bracketNavigation.clearHighlights()
         occurrenceHighlighting.focusChanged(false)
         onBlur?()
@@ -1049,13 +1064,17 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     func refreshCurrentLine() {
         refreshCaretDecorations()
         refreshFocusDecoration()
+        guard hasBufferFocus else {
+            setCurrentLine(.zero)
+            return
+        }
         let location = selectedRange().location
         var newLine = NSRect.zero
         if jjInlineDiff?.hasProjectedCaret == true {
             if let line = jjInlineDiff?.projectedCaretRect {
                 newLine = NSRect(x: bounds.minX, y: line.minY, width: bounds.width, height: line.height)
             }
-        } else if window != nil, caretIsNearViewport(location) {
+        } else if caretIsNearViewport(location) {
             if let line = currentLineBounds(at: location) {
                 newLine = NSRect(x: bounds.minX, y: line.minY, width: bounds.width, height: line.height)
             } else if textStorage?.length == 0, let paragraph = defaultParagraphStyle {
@@ -1063,6 +1082,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
                                  height: paragraph.minimumLineHeight)
             }
         }
+        setCurrentLine(newLine)
+    }
+
+    private func setCurrentLine(_ newLine: NSRect) {
         // Moving one layer keeps old line backgrounds out of the text view's scrolling tiles.
         if currentLineHighlight.frame != newLine {
             currentLineHighlight.frame = newLine

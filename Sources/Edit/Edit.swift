@@ -1156,7 +1156,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     private func checkEditorViewport() async throws {
         try await EditorCheck.checkViewportResize(in: makeDocument())
-        try await EditorCheck.checkCurrentLinePaint(in: makeDocument())
+        try await EditorCheck.checkCurrentLinePaint()
         try await EditorCheck.checkScrolledZoom(in: makeDocument())
     }
 

@@ -435,7 +435,7 @@ extension EditorTextView {
         let hidesLiveCaret = jjInlineDiff?.projectedEditRange?.length == 0
         let projectedCaret = hidesLiveCaret ? jjInlineDiff?.projectedCaretRect : nil
         let showCarets = (hidesLiveCaret ? projectedCaret != nil && isSelectable : isEditable)
-            && !hasMarkedText() && window?.isKeyWindow == true && window?.firstResponder === self
+            && !hasMarkedText() && hasBufferFocus
         let old = multiCaret.highlights
         var highlights: [NSRect] = []
         var carets: [NSRect] = []
@@ -484,8 +484,9 @@ extension EditorTextView {
         }
         guard showCarets, selections.contains(where: { $0.length == 0 }),
               !carets.isEmpty || multiCaret.indicatorGroup != nil else {
-            hideSharedCarets(restoringNativeCaret: !hidesLiveCaret)
-            if hidesLiveCaret { hideNativeCaret() }
+            let suppressNativeCaret = hidesLiveCaret || !hasBufferFocus
+            hideSharedCarets(restoringNativeCaret: !suppressNativeCaret)
+            if suppressNativeCaret { hideNativeCaret() }
             return
         }
         let group = multiCaret.indicatorGroup ?? CaretIndicatorGroup()
@@ -503,15 +504,15 @@ extension EditorTextView {
 
     func drawSecondarySelections(in dirtyRect: NSRect) {
         guard !multiCaret.highlights.isEmpty else { return }
-        let focused = window?.firstResponder === self && window?.isKeyWindow == true
-        (focused ? NSColor.selectedTextBackgroundColor : NSColor.unemphasizedSelectedTextBackgroundColor).setFill()
+        (hasBufferFocus ? NSColor.selectedTextBackgroundColor : NSColor.unemphasizedSelectedTextBackgroundColor).setFill()
         for highlight in multiCaret.highlights {
             highlight.intersection(dirtyRect).fill()
         }
     }
 
     func hideCaretDecorations() {
-        hideSharedCarets()
+        hideSharedCarets(restoringNativeCaret: false)
+        hideNativeCaret()
         for rect in multiCaret.highlights { setNeedsDisplay(rect.intersection(visibleRect)) }
     }
 
@@ -523,7 +524,7 @@ extension EditorTextView {
         }
     }
 
-    private func hideSharedCarets(restoringNativeCaret: Bool = true) {
+    private func hideSharedCarets(restoringNativeCaret: Bool) {
         if restoringNativeCaret, let color = multiCaret.nativeCaretColor {
             insertionPointColor = color
             multiCaret.nativeCaretColor = nil

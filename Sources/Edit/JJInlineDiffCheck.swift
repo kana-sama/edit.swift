@@ -444,24 +444,41 @@ enum JJInlineDiffCheck {
         position.x = 0
         scroll.scrollToVisibleContentOrigin(position)
         try checkAlignment("after returning to the first column")
-        try checkOverscrolledBackgrounds(in: document, controller: controller, hunk: hunk)
+        try checkOverscrolledBackgrounds(base: base, current: current)
     }
 
-    private static func checkOverscrolledBackgrounds(
-        in document: DocumentWindow, controller: JJInlineDiff, hunk: JJDiffHunk
-    ) throws {
-        let editor = document.editor
-        let scroll = document.scrollView
+    private static func checkOverscrolledBackgrounds(base: String, current: String) throws {
+        let bounds = NSRect(x: 0, y: 0, width: 720, height: 480)
+        let window = EditorFocusCheckWindow(contentRect: bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        let (scroll, editor) = EditorTextView.scrollingEditor(in: bounds)
+        window.contentView = scroll
+        defer { window.close() }
+        guard window.makeFirstResponder(editor), editor.hasBufferFocus else { throw Failure("focus the quiet editor fixture") }
+
+        let analysis = JJLineDiff.analyze(base: base, current: current, isConflicted: false, recordedConflict: nil)
+        let hunk = try require(analysis.hunks.first, "make a long changed line for overscroll")
+        editor.string = current
+        window.layoutIfNeeded()
+        scroll.layoutSubtreeIfNeeded()
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        editor.setJJLineMarks(analysis.marks, lineStarts: analysis.lineStarts, hunks: analysis.hunks)
+        let controller = try require(editor.jjInlineDiff, "attach the overscrolled diff")
+        controller.toggle(hunk.mark)
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+
         let clip = scroll.contentView
-        let footer = (editor.string as NSString).range(of: "footer")
+        let footer = (current as NSString).range(of: "footer")
         editor.setSelectedRange(NSRange(location: footer.location, length: 0))
         editor.refreshCurrentLine()
 
         let rows = try [
-            require(editor.lineBounds(at: 0), "lay out an ordinary row"),
+            require(editor.laidOutLineBounds(at: 0), "lay out an ordinary row"),
             require(controller.removedCaretRect(key: hunk.baseRange, offset: 0), "lay out a removed row"),
-            require(editor.lineBounds(at: hunk.currentRange.location), "lay out an added row"),
-            require(editor.lineBounds(at: footer.location), "lay out the active row"),
+            require(editor.laidOutLineBounds(at: hunk.currentRange.location), "lay out an added row"),
+            require(editor.laidOutLineBounds(at: footer.location), "lay out the active row"),
         ]
         for edge in ["left", "right"] {
             let documentFrame = editor.frame
@@ -491,6 +508,12 @@ enum JJInlineDiffCheck {
                   abs(active.redComponent - ordinary.redComponent) > 0.025 else {
                 throw Failure("continue the active, removed, and added backgrounds into the \(edge) overscroll")
             }
+            window.simulatedKeyStatus = false
+            guard try color(rows[3]) == ordinary else {
+                throw Failure("clear the active row into the \(edge) overscroll when the editor loses focus")
+            }
+            window.simulatedKeyStatus = true
+            editor.refreshCurrentLine()
         }
     }
 

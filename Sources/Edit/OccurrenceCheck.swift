@@ -8,6 +8,7 @@ enum OccurrenceCheck {
     }
 
     static func run(in app: Edit) async throws {
+        try await checkFocusedWords()
         let document = app.makeDocument()
         defer { document.window.close() }
         let editor = document.editor
@@ -16,14 +17,9 @@ enum OccurrenceCheck {
         editor.string = source
         editor.didChangeText()
         document.window.layoutIfNeeded()
-        editor.setCaretSelections([NSRange(location: 1, length: 0)])
-        try await waitFor("the whole words beside a single caret") {
-            state.wordRanges == ranges([0, 4]) && state.selectionRanges.isEmpty
-        }
-
         editor.setCaretSelections(ranges([0]))
-        try await waitFor("both word and selected-text highlights using Edit's Find defaults") {
-            state.wordRanges == ranges([0, 4]) && state.selectionRanges == ranges([4, 12, 17])
+        try await waitFor("selected-text highlights using Edit's Find defaults in an inactive window") {
+            state.wordRanges.isEmpty && state.selectionRanges == ranges([4, 12, 17])
         }
         document.findSettings.options.caseSensitive = false
         try await waitFor("selected text using Match Case off") { state.selectionRanges == ranges([4, 8, 12, 17]) }
@@ -51,26 +47,56 @@ enum OccurrenceCheck {
         }
         editor.setCaretSelections([NSRange(location: 0, length: 3), NSRange(location: 13, length: 3)])
         try await waitFor("different selections suppress literal matching") { state.selectionRanges.isEmpty }
+    }
+
+    private static func checkFocusedWords() async throws {
+        let bounds = NSRect(x: 0, y: 0, width: 400, height: 220)
+        let window = EditorFocusCheckWindow(contentRect: bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        let (scroll, editor) = EditorTextView.scrollingEditor(in: bounds)
+        window.contentView = scroll
+        defer { window.close() }
+        window.makeFirstResponder(editor)
+        let state = editor.occurrenceHighlighting
+        editor.string = "foo foo Foo food foo_bar"
+        editor.didChangeText()
+        window.layoutIfNeeded()
 
         editor.setCaretSelections([NSRange(location: 1, length: 0)])
-        try await waitFor("word highlights return after collapsing the selection") { state.wordRanges == ranges([0, 4]) }
-        document.window.makeFirstResponder(nil)
-        guard state.wordRanges.isEmpty else { throw Failure("Word highlights remained after leaving the editor.") }
-        document.focusContent()
+        try await waitFor("the whole words beside a single caret") {
+            state.wordRanges == ranges([0, 4]) && state.selectionRanges.isEmpty
+        }
+        editor.setCaretSelections(ranges([0]))
+        try await waitFor("both word and selected-text highlights in a focused editor") {
+            state.wordRanges == ranges([0, 4]) && state.selectionRanges == ranges([4, 12, 17])
+        }
+        window.makeFirstResponder(nil)
+        guard state.wordRanges.isEmpty, editor.selectedRange() == ranges([0])[0],
+              state.selectionRanges == ranges([4, 12, 17]) else {
+            throw Failure("Leaving the editor must clear word highlights and retain the selection and its matches.")
+        }
+        window.makeFirstResponder(editor)
+        editor.setCaretSelections([NSRange(location: 1, length: 0)])
         try await waitFor("word highlighting resumes on editor focus") { state.wordRanges == ranges([0, 4]) }
-        try checkNativeDrawing(in: document)
+        window.simulatedKeyStatus = false
+        editor.setCaretSelections([NSRange(location: 5, length: 0)])
+        try await Task.sleep(for: .milliseconds(90))
+        guard state.wordRanges.isEmpty else { throw Failure("A background selection brought back word highlights.") }
+        window.simulatedKeyStatus = true
+        try await waitFor("word highlighting resumes when the editor window becomes key") { state.wordRanges == ranges([0, 4]) }
+        try checkNativeDrawing(in: window, editor: editor, clip: scroll.contentView)
         editor.insertText("x", replacementRange: editor.selectedRange())
         try await Task.sleep(for: .milliseconds(90))
-        guard state.wordRanges.isEmpty, state.selectionRanges.isEmpty, !document.window.isVisible,
+        guard state.wordRanges.isEmpty, state.selectionRanges.isEmpty, !window.isVisible,
               !NSApplication.shared.isActive else {
             throw Failure("Typing left stale matches or activated the verification window.")
         }
     }
 
-    private static func checkNativeDrawing(in document: DocumentWindow) throws {
-        let editor = document.editor
-        let clip = document.scrollView.contentView
-        document.window.layoutIfNeeded()
+    private static func checkNativeDrawing(in window: NSWindow, editor: EditorTextView, clip: NSClipView) throws {
+        window.layoutIfNeeded()
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         editor.occurrenceHighlighting.layout()
         guard let marked = clip.bitmapImageRepForCachingDisplay(in: clip.bounds),

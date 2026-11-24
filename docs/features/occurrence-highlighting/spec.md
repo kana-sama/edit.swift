@@ -6,7 +6,7 @@ The behavior reference is [VS Code 1.147.0](https://code.visualstudio.com/update
 
 - For an empty primary selection, use the word at its position. The word includes either caret edge. Where the language defines a word pattern, use it to extract the query. The default treats `_` as part of a word. The textual provider matches case-sensitive whole words using the default VS Code separators. Draw the first 999 results, including the source occurrence if it qualifies as one of them. A position between separators, with neither edge touching a word, clears the word highlights.
 - Use the primary selection for the word query in multi-caret mode. If a primary selection fits entirely inside one word, the word highlights can coexist with the selected-text highlights. A selection spanning beyond that word clears the word highlights.
-- Compute the word query for explicit caret moves and selection gestures. VS Code debounces these events for about 50 ms. Clear word highlights when typing, leaving the editor, or changing documents. A result for an obsolete buffer, caret, selection, or language cannot repaint the active editor.
+- Compute the word query for explicit caret moves and selection gestures while the editor has focus in the key window. VS Code debounces these events for about 50 ms. Clear word highlights when typing, leaving the editor, or changing documents. Selection and language updates in an unfocused editor keep word highlights cleared. A result for an obsolete buffer, caret, selection, or language cannot repaint the editor.
 - Edit follows VS Code's built-in textual behavior. VS Code language providers can additionally supply symbol references and separate read and write marks.
 
 ## Selected text
@@ -25,6 +25,7 @@ The behavior reference is [VS Code 1.147.0](https://code.visualstudio.com/update
 - Toggle Match Case, Whole Word and Regex. Check `f.o fxo f.o` with `f.o` selected. Open and close Find on an identical query. Check simultaneous highlights and different queries, with native selection still readable in light and dark appearances.
 - Test two equal selections with a third match, different selections, two empty carets, and a manual selection in an active occurrence-selection session. Check the overlapping case `abababa`, with `aba` selected at UTF-16 range `[2, 5)`.
 - Check whitespace-only and multiline selections, UTF-16 lengths of 200 and 201 including emoji, matches after non-ASCII text, the match cap, a large document, horizontal and vertical scrolling, Focus blocks, rapid edits, and switching buffers. Check text, selection, and undo state after highlights appear and clear.
+- Move focus out of the buffer and change the selection while the window is inactive. Word highlights stay cleared and return when the buffer regains focus. A selected range and its selected-text matches remain visible when focus moves away.
 
 ## Reference
 

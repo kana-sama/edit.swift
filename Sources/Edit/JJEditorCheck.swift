@@ -122,21 +122,28 @@ enum JJEditorCheck {
 
         try checkTrackAfterResize(in: document)
         try checkGutterUnderTitlebar(in: document)
-        try checkGutterTransparency(in: document)
+        try checkGutterTransparency()
     }
 
-    private static func checkGutterTransparency(in document: DocumentWindow) throws {
-        let editor = document.editor
-        let scroll = document.scrollView
+    private static func checkGutterTransparency() throws {
+        let bounds = NSRect(x: 0, y: 0, width: 720, height: 480)
+        let window = EditorFocusCheckWindow(contentRect: bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        let (scroll, editor) = EditorTextView.scrollingEditor(in: bounds)
+        window.contentView = scroll
+        window.makeFirstResponder(editor)
+        defer { window.close() }
         let row = String(repeating: "M", count: 240) + "\n"
         let starts = [0, 1] + (0..<80).map { 2 + $0 * row.utf16.count }
         editor.string = "\n\n" + String(repeating: row, count: 80)
-        document.window.layoutIfNeeded()
+        window.layoutIfNeeded()
         editor.setJJLineMarks([JJLineMark(kind: .insertion, lines: 0..<1),
                                JJLineMark(kind: .conflict, lines: 3..<4)], lineStarts: starts)
 
         func pixel(x: CGFloat, at offset: Int) throws -> NSColor {
-            guard let line = editor.lineBounds(at: offset) else { throw Failure("lay out the current line") }
+            guard let line = editor.laidOutLineBounds(at: offset) else { throw Failure("lay out the current line at \(offset)") }
             let sample = NSRect(x: scroll.safeAreaRect.minX + x, y: scroll.convert(line, from: editor).midY,
                                 width: 1, height: 1)
             guard let color = try capture(scroll, in: sample).colorAt(x: 0, y: 0) else {
@@ -162,7 +169,7 @@ enum JJEditorCheck {
         }
 
         func gutterSample(at line: Int, inset: CGFloat, width: CGFloat) throws -> NSBitmapImageRep {
-            guard let bounds = editor.lineBounds(at: starts[line]) else { throw Failure("lay out text under the gutter") }
+            guard let bounds = editor.laidOutLineBounds(at: starts[line]) else { throw Failure("lay out text under the gutter") }
             let row = scroll.convert(bounds, from: editor)
             return try capture(scroll, in: NSRect(x: scroll.safeAreaRect.minX + inset, y: row.minY,
                                                   width: width, height: row.height))

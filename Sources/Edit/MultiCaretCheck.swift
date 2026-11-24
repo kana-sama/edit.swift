@@ -200,7 +200,7 @@ enum MultiCaretCheck {
 
     static func checkBlink() throws {
         let rect = NSRect(x: 0, y: 0, width: 400, height: 220)
-        let window = CaretCheckWindow(contentRect: rect, styleMask: [.titled], backing: .buffered, defer: false)
+        let window = EditorFocusCheckWindow(contentRect: rect, styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         let (scroll, editor) = EditorTextView.scrollingEditor(in: rect)
         window.contentView = scroll
@@ -254,12 +254,19 @@ enum MultiCaretCheck {
         try expect(group.caretRects.count == 1 && group.caretRects[0].height > 0,
                    "an empty buffer shows a caret")
         try expect(window.makeFirstResponder(nil) && group.superview == nil
-                   && editor.insertionPointColor == .textColor,
-                   "leaving the editor removes its caret and restores the system cursor color")
-    }
-
-    private final class CaretCheckWindow: NSWindow {
-        override var isKeyWindow: Bool { true }
+                   && editor.insertionPointColor.alphaComponent == 0 && !editor.shouldDrawInsertionPoint,
+                   "leaving the editor removes the custom and system carets")
+        let selections = [NSRange(location: 0, length: 2), NSRange(location: 9, length: 2)]
+        editor.string = "abcdefgh\nabcdefgh"
+        window.makeFirstResponder(editor)
+        editor.setCaretSelections(selections)
+        layoutCarets()
+        try expect(!editor.multiCaret.highlights.isEmpty, "draw the secondary selection in the editor")
+        window.simulatedKeyStatus = false
+        layoutCarets()
+        try expect(editor.multiCaret.indicatorGroup == nil && !editor.shouldDrawInsertionPoint &&
+                   editor.caretSelections == selections && !editor.multiCaret.highlights.isEmpty,
+                   "keep selections after the editor's window loses key status")
     }
 
     static func runComposition(in editor: EditorTextView) throws {

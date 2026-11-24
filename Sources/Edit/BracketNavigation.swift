@@ -42,8 +42,7 @@ final class BracketNavigation {
         guard let editor else { return }
         updateScope(editor.focusRanges)
         let selections = selections(in: editor)
-        guard editor.window?.isKeyWindow == true, editor.window?.firstResponder === editor,
-              !editor.hasMarkedText(), selections.count <= 100,
+        guard editor.hasBufferFocus, !editor.hasMarkedText(), selections.count <= 100,
               selections.contains(where: { $0.length == 0 }) else {
             clearHighlights()
             return
@@ -63,7 +62,7 @@ final class BracketNavigation {
     }
 
     func draw(in dirtyRect: NSRect) {
-        guard !highlightFrames.isEmpty else { return }
+        guard editor?.hasBufferFocus == true, !highlightFrames.isEmpty else { return }
         NSColor.labelColor.withAlphaComponent(0.12).setFill()
         NSColor.labelColor.withAlphaComponent(0.45).setStroke()
         for frame in highlightFrames where frame.intersects(dirtyRect) {

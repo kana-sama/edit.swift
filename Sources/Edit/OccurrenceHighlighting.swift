@@ -66,13 +66,7 @@ final class OccurrenceHighlighting {
     }
 
     func focusChanged(_ focused: Bool) {
-        if focused {
-            refreshWords(input())
-        } else {
-            cancelWordQuery()
-            wordRanges = []
-            layout()
-        }
+        refreshWords(focused ? input() : nil)
     }
 
     func update(language: SyntaxLanguage) {
@@ -114,7 +108,7 @@ final class OccurrenceHighlighting {
 
     private func refreshWords(_ input: OccurrenceSearch.Input?) {
         cancelWordQuery()
-        guard let input else {
+        guard editor?.hasBufferFocus == true, let input else {
             wordRanges = []
             layout()
             return
@@ -158,7 +152,7 @@ final class OccurrenceHighlighting {
     }
 
     private func applyWords(_ ranges: [NSRange], generation: Int) {
-        guard generation == wordGeneration else { return }
+        guard generation == wordGeneration, editor?.hasBufferFocus == true else { return }
         wordTask = nil
         wordRanges = ranges
         layout()
@@ -188,7 +182,7 @@ final class OccurrenceHighlighting {
     }
 
     func draw(in dirtyRect: NSRect) {
-        if !wordRects.isEmpty {
+        if editor?.hasBufferFocus == true, !wordRects.isEmpty {
             NSColor.labelColor.withAlphaComponent(0.17).setFill()
             for rect in wordRects where rect.intersects(dirtyRect) { rect.intersection(dirtyRect).fill() }
         }

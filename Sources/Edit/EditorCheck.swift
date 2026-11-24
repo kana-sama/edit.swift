@@ -263,10 +263,14 @@ enum EditorCheck {
         }
     }
 
-    static func checkCurrentLinePaint(in document: DocumentWindow) async throws {
-        let window = document.window
-        let editor = document.editor
-        let scroll = document.scrollView
+    static func checkCurrentLinePaint() async throws {
+        let bounds = NSRect(x: 0, y: 0, width: 720, height: 480)
+        let window = EditorFocusCheckWindow(contentRect: bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let (scroll, editor) = EditorTextView.scrollingEditor(in: bounds)
+        editor.isEditable = false
+        window.contentView = scroll
+        window.makeFirstResponder(editor)
         let clip = scroll.contentView
         defer { window.close() }
         window.appearance = NSAppearance(named: .darkAqua)
@@ -299,14 +303,16 @@ enum EditorCheck {
             }
         }
 
-        func checkFrame(active row: Int, at x: CGFloat) async throws {
+        func checkFrame(active row: Int?, at x: CGFloat) async throws {
             try await Task.sleep(for: .milliseconds(65))
             try expect(abs(scroll.visibleContentOrigin.x - x) < 1, "active-line check keeps horizontal position \(x)")
             let frame = try liveViewportBitmap(in: clip)
             let plain = try paint(referenceRow, in: frame)
-            let active = try paint(row, in: frame)
-            try expect(Set(active).count == 1 && zip(active, plain).allSatisfy { $0.0 != $0.1 },
-                       "paint active row \(row) across the viewport at horizontal offset \(x)")
+            if let row {
+                let active = try paint(row, in: frame)
+                try expect(Set(active).count == 1 && zip(active, plain).allSatisfy { $0.0 != $0.1 },
+                           "paint active row \(row) across the viewport at horizontal offset \(x)")
+            }
             for other in activeRows where other != row {
                 let old = try paint(other, in: frame)
                 try expect(old == plain, "clear old active row \(other) at horizontal offset \(x)")
@@ -335,6 +341,12 @@ enum EditorCheck {
         try await checkFrame(active: 1, at: 900)
         scroll.scrollToVisibleContentOrigin(.zero)
         try await checkFrame(active: 1, at: 0)
+        window.makeFirstResponder(nil)
+        try await checkFrame(active: nil, at: 0)
+        window.makeFirstResponder(editor)
+        try await checkFrame(active: 1, at: 0)
+        window.simulatedKeyStatus = false
+        try await checkFrame(active: nil, at: 0)
     }
 
     private static func liveViewportBitmap(in clip: NSClipView) throws -> NSBitmapImageRep {
@@ -383,4 +395,17 @@ enum EditorCheck {
 
         var errorDescription: String? { "Failed editor check for \(description)." }
     }
+}
+
+// Exercise key-window drawing without making a test window key on the desktop.
+final class EditorFocusCheckWindow: NSWindow {
+    var simulatedKeyStatus = true {
+        didSet {
+            guard oldValue != simulatedKeyStatus else { return }
+            let event = simulatedKeyStatus ? Self.didBecomeKeyNotification : Self.didResignKeyNotification
+            NotificationCenter.default.post(name: event, object: self)
+        }
+    }
+
+    override var isKeyWindow: Bool { simulatedKeyStatus }
 }
