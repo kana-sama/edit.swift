@@ -1076,7 +1076,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     @objc private func storageDidEdit(_ notification: Notification) {
         guard let storage = notification.object as? NSTextStorage, storage.editedMask.contains(.editedCharacters) else { return }
-        syntaxHighlighting?.storageDidEdit(storage)
+        syntaxHighlighting?.storageDidEdit(storage, replacements: applyingTextEdits)
         if languageInteractionEnabled { languageInteraction.invalidate(afterTextEdit: true) }
         layoutSpacing.sourceDidEdit()
         // Both preedit and its rollback are presentation. Subscribers still hold

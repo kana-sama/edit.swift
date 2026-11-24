@@ -251,7 +251,7 @@ enum SourceControlCheck {
         let prefixes = folder.appending(path: "Diff Prefixes.txt")
         let repeatedInsertion = folder.appending(path: "Repeated Insertion.txt")
         func source(_ value: String) -> String {
-            "let first = \"\(value)\"\n" + (1...9).map { "// Unchanged \($0)\n" }.joined() +
+            "let first = \"\(value)\"\nlet commentTarget = true\n" + (1...9).map { "// Unchanged \($0)\n" }.joined() +
                 "let last = (x: \(value == "Alpha" ? 1 : 0), y: \(value == "Beta" ? 2 : 0), z: \(value == "Gamma" ? 3 : 0))\n"
         }
         try source("Base").write(to: file, atomically: true, encoding: .utf8)
@@ -350,6 +350,27 @@ enum SourceControlCheck {
                    "keep the newly projected conflict clean and reconstruct its original materialized text")
         try expect(originalBlocks.count == 2 && originalBlocks.allSatisfy { $0.sides.count == 3 && $0.style == .diff },
                    "read every block and every side from a jj diff conflict")
+        let commentTarget = (original as NSString).range(of: "let commentTarget = true")
+        func unchangedCommentColor() -> NSColor? {
+            let range = (editor.string as NSString).range(of: "// Unchanged 1")
+            guard range.location != NSNotFound else { return nil }
+            return editor.textStorage?.attribute(.foregroundColor, at: range.upperBound - 1, effectiveRange: nil) as? NSColor
+        }
+        try expect(commentTarget.location != NSNotFound, "find the line to comment out between conflict blocks")
+        editor.scrollRangeToVisible(commentTarget)
+        try await waitFor("paint the unchanged Swift comment before the edit") {
+            unchangedCommentColor() == SyntaxColor.comment.nativeColor
+        }
+        editor.setSelectedRange(NSRange(location: commentTarget.location, length: 0))
+        editor.toggleLineComments(nil)
+        let keptCommentColor = unchangedCommentColor() == SyntaxColor.comment.nativeColor
+        if !keptCommentColor { try render(document.window) }
+        try expect(keptCommentColor && editor.string.contains("// let commentTarget = true"),
+                   "keep the following comment colored at its new text offsets in the first frame")
+        undo.undo()
+        try expect(editor.string == original && unchangedCommentColor() == SyntaxColor.comment.nativeColor,
+                   "preserve the following comment color on Undo before reanalysis")
+        undo.removeAllActions()
         guard let navigation: NSSegmentedControl = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictNavigation" }) else {
             throw Failure("find the conflict navigation")
         }

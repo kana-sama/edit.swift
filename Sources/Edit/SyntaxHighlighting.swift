@@ -20,13 +20,7 @@ final class SyntaxHighlighting {
         cancelPending()
         if let editor { editor.syntaxAnalysis.cancelIfChanged(to: editor.string, language: language) }
         let request = generation
-        if !keepingColors {
-            if immediate {
-                display([])
-            } else {
-                spans = []
-            }
-        }
+        if immediate && !keepingColors { display([]) }
         guard language != .plainText else { return }
 
         task = Task { @MainActor [weak self] in
@@ -119,15 +113,27 @@ final class SyntaxHighlighting {
         editor.setNeedsDisplay(editor.visibleRect)
     }
 
-    func storageDidEdit(_ storage: NSTextStorage) {
-        guard let backed = backedColorRange else { return }
+    func storageDidEdit(_ storage: NSTextStorage, replacements: [EditorTextEdit]?) {
+        guard let backed = backedColorRange else {
+            spans = []
+            return
+        }
         let edit = storage.editedRange
         let delta = storage.changeInLength
         let replacedLength = edit.length - delta
         guard edit.location != NSNotFound, edit.location <= storage.length,
               edit.length <= storage.length - edit.location, replacedLength >= 0 else {
             backedColorRange = NSRange(location: 0, length: storage.length)
+            spans = []
             return
+        }
+
+        // Conflict overlays can repaint existing syntax before the next parse. Keep the
+        // visible colors aligned with the surviving text without walking offscreen captures.
+        if !spans.isEmpty {
+            let edits = replacements?.map { (range: $0.range, delta: $0.text.utf16.count - $0.range.length) }
+                ?? [(range: NSRange(location: edit.location, length: replacedLength), delta: delta)]
+            remapSpans(in: backed, after: edits)
         }
         let beforeEnd = edit.location + replacedLength
         if beforeEnd < backed.location {
@@ -138,6 +144,29 @@ final class SyntaxHighlighting {
             let end = max(edit.upperBound, backed.upperBound + delta)
             backedColorRange = NSRange(location: start, length: end - start)
         }
+    }
+
+    private func remapSpans(in visible: NSRange, after edits: [(range: NSRange, delta: Int)]) {
+        var mapped: [SyntaxSpan] = []
+        var editIndex = 0
+        var offset = 0
+        for span in spans(overlapping: visible) {
+            var start = span.start
+            while editIndex < edits.count, edits[editIndex].range.location < span.end {
+                let edit = edits[editIndex]
+                if start < edit.range.location {
+                    mapped.append(SyntaxSpan(start: start + offset, end: edit.range.location + offset, color: span.color))
+                }
+                start = max(start, edit.range.upperBound)
+                if edit.range.upperBound > span.end { break }
+                offset += edit.delta
+                editIndex += 1
+            }
+            if start < span.end {
+                mapped.append(SyntaxSpan(start: start + offset, end: span.end + offset, color: span.color))
+            }
+        }
+        spans = mapped
     }
 
     private func updateBackingColors(in visible: NSRange?) {
