@@ -93,6 +93,7 @@ final class EditorDocumentWindow: NSWindow {
 final class DocumentWindow: NSObject, NSWindowDelegate {
     static let minimumEditorWidth: CGFloat = 128
     private static let minimumTerminalSidebarWidth: CGFloat = 160
+    private static let fileUndoHistoryLimit = 100
     enum CloseChoice {
         case save(to: URL?)
         case discard
@@ -199,6 +200,16 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var savedText: NSString? = "" as NSString
     private var format = FileFormat()
     private var revision: FileRevision?
+    private struct FileUndoHistory {
+        let url: URL
+        let identity: FileIdentity
+        let revision: FileRevision
+        let format: FileFormat
+        let manager: EditorUndoManager
+        let focusRanges: [NSRange]?
+        let focusHistory: EditorUndoManager.FocusHistory?
+    }
+    private var fileUndoHistories: [FileUndoHistory] = []
     private var normalFrame: NSRect?
     private var pendingFullScreen = false
     private let activity = DocumentActivity()
@@ -1134,6 +1145,36 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         app.recentFiles.rememberPosition(position ?? editor.capturePosition(), for: fileURL, identity: fileIdentity)
     }
 
+    private func rememberFileUndoHistory() {
+        guard hasEditableTextDocument, let fileURL, let fileIdentity, let revision, revision != .missing else { return }
+        fileUndoHistories.removeAll { $0.url == fileURL || $0.identity == fileIdentity }
+        guard !window.isDocumentEdited else { return }
+
+        let manager = editor.editorUndoManager
+        editor.breakUndoCoalescing()
+        while manager.groupingLevel > 0 { manager.endUndoGrouping() }
+        guard manager.undoCount > 0 || manager.redoCount > 0 else { return }
+
+        fileUndoHistories.append(FileUndoHistory(url: fileURL, identity: fileIdentity, revision: revision, format: format,
+                                                manager: manager, focusRanges: editor.focusRanges,
+                                                focusHistory: manager.focusHistory))
+        if fileUndoHistories.count > Self.fileUndoHistoryLimit { fileUndoHistories.removeFirst() }
+        // AppKit can update the active undo manager when the text view's storage is replaced.
+        editor.exitFocus(notify: false)
+        editor.editorUndoManager = EditorUndoManager()
+    }
+
+    private func takeFileUndoHistory(for file: FileBuffer) -> FileUndoHistory? {
+        guard let index = fileUndoHistories.firstIndex(where: { $0.url == file.url || $0.identity == file.identity }) else {
+            return nil
+        }
+        let history = fileUndoHistories.remove(at: index)
+        guard history.identity == file.identity, history.revision == file.revision, history.format == file.format else {
+            return nil
+        }
+        return history
+    }
+
     @discardableResult
     func save(
         asNew: Bool = false, to selectedURL: URL? = nil, encoding: FileTextEncoding? = nil,
@@ -1680,6 +1721,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             let restoreFocus = focusEditor || contentHasFocus
             editor.breakUndoCoalescing()
             var position: EditorPosition?
+            var undoHistory: FileUndoHistory?
             if let file {
                 // Saving the outgoing draft to the target already installed the latest revision.
                 if file.url != fileURL {
@@ -1688,14 +1730,18 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                     guard isCurrent(), !Task.isCancelled else { return false }
                     let preparedSyntax = await prepareOpeningSyntax(file, position: position, scratch: scratch)
                     guard isCurrent(), !Task.isCancelled else { return false }
+                    rememberFileUndoHistory()
                     installContent(in: folder) {
                         load(file, preparedSyntax: preparedSyntax, scratch: scratch)
                     }
+                    undoHistory = takeFileUndoHistory(for: file)
+                    if let undoHistory { editor.editorUndoManager = undoHistory.manager }
                 } else if let folder {
                     setFolder(folder)
                 }
             } else {
                 rememberFilePosition()
+                rememberFileUndoHistory()
                 installContent(in: folder) {
                     removeSourceControlRevision()
                     removeFilePreview()
@@ -1706,21 +1752,28 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             autosave.clearFailure()
             if restoreFocus { focusContent() }
             restoreEditorPosition(position)
+            if let undoHistory, let focusHistory = undoHistory.focusHistory, editor.focusRanges == undoHistory.focusRanges,
+               editor.focusRanges != nil {
+                undoHistory.manager.restoreFocusHistory(focusHistory)
+            }
         case .preview(let preview, let focusEditor, let folder):
             let restoreFocus = focusEditor || contentHasFocus
             autosave.clearFailure()
             rememberFilePosition()
+            rememberFileUndoHistory()
             installContent(in: folder) { loadPreview(preview) }
             if restoreFocus { focusContent() }
         case .sourceControlPreview(let preview):
             let restoreFocus = contentHasFocus
             rememberFilePosition()
+            rememberFileUndoHistory()
             clearSourceControlFile()
             loadSourceControlRevision(preview)
             if restoreFocus { focusContent() }
         case .emptyFolder(let focus, let folder):
             let restoreFocus = focus || contentHasFocus
             rememberFilePosition()
+            rememberFileUndoHistory()
             if folder == nil { app.recordClosedFile(in: self) }
             installContent(in: folder) { loadEmptyFolder() }
             if restoreFocus { focusContent() }

@@ -39,7 +39,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     private weak var observedWindow: NSWindow?
     private var multiCaretComposition: MultiCaretComposition?
     private var updatingComposition = false
-    let editorUndoManager = EditorUndoManager()
+    var editorUndoManager = EditorUndoManager()
     var focusSession: EditorFocusSession?
     var focusDecoration: FocusDecoration?
     var focusEditsAllowed = false

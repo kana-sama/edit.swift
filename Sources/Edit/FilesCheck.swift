@@ -131,6 +131,7 @@ enum FilesCheck {
         try await checkCoordinatedSave(in: directory)
         try await checkExternalRefresh(in: app, directory: directory)
         try await checkAutosaveAndNewBuffer(in: app, directory: directory)
+        try await checkUndoAcrossFiles(in: app, directory: directory)
         try await checkRememberedPosition(in: app, directory: directory)
         try await checkInterruptedDrafts(in: app, directory: directory)
 
@@ -850,6 +851,7 @@ enum FilesCheck {
 
         func insert(_ text: String) {
             // This quiet check does not deliver key events to AppKit.
+            let undo = editor.editorUndoManager
             undo.beginUndoGrouping()
             editor.insertText(text, replacementRange: editor.selectedRange())
             editor.breakUndoCoalescing()
@@ -959,6 +961,66 @@ enum FilesCheck {
         try expect(document.fileURL == nil && editor.string.isEmpty, "New retries a failed autosave")
         try expect(try Data(contentsOf: file) == Data(("\u{feff}" + localText).utf8),
                    "a retry after restoring the disk baseline writes the preserved edits")
+    }
+
+    private static func checkUndoAcrossFiles(in app: Edit, directory: URL) async throws {
+        let first = directory.appending(path: "First Undo History.txt")
+        let second = directory.appending(path: "Second Undo History.txt")
+        try Data("First".utf8).write(to: first)
+        try Data("Second".utf8).write(to: second)
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        let editor = document.editor
+
+        func open(_ url: URL) async throws {
+            let opened = try await app.openFile(url, in: document)
+            try expect(opened === document && document.fileURL?.lastPathComponent == url.lastPathComponent,
+                       "switch the same window to \(url.lastPathComponent)")
+        }
+
+        func append(_ text: String) {
+            let undo = editor.editorUndoManager
+            undo.beginUndoGrouping()
+            editor.insertText(text, replacementRange: NSRange(location: editor.string.utf16.count, length: 0))
+            editor.breakUndoCoalescing()
+            undo.endUndoGrouping()
+        }
+
+        try await open(first)
+        append(" edit")
+        try await open(second)
+        try expect(editor.undoManager?.canUndo == false, "a second file starts with its own Undo stack")
+        append(" own edit")
+        try await open(first)
+        try expect(editor.string == "First edit" && editor.undoManager?.canUndo == true,
+                   "reopening a file restores the edits autosaved when leaving it and their Undo history")
+        _ = editor.tryToPerform(Selector(("undo:")), with: nil)
+        try expect(editor.string == "First", "the Undo command targets the reopened file")
+
+        try await open(second)
+        _ = editor.tryToPerform(Selector(("undo:")), with: nil)
+        try expect(editor.string == "Second", "the other file retains its own Undo history")
+        try await open(first)
+        _ = editor.tryToPerform(Selector(("redo:")), with: nil)
+        try expect(editor.string == "First edit", "Redo survives switching away after Undo")
+
+        document.focusSelection()
+        append(" focused")
+        try await open(second)
+        try await open(first)
+        try expect(editor.focusRanges != nil && editor.undoManager?.canUndo == true,
+                   "restore the Undo history for an active Focus scope")
+        _ = editor.tryToPerform(Selector(("undo:")), with: nil)
+        try expect(editor.string == "First edit" && editor.undoManager?.canUndo == false,
+                   "focused Undo stops before the edit made outside Focus")
+        document.exitFocus()
+        try expect(editor.undoManager?.canUndo == true, "exiting Focus makes the older edit undoable again")
+
+        try await open(second)
+        try Data("Changed outside Edit".utf8).write(to: first, options: .atomic)
+        try await open(first)
+        try expect(editor.string == "Changed outside Edit" && editor.undoManager?.canUndo == false &&
+                   editor.undoManager?.canRedo == false, "reopen changed disk contents without stale history")
     }
 
     private static func waitFor(

@@ -60,6 +60,11 @@ final class EditorFocusSession {
 
 @MainActor
 final class EditorUndoManager: UndoManager {
+    struct FocusHistory {
+        let floor: Int
+        let hasEdits: Bool
+    }
+
     private var focusFloor: Int?
     private var restoreGroupsByEvent = true
     var hasFocusedEdits = false
@@ -93,6 +98,15 @@ final class EditorUndoManager: UndoManager {
         guard focusFloor != nil else { return }
         focusFloor = nil
         groupsByEvent = restoreGroupsByEvent
+    }
+
+    var focusHistory: FocusHistory? {
+        focusFloor.map { FocusHistory(floor: $0, hasEdits: hasFocusedEdits) }
+    }
+
+    func restoreFocusHistory(_ history: FocusHistory) {
+        focusFloor = history.floor
+        hasFocusedEdits = history.hasEdits
     }
 }
 
