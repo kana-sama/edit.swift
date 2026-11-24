@@ -440,9 +440,11 @@ enum LanguageServerCheck {
         guard let separator = descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHover.separator" }) as? NSBox
         else { throw Failure("find the divider above hover metadata") }
         let separatorFrame = separator.convert(separator.bounds, to: nil)
-        try expect(frames[1].minY > separatorFrame.maxY && separatorFrame.minY > frames[2].maxY &&
-                   frames.allSatisfy { $0.minX == frames[0].minX },
-                   "preserve the shared content column and divide the description from metadata")
+        try expect(frames[1].minY > separatorFrame.maxY && separatorFrame.minY > frames[2].maxY,
+                   "divide the description from metadata")
+        try expect(frames[1].minX == separatorFrame.minX && frames[0].minX == separatorFrame.minX + 6 &&
+                   frames[2].minX == frames[3].minX && frames[2].minX > frames[0].minX,
+                   "start the description and declaration block at the left inset and keep a column for labeled rows")
         guard let type = hoverBody(.type, in: view),
               let codeBackground = type.superview?.subviews.compactMap({ $0 as? NSBox }).first(where: {
                   $0.boxType == .custom && $0.frame == type.frame.insetBy(dx: -6, dy: -4)

@@ -102,29 +102,32 @@ private final class HoverSectionsView: NSView {
             let insets = row.label.alignmentRectInsets
             return ceil(row.label.fittingSize.width - insets.left - insets.right)
         }.max() ?? 0
-        let bodyLeading = inset + labelWidth + columnSpacing
-        let trailingInset = inset + codePadding.width
-        let availableWidth = maximumWidth - bodyLeading - trailingInset
-        guard availableWidth > 0 else { return nil }
-        var preferredWidth: CGFloat = 104
-        for row in rows {
-            guard let size = row.body.measure(at: availableWidth) else { return nil }
-            preferredWidth = max(preferredWidth, size.width)
+        let labeledLeading = inset + labelWidth + columnSpacing
+        let leadingEdges = rows.map { row in
+            row.label.isHidden ? inset + (row.isCode ? codePadding.width : 0) : labeledLeading
         }
-        let bodyWidth = min(availableWidth, preferredWidth)
+        let trailingInset = inset + codePadding.width
+        var preferredWidth: CGFloat = 0
+        for (row, leading) in zip(rows, leadingEdges) {
+            let availableWidth = maximumWidth - leading - trailingInset
+            guard availableWidth > 0, let size = row.body.measure(at: availableWidth) else { return nil }
+            preferredWidth = max(preferredWidth, leading + max(104, size.width) + trailingInset)
+        }
+        let width = min(maximumWidth, preferredWidth)
         textViews = rows.map { $0.body }
         super.init(frame: .zero)
 
         var top = inset
         for (index, row) in rows.enumerated() {
             if index > 0, !row.label.isHidden, rows[index - 1].label.isHidden {
-                let width = bodyLeading + bodyWidth + codePadding.width - inset
-                let separator = NSBox(frame: NSRect(x: inset, y: top, width: width, height: 1))
+                let separator = NSBox(frame: NSRect(x: inset, y: top, width: width - 2 * inset, height: 1))
                 separator.identifier = .init("EditorLanguageHover.separator")
                 separator.boxType = .separator
                 addSubview(separator)
                 top += 1 + rowSpacing
             }
+            let bodyLeading = leadingEdges[index]
+            let bodyWidth = width - bodyLeading - trailingInset
             guard let size = row.body.measure(at: bodyWidth), let bodyBaseline = row.body.firstTextBaseline else { return nil }
             let padding = row.isCode ? codePadding : .zero
             let labelHeight = ceil(row.label.fittingSize.height)
@@ -151,7 +154,7 @@ private final class HoverSectionsView: NSView {
             top = max(labelFrame.maxY, paddedBody.maxY)
             if index < rows.count - 1 { top += rowSpacing }
         }
-        setFrameSize(NSSize(width: bodyLeading + bodyWidth + trailingInset, height: top + inset))
+        setFrameSize(NSSize(width: width, height: top + inset))
     }
 
     required init?(coder: NSCoder) { fatalError("Hover sections are created in code.") }
