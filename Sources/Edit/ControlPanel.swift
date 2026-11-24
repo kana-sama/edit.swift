@@ -642,15 +642,15 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
         let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        // Some layouts produce a Latin shortcut character only with Command held.
+        if modifiers == .command || modifiers == [.command, .shift],
+           key == "p" || event.characters?.lowercased() == "p" {
+            toggle(in: document, mode: modifiers.contains(.shift) ? .commands : .files)
+            return nil
+        }
         switch (key, modifiers) {
         case ("q", .command):
             return event
-        case ("p", .command):
-            toggle(in: document, mode: .files)
-            return nil
-        case ("p", [.command, .shift]):
-            toggle(in: document, mode: .commands)
-            return nil
         case ("w", .command):
             dismiss(restoreFocus: true)
             return nil
@@ -1349,10 +1349,11 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         defer { dismiss(restoreFocus: false) }
         focusQuery()
 
-        func key(_ characters: String, _ code: UInt16, _ modifiers: NSEvent.ModifierFlags = []) -> NSEvent {
+        func key(_ characters: String, _ code: UInt16, _ modifiers: NSEvent.ModifierFlags = [],
+                 ignoringModifiers: String? = nil) -> NSEvent {
             NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,
                              timestamp: 0, windowNumber: panel.windowNumber, context: nil,
-                             characters: characters, charactersIgnoringModifiers: characters,
+                             characters: characters, charactersIgnoringModifiers: ignoringModifiers ?? characters,
                              isARepeat: false, keyCode: code)!
         }
 
@@ -1400,6 +1401,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
 
         guard intercept(key("p", 35, .command)) == nil, mode == .files, input.stringValue == "x",
               intercept(key("P", 35, [.command, .shift])) == nil, mode == .commands, input.stringValue == "x",
+              intercept(key("p", 35, .command, ignoringModifiers: "з")) == nil,
+              document === probe, mode == .files, input.placeholderString == "Search recent files",
+              input.currentEditor() === query, query.string == "x",
+              intercept(key("P", 35, [.command, .shift], ignoringModifiers: "З")) == nil,
+              document === probe, mode == .commands, input.placeholderString == "Search commands",
+              input.currentEditor() === query, query.string == "x",
               intercept(key("w", 13, .command)) == nil, document == nil else {
             throw CheckFailure.shortcutEscaped
         }
