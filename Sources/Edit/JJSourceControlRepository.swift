@@ -12,6 +12,8 @@ struct JJSourceControlRevision: Identifiable, Equatable, Sendable {
     let shortID: String
     let description: String
     let author: String
+    let authorDate: Date
+    let committerDate: Date
     let parents: [String]
     var edges: [JJSourceControlEdge] = []
     let bookmarks: [String]
@@ -129,6 +131,8 @@ enum JJSourceControlRepository {
         #""[" ++ local_bookmarks.map(|b| json(stringify(b.name()))).join(",") ++ "]""#,
         "immutable", "conflict", "current_working_copy", "divergent",
         "json(if(author.name(), author.name(), author.email()))",
+        #"author.timestamp().utc().format("%Y-%m-%dT%H:%M:%S%.3fZ")"#,
+        #"committer.timestamp().utc().format("%Y-%m-%dT%H:%M:%S%.3fZ")"#,
     ])
     private static let parentFields = JJRepository.template(["commit_id", #"parents.map(|c| c.commit_id()).join(",")"#])
     private static let previewLimit = 32 * 1024 * 1024
@@ -345,18 +349,22 @@ enum JJSourceControlRepository {
         let bytes = try await JJRepository.readCommand(
             ["log", "--no-graph", "--limit=\(limit)", "-T", revisionFields] + arguments, in: workspace, at: operationID
         )
-        return try JJRepository.records(in: bytes, width: 12).map { row in
+        let timestampFormat = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        return try JJRepository.records(in: bytes, width: 14).map { row in
             let parents = row[4].split(separator: ",").map(String.init)
             guard JJRepository.isHexID(row[0]), isChangeID(row[1]), !row[2].isEmpty,
                   parents.allSatisfy(JJRepository.isHexID),
-                  !row[7...10].contains(where: { $0 != "true" && $0 != "false" }) else {
+                  !row[7...10].contains(where: { $0 != "true" && $0 != "false" }),
+                  let authorDate = try? timestampFormat.parse(row[12]),
+                  let committerDate = try? timestampFormat.parse(row[13]) else {
                 throw Failure.invalidResponse
             }
             let decoder = JSONDecoder()
             return try JJSourceControlRevision(
                 id: row[0], changeID: row[1], shortID: row[2],
                 description: decoder.decode(String.self, from: Data(row[3].utf8)),
-                author: decoder.decode(String.self, from: Data(row[11].utf8)), parents: parents,
+                author: decoder.decode(String.self, from: Data(row[11].utf8)),
+                authorDate: authorDate, committerDate: committerDate, parents: parents,
                 bookmarks: decoder.decode([String].self, from: Data(row[5].utf8)),
                 localBookmarks: decoder.decode([String].self, from: Data(row[6].utf8)),
                 isImmutable: row[7] == "true", isConflicted: row[8] == "true",

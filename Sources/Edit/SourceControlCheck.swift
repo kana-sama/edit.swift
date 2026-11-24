@@ -21,12 +21,14 @@ enum SourceControlCheck {
         try "Clean working file\n".write(to: liveFile, atomically: true, encoding: .utf8)
         try "Removed from the working change\n".write(to: removed, atomically: true, encoding: .utf8)
         try await command(executable, folder, ["describe", "-m", "Base"])
-        try await command(executable, folder, ["new", "-m", "Historical change"])
+        try await command(executable, folder, ["--config", #"debug.commit-timestamp="2020-01-02T03:04:05Z""#,
+                                               "new", "-m", "Historical change"])
         let historical = original.replacingOccurrences(of: "Line 8\n", with: "Historical line\n")
         try historical.write(to: file, atomically: true, encoding: .utf8)
         try Data([3, 2, 35, 7, 0, 255, 0, 0]).write(to: binary)
         try await command(executable, folder, ["new", "-m", "Working change\n\n" + String(repeating: "A long description stays in the popover.\n", count: 12)])
         try await command(executable, folder, ["bookmark", "create", "review/jj-sidebar-layout-with-a-long-bookmark", "-r", "@"])
+        try await command(executable, folder, ["new", "--no-edit", "-m", "Side branch", "@--"])
         let working = historical.replacingOccurrences(of: "Line 3\n", with: "Working line 3\n")
             .replacingOccurrences(of: "Line 14\n", with: "Working line 14\n")
         try working.write(to: file, atomically: true, encoding: .utf8)
@@ -105,8 +107,6 @@ enum SourceControlCheck {
             throw Failure("find the history row")
         }
         let history = panel.graphView.revisions[historyRow]
-        let choices = SourceControlSidebar.changeActivationAlert(for: history).buttons.map(\.title)
-        try expect(choices == ["Edit Change", "New Change Here", "Cancel"], "offer both ways to activate a change and Cancel")
         let contextMenu = panel.graphView.table.menuForRow?(historyRow)
         try expect(contextMenu?.item(withTitle: "Squash into Parent")?.isEnabled == true && contextMenu?.item(withTitle: "Abandon Change…")?.isEnabled == true,
                    "offer change actions when opening the context menu on an unselected row")
@@ -155,14 +155,13 @@ enum SourceControlCheck {
         try expect(try await JJRepository.operation(in: workspace) == changedHead, "leave the operation head unchanged while previewing Undo")
         try await checkOperationDirection(in: document.window, panel: panel)
 
-        guard let previousWorking = panel.graph?.workingCopy, let operation = panel.graph?.operationID else {
+        guard let previousWorking = panel.graph?.workingCopy, let activate = panel.graphView.onEdit else {
             throw Failure("find the working copy before activating the historical file")
         }
-        try await document.performSourceControlMutation(in: workspace) {
-            try await JJSourceControlRepository.mutate(.edit(history.id), in: workspace, expectedOperation: operation)
-        }
-        try await waitFor("promote the open historical file to the live editor, with its change’s hunks expanded") {
-            document.editor.isEditable && document.sourceControlRevisionBanner == nil && document.editor.string == historical &&
+        activate(history)
+        try await waitFor("activate a mutable change immediately and promote its open file with hunks expanded") {
+            document.window.attachedSheet == nil && document.editor.isEditable &&
+                document.sourceControlRevisionBanner == nil && document.editor.string == historical &&
                 document.fileURL == FileBuffer.canonicalURL(file) && document.editor.jjInlineDiff?.hasExpandedHunks == true
         }
         try await command(executable, folder, ["edit", previousWorking.changeID])
@@ -670,6 +669,7 @@ enum SourceControlCheck {
               let graphCell = graph.cell,
               let detail = button(in: panel.view, where: { $0.title == "Change" }),
               let detailCell = detail.cell,
+              let identity = descendant(of: panel.view, where: { $0.identifier?.rawValue == "JujutsuSelectedChangeID" }),
               let revsets = button(in: panel.view, where: { $0.identifier?.rawValue == "JujutsuRevsets" }),
               let actions = button(in: panel.view, where: { $0.toolTip == "Change Actions" }),
               let create = button(in: panel.view, where: { $0.toolTip == "New Change" }) else {
@@ -694,22 +694,15 @@ enum SourceControlCheck {
                        panel.view.convert(toggle.bounds, from: toggle).maxX >= 10,
                        "place the \(toggle.title) chevron after the title and separate it from the actions")
         }
-        guard let title = button(in: panel.view, where: { $0.title == "Working change" }),
-              let graphRow = panel.graphView.table.view(atColumn: 0, row: panel.graphView.table.selectedRow, makeIfNecessary: true) else {
-            throw Failure("find the collapsed title and the selected graph row")
+        guard let title = button(in: panel.view, where: { $0.title == "Working change" }) else {
+            throw Failure("find the compact description action")
         }
         try expect(title.cell?.usesSingleLineMode == true && title.bounds.height <= 24 && title.image == nil,
                    "make the compact change title a one-line description action")
-        let graphLabels = graphRow.subviews.flatMap { child in
-            [child as? NSTextField].compactMap { $0 } + child.subviews.compactMap { $0 as? NSTextField }
-        }
-        let visibleLabels = graphLabels.filter { !$0.isHidden }
-        try expect(visibleLabels.count == 3 && visibleLabels.contains { $0.stringValue == panel.selection?.author } &&
-                   visibleLabels.allSatisfy { $0.cell?.usesSingleLineMode == true && $0.maximumNumberOfLines == 1 },
-                   "keep the graph subject, change ID, and author on two lines")
-        let bookmark = graphRow.subviews.first { $0.identifier?.rawValue == "JujutsuRevisionBookmarks" }
-        try expect(bookmark?.isHidden == false && bookmark?.toolTip?.contains("review/jj-sidebar-layout-with-a-long-bookmark") == true,
-                   "expose the full bookmark name from the compact graph marker")
+        try expect(!identity.isHiddenOrHasHiddenAncestor && identity.superview === detail.superview &&
+                   identity.frame.minX > detail.frame.maxX && abs(identity.frame.midY - detail.frame.midY) < 1,
+                   "keep the change ID in the Change header beside its disclosure")
+        try checkGraphRows(in: panel)
         let graphTitle = graphCell.titleRect(forBounds: graph.bounds)
         let graphChevron = graphCell.imageRect(forBounds: graph.bounds)
         let changeTitle = detailCell.titleRect(forBounds: detail.bounds)
@@ -727,10 +720,51 @@ enum SourceControlCheck {
         try expect(!panel.graphView.view.isHiddenOrHasHiddenAncestor && panel.fileTree.view.isHiddenOrHasHiddenAncestor,
                    "keep the graph visible when change details collapse")
         try expect(!detail.isAccessibilityExpanded() && changeTitle == detailCell.titleRect(forBounds: detail.bounds) &&
-                   changeChevron == detailCell.imageRect(forBounds: detail.bounds) && !actions.isHiddenOrHasHiddenAncestor,
-                   "keep the Change title, chevron slot and actions in place when the details collapse")
+                   changeChevron == detailCell.imageRect(forBounds: detail.bounds) && !actions.isHiddenOrHasHiddenAncestor &&
+                   !identity.isHiddenOrHasHiddenAncestor,
+                   "keep the Change title, chevron slot, ID and actions in place when the details collapse")
         detail.performClick(nil)
         document.window.layoutIfNeeded()
+    }
+
+    private static func checkGraphRows(in panel: SourceControlSidebar) throws {
+        func row(_ matches: (JJSourceControlRevision) -> Bool) throws -> NSView {
+            guard let index = panel.graphView.revisions.firstIndex(where: matches),
+                  let view = panel.graphView.table.view(atColumn: 0, row: index, makeIfNecessary: true) else {
+                throw Failure("find a graph row in the fixture")
+            }
+            view.layoutSubtreeIfNeeded()
+            return view
+        }
+        func subject(in row: NSView) throws -> NSTextField {
+            guard let label = descendant(of: row, where: { (label: NSTextField) in
+                label.identifier?.rawValue == "JujutsuRevisionSubject"
+            }) else { throw Failure("find the graph subject label") }
+            return label
+        }
+
+        let working = try row(\.isWorkingCopy)
+        let historical = try row { $0.subject == "Historical change" }
+        let branch = try row { $0.subject == "Side branch" }
+        let workingSubject = try subject(in: working)
+        let branchSubject = try subject(in: branch)
+        try expect(workingSubject.frame.minX != branchSubject.frame.minX,
+                   "reclaim graph width when a row has fewer occupied lanes")
+        guard let author = descendant(of: working, where: { (label: NSTextField) in label.stringValue == panel.selection?.author }),
+              let bookmarks = descendant(of: working, where: { (label: NSTextField) in
+                  label.identifier?.rawValue == "JujutsuRevisionBookmarks"
+              }) else { throw Failure("show graph author and bookmark labels") }
+        let authorFrame = working.convert(author.bounds, from: author)
+        let bookmarkFrame = working.convert(bookmarks.bounds, from: bookmarks)
+        let name = "review/jj-sidebar-layout-with-a-long-bookmark"
+        try expect(!bookmarks.isHidden && bookmarks.stringValue.contains(name) && bookmarkFrame.width > 20 &&
+                   bookmarkFrame.minX >= authorFrame.maxX && abs(bookmarkFrame.midY - authorFrame.midY) < 1 &&
+                   [workingSubject, author, bookmarks].allSatisfy { $0.maximumNumberOfLines == 1 },
+                   "show a readable single-line bookmark label after the author at minimum width")
+        try expect(working.toolTip?.contains(name) == true && branch.toolTip?.contains("Created ·") == true &&
+                   branch.toolTip?.contains("Commit created ·") == false &&
+                   historical.toolTip?.contains("Change created ·") == true && historical.toolTip?.contains("Commit created ·") == true,
+                   "show full bookmark names and both dates in tooltips, collapsing equal dates")
     }
 
     private static func checkRevisionBanner(in document: DocumentWindow, above body: NSView) throws {

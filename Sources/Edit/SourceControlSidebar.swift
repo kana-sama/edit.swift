@@ -80,7 +80,7 @@ final class SourceControlSidebar: NSObject {
     private let changeBody = NSView()
     private lazy var panes = SourceControlPanes(
         graphHeader: makeHeader(graphToggle, actions: [revsetButton, workingCopyButton, operationsButton, newButton]),
-        graph: graphBody, changeHeader: makeHeader(changeToggle, actions: [actionsButton]), change: changeBody
+        graph: graphBody, changeHeader: makeHeader(changeToggle, identity: detailMetadata, actions: [actionsButton]), change: changeBody
     )
 
     var focusResponder: NSView {
@@ -486,12 +486,16 @@ final class SourceControlSidebar: NSObject {
 
     private func activate(_ revision: JJSourceControlRevision) async {
         guard !stale, !busy, !revision.isWorkingCopy, let workspace, let operation = graph?.operationID else { return }
+        guard revision.isImmutable else {
+            await mutate(.edit(revision.id), selectingWorkingCopy: true, expectedOperation: operation)
+            return
+        }
         let response = await Self.changeActivationAlert(for: revision).beginSheetModal(for: document.window)
         guard self.workspace == workspace else { return }
         switch response {
         case .alertFirstButtonReturn:
             guard !revision.parents.isEmpty else { return }
-            await mutate(.edit(revision.id, ignoreImmutable: revision.isImmutable), selectingWorkingCopy: true, expectedOperation: operation)
+            await mutate(.edit(revision.id, ignoreImmutable: true), selectingWorkingCopy: true, expectedOperation: operation)
         case .alertSecondButtonReturn:
             await mutate(.new(revision.id), selectingWorkingCopy: true, expectedOperation: operation)
         default:
@@ -506,20 +510,16 @@ final class SourceControlSidebar: NSObject {
         alert.messageText = "Edit this change or start a new one?"
         alert.informativeText = if isRoot {
             "\(subject) is the repository root. You can start a new change on top of it."
-        } else if revision.isImmutable {
-            "\(subject) is immutable. Edit Change overrides Jujutsu’s protection. Saving may rewrite this change and its descendants."
         } else {
-            subject
+            "\(subject) is immutable. Edit Change overrides Jujutsu’s protection. Saving may rewrite this change and its descendants."
         }
-        alert.alertStyle = revision.isImmutable ? .warning : .informational
+        alert.alertStyle = .warning
         let edit = alert.addButton(withTitle: "Edit Change")
         let child = alert.addButton(withTitle: "New Change Here")
         alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
         edit.isEnabled = !isRoot
-        if revision.isImmutable {
-            edit.keyEquivalent = ""
-            child.keyEquivalent = "\r"
-        }
+        edit.keyEquivalent = ""
+        child.keyEquivalent = "\r"
         return alert
     }
 
@@ -834,14 +834,10 @@ final class SourceControlSidebar: NSObject {
         detailTitle.lineBreakMode = .byTruncatingTail
         detailTitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         detailMetadata.setContentCompressionResistancePriority(.required, for: .horizontal)
-        let titleRow = NSStackView(views: [detailTitle, detailMetadata, NSView()])
-        titleRow.orientation = .horizontal
-        titleRow.alignment = .centerY
-        titleRow.spacing = 0
-        titleRow.setCustomSpacing(7, after: detailTitle)
+        detailMetadata.identifier = NSUserInterfaceItemIdentifier("JujutsuSelectedChangeID")
         fileMessage.textColor = .secondaryLabelColor
         fileMessage.font = .systemFont(ofSize: 11)
-        let metadata = NSStackView(views: [titleRow, fileMessage])
+        let metadata = NSStackView(views: [detailTitle, fileMessage])
         metadata.orientation = .vertical
         metadata.alignment = .leading
         metadata.spacing = 2
@@ -901,7 +897,7 @@ final class SourceControlSidebar: NSObject {
         return image
     }
 
-    private func makeHeader(_ title: NSButton, actions: [NSButton]) -> NSView {
+    private func makeHeader(_ title: NSButton, identity: SourceControlRevisionIdentity? = nil, actions: [NSButton]) -> NSView {
         let header = NSView()
         let row = NSStackView(views: actions)
         row.orientation = .horizontal
@@ -911,9 +907,17 @@ final class SourceControlSidebar: NSObject {
             header.addSubview(child)
             child.translatesAutoresizingMaskIntoConstraints = false
         }
+        if let identity {
+            header.addSubview(identity)
+            identity.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                identity.leadingAnchor.constraint(equalTo: title.trailingAnchor, constant: 8),
+                identity.centerYAnchor.constraint(equalTo: title.centerYAnchor)
+            ])
+        }
         NSLayoutConstraint.activate([
             title.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 11), title.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            row.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 12),
+            row.leadingAnchor.constraint(greaterThanOrEqualTo: identity?.trailingAnchor ?? title.trailingAnchor, constant: 12),
             row.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -9), row.centerYAnchor.constraint(equalTo: header.centerYAnchor)
         ])
         return header
