@@ -113,6 +113,17 @@ enum LanguageServerCheck {
         await app.navigate(.back)
         try expect(document.fileURL == main && NSLocationInRange(document.editor.selectedRange().location, use),
                    "Go Back returns to the clicked symbol")
+        try await wait("synchronize the caller for context-menu navigation") { lsp.session.supportsDefinition }
+        let crossFileMenu = try editorMenu(in: document, at: use)
+        let goToDefinition = crossFileMenu.indexOfItem(withTitle: "Go to Definition")
+        try expect(goToDefinition >= 0, "offer Go to Definition on the cross-file symbol")
+        crossFileMenu.performActionForItem(at: goToDefinition)
+        try await wait("Go to Definition opens the target from the context menu") {
+            document.fileURL == helper && document.editor.selectedRange().location == declaration.location
+        }
+        await app.navigate(.back)
+        try expect(document.fileURL == main && NSLocationInRange(document.editor.selectedRange().location, use),
+                   "Go Back returns to the context-menu symbol")
         await app.navigate(.forward)
         try expect(document.fileURL == helper && document.editor.selectedRange().location == declaration.location,
                    "Go Forward restores the original definition target")
@@ -158,18 +169,19 @@ enum LanguageServerCheck {
         try await wait("follow the single use without opening a new References view") {
             document.editor.selectedRange().location == last.location
         }
-        let symbolTitles = ["Go to Declaration", "Find References", "Rename…"]
+        let symbolTitles = ["Go to Definition", "Find References", "Rename…"]
         let whitespace = try editorMenu(in: document, at: NSRange(location: first.location - 1, length: 1))
         try expect(whitespace.items.map(\.title) == clipboardTitles, "whitespace offers only clipboard commands")
-        let declarationMenu = try editorMenu(in: document, at: last, controlClick: true)
-        try expect(declarationMenu.items.filter { !$0.isSeparatorItem }.map(\.title) == clipboardTitles + symbolTitles &&
-                   declarationMenu.items.filter(\.isSeparatorItem).count == 1,
+        let offSymbol = NSRange(location: 0, length: 0)
+        document.editor.setCaretSelections([offSymbol])
+        let definitionMenu = try editorMenu(in: document, at: last, controlClick: true)
+        try expect(definitionMenu.items.filter { !$0.isSeparatorItem }.map(\.title) == clipboardTitles + symbolTitles &&
+                   definitionMenu.items.filter(\.isSeparatorItem).count == 1,
                    "group the three symbol commands below the clipboard commands")
-        declarationMenu.performActionForItem(at: declarationMenu.indexOfItem(withTitle: "Go to Declaration"))
-        try await wait("navigate to the declaration from the context menu") {
+        definitionMenu.performActionForItem(at: definitionMenu.indexOfItem(withTitle: "Go to Definition"))
+        try await wait("navigate to the clicked symbol's definition with the caret elsewhere") {
             document.editor.selectedRange().location == first.location
         }
-        let offSymbol = NSRange(location: 0, length: 0)
         document.editor.setCaretSelections([offSymbol])
         let referencesMenu = try editorMenu(in: document, at: first)
         try expect(document.editor.selectedRange() == offSymbol, "constructing the menu leaves the caret in place")
@@ -190,7 +202,7 @@ enum LanguageServerCheck {
 
         try expect(try await app.openFile(typed, in: document) === document, "open the referenced-type fixture")
         try await wait("synchronize the referenced-type fixture") { lsp.session.supportsHover }
-        if let stale = declarationMenu.item(withTitle: "Go to Declaration") {
+        if let stale = definitionMenu.item(withTitle: "Go to Definition") {
             try expect(!lsp.validateUserInterfaceItem(stale), "ignore the old symbol action after switching files")
         }
         let debug = (typedText as NSString).range(of: "debug")

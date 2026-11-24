@@ -8,8 +8,7 @@ The identifiers after each title are request or notification methods. Command ID
 
 ## Code Navigation
 
-- [x] **Go to Definition** (`textDocument/definition`) [ZLS specification](features/lsp/spec.md#cmd-hover-and-cmd-click)
-- [ ] **Go to Declaration** (`textDocument/declaration`)
+- [x] **Go to Definition** (`textDocument/definition`) — Jump to the definition with Cmd-click or from the [symbol’s context menu](features/editor-context-menu/spec.md). [ZLS specification](features/lsp/spec.md#cmd-hover-and-cmd-click)
 - [ ] **Go to Type Definition** (`textDocument/typeDefinition`)
 - [ ] **Go to Implementation** (`textDocument/implementation`)
 - [x] **Find All References** (`textDocument/references`) [ZLS specification](features/lsp/spec.md#references-in-the-sidebar)

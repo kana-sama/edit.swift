@@ -23,11 +23,11 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     }
 
     private enum SymbolNavigation {
-        case definition, declaration, references
+        case definition, definitionLink, references
 
         var failureMessage: String {
             switch self {
-            case .definition, .declaration: "Could not navigate to symbol"
+            case .definition, .definitionLink: "Could not navigate to symbol"
             case .references: "Could not find references"
             }
         }
@@ -125,7 +125,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
 
     private func stateChanged() {
         if session.state != .ready { symbolRename.cancel() }
-        let canInteract = session.supportsDefinition || session.supportsHover || session.supportsDeclaration
+        let canInteract = session.supportsDefinition || session.supportsHover
             || session.supportsReferences || session.supportsRename
         document.editor.languageInteractionEnabled = canInteract
         if !canInteract { cancelLookup() }
@@ -172,7 +172,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         if let target = (item as? NSMenuItem)?.representedObject as? SymbolMenuTarget {
             guard isCurrent(target.query), query() != nil else { return false }
             switch item.action {
-            case #selector(goToDeclaration(_:)): return session.supportsDeclaration
+            case #selector(goToDefinition(_:)): return session.supportsDefinition
             case #selector(findSymbolReferences(_:)): return session.supportsReferences
             case #selector(renameContextSymbol(_:)): return symbolRename.canStart
             default: return false
@@ -187,8 +187,8 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         guard let query = query() else { return [] }
         let target = SymbolMenuTarget(hit: hit, query: query)
         var items: [NSMenuItem] = []
-        if session.supportsDeclaration {
-            items.append(symbolMenuItem("Go to Declaration", action: #selector(goToDeclaration(_:)), target: target))
+        if session.supportsDefinition {
+            items.append(symbolMenuItem("Go to Definition", action: #selector(goToDefinition(_:)), target: target))
         }
         if session.supportsReferences {
             items.append(symbolMenuItem("Find References", action: #selector(findSymbolReferences(_:)), target: target))
@@ -206,9 +206,9 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         return item
     }
 
-    @objc private func goToDeclaration(_ item: NSMenuItem) {
+    @objc private func goToDefinition(_ item: NSMenuItem) {
         guard validateUserInterfaceItem(item), let target = item.representedObject as? SymbolMenuTarget else { return }
-        navigateSymbol(.declaration, at: target.hit.offset, word: target.hit.word, query: target.query)
+        navigateSymbol(.definition, at: target.hit.offset, word: target.hit.word, query: target.query)
     }
 
     @objc private func findSymbolReferences(_ item: NSMenuItem) {
@@ -270,7 +270,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
 
     func followLink(at offset: Int, word: NSRange) {
         guard session.supportsDefinition, let query = query() else { return }
-        navigateSymbol(.definition, at: offset, word: word, query: query)
+        navigateSymbol(.definitionLink, at: offset, word: word, query: query)
     }
 
     private func navigateSymbol(_ command: SymbolNavigation, at offset: Int, word: NSRange, query: Query) {
@@ -286,14 +286,13 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
                     try await findReferences(at: offset, word: word, query: query, id: id, navigationOrigin: origin)
                     return
                 }
-                let locations = try await command == .declaration
-                    ? session.declaration(at: offset) : session.definition(at: offset)
+                let locations = try await session.definition(at: offset)
                 guard isCurrent(query) else { return }
                 switch locations.count {
                 case 0:
                     document.editor.invalidateLanguageInteraction()
-                    if command == .declaration { document.editor.showLanguageFeedback("No declaration found", at: word) }
-                case 1 where command == .definition && isCurrentLocation(locations[0], at: offset, in: query):
+                    if command == .definition { document.editor.showLanguageFeedback("No definition found", at: word) }
+                case 1 where command == .definitionLink && isCurrentLocation(locations[0], at: offset, in: query):
                     if session.supportsReferences {
                         try await findReferences(at: offset, word: word, query: query, id: id, navigationOrigin: origin)
                     }
