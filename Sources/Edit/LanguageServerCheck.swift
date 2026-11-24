@@ -451,7 +451,7 @@ enum LanguageServerCheck {
                   $0.boxType == .custom && $0.frame == type.frame.insetBy(dx: -6, dy: -4)
               })
         else { throw Failure("preserve the padded code background behind the type") }
-        try expect(codeBackground.cornerRadius == 6 && codeBackground.fillColor == .labelColor.withAlphaComponent(0.065) &&
+        try expect(codeBackground.cornerRadius == 6 &&
                    type.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont == EditorTextView.defaultFont,
                    "preserve the type's background and code font")
         try expect(hoverBody(.declaration, in: view)?.string == "fn debug(\n    comptime format: []const u8,\n    args: anytype,\n) void" &&
@@ -472,6 +472,7 @@ enum LanguageServerCheck {
             else { throw Failure("draw the light hover near the top of the screen") }
             defer { lightPanel.close(restoreFocus: false) }
             try expect(lightPanel.frame.maxY < upperAnchor.minY, "leave the symbol above the light hover's pointer")
+            try checkLightCodeBackground(in: lightView)
             try capture(lightView, "hover-sections-light")
         }
 
@@ -543,6 +544,27 @@ enum LanguageServerCheck {
             let fallback = EditorHoverPresentation(text: unfamiliar, isMarkdown: true)
             guard case .markdown(let content) = fallback else { throw Failure("keep unsupported ZLS Markdown in the generic hover") }
             try expect(content.attributedText().length > 0, "keep fallback content visible")
+        }
+    }
+
+    private static func checkLightCodeBackground(in view: NSView) throws {
+        let bounds = view.bounds
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: bounds) else { throw Failure("capture the light hover") }
+        view.cacheDisplay(in: bounds, to: bitmap)
+
+        for kind in [EditorHoverPresentation.Section.Kind.declaration, .type] {
+            guard let body = hoverBody(kind, in: view) else { throw Failure("find the light hover's \(kind.rawValue)") }
+            let frame = body.convert(body.bounds, to: view)
+            let top = view.isFlipped ? frame.midY - bounds.minY : bounds.maxY - frame.midY
+            let y = Int(top * CGFloat(bitmap.pixelsHigh) / bounds.height)
+            let scale = CGFloat(bitmap.pixelsWide) / bounds.width
+            let codeX = Int((frame.maxX - bounds.minX + 2) * scale)
+            let marginX = Int(6 * scale)
+            guard let code = bitmap.colorAt(x: codeX, y: y)?.usingColorSpace(.sRGB),
+                  let margin = bitmap.colorAt(x: marginX, y: y)?.usingColorSpace(.sRGB)
+            else { throw Failure("sample the light hover's code padding and card margin") }
+            try expect(margin.redComponent - code.redComponent > 0.035,
+                       "make the \(kind.rawValue) background visibly darker than the card in light appearance")
         }
     }
 

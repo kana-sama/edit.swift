@@ -74,6 +74,13 @@ struct EditorHoverLayout {
 
 @MainActor
 private final class HoverSectionsView: NSView {
+    private static let codeBackgroundColor = NSColor(name: nil) { appearance in
+        if appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua {
+            return NSColor.white.withAlphaComponent(0.065)
+        }
+        return NSColor.black.withAlphaComponent(0.075)
+    }
+
     let textViews: [HoverTextView]
 
     override var isFlipped: Bool { true }
@@ -145,7 +152,7 @@ private final class HoverSectionsView: NSView {
                 background.titlePosition = .noTitle
                 background.borderWidth = 0
                 background.cornerRadius = 6
-                background.fillColor = .labelColor.withAlphaComponent(0.065)
+                background.fillColor = Self.codeBackgroundColor
                 background.setAccessibilityElement(false)
                 addSubview(background)
             }
