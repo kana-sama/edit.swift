@@ -9,6 +9,12 @@ struct LSPDocument: Sendable {
     let revision: Int
 }
 
+struct LSPWorkDoneActivity: Equatable, Sendable {
+    let title: String
+    var message: String?
+    var percentage: Int?
+}
+
 struct LSPCapabilities: Decodable, Sendable {
     enum Change: Int, Decodable { case none, full, incremental }
 
@@ -102,7 +108,7 @@ final class LanguageServerConnection: @unchecked Sendable {
         }
     }
 
-    private enum MessageID: Codable {
+    private enum MessageID: Codable, Hashable {
         case string(String), integer(Int)
 
         init(from decoder: Decoder) throws {
@@ -132,6 +138,29 @@ final class LanguageServerConnection: @unchecked Sendable {
         let id: MessageID?
         let method: String?
         let error: Failure?
+    }
+
+    private struct ProgressToken: Decodable {
+        let token: MessageID
+    }
+
+    private struct ProgressNotification: Decodable {
+        struct Value: Decodable {
+            enum Kind: String, Decodable { case begin, report, end }
+
+            let kind: Kind
+            let title: String?
+            let message: String?
+            let percentage: Int?
+        }
+
+        let token: MessageID
+        let value: Value
+    }
+
+    private struct WorkDoneProgress {
+        let token: MessageID
+        var activity: LSPWorkDoneActivity?
     }
 
     private struct Reply<Value: Decodable>: Decodable { let result: Value? }
@@ -168,6 +197,8 @@ final class LanguageServerConnection: @unchecked Sendable {
     private let root: URL
     private let environment: [String: String]
     private let onFailure: @Sendable (String) -> Void
+    let progress: AsyncStream<[LSPWorkDoneActivity]>
+    private let progressUpdates: AsyncStream<[LSPWorkDoneActivity]>.Continuation
     private let decoder = JSONDecoder()
     private var process: Process?
     private var input: DispatchIO?
@@ -177,6 +208,7 @@ final class LanguageServerConnection: @unchecked Sendable {
     private var buffer = Data()
     private var contentLength: Int?
     private var pending: [String: Pending] = [:]
+    private var workDone: [WorkDoneProgress] = []
     private var stopWaiters: [CheckedContinuation<Void, Never>] = []
     private var shutdownID: String?
     private var stopping = false
@@ -192,6 +224,7 @@ final class LanguageServerConnection: @unchecked Sendable {
         self.root = root
         self.environment = environment
         self.onFailure = onFailure
+        (progress, progressUpdates) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
 
     func start() async throws -> LSPCapabilities {
@@ -346,6 +379,7 @@ final class LanguageServerConnection: @unchecked Sendable {
             return ["processId": ProcessInfo.processInfo.processIdentifier, "rootUri": root.absoluteString,
                     "workspaceFolders": [workspace], "clientInfo": ["name": "Edit"],
                     "capabilities": ["general": ["positionEncodings": ["utf-16"]],
+                                     "window": ["workDoneProgress": true],
                                      "workspace": ["workspaceFolders": true, "workspaceEdit": ["documentChanges": true]],
                                      "textDocument": ["definition": ["linkSupport": true],
                                                       "declaration": ["linkSupport": true],
@@ -514,9 +548,24 @@ final class LanguageServerConnection: @unchecked Sendable {
     private func handleMessage(_ data: Data) throws {
         let message = try decoder.decode(Message.self, from: data)
         if let method = message.method {
-            guard let id = message.id?.value else { return }
+            guard let id = message.id?.value else {
+                if method == "$/progress", !stopping,
+                   let notification = try? decoder.decode(Parameters<ProgressNotification>.self, from: data) {
+                    updateProgress(notification.params)
+                }
+                return
+            }
             if method == "workspace/workspaceFolders" {
                 try send(["id": id, "result": [workspace]])
+            } else if method == "window/workDoneProgress/create" {
+                if let request = try? decoder.decode(Parameters<ProgressToken>.self, from: data) {
+                    if !stopping, !workDone.contains(where: { $0.token == request.params.token }) {
+                        workDone.append(WorkDoneProgress(token: request.params.token))
+                    }
+                    try send(["id": id, "result": NSNull()])
+                } else {
+                    try send(["id": id, "error": ["code": -32602, "message": "Invalid progress token"]])
+                }
             } else {
                 try send(["id": id, "error": ["code": -32601, "message": "Unsupported method"]])
             }
@@ -534,6 +583,30 @@ final class LanguageServerConnection: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    private struct Parameters<Value: Decodable>: Decodable { let params: Value }
+
+    private func updateProgress(_ notification: ProgressNotification) {
+        guard let index = workDone.firstIndex(where: { $0.token == notification.token }) else { return }
+        let value = notification.value
+        let percentage = value.percentage.flatMap { (0...100).contains($0) ? $0 : nil }
+        let previous = workDone[index].activity
+        switch value.kind {
+        case .begin:
+            guard let title = value.title, !title.isEmpty else { return }
+            workDone[index].activity = LSPWorkDoneActivity(title: title, message: value.message, percentage: percentage)
+        case .report:
+            guard var activity = previous else { return }
+            activity.message = value.message ?? activity.message
+            activity.percentage = percentage ?? activity.percentage
+            guard activity != previous else { return }
+            workDone[index].activity = activity
+        case .end:
+            workDone.remove(at: index)
+            guard previous != nil else { return }
+        }
+        progressUpdates.yield(workDone.compactMap(\.activity))
     }
 
     private func cancelRequest(_ id: String, error: Error) {
@@ -601,6 +674,8 @@ final class LanguageServerConnection: @unchecked Sendable {
     private func finish(error: Error) {
         guard !closed else { return }
         closed = true
+        progressUpdates.finish()
+        workDone.removeAll()
         process?.terminationHandler = nil
         process = nil
         input?.close(flags: .stop)

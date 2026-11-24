@@ -65,6 +65,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
 
     func connectEditor() {
         session.onStateChange = { [weak self] in self?.stateChanged() }
+        session.onProgressChange = { [weak self] in self?.updateServerStatus() }
         document.editor.languageProbe = { [weak self] offset, word in await self?.probe(at: offset, word: word) }
         document.editor.languageHover = { [weak self] offset, word in await self?.hover(at: offset, word: word) }
         document.editor.languageFollowLink = { [weak self] offset, word in self?.followLink(at: offset, word: word) }
@@ -118,6 +119,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         status.close()
         document.editor.languageInteractionEnabled = false
         session.onStateChange = nil
+        session.onProgressChange = nil
         session.close()
     }
 
@@ -128,10 +130,14 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         document.editor.languageInteractionEnabled = canInteract
         if !canInteract { cancelLookup() }
         document.editor.occurrenceHighlighting.setSemanticWordHighlightsEnabled(session.supportsDocumentHighlight)
-        status.update(visible: session.isEligible, state: session.state,
+        updateServerStatus()
+        app.languageServerStateDidChange(in: document)
+    }
+
+    private func updateServerStatus() {
+        status.update(visible: session.isEligible, state: session.state, progress: session.progress,
                       enabled: Set(LanguageServerCommand.allCases.filter(canPerform)))
         document.titleBar.languageServerStatusChanged()
-        app.languageServerStateDidChange(in: document)
     }
 
     func canPerform(_ command: LanguageServerCommand) -> Bool {

@@ -128,7 +128,8 @@ The identifiers after each title are request or notification methods. Command ID
 
 ## Project Tools
 
-- [ ] **Language Server Progress** (`$/progress`, `window/workDoneProgress/cancel`) — See indexing and analysis progress and cancel operations when supported. [LSP Progress][lsp-window] · [SourceKit-LSP][swift]
+- [x] **Language Server Progress** (`window/workDoneProgress/create`, `$/progress`) — See server initialization and reported background work such as ZLS loading the build configuration. [Edit specification](features/lsp-progress/spec.md) · [LSP Progress][lsp-window]
+- [ ] **Cancel Language Server Work** (`window/workDoneProgress/cancel`) — Cancel an operation when the server supports it. [LSP Progress][lsp-window]
 - [ ] **Reindex or Reload Project** (`sourcekit/workspace/triggerReindex`, `java/projectConfigurationsUpdate`, `rust-analyzer/reloadWorkspace`) — Refresh the index or reload build settings on demand. [SourceKit-LSP][swift] · [JDT LS][java] · [rust-analyzer][ra]
 - [ ] **Select Project Context** (`textDocument/_vs_getProjectContexts`) — Choose which project or .NET target framework to use for a shared source file. [Roslyn][roslyn]
 - [ ] **Browse Project Dependencies** (`rust-analyzer/fetchDependencyList`, `rust-analyzer/viewCrateGraph`, `rubyLsp/workspace/dependencies`, `workspace/executeCommand` with `terraform-ls.module.calls` or `terraform-ls.module.callers`) — See dependencies and how they relate to one another. [rust-analyzer][ra] · [Ruby LSP][ruby] · [Terraform Language Server][terraform]
