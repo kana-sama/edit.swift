@@ -827,7 +827,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         if renameDraft != nil { super.doCommand(by: selector); return }
         if jjInlineDiff?.handleSelectionCommand(selector) == true { return }
         let before = selectedRange()
-        if !moveSecondarySelections(command: selector) {
+        if !moveSelections(command: selector) {
+            if before.length == 0, !hasSecondarySelections, focusRanges == nil {
+                multiCaret.navigation.removeValue(forKey: before)
+            }
             super.doCommand(by: selector)
             let selection = selectedRange()
             if selection != before {
@@ -1212,7 +1215,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
-        if renameDraft != nil { requestLineRefresh(); return }
+        if renameDraft != nil {
+            multiCaret.restartBlink = true
+            requestLineRefresh()
+            return
+        }
         if !updatingComposition, !multiCaret.isApplying {
             nativeSelectionChanged()
             occurrenceHighlighting.selectionChanged()
@@ -1364,8 +1371,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func refreshCurrentLine() {
-        if renameDraft == nil { refreshCaretDecorations() }
-        else { hideCaretDecorations() }
+        refreshCaretDecorations()
         refreshFocusDecoration()
         guard hasBufferFocus else {
             setCurrentLine(.zero)

@@ -330,9 +330,15 @@ extension EditorTextView {
         steps: Int = 1
     ) -> (range: NSRange, selection: NSTextSelection)? {
         guard let layout = textLayoutManager, let textRange = textRange(range, in: layout) else { return nil }
-        var selection = multiCaret.navigation[range] ?? NSTextSelection(
-            range: textRange, affinity: .downstream, granularity: .character
-        )
+        let previous = multiCaret.navigation[range]
+        let affinity: NSTextSelection.Affinity = range == selectedRange() && selectionAffinity == .upstream
+            ? .upstream : .downstream
+        var selection = previous ?? NSTextSelection(range: textRange, affinity: affinity, granularity: .character)
+        if previous == nil, range.length == 0, direction == .up || direction == .down,
+           let caret = lineBounds(at: range.location) {
+            // A destination on a short line still carries this column for the next arrow.
+            selection.anchorPositionOffset = caret.minX - textContainerOrigin.x
+        }
         for _ in 0..<steps {
             guard let next = layout.textSelectionNavigation.destinationSelection(
                 for: selection, direction: direction, destination: destination, extending: extending, confined: false
@@ -405,11 +411,21 @@ extension EditorTextView {
         return (movement.0, movement.1, movement.2, steps)
     }
 
-    func moveSecondarySelections(command: Selector) -> Bool {
+    func moveSelections(command: Selector) -> Bool {
         let primary = selectedRange()
+        let singleVerticalCaret = !hasSecondarySelections && focusRanges == nil && primary.length == 0 &&
+            (command == #selector(moveUp(_:)) || command == #selector(moveDown(_:)))
         let hasBackwardSelection = primary.length > 0 && multiCaret.navigation[primary]?.affinity == .upstream
-        guard (hasSecondarySelections || focusRanges != nil || hasBackwardSelection), !hasMarkedText(),
+        guard (hasSecondarySelections || focusRanges != nil || hasBackwardSelection || singleVerticalCaret), !hasMarkedText(),
               let movement = selectionMovement(for: command) else { return false }
+        if singleVerticalCaret {
+            guard let result = navigationResult(primary, direction: movement.direction, destination: movement.destination,
+                                                extending: false) else { return false }
+            let affinity: NSSelectionAffinity = result.selection.affinity == .upstream ? .upstream : .downstream
+            setCaretSelections([result.range], navigation: [result.range: result.selection], primaryAffinity: affinity)
+            scrollRangeToVisible(result.range)
+            return true
+        }
         if focusRanges != nil {
             moveFocusedSelections(direction: movement.direction, destination: movement.destination,
                                   extending: movement.extending, steps: movement.steps) {
@@ -431,7 +447,8 @@ extension EditorTextView {
     }
 
     func refreshCaretDecorations() {
-        let selections = caretSelections
+        let renaming = renameRange != nil
+        let selections = renaming ? [selectedRange()] : caretSelections
         let hidesLiveCaret = jjInlineDiff?.projectedEditRange?.length == 0
         let projectedCaret = hidesLiveCaret ? jjInlineDiff?.projectedCaretRect : nil
         let showCarets = (hidesLiveCaret ? projectedCaret != nil && isSelectable : isEditable)
@@ -440,7 +457,7 @@ extension EditorTextView {
         var highlights: [NSRect] = []
         var carets: [NSRect] = []
         let viewportRect = visibleRect
-        let focusedGroups = focusRanges == nil ? [] : (multiCaret.focusNavigation ?? [])
+        let focusedGroups = renaming || focusRanges == nil ? [] : (multiCaret.focusNavigation ?? [])
         if showCarets || selections.count > 1 || !focusedGroups.isEmpty, let window, let layout = textLayoutManager {
             let visible = layout.textViewportLayoutController.viewportRange.map { charRange($0, in: layout) }
                 ?? NSRange(location: 0, length: 0)
@@ -496,6 +513,8 @@ extension EditorTextView {
             group.clipsToBounds = true
             addSubview(group)
         }
+        // Keep the insertion point visible at the edge of the rename shade.
+        group.layer?.zPosition = renaming ? 2 : 0
         hideNativeCaret()
         group.update(carets, viewport: viewportRect, color: multiCaret.nativeCaretColor ?? .textColor,
                      restartBlink: multiCaret.restartBlink)
