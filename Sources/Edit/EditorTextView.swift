@@ -45,6 +45,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var focusEditsAllowed = false
     var onFocusScopeChange: (() -> Void)?
     var onTextChange: (() -> Void)?
+    var onNavigationSelectionChange: (() -> Void)?
+    var onNavigationTextEdit: ((NSRange) -> Void)?
     var onJJCompositionChange: (() -> Void)?
     var onConflictSelectionChange: (() -> Void)?
     var conflictEdits: [JJConflictEdit] = []
@@ -706,6 +708,20 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         revealInExposedArea(range)
     }
 
+    func revealNavigationSelection(_ range: NSRange) {
+        guard let scroll = enclosingScrollView else { return }
+        let viewport = textViewport(in: scroll)
+        let offset = activeEnd(of: range)
+        if let line = laidOutLineBounds(at: offset), viewport.contains(line.minY), viewport.contains(line.maxY) {
+            revealInExposedArea(range)
+            return
+        }
+        guard let line = layoutLine(at: offset) else { return }
+        let height = viewport.upperBound - viewport.lowerBound
+        scrollToTextTop(line.midY - height / 2, horizontalOrigin: scroll.visibleContentOrigin.x, in: scroll)
+        revealInExposedArea(range)
+    }
+
     private func revealInExposedArea(_ range: NSRange) {
         guard range.location != NSNotFound, let window, let scroll = enclosingScrollView else { return }
         let insets = scroll.contentInsets
@@ -1065,6 +1081,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         requestLineRefresh()
         jjInlineDiff?.selectionChanged()
         onConflictSelectionChange?()
+        if !updatingComposition { onNavigationSelectionChange?() }
     }
 
     func withTextEdits(_ edits: [EditorTextEdit], _ apply: () -> Void) {
@@ -1082,6 +1099,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         // Both preedit and its rollback are presentation. Subscribers still hold
         // the baseline onto which the real replacements will be applied.
         guard !updatingComposition else { return }
+        onNavigationTextEdit?(storage.editedRange)
         if !replacingConflictStructure, !conflictEdits.isEmpty {
             let range = storage.editedRange
             let previousLength = range.length - storage.changeInLength

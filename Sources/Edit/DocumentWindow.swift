@@ -125,6 +125,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var pendingTerminalFocus: Bool?
     private(set) lazy var titleBar = DocumentTitleBar(document: self, app: app)
     private(set) lazy var languageFeatures = DocumentLanguageFeatures(document: self, app: app)
+    private var navigationBufferID = UUID()
+    private var navigationSelectionAnchor: NavigationHistory.Selection.Anchor?
+    private var restoringNavigationSelection = false
 
     private unowned let app: Edit
     private(set) var fileURL: URL? {
@@ -183,6 +186,54 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func focusContent() {
         window.makeFirstResponder(contentResponder)
+    }
+
+    var navigationLocation: NavigationHistory.Location? { navigationLocation(at: nil) }
+
+    private var navigationResource: NavigationHistory.Resource? {
+        guard !showsEmptyFolder, sourceControlRevision == nil else { return nil }
+        return displayedFileURL.map { .file($0.standardizedFileURL) } ?? .buffer(navigationBufferID)
+    }
+
+    func navigationLocation(at range: NSRange?) -> NavigationHistory.Location? {
+        guard let resource = navigationResource else { return nil }
+        let selection: NavigationHistory.Selection?
+        if hasTextDocument, editor.conflictEdits.isEmpty, let text = editor.textStorage?.mutableString {
+            let caret = range ?? editor.selectedRange()
+            selection = .init(range: caret, in: text, activeEnd: editor.activeEnd(of: caret), previousAnchor: navigationSelectionAnchor)
+            navigationSelectionAnchor = selection?.anchor
+        } else {
+            selection = nil
+        }
+        return .init(window: ObjectIdentifier(self), resource: resource, selection: selection)
+    }
+
+    func restoreNavigationSelection(_ selection: NavigationHistory.Selection) {
+        guard hasTextDocument else { return }
+        applyNavigationSelection(selection.range(in: editor.string), backward: selection.isBackward)
+    }
+
+    func navigate(to caret: NSRange, from origin: NavigationHistory.Location?) {
+        if let origin { app.recordNavigation(origin, reason: .selection) }
+        applyNavigationSelection(caret)
+        app.recordNavigation(in: self, reason: .jump)
+    }
+
+    private func applyNavigationSelection(_ range: NSRange, backward: Bool = false) {
+        restoringNavigationSelection = true
+        defer { restoringNavigationSelection = false }
+        if let scope = editor.focusRanges,
+           !scope.contains(where: { $0.location <= range.location && range.upperBound <= $0.upperBound }) {
+            editor.exitFocus()
+        }
+        focusContent()
+        editor.setCaretSelections([range], record: false, primaryAffinity: backward ? .upstream : .downstream)
+        editor.revealNavigationSelection(range)
+    }
+
+    private func recordEditorSelection() {
+        guard !restoringNavigationSelection, !isBusy, window.firstResponder === editor, !editor.hasMarkedText() else { return }
+        app.recordNavigation(in: self, reason: .selection)
     }
 
     func setFolder(_ url: URL?) {
@@ -303,6 +354,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         window.initialFirstResponder = editor
         window.makeFirstResponder(editor)
         editor.onTextChange = { [weak self] in self?.textDidChange() }
+        editor.onNavigationSelectionChange = { [weak self] in self?.recordEditorSelection() }
+        editor.onNavigationTextEdit = { [weak self] range in
+            if let self, let anchor = navigationSelectionAnchor, range.location <= anchor.offset {
+                navigationSelectionAnchor = nil
+            }
+        }
         editor.onConflictSelectionChange = { [weak self] in self?.updateConflictControls() }
         editor.onFocusScopeChange = { [weak self] in
             guard let self else { return }
@@ -714,6 +771,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         jjDocumentChanges?.recheck()
         app.jjChanges.refreshSoon(sourceControlFileSubscription)
         app.updateJujutsuShortcut()
+        if !isBusy, displayedFileURL != nil || (hasTextDocument && !editor.string.isEmpty) {
+            app.recordNavigation(in: self, reason: .selection)
+        }
     }
 
     func windowDidEndSheet(_ notification: Notification) {
@@ -1064,6 +1124,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func resetDocument() {
         clearSourceControlFile()
+        navigationBufferID = UUID()
         fileURL = nil
         manualSyntaxLanguage = nil
         fileIdentity = nil
@@ -1640,6 +1701,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         refreshSyntax(immediate: false)
         jjDocumentChanges?.bufferChanged()
         languageFeatures.documentTextChanged()
+        if !isBusy, window.firstResponder === editor { app.recordNavigation(in: self, reason: .edit) }
     }
 
     private func refreshSyntax(immediate: Bool, preparedSyntax: SyntaxSnapshot? = nil) {
@@ -1759,6 +1821,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
         guard isCurrent(), !Task.isCancelled else { return false }
 
+        let previousResource = navigationResource
         switch destination {
         case .buffer(let file, let focusEditor, let scratch, let folder):
             let restoreFocus = focusEditor || contentHasFocus
@@ -1801,6 +1864,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                editor.focusRanges != nil {
                 undoHistory.manager.restoreFocusHistory(focusHistory)
             }
+            if focusEditor { app.recordNavigation(in: self, reason: .selection) }
         case .preview(let preview, let focusEditor, let folder):
             let restoreFocus = focusEditor || contentHasFocus
             autosave.clearFailure()
@@ -1808,6 +1872,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             rememberFileUndoHistory()
             installContent(in: folder) { loadPreview(preview) }
             if restoreFocus { focusContent() }
+            if focusEditor { app.recordNavigation(in: self, reason: .selection) }
         case .sourceControlPreview(let preview):
             let restoreFocus = contentHasFocus
             rememberFilePosition()
@@ -1824,6 +1889,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             if restoreFocus { focusContent() }
         case .window:
             window.close()
+        }
+        if case .buffer(let id) = previousResource, navigationResource != .buffer(id) {
+            app.removeNavigationResource(.buffer(id), in: self)
         }
         return true
     }
@@ -1979,6 +2047,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         _ text: String, preparedSyntax: SyntaxSnapshot? = nil, openingConflicts: JJOpeningConflicts? = nil,
         confirmedConflicts: [JJConflict] = [], restoredConflicts: [JJConflictEdit] = [], revealInWorktree: Bool = true
     ) {
+        navigationSelectionAnchor = nil
         let projection = restoredConflicts.isEmpty
             ? JJConflictEdit.project(openingConflicts?.blocks ?? confirmedConflicts, in: text)
             : (text: text, edits: restoredConflicts)

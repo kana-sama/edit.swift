@@ -292,6 +292,7 @@ final class WorktreeActions {
                 }
             }.value
             let result = try await recycle(targets)
+            app.removeNavigationFiles(under: result.completed.map(\.source))
             for move in result.completed {
                 for document in app.documents { document.detachTrashedFile(at: move.source) }
             }
@@ -351,6 +352,7 @@ final class WorktreeActions {
     }
 
     private func retarget(_ move: WorktreeFileOperations.Transfer, revealInWorktree: Bool = true) {
+        app.retargetNavigation(from: move.source, to: move.destination)
         for document in app.documents {
             document.retargetMovedFile(from: move.source, to: move.destination, revealInWorktree: revealInWorktree)
         }

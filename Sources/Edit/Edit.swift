@@ -97,6 +97,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     private var sessionReadFailed = false
     private var pendingFullScreen: [DocumentWindow] = []
     private weak var enteringFullScreen: DocumentWindow?
+    private let navigationHistory = NavigationHistory()
+    private var navigationReplays: Set<ObjectIdentifier> = []
 
     private(set) var documents: [DocumentWindow] = []
     private(set) var isQuitting = false
@@ -147,6 +149,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try await BracketCheck.run(in: self)
                     try await OccurrenceCheck.run(in: self)
                     try await FindCheck.run(in: self)
+                    try await NavigationHistoryCheck.run(in: self)
                     try await FocusCheck.run(in: self)
                     try checkWindow(sample.window, screenshot: arguments.first)
                     try MultiCaretCheck.runComposition(in: sample.editor)
@@ -247,8 +250,17 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     func routeWindowEvent(_ event: NSEvent) -> NSEvent? {
         switch event.type {
         case .keyDown:
+            let modifiers = event.modifierFlags.intersection([.control, .command, .option, .shift])
+            if event.characters(byApplyingModifiers: []) == "-",
+               modifiers == .control || modifiers == [.control, .shift] {
+                let direction: NavigationHistory.Direction = modifiers.contains(.shift) ? .forward : .back
+                if canNavigate(direction) {
+                    Task { await navigate(direction) }
+                    return nil
+                }
+            }
             if event.charactersIgnoringModifiers?.lowercased() == "g",
-               event.modifierFlags.intersection([.control, .command, .option, .shift]) == [.command, .shift] {
+               modifiers == [.command, .shift] {
                 updateJujutsuShortcut()
             }
             let document = documents.first { $0.window === event.window }
@@ -537,11 +549,112 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     @objc func focusSelection(_ sender: Any?) { activeDocument?.focusSelection() }
     @objc func exitFocus(_ sender: Any?) { activeDocument?.exitFocus() }
 
+    @objc func goBack(_ sender: Any?) { Task { await navigate(.back) } }
+    @objc func goForward(_ sender: Any?) { Task { await navigate(.forward) } }
+
+    func recordNavigation(in document: DocumentWindow, reason: NavigationHistory.Reason = .selection) {
+        guard let location = document.navigationLocation else { return }
+        recordNavigation(location, reason: reason)
+    }
+
+    func recordNavigation(_ location: NavigationHistory.Location, reason: NavigationHistory.Reason) {
+        guard !isQuitting, !navigationReplays.contains(location.window),
+              documents.contains(where: { ObjectIdentifier($0) == location.window }) else { return }
+        navigationHistory.record(location, reason: reason)
+    }
+
+    func removeNavigationResource(_ resource: NavigationHistory.Resource, in document: DocumentWindow) {
+        navigationHistory.remove(window: ObjectIdentifier(document), resource: resource)
+    }
+
+    func retargetNavigation(from source: URL, to destination: URL) {
+        navigationHistory.moveFiles { url in
+            guard let suffix = DocumentWindow.worktreePathSuffix(from: source, to: url) else { return nil }
+            return (suffix.isEmpty ? destination : destination.appending(path: suffix, directoryHint: .notDirectory))
+                .standardizedFileURL
+        }
+    }
+
+    func removeNavigationFiles(under urls: [URL]) {
+        navigationHistory.removeFiles { file in
+            urls.contains { DocumentWindow.worktreePathSuffix(from: $0, to: file) != nil }
+        }
+    }
+
+    func canNavigate(_ direction: NavigationHistory.Direction) -> Bool {
+        !isQuitting && activeDocument?.window.attachedSheet == nil && navigationHistory.canGo(direction)
+    }
+
+    func navigate(_ direction: NavigationHistory.Direction) async {
+        while !Task.isCancelled, canNavigate(direction), let move = navigationHistory.begin(direction) {
+            guard await skipOrNavigate(to: move) else { return }
+        }
+    }
+
+    /// A location discarded while looking it up should not block the remaining stack.
+    private func skipOrNavigate(to move: NavigationHistory.Move) async -> Bool {
+        let location = move.location
+        guard let document = documents.first(where: { ObjectIdentifier($0) == location.window }) else {
+            navigationHistory.remove(window: location.window)
+            return true
+        }
+
+        var opened = false
+        defer { navigationHistory.finish(move, opened: opened) }
+
+        if document.navigationLocation?.resource != location.resource {
+            guard case .file(let url) = location.resource else {
+                navigationHistory.remove(window: location.window, resource: location.resource)
+                return true
+            }
+            let missing = await Self.navigationFileIsMissing(url)
+            guard !Task.isCancelled, navigationHistory.isPending(move) else { return false }
+            if missing {
+                navigationHistory.removeFiles { $0 == url }
+                return true
+            }
+            do {
+                guard try await openFile(url, in: document, focusEditor: false, shouldOpen: { [weak self] in
+                    self?.navigationHistory.isPending(move) == true
+                }) === document else { return false }
+            } catch {
+                guard navigationHistory.isPending(move) else { return false }
+                await document.showError("Could Not Open “\(url.lastPathComponent)”", detail: error.localizedDescription)
+                return false
+            }
+        }
+        guard navigationHistory.isPending(move), documents.contains(where: { $0 === document }) else { return false }
+        navigationReplays.insert(location.window)
+        defer { navigationReplays.remove(location.window) }
+        controlPanel?.dismiss(restoreFocus: false)
+        if !isAgentCheck && !document.window.isKeyWindow { document.present() }
+        if let selection = location.selection, document.hasTextDocument {
+            document.restoreNavigationSelection(selection)
+        } else {
+            document.focusContent()
+        }
+        opened = true
+        return false
+    }
+
+    @concurrent private nonisolated static func navigationFileIsMissing(_ url: URL) async -> Bool {
+        do {
+            _ = try FileManager.default.attributesOfItem(atPath: url.path)
+            return false
+        } catch let error as CocoaError {
+            return error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile
+        } catch {
+            return false
+        }
+    }
+
     func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
         guard !isQuitting else { return false }
         switch item.action {
         case #selector(focusSelection(_:)): return activeDocument?.canFocusSelection ?? false
         case #selector(exitFocus(_:)): return activeDocument?.canExitFocus ?? false
+        case #selector(goBack(_:)): return canNavigate(.back)
+        case #selector(goForward(_:)): return canNavigate(.forward)
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
         case #selector(showGoToFile(_:)), #selector(showCommandMode(_:)):
             return activeDocument.map { $0.window.attachedSheet == nil } ?? false
@@ -676,6 +789,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     func didClose(_ document: DocumentWindow) {
         recordClosedFile(in: document)
+        navigationHistory.remove(window: ObjectIdentifier(document))
         if openPanelDocument === document { openFilePanel?.cancel() }
         lastPlacement = document.placement
         pendingFullScreen.removeAll { $0 === document }
@@ -1138,6 +1252,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         view.addItem(.separator())
         view.addCommand("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.control, .command])
 
+        let go = addMenu("Go")
+        go.addCommand("Go Back", #selector(goBack(_:)), "-", [.control]).target = self
+        go.addCommand("Go Forward", #selector(goForward(_:)), "-", [.control, .shift]).target = self
+
         let window = addMenu("Window")
         window.addCommand("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m")
         window.addCommand("Zoom", #selector(NSWindow.performZoom(_:)))
@@ -1159,6 +1277,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             try MultiCaretCheck.runComposition(in: document.editor)
             document.window.close()
             try await checkEditorViewport()
+            try await NavigationHistoryCheck.run(in: self)
         case "inline-diff":
             if let screenshot {
                 try JJInlineDiffCheck.run(in: document) { view in
