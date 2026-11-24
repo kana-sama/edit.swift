@@ -404,6 +404,7 @@ enum LanguageServerCheck {
     private static func checkStructuredHover(in owner: NSWindow, capture: (NSView, String) throws -> Void) throws {
         let declaration = "fn debug(\n            comptime format: []const u8,\n            args: anytype,\n        ) void"
         let wrappedType = "(fn (comptime []const u8, anytype) void)"
+        let referenceLine = "Go to [A](file:///tmp/A.zig#L1) | [B](file:///tmp/B.zig#L2) | [C](file:///tmp/C.zig#L3)"
         let raw = """
             ```zig
             \(declaration)
@@ -412,7 +413,7 @@ enum LanguageServerCheck {
             \(wrappedType)
             ```
 
-            Go to [A](file:///tmp/A.zig#L1) | [B](file:///tmp/B.zig#L2) | [C](file:///tmp/C.zig#L3)
+            \(referenceLine)
 
             Log a debug message. This log level is intended to be used for messages which are only useful for debugging.
             """
@@ -478,7 +479,8 @@ enum LanguageServerCheck {
             guard let label = descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHover.\(kind.rawValue).label" }) as? NSTextField,
                   let body = hoverBody(kind, in: view)
             else { throw Failure("find both columns in the \(kind.rawValue) row") }
-            try expect(label.stringValue == kind.rawValue && label.accessibilityRole()?.rawValue == "AXHeading" &&
+            try expect(label.stringValue == (kind == .references ? "Links" : "Type") &&
+                       label.accessibilityRole()?.rawValue == "AXHeading" &&
                        label.alignment == .right && label.textColor == .secondaryLabelColor &&
                        label.font == .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium),
                        "show the aligned native \(kind.rawValue) label")
@@ -489,12 +491,33 @@ enum LanguageServerCheck {
             let firstLine = body.firstRect(forCharacterRange: NSRange(location: 0, length: 1), actualRange: nil)
             let textLine = panel.window.convertFromScreen(firstLine)
             try expect((textLine.minY...textLine.maxY).contains(labelBaseline), "align the \(kind.rawValue) label with its first line")
-            return (labelEdge: labelEdge, bodyStart: bodyStart)
+            let naturalWidth = label.alignmentRect(forFrame: NSRect(origin: .zero, size: label.fittingSize)).width
+            return (labelEdge: labelEdge, bodyStart: bodyStart, naturalWidth: naturalWidth)
         }
         let firstColumn = columns[0]
         try expect(columns.allSatisfy { abs($0.labelEdge - firstColumn.labelEdge) < 1 &&
                    abs($0.bodyStart - firstColumn.bodyStart) < 1 && $0.labelEdge < $0.bodyStart },
                    "share a label edge and a content column across the hover rows (\(columns))")
+        let widestLabel = ceil(max(columns[0].naturalWidth, columns[1].naturalWidth))
+        try expect(abs(firstColumn.labelEdge - separatorFrame.minX - widestLabel) < 1,
+                   "size the label column for the widest visible label")
+
+        let typeOnly = raw.replacingOccurrences(of: referenceLine + "\n\n", with: "")
+        guard let typePanel = EditorHoverPopover(owner: owner, appearance: owner.effectiveAppearance, anchor: anchor,
+                                                  presentation: EditorHoverPresentation(text: typeOnly, isMarkdown: true),
+                                                  onNavigate: { _ in }, onEnter: {}, onExit: {}),
+              let typeView = typePanel.window.contentView,
+              let label = descend(typeView, matching: { $0.identifier?.rawValue == "EditorLanguageHover.Type.label" }) as? NSTextField,
+              let description = hoverBody(.documentation, in: typeView)
+        else { throw Failure("show a type without links") }
+        defer { typePanel.close(restoreFocus: false) }
+        let labelFrame = label.alignmentRect(forFrame: label.bounds)
+        let naturalWidth = label.alignmentRect(forFrame: NSRect(origin: .zero, size: label.fittingSize)).width
+        let labelStart = label.convert(labelFrame, to: nil).minX
+        let descriptionStart = description.convert(description.bounds, to: nil).minX
+        try expect(hoverBody(.references, in: typeView) == nil && abs(labelFrame.width - ceil(naturalWidth)) < 1 &&
+                   abs(labelStart - descriptionStart) < 1, "place a lone Type label at the left inset")
+        try capture(typeView, "hover-type-only")
 
         let longDocumentation = raw + String(repeating: "\n\nA documentation paragraph in a long hover.", count: 20)
         let longPresentation = EditorHoverPresentation(text: longDocumentation, isMarkdown: true)
@@ -538,7 +561,7 @@ enum LanguageServerCheck {
         let link = (text.string as NSString).range(of: "FontVariant", options: .backwards)
         guard link.location != NSNotFound,
               let url = text.textStorage?.attribute(.link, at: link.location, effectiveRange: nil) as? URL
-        else { throw Failure("make the FontVariant name in the hover's References row clickable") }
+        else { throw Failure("make the FontVariant name in the hover's Links row clickable") }
         let linkedFile = FileBuffer.canonicalURL(URL(filePath: url.path))
         try expect(linkedFile.path == file.path && url.fragment == "L3",
                    "retain the local line link from the actual ZLS Markdown (\(url.absoluteString), expected \(file.absoluteString)#L3)")

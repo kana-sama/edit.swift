@@ -6,7 +6,7 @@ enum EditorHoverPresentation: Sendable {
             case declaration = "Declaration"
             case type = "Type"
             case documentation = "Description"
-            case references = "References"
+            case references = "Links"
 
             var isCode: Bool { self == .declaration || self == .type }
             var showsLabel: Bool { self == .type || self == .references }
@@ -98,7 +98,7 @@ private final class HoverSectionsView: NSView {
             if label.isHidden { body.setAccessibilityLabel(name) }
             return (label: label, body: body, isCode: section.kind.isCode)
         }
-        let labelWidth = rows.map { row in
+        let labelWidth = rows.lazy.filter { !$0.label.isHidden }.map { row in
             let insets = row.label.alignmentRectInsets
             return ceil(row.label.fittingSize.width - insets.left - insets.right)
         }.max() ?? 0
