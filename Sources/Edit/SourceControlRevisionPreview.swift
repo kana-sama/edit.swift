@@ -34,10 +34,14 @@ struct SourceControlRevisionPreview: Sendable {
             content = .text(current, format, analysis)
         } else if let bytes {
             let (details, backing) = await FilePreviewDetails.loadRevision(bytes, at: url)
-            content = .media(OpenFilePreview(url: url, identity: nil, reason: "", details: details,
+            let reason = details.image == nil && !details.playableVideo ? "A text diff is unavailable for this file." : ""
+            content = .media(OpenFilePreview(url: url, identity: nil, reason: reason, details: details,
                                              mediaBacking: backing, allowsReveal: false))
         } else if let preview = metadata(for: file, at: url) {
             content = .media(preview)
+        } else if file.source == .absent && file.target == .absent {
+            content = .media(OpenFilePreview(url: url, identity: nil, reason: "This path is absent from this revision.",
+                                              details: .revisionEntry(kind: "Unavailable File"), allowsReveal: false))
         } else {
             throw CocoaError(.fileReadNoSuchFile)
         }
@@ -105,7 +109,8 @@ final class SourceControlRevisionBanner: NSView {
     required init?(coder: NSCoder) { fatalError("Revision banners are programmatically constructed") }
 
     override func draw(_ dirtyRect: NSRect) {
+        // AppKit can pass a dirty rect that extends into the editor below the banner.
         NSColor.windowBackgroundColor.setFill()
-        dirtyRect.fill()
+        bounds.fill()
     }
 }

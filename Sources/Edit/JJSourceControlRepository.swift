@@ -11,6 +11,7 @@ struct JJSourceControlRevision: Identifiable, Equatable, Sendable {
     let changeID: String
     let shortID: String
     let description: String
+    let author: String
     let parents: [String]
     var edges: [JJSourceControlEdge] = []
     let bookmarks: [String]
@@ -82,7 +83,7 @@ struct JJSourceControlFileContents: Sendable {
 }
 
 enum JJSourceControlMutation: Sendable {
-    case edit(String)
+    case edit(String, ignoreImmutable: Bool = false)
     case new(String)
     case describe(String, String)
     case abandon(String)
@@ -90,13 +91,14 @@ enum JJSourceControlMutation: Sendable {
 
     fileprivate var target: String {
         switch self {
-        case .edit(let id), .new(let id), .describe(let id, _), .abandon(let id), .squash(let id, _): id
+        case .edit(let id, _), .new(let id), .describe(let id, _), .abandon(let id), .squash(let id, _): id
         }
     }
 
     fileprivate func arguments(revision: String) -> [String] {
         switch self {
-        case .edit: ["edit", "--", revision]
+        case .edit(_, let ignoreImmutable):
+            (ignoreImmutable ? ["--ignore-immutable"] : []) + ["edit", "--", revision]
         case .new: ["new", "--", revision]
         case .describe(_, let description): ["describe", "--message=\(description)", "--", revision]
         case .abandon: ["abandon", "--", revision]
@@ -126,6 +128,7 @@ enum JJSourceControlRepository {
         #""[" ++ bookmarks.map(|b| json(stringify(b.name() ++ if(b.remote(), "@" ++ b.remote())))).join(",") ++ "]""#,
         #""[" ++ local_bookmarks.map(|b| json(stringify(b.name()))).join(",") ++ "]""#,
         "immutable", "conflict", "current_working_copy", "divergent",
+        "json(if(author.name(), author.name(), author.email()))",
     ])
     private static let parentFields = JJRepository.template(["commit_id", #"parents.map(|c| c.commit_id()).join(",")"#])
     private static let previewLimit = 32 * 1024 * 1024
@@ -220,6 +223,37 @@ enum JJSourceControlRepository {
         }
     }
 
+    static func departedFile(
+        _ file: JJSourceControlFile, from revision: JJSourceControlRevision, lastCommitID: String,
+        lastOperationID: String, in workspace: JJWorkspace, at operationID: String
+    ) async throws -> (JJSourceControlFile, JJSourceControlRevision, JJSourceControlFileContents) {
+        guard isChangeID(revision.changeID), JJRepository.isHexID(lastCommitID) else { throw Failure.invalidResponse }
+        let exact = "present(\(lastCommitID)) & visible()"
+        let expression = revision.isDivergent ? exact : "coalesce(\(exact), present(\(revision.changeID)) & visible())"
+        let visible = try await revisions(["-r", expression], limit: 2, in: workspace, at: operationID)
+        let snapshot = visible.count == 1 ? operationID : lastOperationID
+        let target: JJSourceControlRevision
+        if visible.count == 1, let current = visible.first {
+            target = current
+        } else {
+            target = try await singleRevision(lastCommitID, in: workspace, at: snapshot)
+        }
+        let files = try await changedFiles(target.id, in: workspace, at: snapshot)
+        if let changed = files.first(where: { $0.path == file.path }) {
+            return (changed, target, try await self.file(changed, in: target, workspace: workspace, at: snapshot))
+        }
+        // The path can become clean before leaving the change. Its recorded contents still belong to that change.
+        let path = JJRepository.literalFileset(file.path)
+        let kindText = try await read(workspace, operation: snapshot,
+                                      arguments: ["file", "list", "-r", target.id, "-T", "file_type", path])
+        let kind = JJEntryKind(rawValue: kindText) ?? .absent
+        let data = kind == .file
+            ? try await JJRepository.readCommand(["file", "show", "-r", target.id, path], in: workspace, at: snapshot,
+                                                 limit: previewLimit) : nil
+        let unchanged = JJSourceControlFile(path: file.path, sourcePath: nil, kind: .modified, source: kind, target: kind)
+        return (unchanged, target, .init(base: data, recorded: data, isConflict: false))
+    }
+
     static func mutate(
         _ mutation: JJSourceControlMutation, in workspace: JJWorkspace, expectedOperation: String
     ) async throws {
@@ -234,6 +268,7 @@ enum JJSourceControlRepository {
             try await JJRepository.requireCurrentWorkingCopy(
                 workspace, operationID: expectedOperation, commitID: workingCopy.id
             )
+            let overrideSnapshot = await JJRepository.maySnapshotImmutable(workingCopy.changeID, in: workspace)
             guard try await JJRepository.operation(in: workspace) == expectedOperation else {
                 throw Failure.changedOperation
             }
@@ -241,11 +276,15 @@ enum JJSourceControlRepository {
             let operation: String
             if target.isWorkingCopy {
                 revision = "@ & present(\(target.changeID))"
-                operation = expectedOperation
+                operation = if overrideSnapshot {
+                    try await snapshotForSelectedRevision(in: workspace, at: expectedOperation, ignoreImmutable: true)
+                } else {
+                    expectedOperation
+                }
             } else {
                 // Snapshot first so a rebased descendant still resolves to a single exact commit.
                 // Describe, abandon and new accept multiple revisions on the command line.
-                operation = try await snapshotForSelectedRevision(in: workspace, at: expectedOperation)
+                operation = try await snapshotForSelectedRevision(in: workspace, at: expectedOperation, ignoreImmutable: overrideSnapshot)
                 var id = target.id
                 if operation != expectedOperation && !target.isDivergent {
                     let expression = "coalesce(present(\(target.id)) & visible(), present(\(target.changeID)) & visible())"
@@ -260,13 +299,22 @@ enum JJSourceControlRepository {
                 ["--at-op=@", "--config", "edit.source-control=true"] + mutation.arguments(revision: revision),
                 in: workspace, timeout: nil
             )
+            switch mutation {
+            case .edit(_, let ignoreImmutable):
+                await JJRepository.authorizeImmutableSnapshots(of: ignoreImmutable ? target.changeID : nil, in: workspace)
+            case .new:
+                await JJRepository.authorizeImmutableSnapshots(of: nil, in: workspace)
+            default:
+                break
+            }
         }
     }
 
-    private static func snapshotForSelectedRevision(in workspace: JJWorkspace, at operation: String) async throws -> String {
+    private static func snapshotForSelectedRevision(in workspace: JJWorkspace, at operation: String, ignoreImmutable: Bool) async throws -> String {
         let token = UUID().uuidString
+        let flags = ignoreImmutable ? ["--ignore-immutable"] : []
         _ = try await JJRepository.command(
-            ["--at-op=@", "--config", "edit.source-control-snapshot=\(token)", "util", "snapshot"],
+            ["--at-op=@", "--config", "edit.source-control-snapshot=\(token)"] + flags + ["util", "snapshot"],
             in: workspace, timeout: nil
         )
         let head = try await JJRepository.operation(in: workspace)
@@ -297,7 +345,7 @@ enum JJSourceControlRepository {
         let bytes = try await JJRepository.readCommand(
             ["log", "--no-graph", "--limit=\(limit)", "-T", revisionFields] + arguments, in: workspace, at: operationID
         )
-        return try JJRepository.records(in: bytes, width: 11).map { row in
+        return try JJRepository.records(in: bytes, width: 12).map { row in
             let parents = row[4].split(separator: ",").map(String.init)
             guard JJRepository.isHexID(row[0]), isChangeID(row[1]), !row[2].isEmpty,
                   parents.allSatisfy(JJRepository.isHexID),
@@ -307,7 +355,8 @@ enum JJSourceControlRepository {
             let decoder = JSONDecoder()
             return try JJSourceControlRevision(
                 id: row[0], changeID: row[1], shortID: row[2],
-                description: decoder.decode(String.self, from: Data(row[3].utf8)), parents: parents,
+                description: decoder.decode(String.self, from: Data(row[3].utf8)),
+                author: decoder.decode(String.self, from: Data(row[11].utf8)), parents: parents,
                 bookmarks: decoder.decode([String].self, from: Data(row[5].utf8)),
                 localBookmarks: decoder.decode([String].self, from: Data(row[6].utf8)),
                 isImmutable: row[7] == "true", isConflicted: row[8] == "true",

@@ -30,11 +30,8 @@ final class SourceControlSidebar: NSObject {
     private static let collapsedChevron = disclosureImage("chevron.forward")
     private static let expandedChevron = disclosureImage("chevron.down")
     private let graphMessage = NSTextField(wrappingLabelWithString: "")
-    private let graphLimit = NSTextField(labelWithString: "")
     private let detailTitle = SourceControlDetailButton()
     private let detailMetadata = SourceControlRevisionIdentity()
-    private let fileCount = NSTextField(labelWithString: "")
-    private let fileHeading = NSTextField(labelWithString: "Changed Files")
     private let fileMessage = NSTextField(wrappingLabelWithString: "")
     private lazy var descriptionPopover = SourceControlDescriptionPopover(anchor: detailTitle) { [weak self] in self?.saveDescription($0) }
     private lazy var revsetPicker = SourceControlRevsetPicker(
@@ -279,8 +276,7 @@ final class SourceControlSidebar: NSObject {
     private func displayGraph() {
         guard let graph else { return }
         let rows = graph.revisions
-        graphLimit.isHidden = !graph.isTruncated || rows.isEmpty
-        graphLimit.stringValue = "Showing the first \(graph.revisions.count) changes"
+        graphView.table.setAccessibilityHelp(graph.isTruncated ? "Graph limited to \(rows.count) changes." : nil)
         let old = selection
         let next = if revealWorkingCopy {
             rows.first { $0.id == graph.workingCopy.id }
@@ -368,11 +364,9 @@ final class SourceControlSidebar: NSObject {
         let revision = presentation?.target.revision
         PanelLayout.withoutAnimation {
             detailTitle.title = revision?.subject ?? "Select a change"
-            detailTitle.image = revision.flatMap { Self.symbol($0.isImmutable ? "chevron.right" : "pencil", size: 10) }
             detailTitle.toolTip = revision.map { $0.isImmutable ? "View change description" : "Edit change description" }
-            if let revision { detailMetadata.update(revision, showsBookmarks: false) }
+            if let revision { detailMetadata.update(revision, showsAuthor: false) }
             detailMetadata.isHidden = revision == nil
-            fileHeading.isHidden = revision == nil
             renderFiles()
         }
     }
@@ -385,7 +379,7 @@ final class SourceControlSidebar: NSObject {
     private func renderFiles() {
         guard let presentedDetail, let workspace else {
             fileTree.clearSourceControl()
-            showFiles(count: nil, message: nil)
+            showFiles()
             return
         }
         let target = presentedDetail.target
@@ -401,17 +395,16 @@ final class SourceControlSidebar: NSObject {
                 files = detail.files
             }
             fileTree.updateSourceControl(revision: revision, workspace: workspace, operationID: target.operationID, files: files)
-            showFiles(count: files.count, message: files.isEmpty ? "No changed files" : nil)
+            showFiles(hasFiles: !files.isEmpty, message: files.isEmpty ? "No changed files" : nil)
         case .failure(let error):
-            showFiles(count: nil, message: error.localizedDescription)
+            showFiles(message: error.localizedDescription)
         case nil:
-            showFiles(count: nil, message: "Loading changed files…")
+            showFiles(message: "Loading changed files…")
         }
     }
 
-    private func showFiles(count: Int?, message: String?) {
-        fileCount.stringValue = count.map(String.init) ?? ""
-        fileTree.view.isHidden = (count ?? 0) == 0
+    private func showFiles(hasFiles: Bool = false, message: String? = nil) {
+        fileTree.view.isHidden = !hasFiles
         fileMessage.isHidden = message == nil
         fileMessage.stringValue = message ?? ""
     }
@@ -420,7 +413,6 @@ final class SourceControlSidebar: NSObject {
         graphMessage.isHidden = text == nil
         graphMessage.stringValue = text ?? ""
         graphView.view.isHidden = text != nil
-        if text != nil { graphLimit.isHidden = true }
     }
 
     private func updateControls() {
@@ -492,15 +484,43 @@ final class SourceControlSidebar: NSObject {
         requestGraph()
     }
 
-    private func edit(_ revision: JJSourceControlRevision) async {
-        guard !revision.isWorkingCopy, let operation = graph?.operationID else { return }
-        if revision.isImmutable {
-            if await confirm("Start a new change here?", detail: "“\(revision.subject)” is immutable. Create a child and make it the working copy.", action: "New Change Here") {
-                await mutate(.new(revision.id), selectingWorkingCopy: true, expectedOperation: operation)
-            }
-        } else {
-            await mutate(.edit(revision.id), selectingWorkingCopy: true)
+    private func activate(_ revision: JJSourceControlRevision) async {
+        guard !stale, !busy, !revision.isWorkingCopy, let workspace, let operation = graph?.operationID else { return }
+        let response = await Self.changeActivationAlert(for: revision).beginSheetModal(for: document.window)
+        guard self.workspace == workspace else { return }
+        switch response {
+        case .alertFirstButtonReturn:
+            guard !revision.parents.isEmpty else { return }
+            await mutate(.edit(revision.id, ignoreImmutable: revision.isImmutable), selectingWorkingCopy: true, expectedOperation: operation)
+        case .alertSecondButtonReturn:
+            await mutate(.new(revision.id), selectingWorkingCopy: true, expectedOperation: operation)
+        default:
+            break
         }
+    }
+
+    static func changeActivationAlert(for revision: JJSourceControlRevision) -> NSAlert {
+        let alert = NSAlert()
+        let isRoot = revision.parents.isEmpty
+        let subject = "“\(revision.subject)”"
+        alert.messageText = "Edit this change or start a new one?"
+        alert.informativeText = if isRoot {
+            "\(subject) is the repository root. You can start a new change on top of it."
+        } else if revision.isImmutable {
+            "\(subject) is immutable. Edit Change overrides Jujutsu’s protection. Saving may rewrite this change and its descendants."
+        } else {
+            subject
+        }
+        alert.alertStyle = revision.isImmutable ? .warning : .informational
+        let edit = alert.addButton(withTitle: "Edit Change")
+        let child = alert.addButton(withTitle: "New Change Here")
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+        edit.isEnabled = !isRoot
+        if revision.isImmutable {
+            edit.keyEquivalent = ""
+            child.keyEquivalent = "\r"
+        }
+        return alert
     }
 
     private func confirm(_ title: String, detail: String, action: String, destructive: Bool = false) async -> Bool {
@@ -557,8 +577,9 @@ final class SourceControlSidebar: NSObject {
     }
 
     @objc private func editItem(_ item: NSMenuItem) {
-        guard let revision = revision(for: item) else { return }
-        Task { await edit(revision) }
+        guard let revision = revision(for: item), !revision.isImmutable, !revision.isWorkingCopy,
+              let operation = graph?.operationID else { return }
+        Task { await mutate(.edit(revision.id), selectingWorkingCopy: true, expectedOperation: operation) }
     }
 
     @objc private func newHere(_ item: NSMenuItem) {
@@ -787,25 +808,18 @@ final class SourceControlSidebar: NSObject {
 
     private func configureGraph() {
         graphView.onSelect = { [weak self] in self?.choose($0) }
-        graphView.onEdit = { [weak self] revision in Task { await self?.edit(revision) } }
+        graphView.onEdit = { [weak self] revision in Task { await self?.activate(revision) } }
         graphView.menu = { [weak self] in self?.menu(for: $0) }
         graphMessage.textColor = .secondaryLabelColor
         graphMessage.font = .systemFont(ofSize: 12)
-        graphLimit.textColor = .secondaryLabelColor
-        graphLimit.font = .systemFont(ofSize: 10.5)
-        graphLimit.isHidden = true
-        let list = NSStackView(views: [graphView.view, graphLimit])
-        list.orientation = .vertical
-        list.alignment = .width
-        list.spacing = 0
-        list.setHuggingPriority(.defaultLow, for: .vertical)
-        for child in [list, graphMessage] {
+        let graph = graphView.view
+        for child in [graph, graphMessage] {
             graphBody.addSubview(child)
             child.translatesAutoresizingMaskIntoConstraints = false
         }
         NSLayoutConstraint.activate([
-            list.leadingAnchor.constraint(equalTo: graphBody.leadingAnchor), list.trailingAnchor.constraint(equalTo: graphBody.trailingAnchor),
-            list.topAnchor.constraint(equalTo: graphBody.topAnchor), list.bottomAnchor.constraint(equalTo: graphBody.bottomAnchor),
+            graph.leadingAnchor.constraint(equalTo: graphBody.leadingAnchor), graph.trailingAnchor.constraint(equalTo: graphBody.trailingAnchor),
+            graph.topAnchor.constraint(equalTo: graphBody.topAnchor), graph.bottomAnchor.constraint(equalTo: graphBody.bottomAnchor),
             graphMessage.leadingAnchor.constraint(equalTo: graphBody.leadingAnchor, constant: 12),
             graphMessage.trailingAnchor.constraint(equalTo: graphBody.trailingAnchor, constant: -12),
             graphMessage.topAnchor.constraint(equalTo: graphBody.topAnchor, constant: 8)
@@ -814,24 +828,23 @@ final class SourceControlSidebar: NSObject {
 
     private func configureDetail() {
         configure(detailTitle, action: #selector(showDescription(_:)))
-        detailTitle.font = .systemFont(ofSize: 14, weight: .semibold)
+        detailTitle.font = .systemFont(ofSize: 13, weight: .semibold)
         detailTitle.alignment = .left
-        detailTitle.imagePosition = .imageTrailing
         detailTitle.cell?.usesSingleLineMode = true
         detailTitle.lineBreakMode = .byTruncatingTail
         detailTitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        detailMetadata.heightAnchor.constraint(equalToConstant: 14).isActive = true
-        for label in [fileHeading, fileCount, fileMessage] {
-            label.textColor = .secondaryLabelColor
-            label.font = .systemFont(ofSize: 11)
-        }
-        let fileHeader = NSStackView(views: [fileHeading, NSView(), fileCount])
-        fileHeader.orientation = .horizontal
-        let metadata = NSStackView(views: [detailTitle, detailMetadata, fileHeader, fileMessage])
+        detailMetadata.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let titleRow = NSStackView(views: [detailTitle, detailMetadata, NSView()])
+        titleRow.orientation = .horizontal
+        titleRow.alignment = .centerY
+        titleRow.spacing = 0
+        titleRow.setCustomSpacing(7, after: detailTitle)
+        fileMessage.textColor = .secondaryLabelColor
+        fileMessage.font = .systemFont(ofSize: 11)
+        let metadata = NSStackView(views: [titleRow, fileMessage])
         metadata.orientation = .vertical
         metadata.alignment = .leading
         metadata.spacing = 2
-        metadata.setCustomSpacing(9, after: detailMetadata)
         for child in metadata.arrangedSubviews { child.widthAnchor.constraint(equalTo: metadata.widthAnchor).isActive = true }
         fileTree.onDiscardSourceControlFile = { [weak self] restore in Task { await self?.discard(restore) } }
         let tree = fileTree.view

@@ -12,6 +12,7 @@ enum SourceControlCheck {
         defer { try? FileManager.default.removeItem(at: fixture) }
         try FileManager.default.createDirectory(at: plain, withIntermediateDirectories: false)
         let file = nested.appending(path: "Tracked.txt")
+        let binary = nested.appending(path: "Shader.spv")
         let liveFile = nested.appending(path: "Live.txt")
         let removed = folder.appending(path: "Removed.txt")
         let original = (1...18).map { "Line \($0)\n" }.joined()
@@ -23,6 +24,7 @@ enum SourceControlCheck {
         try await command(executable, folder, ["new", "-m", "Historical change"])
         let historical = original.replacingOccurrences(of: "Line 8\n", with: "Historical line\n")
         try historical.write(to: file, atomically: true, encoding: .utf8)
+        try Data([3, 2, 35, 7, 0, 255, 0, 0]).write(to: binary)
         try await command(executable, folder, ["new", "-m", "Working change\n\n" + String(repeating: "A long description stays in the popover.\n", count: 12)])
         try await command(executable, folder, ["bookmark", "create", "review/jj-sidebar-layout-with-a-long-bookmark", "-r", "@"])
         let working = historical.replacingOccurrences(of: "Line 3\n", with: "Working line 3\n")
@@ -85,7 +87,6 @@ enum SourceControlCheck {
             throw Failure("\(error.localizedDescription) (file \(document.fileURL?.path ?? "none"), editable \(document.editor.isEditable), marks \(marks), expanded \(expanded))")
         }
         try expect(document.sourceControlRevisionBanner == nil, "leave the ordinary editor free of a revision banner")
-        try render(document.window)
         try expect(try await JJRepository.operation(in: workspace) == head, "leave repository history unchanged by inspection")
         let fileUndo = try await JJSourceControlOperations.preview(.undo, in: workspace)
         try expect(fileUndo.fileEffects.count == 2, "preview both working-copy file effects for Undo")
@@ -103,6 +104,9 @@ enum SourceControlCheck {
         guard let historyRow = panel.graphView.revisions.firstIndex(where: { $0.subject == "Historical change" }) else {
             throw Failure("find the history row")
         }
+        let history = panel.graphView.revisions[historyRow]
+        let choices = SourceControlSidebar.changeActivationAlert(for: history).buttons.map(\.title)
+        try expect(choices == ["Edit Change", "New Change Here", "Cancel"], "offer both ways to activate a change and Cancel")
         let contextMenu = panel.graphView.table.menuForRow?(historyRow)
         try expect(contextMenu?.item(withTitle: "Squash into Parent")?.isEnabled == true && contextMenu?.item(withTitle: "Abandon Change…")?.isEnabled == true,
                    "offer change actions when opening the context menu on an unselected row")
@@ -112,7 +116,7 @@ enum SourceControlCheck {
                    !panel.fileTree.view.isHidden && row(named: "Removed.txt", in: tree) != nil && !tree.isEnabled,
                    "keep the complete previous Change pane visible while the next detail loads")
         try await waitFor("browse a historical change while keeping the working-copy pointer") {
-            panel.selection?.subject == "Historical change" && panel.detail?.files.count == 1
+            panel.selection?.subject == "Historical change" && panel.detail?.files.count == 2
         }
         try expect(panel.graph?.workingCopy.subject == "Working change", "keep @ distinct from graph selection")
         try open("Tracked.txt", in: panel.fileTree)
@@ -120,8 +124,25 @@ enum SourceControlCheck {
             document.sourceControlRevisionBanner != nil && !document.editor.isEditable &&
                 document.editor.string == historical && document.editor.jjInlineDiff?.hasExpandedHunks == true
         }
+        try render(document.window)
+        let viewport = document.scrollView.contentView.bounds
+        try expect(viewport.width > 100 && viewport.height > 100 && !document.scrollView.isHiddenOrHasHiddenAncestor,
+                   "give historical text a visible editor viewport (\(viewport), \(document.scrollView.frame))")
+        try checkRevisionBanner(in: document, above: document.scrollView)
         if let historicalFileRow = row(named: "Tracked.txt", in: tree) {
             try expect(panel.fileTree.menu(at: historicalFileRow) == nil, "keep historical file rows free of working-copy mutations")
+        }
+        try open("Shader.spv", in: panel.fileTree)
+        try await waitFor("show an explanation in the binary revision preview") {
+            document.sourceControlRevisionBanner != nil && document.isShowingFilePreview &&
+                descendant(of: document.contentResponder) { (label: NSTextField) in
+                    label.stringValue == "A text diff is unavailable for this file."
+                } != nil
+        }
+        try checkRevisionBanner(in: document, above: document.contentResponder)
+        try open("Tracked.txt", in: panel.fileTree)
+        try await waitFor("restore the historical text after a binary preview") {
+            !document.isShowingFilePreview && document.editor.string == historical
         }
 
         try await command(executable, folder, ["describe", "-m", "Renamed at the terminal"])
@@ -133,6 +154,23 @@ enum SourceControlCheck {
         try expect(undo.fileEffects.isEmpty && !undo.revisionEffects.isEmpty, "preview a description-only operation as a graph change")
         try expect(try await JJRepository.operation(in: workspace) == changedHead, "leave the operation head unchanged while previewing Undo")
         try await checkOperationDirection(in: document.window, panel: panel)
+
+        guard let previousWorking = panel.graph?.workingCopy, let operation = panel.graph?.operationID else {
+            throw Failure("find the working copy before activating the historical file")
+        }
+        try await document.performSourceControlMutation(in: workspace) {
+            try await JJSourceControlRepository.mutate(.edit(history.id), in: workspace, expectedOperation: operation)
+        }
+        try await waitFor("promote the open historical file to the live editor, with its change’s hunks expanded") {
+            document.editor.isEditable && document.sourceControlRevisionBanner == nil && document.editor.string == historical &&
+                document.fileURL == FileBuffer.canonicalURL(file) && document.editor.jjInlineDiff?.hasExpandedHunks == true
+        }
+        try await command(executable, folder, ["edit", previousWorking.changeID])
+        try await waitFor("demote the open file to its historical revision after a terminal checkout") {
+            !document.editor.isEditable && document.sourceControlRevisionBanner != nil &&
+                document.editor.string == historical && document.editor.jjInlineDiff?.hasExpandedHunks == true &&
+                panel.graph?.workingCopy.changeID == previousWorking.changeID
+        }
 
         guard let currentRow = panel.graphView.revisions.firstIndex(where: \.isWorkingCopy) else {
             throw Failure("find the working copy after Redo")
@@ -179,6 +217,32 @@ enum SourceControlCheck {
                    "restore the Find Previous shortcut outside the workspace")
         app.focusJujutsu(nil)
         try expect(document.sidebarMode == .worktree, "ignore a direct focus command outside a workspace")
+        try await checkImmutableActivation(executable: executable, workspace: workspace, changeID: history.changeID, file: file)
+    }
+
+    private static func checkImmutableActivation(executable: URL, workspace: JJWorkspace, changeID: String, file: URL) async throws {
+        try await command(executable, workspace.root, ["tag", "set", "protected-change", "-r", changeID])
+        let graph = try await JJSourceControlRepository.graph(in: workspace, revset: "all()")
+        guard let change = graph.revisions.first(where: { $0.changeID == changeID && $0.isImmutable }) else {
+            throw Failure("find a non-root immutable change")
+        }
+        let buttons = SourceControlSidebar.changeActivationAlert(for: change).buttons
+        try expect(buttons.map(\.title) == ["Edit Change", "New Change Here", "Cancel"] && buttons[0].isEnabled &&
+                   buttons[1].keyEquivalent == "\r", "allow explicitly overriding protection and default to creating a child")
+
+        try await JJSourceControlRepository.mutate(.edit(change.id, ignoreImmutable: true), in: workspace,
+                                                   expectedOperation: graph.operationID)
+        try "Saved in the explicitly edited immutable change\n".write(to: file, atomically: true, encoding: .utf8)
+        try await JJRepository.snapshot(workspace)
+        let saved = try await JJSourceControlRepository.graph(in: workspace, revset: "all()")
+        try expect(saved.workingCopy.changeID == changeID && saved.workingCopy.id != change.id,
+                   "snapshot a file edit in the explicitly chosen immutable change")
+
+        try await JJSourceControlRepository.mutate(.new(saved.workingCopy.id), in: workspace,
+                                                   expectedOperation: saved.operationID)
+        let child = try await JJSourceControlRepository.graph(in: workspace, revset: "all()")
+        try expect(child.workingCopy.parents == [saved.workingCopy.id] && child.workingCopy.changeID != changeID,
+                   "create a separate working-copy child of the immutable change")
     }
 
     private static func checkRevsets(in document: DocumentWindow, panel: SourceControlSidebar, workspace: JJWorkspace, app: Edit) async throws {
@@ -547,7 +611,7 @@ enum SourceControlCheck {
         }
         try expect(switchedAgain.duration(to: .now) < .milliseconds(650), "expire the previous pane on its original deadline")
         try await waitFor("publish only the final selection when the slow read finishes") {
-            panel.selection?.subject == historical && panel.detail?.files.count == 1 &&
+            panel.selection?.subject == historical && panel.detail?.files.count == 2 &&
                 button(in: panel.view, where: { $0.title == historical }) != nil &&
                 !panel.fileTree.view.isHidden && row(named: "Tracked.txt", in: panel.fileTree.outline) != nil
         }
@@ -634,13 +698,18 @@ enum SourceControlCheck {
               let graphRow = panel.graphView.table.view(atColumn: 0, row: panel.graphView.table.selectedRow, makeIfNecessary: true) else {
             throw Failure("find the collapsed title and the selected graph row")
         }
-        try expect(title.cell?.usesSingleLineMode == true && title.bounds.height <= 24 && title.image != nil,
+        try expect(title.cell?.usesSingleLineMode == true && title.bounds.height <= 24 && title.image == nil,
                    "make the compact change title a one-line description action")
         let graphLabels = graphRow.subviews.flatMap { child in
             [child as? NSTextField].compactMap { $0 } + child.subviews.compactMap { $0 as? NSTextField }
         }
-        try expect(graphLabels.count == 3 && graphLabels.allSatisfy { $0.cell?.usesSingleLineMode == true && $0.maximumNumberOfLines == 1 },
-                   "keep the graph subject, change ID, and long bookmark on two lines")
+        let visibleLabels = graphLabels.filter { !$0.isHidden }
+        try expect(visibleLabels.count == 3 && visibleLabels.contains { $0.stringValue == panel.selection?.author } &&
+                   visibleLabels.allSatisfy { $0.cell?.usesSingleLineMode == true && $0.maximumNumberOfLines == 1 },
+                   "keep the graph subject, change ID, and author on two lines")
+        let bookmark = graphRow.subviews.first { $0.identifier?.rawValue == "JujutsuRevisionBookmarks" }
+        try expect(bookmark?.isHidden == false && bookmark?.toolTip?.contains("review/jj-sidebar-layout-with-a-long-bookmark") == true,
+                   "expose the full bookmark name from the compact graph marker")
         let graphTitle = graphCell.titleRect(forBounds: graph.bounds)
         let graphChevron = graphCell.imageRect(forBounds: graph.bounds)
         let changeTitle = detailCell.titleRect(forBounds: detail.bounds)
@@ -662,6 +731,35 @@ enum SourceControlCheck {
                    "keep the Change title, chevron slot and actions in place when the details collapse")
         detail.performClick(nil)
         document.window.layoutIfNeeded()
+    }
+
+    private static func checkRevisionBanner(in document: DocumentWindow, above body: NSView) throws {
+        let content = document.editorContentView
+        document.window.layoutIfNeeded()
+        guard let banner = document.sourceControlRevisionBanner else { throw Failure("find the revision banner") }
+        let bounds = content.bounds
+        func capture() throws -> NSBitmapImageRep {
+            guard let bitmap = content.bitmapImageRepForCachingDisplay(in: bounds) else {
+                throw Failure("capture the revision preview")
+            }
+            content.cacheDisplay(in: bounds, to: bitmap)
+            return bitmap
+        }
+        let visible = try capture()
+        banner.isHidden = true
+        defer { banner.isHidden = false }
+        let uncovered = try capture()
+        let area = content.convert(body.bounds, from: body).intersection(bounds).insetBy(dx: 8, dy: 8)
+        try expect(!area.isEmpty, "give the selected revision a visible body below the strip")
+        let xScale = CGFloat(visible.pixelsWide) / bounds.width
+        let yScale = CGFloat(visible.pixelsHigh) / bounds.height
+        let top = content.isFlipped ? area.minY : bounds.maxY - area.maxY
+        for x in stride(from: Int(area.minX * xScale), to: Int(area.maxX * xScale), by: 4) {
+            for y in stride(from: Int(top * yScale), to: Int((top + area.height) * yScale), by: 4) {
+                try expect(visible.colorAt(x: x, y: y) == uncovered.colorAt(x: x, y: y),
+                           "keep all banner drawing above the revision body")
+            }
+        }
     }
 
     private static func button(in view: NSView, where test: (NSButton) -> Bool) -> NSButton? {

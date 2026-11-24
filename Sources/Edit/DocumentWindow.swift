@@ -140,6 +140,23 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var filePreviewView: FilePreviewView?
     private var emptyFolderView: EmptyFolderView?
     private var sourceControlRevision: SourceControlRevisionPreview?
+    private struct SourceControlFile: Equatable {
+        let file: JJSourceControlFile
+        let revision: JJSourceControlRevision
+        let workspace: JJWorkspace
+        let operationID: String
+
+        var url: URL { workspace.root.appending(path: file.path, directoryHint: .notDirectory) }
+
+        func ownsWorkingCopy(_ checkout: JJRepositoryState) -> Bool {
+            revision.changeID == checkout.changeID && (!revision.isDivergent || revision.id == checkout.commitID)
+        }
+    }
+    private var sourceControlFile: SourceControlFile?
+    private var sourceControlFileSubscription: JJChangeMonitor.Subscription?
+    private var sourceControlCheckout: JJRepositoryState?
+    private var lastLiveSourceControlCheckout: JJRepositoryState?
+    private var sourceControlFileTransition: Task<Void, Never>?
     private(set) var sourceControlRevisionBanner: SourceControlRevisionBanner?
     private var editorTopConstraint: NSLayoutConstraint?
     private var filePreviewTopConstraint: NSLayoutConstraint?
@@ -183,6 +200,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private lazy var autosave = DocumentAutosave(document: self)
     private lazy var fileRefresh = DocumentFileRefresh(
         canRefresh: { [weak self] in self?.canRefreshFile == true },
+        validateDiskOwner: { [weak self] in await self?.validateSourceControlDiskOwner() == true },
         apply: { [weak self] in self?.applyExternalFile($0) }
     )
     private var draftRecoveryRevision: DraftRecoveryRevision?
@@ -668,11 +686,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     func windowDidBecomeKey(_ notification: Notification) {
         reportAutosaveFailure()
         jjDocumentChanges?.recheck()
+        app.jjChanges.refreshSoon(sourceControlFileSubscription)
         app.updateJujutsuShortcut()
     }
 
     func windowDidEndSheet(_ notification: Notification) {
         fileRefresh.resume()
+        scheduleSourceControlFileTransition()
         Task { @MainActor [weak self] in self?.reportAutosaveFailure() }
     }
 
@@ -685,7 +705,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private var canRefreshFile: Bool {
         canReplaceBuffer && !app.isQuitting && !window.isDocumentEdited && !autosave.hasWorker &&
-            !editor.hasMarkedText() && !(NSApp.isActive && window.isKeyWindow && contentHasFocus)
+            !sourceControlFileNeedsTransition && !editor.hasMarkedText() &&
+            !(NSApp.isActive && window.isKeyWindow && contentHasFocus)
     }
 
     private func applyExternalFile(_ file: FileBuffer) {
@@ -704,6 +725,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func load(
+        _ file: FileBuffer, storedSyntaxLanguage: String? = nil, preparedSyntax: SyntaxSnapshot? = nil, scratch: ScratchFile? = nil
+    ) {
+        clearSourceControlFile()
+        installBuffer(file, storedSyntaxLanguage: storedSyntaxLanguage, preparedSyntax: preparedSyntax, scratch: scratch)
+    }
+
+    private func installBuffer(
         _ file: FileBuffer, storedSyntaxLanguage: String? = nil, preparedSyntax: SyntaxSnapshot? = nil, scratch: ScratchFile? = nil
     ) {
         removeSourceControlRevision()
@@ -733,6 +761,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func loadPreview(_ preview: OpenFilePreview, revealInWorktree: Bool = true) {
+        clearSourceControlFile()
         removeSourceControlRevision()
         installFilePreview(preview, revealInWorktree: revealInWorktree)
     }
@@ -772,17 +801,19 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         operationID: String, while isWanted: @escaping () -> Bool
     ) async -> Bool {
         guard canRequestOpen, isWanted(), !app.isQuitting else { return false }
-        let url = workspace.root.appending(path: file.path, directoryHint: .notDirectory)
+        let selection = SourceControlFile(file: file, revision: change, workspace: workspace, operationID: operationID)
+        let url = selection.url
         let folder = folderURL
         let opensWorkingCopy = change.isWorkingCopy && !file.isDeleted
         let metadata = opensWorkingCopy ? SourceControlRevisionPreview.metadata(for: file, at: url) : nil
         do {
             if opensWorkingCopy && metadata == nil {
                 guard try await app.openFile(url, in: self, focusEditor: false, shouldOpen: isWanted) != nil,
-                      isWanted(), !Task.isCancelled else { return false }
+                      isWanted(), !Task.isCancelled, displayedFileURL == FileBuffer.canonicalURL(url) else { return false }
                 if let fileURL, hasEditableTextDocument {
                     pendingSourceControlDiffFile = editor.jjInlineDiff?.expandAll() == true ? nil : fileURL
                 }
+                observeSourceControlFile(selection)
                 return true
             }
 
@@ -791,17 +822,146 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 !Task.isCancelled && !app.isQuitting && openRequestGeneration == generation && folderURL == folder &&
                     isWanted() && app.documents.contains(where: { $0 === self })
             }
-            if let metadata { return await open(.preview(metadata, focusEditor: false), while: isCurrent) }
-            let contents = try await JJSourceControlRepository.file(file, in: change, workspace: workspace, at: operationID)
-            guard isCurrent() else { return false }
-            let preview = try await SourceControlRevisionPreview.prepare(contents, file: file, revision: change, at: url)
-            return await open(.sourceControlPreview(preview), while: isCurrent)
+            let destination: CloseDestination
+            if let metadata {
+                destination = .preview(metadata, focusEditor: false)
+            } else {
+                let contents = try await JJSourceControlRepository.file(file, in: change, workspace: workspace, at: operationID)
+                guard isCurrent() else { return false }
+                let preview = try await SourceControlRevisionPreview.prepare(contents, file: file, revision: change, at: url)
+                destination = .sourceControlPreview(preview)
+            }
+            guard await open(destination, while: isCurrent), isCurrent() else { return false }
+            observeSourceControlFile(selection)
+            return true
         } catch {
             if isWanted(), !app.isQuitting, !Task.isCancelled, canReplaceBuffer,
                app.documents.contains(where: { $0 === self }) {
                 await showError("Could Not Open “\(url.lastPathComponent)”", detail: error.localizedDescription)
             }
             return false
+        }
+    }
+
+    private func observeSourceControlFile(_ selection: SourceControlFile) {
+        clearSourceControlFile()
+        sourceControlFile = selection
+        sourceControlFileSubscription = app.jjChanges.subscribe(to: selection.workspace) { [weak self] contents in
+            guard let self, let state = contents?.repository else { return }
+            recordSourceControlCheckout(state)
+            scheduleSourceControlFileTransition()
+            fileRefresh.resume()
+        }
+    }
+
+    private func clearSourceControlFile() {
+        sourceControlFileTransition?.cancel()
+        sourceControlFileTransition = nil
+        app.jjChanges.unsubscribe(sourceControlFileSubscription)
+        sourceControlFileSubscription = nil
+        sourceControlCheckout = nil
+        lastLiveSourceControlCheckout = nil
+        sourceControlFile = nil
+    }
+
+    private func recordSourceControlCheckout(_ state: JJRepositoryState) {
+        guard let sourceControlFile, sourceControlFile.workspace == state.workspace else { return }
+        sourceControlCheckout = state
+        if sourceControlFile.ownsWorkingCopy(state) { lastLiveSourceControlCheckout = state }
+    }
+
+    private var sourceControlFileNeedsTransition: Bool {
+        guard let sourceControlFile, let sourceControlCheckout else { return false }
+        let shouldBeLive = sourceControlFile.ownsWorkingCopy(sourceControlCheckout) &&
+            sourceControlCheckout.changes[sourceControlFile.file.path]?.status != .removed
+        return shouldBeLive != (sourceControlRevision == nil)
+    }
+
+    private func validateSourceControlDiskOwner() async -> Bool {
+        guard let selection = sourceControlFile else { return true }
+        guard let head = try? await JJRepository.operation(in: selection.workspace), selection == sourceControlFile else {
+            return false
+        }
+        if sourceControlCheckout?.operationID != head {
+            // A disk event can arrive before the workspace watcher publishes the checkout.
+            guard let state = try? await JJRepository.read(selection.workspace, at: head),
+                  (try? await JJRepository.operation(in: selection.workspace)) == head,
+                  selection == sourceControlFile else { return false }
+            recordSourceControlCheckout(state)
+            scheduleSourceControlFileTransition()
+        }
+        return !sourceControlFileNeedsTransition
+    }
+
+    private func scheduleSourceControlFileTransition() {
+        guard canReplaceBuffer, !app.isQuitting, !window.isDocumentEdited, !autosave.hasWorker,
+              !editor.hasMarkedText(), sourceControlFileNeedsTransition, sourceControlFileTransition == nil else { return }
+        sourceControlFileTransition = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled, let state = sourceControlCheckout, sourceControlFileNeedsTransition {
+                await transitionSourceControlFile(discard: false, duringMutation: false)
+                // A newer observation during the load gets a fresh attempt.
+                if sourceControlCheckout?.operationID == state.operationID { break }
+            }
+            if !Task.isCancelled { sourceControlFileTransition = nil }
+        }
+    }
+
+    private func transitionSourceControlFile(discard: Bool, duringMutation: Bool) async {
+        guard let selection = sourceControlFile, let state = sourceControlCheckout, sourceControlFileNeedsTransition else { return }
+        let generation = openRequestGeneration
+        func isCurrent() -> Bool {
+            !Task.isCancelled && !app.isQuitting && sourceControlCheckout?.operationID == state.operationID &&
+                sourceControlFile == selection && openRequestGeneration == generation &&
+                (duringMutation || (canReplaceBuffer && !autosave.hasWorker && !editor.hasMarkedText())) &&
+                (discard || !window.isDocumentEdited)
+        }
+        guard isCurrent() else { return }
+
+        do {
+            let preview: SourceControlRevisionPreview?
+            let live: OpenedFile?
+            if selection.ownsWorkingCopy(state) && state.changes[selection.file.path]?.status != .removed {
+                let opened = try await Edit.readForOpening(selection.url, within: selection.workspace.root)
+                // A sparse or missing path has no writable working-copy representation.
+                guard opened.identity != nil else { return }
+                live = opened
+                preview = nil
+            } else {
+                let (file, revision, contents) = try await JJSourceControlRepository.departedFile(
+                    selection.file, from: selection.revision, lastCommitID: lastLiveSourceControlCheckout?.commitID ?? selection.revision.id,
+                    lastOperationID: lastLiveSourceControlCheckout?.operationID ?? selection.operationID,
+                    in: selection.workspace, at: state.operationID
+                )
+                preview = try await SourceControlRevisionPreview.prepare(contents, file: file, revision: revision, at: selection.url)
+                live = nil
+            }
+            guard isCurrent(), try await JJRepository.operation(in: selection.workspace) == state.operationID,
+                  isCurrent() else { return }
+            let position = hasTextDocument ? editor.capturePosition() : nil
+            let wasFocused = contentHasFocus
+            PanelLayout.withoutAnimation {
+                autosave.reset()
+                if let preview {
+                    loadSourceControlRevision(preview)
+                } else if let live {
+                    switch live {
+                    case .text(let file):
+                        installBuffer(file)
+                        pendingSourceControlDiffFile = file.url
+                        activity.restoreEditabilityAfterMutation()
+                        editor.isEditable = !duringMutation
+                    case .preview(let details):
+                        removeSourceControlRevision()
+                        installFilePreview(details, revealInWorktree: false)
+                    }
+                }
+                if wasFocused { focusContent() }
+                window.layoutIfNeeded()
+                if hasTextDocument { restoreEditorPosition(position) }
+            }
+        } catch {
+            // Keep the current buffer if a concurrently rewritten revision cannot supply a replacement.
         }
     }
 
@@ -857,6 +1017,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func loadEmptyFolder() {
+        clearSourceControlFile()
         removeSourceControlRevision()
         removeFilePreview()
         if !showsEmptyFolder {
@@ -879,6 +1040,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func resetDocument() {
+        clearSourceControlFile()
         fileURL = nil
         manualSyntaxLanguage = nil
         fileIdentity = nil
@@ -909,6 +1071,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func restoreDraft(_ record: SessionDocument, text: String, identity: FileIdentity? = nil, scratch: ScratchFile? = nil) {
+        clearSourceControlFile()
         removeSourceControlRevision()
         fileRefresh.stop()
         fileURL = record.path.map { URL(fileURLWithPath: $0) }
@@ -1093,8 +1256,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func adoptSavedFile(_ file: FileBuffer, scratch: ScratchFile? = nil) {
         let changedPath = fileURL != file.url
-        if changedPath { discardDraftCheckpoint() }
-        if changedPath { rememberFilePosition() }
+        if changedPath {
+            clearSourceControlFile()
+            discardDraftCheckpoint()
+            rememberFilePosition()
+        }
         let previousLanguage = resolvedSyntaxLanguage
         updateIdentity(from: file)
         if let scratch {
@@ -1113,15 +1279,17 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     var canScheduleAutosave: Bool {
-        fileURL != nil && !app.isQuitting && (window.isDocumentEdited || autosave.hasWorker || activity.isSaving)
+        fileURL != nil && !app.isQuitting && !sourceControlFileNeedsTransition &&
+            (window.isDocumentEdited || autosave.hasWorker || activity.isSaving)
     }
 
-    var canRunAutosave: Bool { !isBusy && !app.isQuitting }
+    var canRunAutosave: Bool { !isBusy && !app.isQuitting && !sourceControlFileNeedsTransition }
 
     func requestAutosave() { autosave.request() }
 
     func autosaveDidFinish() {
         fileRefresh.resume()
+        scheduleSourceControlFileTransition()
         reportAutosaveFailure()
     }
 
@@ -1130,6 +1298,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func writeAutosave(_ text: String) async throws {
         guard let target = fileURL, let revision, savedText?.isEqual(to: text) != true else { return }
+        guard await validateSourceControlDiskOwner(), target == fileURL else { throw FileBufferError.changedOnDisk }
         guard app.reserveSave(to: target, identity: fileIdentity, for: self) else {
             throw DocumentAutosave.WriteError.inUse
         }
@@ -1139,7 +1308,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func worktreeMutationAffects(_ sources: [URL]) -> Bool {
         sources.contains { source in
-            [displayedFileURL, folderURL].compactMap { $0 }.contains { Self.worktreePathSuffix(from: source, to: $0) != nil }
+            [displayedFileURL ?? sourceControlFile?.url, folderURL].compactMap { $0 }.contains {
+                Self.worktreePathSuffix(from: source, to: $0) != nil
+            }
         }
     }
 
@@ -1160,6 +1331,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         autosave.resume()
         if !autosave.hasWorker { autosave.scheduleIdle() }
         fileRefresh.resume()
+        scheduleSourceControlFileTransition()
     }
 
     @discardableResult
@@ -1168,7 +1340,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     ) async throws -> Bool {
         let paths = files ?? [workspace.root]
         let affected = app.documents.filter { document in
-            guard let file = document.fileURL else { return false }
+            guard let file = document.fileURL ?? (document.sourceControlFile?.workspace == workspace
+                ? document.sourceControlFile?.url : nil) else { return false }
             return paths.contains { path in
                 guard let suffix = Self.worktreePathSuffix(from: path, to: file) else { return false }
                 return files == nil || suffix.isEmpty
@@ -1206,8 +1379,23 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 for document in affected { await document.refreshAfterSourceControlMutation(discard: false) }
                 throw error
             }
+            let checkout: JJRepositoryState?
+            if affected.contains(where: { $0.sourceControlFile?.workspace == workspace }),
+               let head = try? await JJRepository.operation(in: workspace) {
+                checkout = try? await JJRepository.read(workspace, at: head)
+            } else {
+                checkout = nil
+            }
             for document in affected {
-                await document.refreshAfterSourceControlMutation(discard: discarded.contains(ObjectIdentifier(document)))
+                let discard = discarded.contains(ObjectIdentifier(document))
+                if let checkout, document.sourceControlFile?.workspace == workspace {
+                    document.recordSourceControlCheckout(checkout)
+                    if document.sourceControlFileNeedsTransition {
+                        await document.transitionSourceControlFile(discard: discard, duringMutation: true)
+                        continue
+                    }
+                }
+                await document.refreshAfterSourceControlMutation(discard: discard)
             }
             return true
         }
@@ -1254,6 +1442,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         guard let original = displayedFileURL, let suffix = Self.worktreePathSuffix(from: source, to: original) else { return }
         let movedFile = suffix.isEmpty ? destination : destination.appending(path: suffix, directoryHint: .notDirectory)
         let movedURL = URL(filePath: movedFile.path, directoryHint: .notDirectory)
+        clearSourceControlFile()
         if let filePreview {
             let wasFocused = contentHasFocus
             loadPreview(OpenFilePreview(url: movedURL, identity: FileIdentity.at(movedURL),
@@ -1426,6 +1615,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             if folderURL != previousFolder { sidebar.folderChanged() }
             autosave.resume()
             fileRefresh.resume()
+            scheduleSourceControlFileTransition()
         }
 
         await flushAutosave()
@@ -1509,6 +1699,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         case .sourceControlPreview(let preview):
             let restoreFocus = contentHasFocus
             rememberFilePosition()
+            clearSourceControlFile()
             loadSourceControlRevision(preview)
             if restoreFocus { focusContent() }
         case .emptyFolder(let focus, let folder):
@@ -1617,6 +1808,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         fileRefresh.stop()
         closeTerminalSessions()
         jjDocumentChanges?.stop()
+        clearSourceControlFile()
         rememberFilePosition()
         editor.exitFocus(notify: false)
         filePreviewView?.stop()
@@ -1740,7 +1932,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         let isEdited = savedText.map { !(editor.textStorage?.mutableString.isEqual($0) ?? false) } ?? true
         if isEdited != window.isDocumentEdited {
             window.isDocumentEdited = isEdited
-            if !isEdited { fileRefresh.resume() }
+            if !isEdited {
+                fileRefresh.resume()
+                scheduleSourceControlFileTransition()
+            }
         }
     }
 

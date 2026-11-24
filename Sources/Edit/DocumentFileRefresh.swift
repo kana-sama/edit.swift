@@ -3,6 +3,7 @@ import Foundation
 @MainActor
 final class DocumentFileRefresh {
     private let canRefresh: () -> Bool
+    private let validateDiskOwner: () async -> Bool
     private let apply: (FileBuffer) -> Void
     private var url: URL?
     private var stamp: FileBuffer.DiskStamp?
@@ -10,8 +11,10 @@ final class DocumentFileRefresh {
     private var worker: Task<Void, Never>?
     private var pending = false
 
-    init(canRefresh: @escaping () -> Bool, apply: @escaping (FileBuffer) -> Void) {
+    init(canRefresh: @escaping () -> Bool, validateDiskOwner: @escaping () async -> Bool,
+         apply: @escaping (FileBuffer) -> Void) {
         self.canRefresh = canRefresh
+        self.validateDiskOwner = validateDiskOwner
         self.apply = apply
     }
 
@@ -60,7 +63,16 @@ final class DocumentFileRefresh {
                 }
                 // A write or a newer notification during the read invalidates its result.
                 if self.stamp != stamp { pending = true }
-                if !pending, let file, file.url == url { apply(file) }
+                if !pending, let file, file.url == url {
+                    let sameOwner = await validateDiskOwner()
+                    guard !Task.isCancelled else { return }
+                    guard sameOwner, canRefresh() else {
+                        pending = true
+                        break
+                    }
+                    if self.stamp != stamp { pending = true }
+                    if !pending { apply(file) }
+                }
             }
             if !Task.isCancelled { worker = nil }
         }

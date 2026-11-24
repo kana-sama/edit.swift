@@ -40,7 +40,6 @@ final class SourceControlGraphView: NSObject, NSTableViewDataSource, NSTableView
         view.hasVerticalScroller = true
         view.autohidesScrollers = true
         view.documentView = table
-        view.contentInsets.bottom = 10
     }
 
     func install(_ revisions: [JJSourceControlRevision], selected: String?) {
@@ -173,30 +172,51 @@ private struct SourceControlGraphRow {
 private final class SourceControlGraphCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("SourceControlRevision")
     private let subject = NSTextField(labelWithString: "")
+    private let bookmark = NSImageView()
+    private let bookmarkCount = NSTextField(labelWithString: "")
     private let metadata = SourceControlRevisionIdentity()
     private let graph = SourceControlGraphGutter()
     private var graphWidth: NSLayoutConstraint!
+    private var bookmarkWidth: NSLayoutConstraint!
+    private var bookmarkGap: NSLayoutConstraint!
+    private var bookmarkCountGap: NSLayoutConstraint!
+    private var hiddenBookmarkCountWidth: NSLayoutConstraint!
     private var revision: JJSourceControlRevision?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         identifier = Self.identifier
         subject.font = .systemFont(ofSize: 12, weight: .medium)
-        subject.maximumNumberOfLines = 1
-        subject.cell?.usesSingleLineMode = true
-        subject.lineBreakMode = .byTruncatingTail
-        for view in [graph, subject, metadata] {
+        subject.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        bookmark.identifier = NSUserInterfaceItemIdentifier("JujutsuRevisionBookmarks")
+        bookmark.image = NSImage(systemSymbolName: "bookmark.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+        bookmark.imageScaling = .scaleProportionallyDown
+        bookmarkCount.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+        for label in [subject, bookmarkCount] {
+            label.maximumNumberOfLines = 1
+            label.cell?.usesSingleLineMode = true
+            label.lineBreakMode = .byTruncatingTail
+        }
+        for view in [graph, subject, bookmark, bookmarkCount, metadata] {
             addSubview(view)
             view.translatesAutoresizingMaskIntoConstraints = false
         }
         graphWidth = graph.widthAnchor.constraint(equalToConstant: 28)
+        bookmarkWidth = bookmark.widthAnchor.constraint(equalToConstant: 0)
+        bookmarkGap = bookmark.leadingAnchor.constraint(equalTo: subject.trailingAnchor)
+        bookmarkCountGap = bookmarkCount.leadingAnchor.constraint(equalTo: bookmark.trailingAnchor)
+        hiddenBookmarkCountWidth = bookmarkCount.widthAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             graph.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6), graph.topAnchor.constraint(equalTo: topAnchor),
             graph.bottomAnchor.constraint(equalTo: bottomAnchor), graphWidth,
             subject.leadingAnchor.constraint(equalTo: graph.trailingAnchor, constant: 4),
-            subject.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             subject.bottomAnchor.constraint(equalTo: centerYAnchor, constant: -1), subject.heightAnchor.constraint(equalToConstant: 15),
-            metadata.leadingAnchor.constraint(equalTo: subject.leadingAnchor), metadata.trailingAnchor.constraint(equalTo: subject.trailingAnchor),
+            bookmarkGap, bookmarkWidth, bookmark.heightAnchor.constraint(equalToConstant: 13),
+            bookmark.centerYAnchor.constraint(equalTo: subject.centerYAnchor),
+            bookmarkCountGap, hiddenBookmarkCountWidth, bookmarkCount.centerYAnchor.constraint(equalTo: subject.centerYAnchor),
+            bookmarkCount.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            metadata.leadingAnchor.constraint(equalTo: subject.leadingAnchor), metadata.trailingAnchor.constraint(equalTo: bookmarkCount.trailingAnchor),
             metadata.topAnchor.constraint(equalTo: centerYAnchor, constant: 1), metadata.heightAnchor.constraint(equalToConstant: 14)
         ])
     }
@@ -206,7 +226,19 @@ private final class SourceControlGraphCell: NSTableCellView {
     func setRevision(_ revision: JJSourceControlRevision, path: SourceControlGraphRow, laneCount: Int) {
         self.revision = revision
         subject.stringValue = revision.subject
-        toolTip = revision.description.isEmpty ? revision.subject : revision.description
+        let description = revision.description.isEmpty ? revision.subject : revision.description
+        let bookmarks = revision.bookmarks
+        let bookmarkNames = bookmarks.isEmpty ? nil : "Bookmarks: \(bookmarks.joined(separator: ", "))"
+        let showsCount = bookmarks.count > 1
+        bookmark.isHidden = bookmarks.isEmpty
+        bookmarkWidth.constant = bookmarks.isEmpty ? 0 : 12
+        bookmarkGap.constant = bookmarks.isEmpty ? 0 : 5
+        bookmark.toolTip = bookmarkNames
+        bookmarkCount.isHidden = !showsCount
+        bookmarkCount.stringValue = showsCount ? String(bookmarks.count) : ""
+        bookmarkCount.toolTip = bookmarkNames
+        bookmarkCountGap.constant = showsCount ? 1 : 0
+        hiddenBookmarkCountWidth.isActive = !showsCount
         graphWidth.constant = min(72, 17 + CGFloat(laneCount) * 9)
         graph.row = path
         graph.laneCount = laneCount
@@ -215,7 +247,8 @@ private final class SourceControlGraphCell: NSTableCellView {
         graph.isConflicted = revision.isConflicted
         metadata.update(revision)
         updateColors()
-        setAccessibilityLabel([revision.subject, metadata.accessibilityLabel() ?? ""].joined(separator: ", "))
+        setAccessibilityLabel([revision.subject, metadata.accessibilityLabel(), bookmarkNames].compactMap { $0 }.joined(separator: ", "))
+        toolTip = [description, metadata.toolTip, bookmarkNames].compactMap { $0 }.joined(separator: "\n")
     }
 
     override var backgroundStyle: NSView.BackgroundStyle {
@@ -225,7 +258,10 @@ private final class SourceControlGraphCell: NSTableCellView {
     private func updateColors() {
         guard revision != nil else { return }
         let emphasized = backgroundStyle == .emphasized
+        let bookmarkColor = emphasized ? NSColor.alternateSelectedControlTextColor : .controlAccentColor
         subject.textColor = emphasized ? .alternateSelectedControlTextColor : .labelColor
+        bookmark.contentTintColor = bookmarkColor
+        bookmarkCount.textColor = bookmarkColor
         metadata.setEmphasized(emphasized)
         graph.emphasized = emphasized
         graph.needsDisplay = true

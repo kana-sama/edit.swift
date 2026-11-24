@@ -20,6 +20,7 @@ struct JJRepositoryState: Equatable, Sendable {
     let workspace: JJWorkspace
     let operationID: String
     let commitID: String
+    let changeID: String
     let changes: [String: JJChange]
     let conflicts: Set<String>
 
@@ -63,11 +64,22 @@ enum JJRepository {
 
     private actor Writes {
         var active: Set<URL> = []
+        private var editableImmutableChanges: [JJWorkspace: String] = [:]
 
         func run<T: Sendable>(in repository: URL, _ operation: @Sendable () async throws -> T) async throws -> T {
             guard active.insert(repository).inserted else { throw Failure.busy }
             defer { active.remove(repository) }
             return try await operation()
+        }
+
+        func authorizeSnapshots(of changeID: String?, in workspace: JJWorkspace) {
+            editableImmutableChanges[workspace] = changeID
+        }
+
+        func maySnapshotImmutable(_ changeID: String, in workspace: JJWorkspace) -> Bool {
+            if editableImmutableChanges[workspace] == changeID { return true }
+            editableImmutableChanges[workspace] = nil
+            return false
         }
     }
 
@@ -104,14 +116,15 @@ enum JJRepository {
         // conflicted_files() includes inherited conflicts without scanning or emitting the whole tree.
         let context = try await readCommand(
             ["log", "--no-graph", "-r", "@", "-T",
-             #"commit_id ++ "\0" ++ config("working-copy.eol-conversion").as_string() ++ "\0" ++ conflicted_files.map(|entry| entry.path() ++ "\0").join("")"#],
+             #"commit_id ++ "\0" ++ change_id ++ "\0" ++ config("working-copy.eol-conversion").as_string() ++ "\0" ++ conflicted_files.map(|entry| entry.path() ++ "\0").join("")"#],
             in: workspace, at: operationID
         )
         let fields = try records(in: context, width: 1).map { $0[0] }
-        guard fields.count >= 2, isHexID(fields[0]),
-              fields.dropFirst(2).allSatisfy(isRelativePath) else { throw Failure.invalidResponse }
+        guard fields.count >= 3, isHexID(fields[0]), !fields[1].isEmpty,
+              fields[1].utf8.allSatisfy({ (107...122).contains($0) }),
+              fields.dropFirst(3).allSatisfy(isRelativePath) else { throw Failure.invalidResponse }
         let commitID = fields[0]
-        let normalizesCRLF = fields[1] == "input" || fields[1] == "input-output"
+        let normalizesCRLF = fields[2] == "input" || fields[2] == "input-output"
         async let diff = readCommand(
             ["diff", "-r", "@", "-T", template([
                 "status", "path", "source.path()", kind("source"), kind("target"),
@@ -143,8 +156,8 @@ enum JJRepository {
             entries[path] = JJChangedEntry(source: source, target: target)
         }
 
-        return JJRepositoryState(workspace: workspace, operationID: operationID, commitID: commitID,
-                                 changes: changes, conflicts: Set(fields.dropFirst(2)), entries: entries,
+        return JJRepositoryState(workspace: workspace, operationID: operationID, commitID: commitID, changeID: fields[1],
+                                 changes: changes, conflicts: Set(fields.dropFirst(3)), entries: entries,
                                  normalizesCRLF: normalizesCRLF)
     }
 
@@ -217,14 +230,25 @@ enum JJRepository {
         try await writes.run(in: workspace.repository, operation)
     }
 
+    static func authorizeImmutableSnapshots(of changeID: String?, in workspace: JJWorkspace) async {
+        await writes.authorizeSnapshots(of: changeID, in: workspace)
+    }
+
+    static func maySnapshotImmutable(_ changeID: String, in workspace: JJWorkspace) async -> Bool {
+        await writes.maySnapshotImmutable(changeID, in: workspace)
+    }
+
     static func snapshotWithWriteAccess(_ workspace: JJWorkspace) async throws {
         let head = try await operation(in: workspace)
-        let commit = try await workspaceCommit(in: workspace, at: head)
-        try await requireCurrentWorkingCopy(workspace, operationID: head, commitID: commit)
+        let checkout = try await workingCopy(in: workspace, at: head)
+        try await requireCurrentWorkingCopy(workspace, operationID: head, commitID: checkout.commitID)
         // Resolve the current head again inside jj. "@" rejects divergent heads before it can
         // reconcile them. With 0.46, this pin alone still permits the intended snapshot.
         // Finishing the write belongs to jj even if the last Edit window closes during it.
-        _ = try await command(["--at-op=@", "util", "snapshot"], in: workspace, timeout: nil)
+        let override = await maySnapshotImmutable(checkout.changeID, in: workspace)
+        if override, try await operation(in: workspace) != head { throw Failure.busy }
+        let flags = override ? ["--ignore-immutable"] : []
+        _ = try await command(["--at-op=@"] + flags + ["util", "snapshot"], in: workspace, timeout: nil)
     }
 
     static func requireCurrentWorkingCopy(
@@ -235,7 +259,7 @@ enum JJRepository {
         let output = try await readCommand(["debug", "working-copy"], in: workspace, at: operationID)
         let localID = try workingCopyOperation(in: output)
         if localID != operationID {
-            guard try await workspaceCommit(in: workspace, at: localID) == commitID else {
+            guard try await workingCopy(in: workspace, at: localID).commitID == commitID else {
                 throw Failure.staleWorkspace
             }
         }
@@ -253,10 +277,14 @@ enum JJRepository {
         return id
     }
 
-    private static func workspaceCommit(in workspace: JJWorkspace, at operationID: String) async throws -> String {
-        let data = try await readCommand(["log", "--no-graph", "-r", "@", "-T", "commit_id"], in: workspace, at: operationID)
-        guard let id = String(data: data, encoding: .utf8), isHexID(id) else { throw Failure.invalidResponse }
-        return id
+    private static func workingCopy(in workspace: JJWorkspace, at operationID: String) async throws -> (commitID: String, changeID: String) {
+        let data = try await readCommand(
+            ["log", "--no-graph", "-r", "@", "-T", #"commit_id ++ "\0" ++ change_id"#],
+            in: workspace, at: operationID
+        )
+        guard let fields = String(data: data, encoding: .utf8)?.components(separatedBy: "\0"),
+              fields.count == 2, isHexID(fields[0]), !fields[1].isEmpty else { throw Failure.invalidResponse }
+        return (fields[0], fields[1])
     }
 
     private static func enclosingWorkspace(of directory: URL) -> JJWorkspace? {
