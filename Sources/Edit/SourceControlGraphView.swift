@@ -368,7 +368,8 @@ private final class SourceControlGraphCell: NSTableCellView {
         graphWidth.constant = 18 + CGFloat(path.rightmostLane) * graph.laneSpacing
         graph.row = path
         graph.isWorkingCopy = revision.isWorkingCopy
-        let newStatuses = SourceControlRevisionStatus.statuses(for: revision, conflictSymbol: "xmark")
+        let revisionStatuses = SourceControlRevisionStatus.statuses(for: revision)
+        let newStatuses = revisionStatuses.filter { $0.symbol != "at" }
         if statuses.map(\.symbol) != newStatuses.map(\.symbol) {
             for icon in statusIcons.arrangedSubviews {
                 statusIcons.removeArrangedSubview(icon)
@@ -389,7 +390,7 @@ private final class SourceControlGraphCell: NSTableCellView {
         countWidth.constant = bookmarkCount.isHidden ? 0 : ceil(bookmarkCount.intrinsicContentSize.width)
         countGap.constant = bookmarkCount.isHidden ? 0 : 4
         updateColors()
-        let labels = statuses.map(\.name) + [revision.subject, revision.author] + (bookmarkNames.map { [$0] } ?? [])
+        let labels = revisionStatuses.map(\.name) + [revision.subject, revision.author] + (bookmarkNames.map { [$0] } ?? [])
         setAccessibilityLabel(labels.filter { !$0.isEmpty }.joined(separator: ", "))
         setAccessibilityHelp(SourceControlRevisionCard.creationDates(for: revision).joined(separator: "\n"))
     }
@@ -404,7 +405,8 @@ private final class SourceControlGraphCell: NSTableCellView {
         let foreground: NSColor = emphasized ? .alternateSelectedControlTextColor : .labelColor
         let muted: NSColor = emphasized ? foreground.withAlphaComponent(0.78) : .secondaryLabelColor
         let text = NSMutableAttributedString(string: revision.subject, attributes: [
-            .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: foreground,
+            .font: NSFont.systemFont(ofSize: 12, weight: revision.isWorkingCopy ? .bold : .medium),
+            .foregroundColor: foreground,
         ])
         if !revision.author.isEmpty {
             text.append(NSAttributedString(string: "\u{2002}" + revision.author, attributes: [

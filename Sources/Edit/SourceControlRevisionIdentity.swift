@@ -7,20 +7,21 @@ struct SourceControlRevisionStatus {
     let name: String
     let color: NSColor
 
-    static func statuses(for revision: JJSourceControlRevision,
-                         conflictSymbol: String = "exclamationmark.diamond.fill") -> [Self] {
+    static func statuses(for revision: JJSourceControlRevision) -> [Self] {
         var statuses: [Self] = []
         if revision.isWorkingCopy { statuses.append(.init(symbol: "at", name: "Working copy", color: .controlAccentColor)) }
         if revision.isImmutable { statuses.append(.init(symbol: "lock.fill", name: "Immutable", color: .systemTeal)) }
-        if revision.isConflicted { statuses.append(.init(symbol: conflictSymbol, name: "Conflict", color: .systemPurple)) }
+        if revision.isConflicted { statuses.append(.init(symbol: "xmark.circle.fill", name: "Conflict", color: .systemPurple)) }
         if revision.isDivergent { statuses.append(.init(symbol: "arrow.triangle.branch", name: "Divergent", color: .systemOrange)) }
         return statuses
     }
 
     func makeIcon() -> NSImageView {
+        let isConflict = symbol == "xmark.circle.fill"
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold)) ?? NSImage()
+            .withSymbolConfiguration(.init(pointSize: isConflict ? 13 : 10, weight: isConflict ? .bold : .semibold)) ?? NSImage()
         let icon = NSImageView(image: image)
+        if isConflict { icon.identifier = .init("JujutsuConflictIcon") }
         icon.imageScaling = .scaleProportionallyDown
         icon.widthAnchor.constraint(equalToConstant: Self.iconWidth).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 13).isActive = true
@@ -37,6 +38,7 @@ final class SourceControlRevisionIdentity: NSView {
     private let bookmarks = NSTextField(labelWithString: "")
     private var icons: [(NSImageView, NSColor)] = []
     private var shownStatuses: [SourceControlRevisionStatus] = []
+    private var symbolWidth: NSLayoutConstraint!
     private var statusGap: NSLayoutConstraint!
     private var authorGap: NSLayoutConstraint!
     private var bookmarkGap: NSLayoutConstraint!
@@ -67,6 +69,7 @@ final class SourceControlRevisionIdentity: NSView {
             addSubview(child)
         }
         statusGap = changeID.leadingAnchor.constraint(equalTo: symbols.trailingAnchor)
+        symbolWidth = symbols.widthAnchor.constraint(equalToConstant: 0)
         authorGap = author.leadingAnchor.constraint(equalTo: changeID.trailingAnchor)
         authorGap.priority = .defaultHigh
         bookmarkGap = bookmarks.leadingAnchor.constraint(equalTo: author.trailingAnchor)
@@ -74,7 +77,7 @@ final class SourceControlRevisionIdentity: NSView {
         bookmarkMinimumWidth = bookmarks.widthAnchor.constraint(greaterThanOrEqualToConstant: 0)
         bookmarkMinimumWidth.priority = .init(rawValue: 500)
         NSLayoutConstraint.activate([
-            symbols.leadingAnchor.constraint(equalTo: leadingAnchor), symbols.centerYAnchor.constraint(equalTo: centerYAnchor),
+            symbols.leadingAnchor.constraint(equalTo: leadingAnchor), symbols.centerYAnchor.constraint(equalTo: centerYAnchor), symbolWidth,
             statusGap, changeID.centerYAnchor.constraint(equalTo: centerYAnchor),
             changeID.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
             authorGap, author.leadingAnchor.constraint(greaterThanOrEqualTo: changeID.trailingAnchor),
@@ -93,10 +96,9 @@ final class SourceControlRevisionIdentity: NSView {
     }
 
     override var intrinsicContentSize: NSSize {
-        let statusWidth = CGFloat(icons.count) * SourceControlRevisionStatus.iconWidth + CGFloat(max(0, icons.count - 1)) * symbols.spacing
         let authorWidth = author.isHidden ? 0 : Self.textSpacing + author.intrinsicContentSize.width
         let bookmarkWidth = bookmarks.isHidden ? 0 : Self.textSpacing + bookmarks.intrinsicContentSize.width
-        let width = statusWidth + statusGap.constant + changeID.intrinsicContentSize.width + authorWidth + bookmarkWidth
+        let width = symbolWidth.constant + statusGap.constant + changeID.intrinsicContentSize.width + authorWidth + bookmarkWidth
         return NSSize(width: ceil(width), height: 14)
     }
 
@@ -114,6 +116,8 @@ final class SourceControlRevisionIdentity: NSView {
                 return (icon, status.color)
             }
             shownStatuses = visibleStatuses
+            symbolWidth.constant = CGFloat(icons.count) * SourceControlRevisionStatus.iconWidth
+                + CGFloat(max(0, icons.count - 1)) * symbols.spacing
             statusGap.constant = visibleStatuses.isEmpty ? 0 : 4
         }
         changeID.stringValue = revision.shortID

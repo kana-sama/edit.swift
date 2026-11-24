@@ -367,7 +367,7 @@ final class SourceControlSidebar: NSObject {
         PanelLayout.withoutAnimation {
             detailTitle.title = revision?.subject ?? "Select a change"
             detailTitle.toolTip = revision.map { $0.isImmutable ? "View change description" : "Edit change description" }
-            if let revision { detailMetadata.update(revision, showsAuthor: false) }
+            if let revision { detailMetadata.update(revision, showsAuthor: false, showsAllStatuses: true) }
             detailMetadata.isHidden = revision == nil
             renderFiles()
         }
