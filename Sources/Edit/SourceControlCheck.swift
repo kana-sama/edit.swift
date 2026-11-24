@@ -26,7 +26,9 @@ enum SourceControlCheck {
         let historical = original.replacingOccurrences(of: "Line 8\n", with: "Historical line\n")
         try historical.write(to: file, atomically: true, encoding: .utf8)
         try Data([3, 2, 35, 7, 0, 255, 0, 0]).write(to: binary)
-        try await command(executable, folder, ["new", "-m", "Working change\n\n" + String(repeating: "A long description stays in the popover.\n", count: 12)])
+        let description = "Working change\n\nA long description starts with [Guide](https://example.com/guide) and https://example.com/plain.\n"
+            + String(repeating: "A long description stays in the popover.\n", count: 11)
+        try await command(executable, folder, ["new", "-m", description])
         try await command(executable, folder, ["bookmark", "create", "review/jj-sidebar-layout-with-a-long-bookmark", "-r", "@"])
         try await command(executable, folder, ["new", "--no-edit", "-m", "Side branch", "@--"])
         let working = historical.replacingOccurrences(of: "Line 3\n", with: "Working line 3\n")
@@ -218,6 +220,41 @@ enum SourceControlCheck {
         app.focusJujutsu(nil)
         try expect(document.sidebarMode == .worktree, "ignore a direct focus command outside a workspace")
         try await checkImmutableActivation(executable: executable, workspace: workspace, changeID: history.changeID, file: file)
+        try await checkPublishedLinks(executable: executable, folder: fixture.appending(path: "Origin links"))
+    }
+
+    private static func checkPublishedLinks(executable: URL, folder: URL) async throws {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        try await command(executable, folder, ["git", "init", "--colocate"])
+        try await command(executable, folder, ["describe", "-m", "Published ancestor"])
+        try await command(executable, folder, ["new", "-m", "Published tip"])
+        try await command(executable, folder, ["new", "-m", "Local draft"])
+        guard let workspace = await JJRepository.discover(at: folder) else { throw Failure("open the origin fixture") }
+        let tip = try await JJSourceControlRepository.read(workspace, arguments: ["log", "--no-graph", "-r", "@-", "-T", "commit_id"])
+        let git = URL(filePath: "/usr/bin/git")
+        try await command(git, folder, ["remote", "add", "origin", "git@codeberg.org:edit/example.git"], usesJJOptions: false)
+        try await command(git, folder, ["update-ref", "refs/remotes/origin/main", tip], usesJJOptions: false)
+        try await command(executable, folder, ["git", "import"])
+        let graph = try await JJSourceControlRepository.graph(in: workspace, revset: "all()")
+        guard let ancestor = graph.revisions.first(where: { $0.subject == "Published ancestor" }),
+              let link = await JJSourceControlCommitLink.lookup(for: ancestor, in: workspace, at: graph.operationID) else {
+            throw Failure("link a commit in the known history of origin")
+        }
+        try expect(link.url.absoluteString == "https://codeberg.org/edit/example/commit/\(ancestor.id)",
+                   "open Codeberg by exact commit ID, including published ancestors")
+        let draftLink = await JJSourceControlCommitLink.lookup(for: graph.workingCopy, in: workspace, at: graph.operationID)
+        try expect(draftLink == nil, "leave local-only commits without a hosting button")
+        var opened: [URL] = []
+        let card = SourceControlRevisionCard(revision: ancestor) { opened.append($0) }
+        card.setCommitLink(link)
+        guard let button = button(in: card, where: { $0.identifier?.rawValue == "JujutsuRevisionCardOpenCommit" }) else {
+            throw Failure("find the hosting button in the card")
+        }
+        try expect(!button.isHidden && button.attributedTitle.string == "Open on Codeberg", "name the origin service on the button")
+        button.performClick(nil)
+        try expect(opened == [link.url], "dispatch the commit URL from the hosting button")
+        card.setCommitLink(nil)
+        try expect(button.isHidden, "hide the hosting button without a published commit")
     }
 
     private static func checkImmutableActivation(executable: URL, workspace: JJWorkspace, changeID: String, file: URL) async throws {
@@ -787,6 +824,7 @@ enum SourceControlCheck {
         window.makeFirstResponder(graph.table)
         graph.install(revisions, selected: revisions[historical].id)
         window.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(220))
 
         func pointer(at row: Int) throws -> NSEvent {
             let rect = graph.table.rect(ofRow: row)
@@ -808,14 +846,49 @@ enum SourceControlCheck {
         try expect(card() == nil, "wait for the pointer to settle on a graph row")
         try await waitFor("show the hovered revision card") { card()?.isVisible == true }
         guard let preview = card(), let content = preview.contentView else { throw Failure("find the native hover surface") }
-        try expect(!preview.canBecomeKey && preview.ignoresMouseEvents && window.firstResponder === graph.table &&
+        try expect(preview.canBecomeKey && !preview.isKeyWindow && preview.ignoresMouseEvents && window.firstResponder === graph.table &&
                    graph.table.selectedRow == historical,
                    "preview a different row without moving selection or keyboard focus")
-        try expect(label("Subject", in: content)?.stringValue == "Working change" &&
-                   label("Author", in: content)?.stringValue == revisions[working].author &&
+        guard let subject = descendant(of: content, where: { (view: NSTextView) in
+            view.identifier?.rawValue == "JujutsuRevisionCardSubject"
+        }), let description = descendant(of: content, where: { (view: NSTextView) in
+            view.identifier?.rawValue == "JujutsuRevisionCardDescription"
+        }) else { throw Failure("find the selectable title and description") }
+        let author = revisions[working]
+        try expect(subject.string == "Working change" &&
+                   label("Author", in: content)?.stringValue == "\(author.author) (\(author.authorEmail))" &&
                    label("Bookmarks", in: content)?.stringValue.contains("review/jj-sidebar-layout-with-a-long-bookmark") == true &&
-                   label("Description", in: content)?.stringValue.hasPrefix("A long description") == true,
+                   description.string.hasPrefix("A long description"),
                    "show the subject, author, full bookmark name, and body as distinct parts of the card")
+        try expect(description.isSelectable && !description.isEditable && description.needsPanelToBecomeKey,
+                   "allow text selection and keyboard copy without editing the description")
+        let guide = (description.string as NSString).range(of: "Guide")
+        guard guide.location != NSNotFound,
+              let link = description.textStorage?.attribute(.link, at: guide.location, effectiveRange: nil) as? URL else {
+            throw Failure("give the rendered Markdown link its destination")
+        }
+        let plain = (description.string as NSString).range(of: "https://example.com/plain")
+        try expect(link.absoluteString == "https://example.com/guide" && plain.location != NSNotFound &&
+                   (description.textStorage?.attribute(.link, at: plain.location, effectiveRange: nil) as? URL)?.absoluteString == "https://example.com/plain",
+                   "detect both Markdown and plain web links")
+
+        let anchor = window.convertToScreen(graph.table.convert(graph.table.rect(ofRow: working), to: nil))
+        let gap = NSPoint(x: (anchor.maxX + preview.frame.minX) / 2, y: (anchor.midY + preview.frame.midY) / 2)
+        try expect(SourceControlRevisionCorridor(anchor: anchor, card: preview.frame).contains(gap),
+                   "connect the row and the card across their gap")
+        graph.table.hoverPointerLeft?(gap)
+        try expect(card() === preview, "keep the card during pointer travel across the gap")
+        let inside = NSPoint(x: content.bounds.midX, y: content.bounds.midY)
+        guard let arrival = NSEvent.mouseEvent(with: .mouseMoved, location: content.convert(inside, to: nil),
+                                                modifierFlags: [], timestamp: 0, windowNumber: preview.windowNumber,
+                                                context: nil, eventNumber: 0, clickCount: 0, pressure: 0) else {
+            throw Failure("create a card entry event")
+        }
+        content.mouseEntered(with: arrival)
+        description.setSelectedRange(guide)
+        try await Task.sleep(for: .milliseconds(250))
+        try expect(card() === preview && description.selectedRange() == guide && graph.table.selectedRow == historical,
+                   "keep the card and text selection after crossing into the card")
         try expect(SourceControlRevisionCard.creationDates(for: revisions[historical]).count == 2 &&
                    SourceControlRevisionCard.creationDates(for: branch).count == 1,
                    "show both creation times only when they differ")
@@ -830,8 +903,8 @@ enum SourceControlCheck {
             guard let content = card()?.contentView, let dates = label("Dates", in: content)?.stringValue else { return false }
             return dates.contains("Change created ·") && dates.contains("Commit created ·")
         }
-        graph.table.mouseExited(with: try pointer(at: historical))
-        try expect(card() == nil, "dismiss the card on leaving its row")
+        graph.table.mouseExited(with: try pointer(at: working))
+        try await waitFor("dismiss the card after leaving the row and its corridor") { card() == nil }
         graph.table.mouseMoved(with: try pointer(at: working))
         window.simulatedKeyStatus = false
         try await Task.sleep(for: .milliseconds(500))
@@ -886,11 +959,11 @@ enum SourceControlCheck {
     }
 
     @concurrent
-    private static func command(_ executable: URL, _ folder: URL, _ arguments: [String]) async throws {
+    private static func command(_ executable: URL, _ folder: URL, _ arguments: [String], usesJJOptions: Bool = true) async throws {
         let process = Process()
         process.executableURL = executable
         process.currentDirectoryURL = folder
-        process.arguments = ["--no-pager", "--color=never"] + arguments
+        process.arguments = usesJJOptions ? ["--no-pager", "--color=never"] + arguments : arguments
         let output = Pipe()
         process.standardOutput = output
         process.standardError = output

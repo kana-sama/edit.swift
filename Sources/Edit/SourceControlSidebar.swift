@@ -287,7 +287,8 @@ final class SourceControlSidebar: NSObject {
                 rows.first { $0.id == graph.workingCopy.id } ?? rows.first
         }
         selection = next
-        graphView.install(rows, selected: next?.id)
+        let linkContext = workspace.map { SourceControlRevisionHover.LinkContext(workspace: $0, operationID: graph.operationID) }
+        graphView.install(rows, selected: next?.id, linkContext: linkContext)
         if rows.isEmpty { showGraphMessage("No matching changes") }
         else {
             showGraphMessage(nil)

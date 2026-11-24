@@ -8,6 +8,7 @@ final class SourceControlGraphView: NSObject, NSTableViewDataSource, NSTableView
     var onEdit: ((JJSourceControlRevision) -> Void)?
     var menu: ((JJSourceControlRevision) -> NSMenu?)?
     private let revisionHover = SourceControlRevisionHover()
+    private var linkContext: SourceControlRevisionHover.LinkContext?
 
     private(set) var revisions: [JJSourceControlRevision] = []
     private var paths: [SourceControlGraphRow] = []
@@ -35,11 +36,12 @@ final class SourceControlGraphView: NSObject, NSTableViewDataSource, NSTableView
         table.hoverRowChanged = { [weak self] row in
             guard let self else { return }
             if let row, revisions.indices.contains(row) {
-                revisionHover.track(revisions[row], row: row, in: table)
+                revisionHover.track(revisions[row], row: row, in: table, linkContext: linkContext)
             } else {
                 dismissRevisionCard()
             }
         }
+        table.hoverPointerLeft = { [weak self] point in self?.revisionHover.pointerLeft(at: point) }
         table.menuForRow = { [weak self] row in
             guard let self, revisions.indices.contains(row), table.isEnabled else { return nil }
             table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
@@ -51,10 +53,14 @@ final class SourceControlGraphView: NSObject, NSTableViewDataSource, NSTableView
         view.documentView = table
     }
 
-    func install(_ revisions: [JJSourceControlRevision], selected: String?) {
+    func install(_ revisions: [JJSourceControlRevision], selected: String?, linkContext: SourceControlRevisionHover.LinkContext? = nil) {
         if let row = revisionHover.row,
            !revisions.indices.contains(row) || self.revisions[row] != revisions[row] {
             dismissRevisionCard()
+        }
+        if self.linkContext != linkContext {
+            self.linkContext = linkContext
+            revisionHover.updateLinkContext(linkContext)
         }
         let top = table.rows(in: view.documentVisibleRect).location
         let oldAnchor = self.revisions.indices.contains(top) ? self.revisions[top].changeID : nil
@@ -148,6 +154,7 @@ final class SourceControlGraphView: NSObject, NSTableViewDataSource, NSTableView
 final class SourceControlGraphTable: NSTableView {
     var menuForRow: ((Int) -> NSMenu?)?
     var hoverRowChanged: ((Int?) -> Void)?
+    var hoverPointerLeft: ((NSPoint) -> Void)?
     private var hoverTrackingArea: NSTrackingArea?
 
     override var isEnabled: Bool {
@@ -165,7 +172,7 @@ final class SourceControlGraphTable: NSTableView {
 
     override func mouseEntered(with event: NSEvent) { updateHover(with: event) }
     override func mouseMoved(with event: NSEvent) { updateHover(with: event) }
-    override func mouseExited(with event: NSEvent) { hoverRowChanged?(nil) }
+    override func mouseExited(with event: NSEvent) { pointerLeft(with: event) }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if newWindow !== window { hoverRowChanged?(nil) }
@@ -176,10 +183,14 @@ final class SourceControlGraphTable: NSTableView {
         let point = convert(event.locationInWindow, from: nil)
         let row = row(at: point)
         guard isEnabled, visibleRect.contains(point), row >= 0 else {
-            hoverRowChanged?(nil)
+            pointerLeft(with: event)
             return
         }
         hoverRowChanged?(row)
+    }
+
+    private func pointerLeft(with event: NSEvent) {
+        if let window { hoverPointerLeft?(window.convertPoint(toScreen: event.locationInWindow)) }
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {

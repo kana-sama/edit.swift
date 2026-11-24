@@ -66,6 +66,11 @@ final class SourceControlRevisionIdentity: NSView {
 
     required init?(coder: NSCoder) { fatalError("Change identifiers are created in code.") }
 
+    var isChangeIDSelectable: Bool {
+        get { changeID.isSelectable }
+        set { changeID.isSelectable = newValue }
+    }
+
     override var intrinsicContentSize: NSSize {
         let statusWidth = CGFloat(icons.count) * Self.iconWidth + CGFloat(max(0, icons.count - 1)) * symbols.spacing
         let authorWidth = author.isHidden ? 0 : Self.textSpacing + author.intrinsicContentSize.width
@@ -74,13 +79,13 @@ final class SourceControlRevisionIdentity: NSView {
         return NSSize(width: ceil(width), height: 14)
     }
 
-    func update(_ revision: JJSourceControlRevision, showsAuthor: Bool = true) {
+    func update(_ revision: JJSourceControlRevision, showsAuthor: Bool = true, showsAllStatuses: Bool = false) {
         var statuses: [Status] = []
         if revision.isWorkingCopy { statuses.append(.init(symbol: "at", name: "Working copy", color: .controlAccentColor)) }
         if revision.isImmutable { statuses.append(.init(symbol: "lock.fill", name: "Immutable", color: .systemTeal)) }
         if revision.isConflicted { statuses.append(.init(symbol: "exclamationmark.diamond.fill", name: "Conflict", color: .systemPurple)) }
         if revision.isDivergent { statuses.append(.init(symbol: "arrow.triangle.branch", name: "Divergent", color: .systemOrange)) }
-        let visibleStatuses = showsAuthor ? statuses : Array(statuses.prefix(2))
+        let visibleStatuses = showsAuthor || showsAllStatuses ? statuses : Array(statuses.prefix(2))
         if shownStatuses.map(\.symbol) != visibleStatuses.map(\.symbol) {
             for (icon, _) in icons {
                 symbols.removeArrangedSubview(icon)

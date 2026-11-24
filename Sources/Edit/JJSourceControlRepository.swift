@@ -12,6 +12,7 @@ struct JJSourceControlRevision: Identifiable, Equatable, Sendable {
     let shortID: String
     let description: String
     let author: String
+    let authorEmail: String
     let authorDate: Date
     let committerDate: Date
     let parents: [String]
@@ -133,6 +134,7 @@ enum JJSourceControlRepository {
         "json(if(author.name(), author.name(), author.email()))",
         #"author.timestamp().utc().format("%Y-%m-%dT%H:%M:%S%.3fZ")"#,
         #"committer.timestamp().utc().format("%Y-%m-%dT%H:%M:%S%.3fZ")"#,
+        "json(author.email())",
     ])
     private static let parentFields = JJRepository.template(["commit_id", #"parents.map(|c| c.commit_id()).join(",")"#])
     private static let previewLimit = 32 * 1024 * 1024
@@ -350,7 +352,7 @@ enum JJSourceControlRepository {
             ["log", "--no-graph", "--limit=\(limit)", "-T", revisionFields] + arguments, in: workspace, at: operationID
         )
         let timestampFormat = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
-        return try JJRepository.records(in: bytes, width: 14).map { row in
+        return try JJRepository.records(in: bytes, width: 15).map { row in
             let parents = row[4].split(separator: ",").map(String.init)
             guard JJRepository.isHexID(row[0]), isChangeID(row[1]), !row[2].isEmpty,
                   parents.allSatisfy(JJRepository.isHexID),
@@ -364,6 +366,7 @@ enum JJSourceControlRepository {
                 id: row[0], changeID: row[1], shortID: row[2],
                 description: decoder.decode(String.self, from: Data(row[3].utf8)),
                 author: decoder.decode(String.self, from: Data(row[11].utf8)),
+                authorEmail: decoder.decode(String.self, from: Data(row[14].utf8)),
                 authorDate: authorDate, committerDate: committerDate, parents: parents,
                 bookmarks: decoder.decode([String].self, from: Data(row[5].utf8)),
                 localBookmarks: decoder.decode([String].self, from: Data(row[6].utf8)),
