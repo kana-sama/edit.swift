@@ -4,9 +4,6 @@ import PackageDescription
 
 let agentChecks = ProcessInfo.processInfo.environment["EDIT_AGENT_BUILD"] == "1"
 let editorTarget = agentChecks ? "EditAgent" : "Edit"
-let editorSources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "Sources/Edit")
-let checkSources = try FileManager.default.contentsOfDirectory(atPath: editorSources.path)
-    .filter { $0.hasSuffix("Check.swift") }.sorted()
 
 let package = Package(
     name: "Edit",
@@ -20,7 +17,7 @@ let package = Package(
             name: editorTarget,
             dependencies: ["EditSyntaxABI", .product(name: "SwiftTerm", package: "SwiftTerm")],
             path: "Sources/Edit",
-            exclude: agentChecks ? [] : checkSources,
+            exclude: agentChecks ? [] : ["Checks"],
             resources: [.copy("Resources/Seti")],
             swiftSettings: agentChecks ? [.define("EDIT_AGENT_CHECKS")] : []
         ),

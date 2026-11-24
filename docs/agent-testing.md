@@ -11,7 +11,7 @@ Read this before building or launching for agent checks or changing the build an
 
 SwiftPM builds and links the Edit executable and the pinned SwiftTerm dependency. The build script packages the resulting product and resources in the signed application bundle. The pinned Tree-sitter runtime and grammars build into a native library cached per SDK, compiler and target. The same C header defines the entry point used by the library and the editor. The build reuses SwiftPM checkouts and products and the syntax library in `.local/swift-sdk`, and reuses the signed bundle when its inputs match. Use the default debug build during development and an optimized build when measuring runtime or launch performance.
 
-`./script/check` enables `EDIT_AGENT_CHECKS` and includes the native check sources in the separate `Edit Agent.app`. The normal Edit executable excludes the check sources and the check runner.
+`./script/check` enables `EDIT_AGENT_CHECKS` and includes the native check sources from `Sources/Edit/Checks` in the separate `Edit Agent.app`. The normal Edit executable excludes that directory and the check runner.
 
 Building or installing a replacement keeps the previous bundle on disk so macOS can validate any processes still using it. Subsequent builds or installs remove retained bundles whose executables are no longer running.
 

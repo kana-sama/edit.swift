@@ -31,7 +31,7 @@ if [[ "$configuration" == debug && "$compiler" == /Library/Developer/CommandLine
 fi
 sources=()
 while IFS= read -r -d '' path; do
-    if [[ "$bundle_name" == Edit && "$path" == *Check.swift ]]; then continue; fi
+    if [[ "$bundle_name" == Edit && "$path" == Sources/Edit/Checks/* ]]; then continue; fi
     sources+=("$path")
 done < <(/usr/bin/find -s Sources/Edit -type f -name '*.swift' -print0)
 
