@@ -35,6 +35,7 @@ struct ControlCommand {
         if documentOnly {
             guard document.hasTextDocument, document.window.attachedSheet == nil,
                   document.editor.responds(to: action) else { return false }
+            if Self.isCaseCommand(action) { return document.editor.validateUserInterfaceItem(item) }
             return !Self.isBracketCommand(action) || document.editor.canNavigateBrackets
         }
         if let target = item.target as? NSUserInterfaceValidations {
@@ -163,12 +164,16 @@ struct ControlCommand {
                action != #selector(NSWindow.performMiniaturize(_:)),
                action != #selector(NSWindow.performZoom(_:)) { return [] }
             return [ControlCommand(id: NSStringFromSelector(action), title: "\(prefix): \(item.title)", item: item,
-                                   documentOnly: isBracketCommand(action))]
+                                   documentOnly: isBracketCommand(action) || isCaseCommand(action))]
         }
     }
 
     private static func isBracketCommand(_ action: Selector) -> Bool {
         action == #selector(EditorTextView.goToBracket(_:)) || action == #selector(EditorTextView.selectToBracket(_:))
+    }
+
+    private static func isCaseCommand(_ action: Selector) -> Bool {
+        action == #selector(EditorTextView.uppercaseWord(_:)) || action == #selector(EditorTextView.lowercaseWord(_:))
     }
 }
 

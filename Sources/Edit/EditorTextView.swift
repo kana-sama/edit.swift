@@ -573,13 +573,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func uppercaseWord(_ sender: Any?) {
-        if transformProjectedSelection({ $0.uppercased() }) { return }
-        if !transformFocusedSelections({ $0.uppercased() }) { super.uppercaseWord(sender) }
+        if !transformCase({ $0.uppercased() }) { super.uppercaseWord(sender) }
     }
 
     override func lowercaseWord(_ sender: Any?) {
-        if transformProjectedSelection({ $0.lowercased() }) { return }
-        if !transformFocusedSelections({ $0.lowercased() }) { super.lowercaseWord(sender) }
+        if !transformCase({ $0.lowercased() }) { super.lowercaseWord(sender) }
     }
 
     override func capitalizeWord(_ sender: Any?) {
@@ -711,6 +709,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             return isSelectable && (jjInlineDiff?.projectedEditRange != nil || (textStorage?.length ?? 0) > 0)
         case #selector(cut(_:)):
             return isEditable && (jjInlineDiff?.projectedEditRange?.length ?? textStorage?.length ?? 0) > 0
+        case #selector(uppercaseWord(_:)), #selector(lowercaseWord(_:)):
+            return isEditable && !hasMarkedText() && (textStorage?.length ?? 0) > 0
         case #selector(increaseTextSize(_:)):
             return fontSize < 72
         case #selector(decreaseTextSize(_:)):
@@ -946,6 +946,24 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         diff.clearProjectedSelection()
         let caret = NSRange(location: editable.location + replacement.utf16.count, length: 0)
         applyMultiEdits([.init(range: editable, text: replacement)], selections: [caret])
+        return true
+    }
+
+    private func transformCase(_ transform: (String) -> String) -> Bool {
+        guard isEditable, !hasMarkedText() else { return true }
+        if transformProjectedSelection(transform) || transformFocusedSelections(transform) { return true }
+
+        let selections = caretSelections
+        guard selections.count > 1 || (selections.first?.length ?? 0) > 0,
+              let text = textStorage?.mutableString else { return false }
+        let edits = MultiCaretEditing.ordered(selections.filter { $0.length > 0 }).compactMap {
+            range -> MultiCaretEditing.Replacement? in
+            let original = text.substring(with: range)
+            let transformed = transform(original)
+            return original == transformed ? nil : MultiCaretEditing.Replacement(range: range, text: transformed)
+        }
+        let carets = selections.map { NSRange(location: NSMaxRange($0), length: 0) }
+        applyMultiEdits(edits, selections: MultiCaretEditing.mapped(carets, after: edits))
         return true
     }
 

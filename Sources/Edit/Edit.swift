@@ -1075,6 +1075,11 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         lines.addCommand("Outdent Lines", #selector(EditorTextView.outdentLines(_:)), "[")
         edit.addItem(withTitle: "Lines", action: nil, keyEquivalent: "").submenu = lines
 
+        let transformations = NSMenu(title: "Transformations")
+        transformations.addCommand("Uppercase", #selector(EditorTextView.uppercaseWord(_:)))
+        transformations.addCommand("Lowercase", #selector(EditorTextView.lowercaseWord(_:)))
+        edit.addItem(withTitle: "Transformations", action: nil, keyEquivalent: "").submenu = transformations
+
         let selection = NSMenu(title: "Selection")
         selection.addCommand("Add Caret Above", #selector(EditorTextView.addCaretAbove(_:)), "\u{F700}", [.command, .option])
         selection.addCommand("Add Caret Below", #selector(EditorTextView.addCaretBelow(_:)), "\u{F701}", [.command, .option])

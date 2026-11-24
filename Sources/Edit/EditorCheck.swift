@@ -29,6 +29,30 @@ enum EditorCheck {
         try expect(editor.tryToPerform(Selector(("redo:")), with: nil), "Redo menu action on responder chain")
         try expect(editor.string == "Café 👋", "redo native text input")
 
+        guard let menu = NSApp.mainMenu else { throw Failure("find the editor menus") }
+        let caseCommands = ControlCommand.fromMenu(menu)
+        guard let uppercase = caseCommands.first(where: { $0.title == "Edit: Uppercase" }),
+              let lowercase = caseCommands.first(where: { $0.title == "Edit: Lowercase" }),
+              let uppercaseAction = uppercase.item.action, let lowercaseAction = lowercase.item.action else {
+            throw Failure("expose the case transformations in Edit and Command Mode")
+        }
+        setBuffer("straße · café · Keep")
+        editor.setCaretSelections([NSRange(location: 0, length: 6), NSRange(location: 9, length: 4)])
+        edit { _ = editor.tryToPerform(uppercaseAction, with: uppercase.item) }
+        try expect(editor.string == "STRASSE · CAFÉ · Keep" && editor.caretSelections.count == 2,
+                   "uppercase both selections including a Unicode length change")
+        undo.undo()
+        try expect(editor.string == "straße · café · Keep" && editor.caretSelections.count == 2,
+                   "undo all uppercase replacements together")
+        setBuffer("ÉDIT · Keep", length: 4)
+        edit { _ = editor.tryToPerform(lowercaseAction, with: lowercase.item) }
+        try expect(editor.string == "édit · Keep", "lowercase the selected text")
+        editor.isEditable = false
+        let disablesCaseWhenReadOnly = !editor.validateUserInterfaceItem(uppercase.item) &&
+            !editor.validateUserInterfaceItem(lowercase.item)
+        editor.isEditable = true
+        try expect(disablesCaseWhenReadOnly, "disable case transformations in a read-only editor")
+
         setBuffer("  first\nsecond", at: 7)
         edit { editor.insertNewline(nil) }
         try expect(editor.string == "  first\n  \nsecond", "Return copies indentation")
