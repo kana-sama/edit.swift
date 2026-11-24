@@ -423,30 +423,36 @@ enum SourceControlCheck {
         }
         undo.undo()
         try await waitFor("undo the replay result before changing format") { editor.string == original && format.isEnabled }
+        reveal(originalBlocks[0].range)
         format.selectedSegment = 1
         if let action = format.action { format.sendAction(action, to: format.target) }
         try await waitFor("switch all open conflict blocks to Snapshot") {
             let current = blocks(editor.string)
-            return current.count == 2 && current.allSatisfy { $0.style == .snapshot } && format.isEnabled
+            return current.count == 2 && current.allSatisfy { $0.style == .snapshot }
         }
         let snapshotBlocks = blocks(editor.string)
+        document.window.layoutIfNeeded()
+        try expect(format.isEnabled, "install the new conflict presentation in the same update as the Snapshot text")
+        try checkConflictMarkerGlyphs(snapshotBlocks[0], in: editor)
         try expect(zip(snapshotBlocks, originalBlocks).allSatisfy { $0.sides == $1.sides },
                    "retain each side when changing the editable representation")
         editor.setCaretSelections([NSRange(location: snapshotBlocks[0].range.location, length: 0)])
         editor.scrollRangeToVisible(editor.selectedRange())
         let thirdSide = snapshotBlocks[0].segments[2].anchor
         reveal(thirdSide)
-        try await waitFor("attach a direct Use Side button to the third snapshot") {
-            button("Use Side", on: thirdSide) != nil
+        try await waitFor("attach a direct Accept Snapshot button to the third snapshot") {
+            button("Accept Snapshot", on: thirdSide) != nil
         }
-        button("Use Side", on: thirdSide)?.performClick(nil)
+        button("Accept Snapshot", on: thirdSide)?.performClick(nil)
         try await waitFor("resolve only the selected block with the third side") {
             editor.string.hasPrefix("let first = \"Gamma\"\n") && blocks(editor.string).count == 1
         }
         undo.undo()
         try await waitFor("undo a resolution and recover all three sides") { blocks(editor.string) == snapshotBlocks }
         undo.undo()
-        try await waitFor("undo a format switch") { editor.string == original }
+        try await waitFor("undo a format switch") { editor.string == original && format.isEnabled }
+        reveal(originalBlocks[0].range)
+        try checkConflictMarkerGlyphs(originalBlocks[0], in: editor)
         try expect(await document.save(), "save the restored conflict before opening its history")
 
         try await command(executable, folder, ["new", "-m", "Review child"])
@@ -493,20 +499,28 @@ enum SourceControlCheck {
             case .addition: green > red + 0.03 && green > blue + 0.03
             }
             try expect(matches, role == .marker ? "leave the marker background neutral" : "paint a full-width \(role) background")
-            if role == .marker {
-                let glyphs = NSRect(x: editor.textContainerInset.width + 4, y: line.minY, width: 65, height: line.height)
-                guard let glyphBitmap = editor.bitmapImageRepForCachingDisplay(in: glyphs) else {
-                    throw Failure("capture the marker text")
+        }
+        try checkConflictMarkerGlyphs(block, in: editor)
+    }
+
+    private static func checkConflictMarkerGlyphs(_ block: JJConflict, in editor: EditorTextView) throws {
+        let markerOffsets = Set(block.highlights.filter { $0.role == .marker }.map(\.range.location))
+        let source = editor.string as NSString
+        var offset = block.range.location
+        while offset < NSMaxRange(block.range) {
+            let range = source.lineRange(for: NSRange(location: offset, length: 0))
+            guard let line = editor.laidOutLineBounds(at: offset) else { throw Failure("lay out the conflict text") }
+            let glyphs = NSRect(x: editor.textContainerInset.width + 4, y: line.minY, width: 65, height: line.height)
+            guard let bitmap = editor.bitmapImageRepForCachingDisplay(in: glyphs) else { throw Failure("capture the conflict text") }
+            editor.cacheDisplay(in: glyphs, to: bitmap)
+            let purple = (0..<bitmap.pixelsWide).contains { x in
+                (0..<bitmap.pixelsHigh).contains { y in
+                    guard let pixel = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { return false }
+                    return pixel.blueComponent > pixel.greenComponent + 0.12 && pixel.redComponent > pixel.greenComponent + 0.08
                 }
-                editor.cacheDisplay(in: glyphs, to: glyphBitmap)
-                let purple = (0..<glyphBitmap.pixelsWide).contains { x in
-                    (0..<glyphBitmap.pixelsHigh).contains { y in
-                        guard let pixel = glyphBitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { return false }
-                        return pixel.blueComponent > pixel.greenComponent + 0.12 && pixel.redComponent > pixel.greenComponent + 0.08
-                    }
-                }
-                try expect(purple, "draw the marker glyphs purple")
             }
+            try expect(purple == markerOffsets.contains(offset), "use purple only on marker glyphs at \(source.substring(with: range))")
+            offset = NSMaxRange(range)
         }
     }
 

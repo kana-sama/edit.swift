@@ -31,20 +31,15 @@ final class JJConflictDecorations {
         self.editor = editor
     }
 
+    var hasHighlights: Bool { !highlights.isEmpty }
+
     func update(_ highlights: [JJConflict.Highlight]) {
         guard self.highlights != highlights else { return }
-        if let editor, let manager = editor.textLayoutManager {
-            for highlight in self.highlights where highlight.role == .marker {
-                if let range = textRange(highlight.range, in: manager) {
-                    manager.removeRenderingAttribute(.foregroundColor, for: range)
-                }
-            }
-        }
+        let previousMarkers = self.highlights.lazy.filter { $0.role == .marker }.map(\.range)
+        let markers = highlights.lazy.filter { $0.role == .marker }.map(\.range)
+        let changedMarkers = !previousMarkers.elementsEqual(markers)
         self.highlights = highlights
-        if let manager = editor?.textLayoutManager, let visible = manager.textViewportLayoutController.viewportRange {
-            manager.invalidateRenderingAttributes(for: visible)
-            paintMarkers(in: visible, using: manager)
-        }
+        if changedMarkers { editor?.syntaxHighlighting?.refreshColors() }
         layout()
     }
 
@@ -60,21 +55,11 @@ final class JJConflictDecorations {
         for row in actionRows.values { row.view.setEnabled(enabled) }
     }
 
-    func paintMarkers(in range: NSTextRange, using manager: NSTextLayoutManager) {
-        guard let editor else { return }
-        let visible = editor.charRange(range, in: manager)
-        for highlight in highlightsInViewport(visible) where highlight.role == .marker {
-            if let marker = textRange(NSIntersectionRange(visible, highlight.range), in: manager) {
-                manager.addRenderingAttribute(.foregroundColor, value: NSColor.systemPurple, for: marker)
-            }
+    func markerRanges(in visible: NSRange) -> [NSRange] {
+        guard visible.length > 0 else { return [] }
+        return highlightsInViewport(visible).compactMap {
+            $0.role == .marker ? NSIntersectionRange(visible, $0.range) : nil
         }
-    }
-
-    private func textRange(_ range: NSRange, in manager: NSTextLayoutManager) -> NSTextRange? {
-        guard range.length > 0,
-              let start = manager.location(manager.documentRange.location, offsetBy: range.location),
-              let end = manager.location(start, offsetBy: range.length) else { return nil }
-        return NSTextRange(location: start, end: end)
     }
 
     func layout() {

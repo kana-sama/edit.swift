@@ -2044,6 +2044,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
         conflictBlocks = conflicts
         conflictPresentationCurrent = !conflicts.isEmpty
+        if !conflicts.isEmpty && syntaxHighlighting == nil { syntaxHighlighting = SyntaxHighlighting(editor: editor) }
         editor.setJJConflictHighlights(conflicts.flatMap(\.highlights))
         guard !conflicts.isEmpty else {
             suspendConflictControls()
@@ -2200,25 +2201,24 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         let original = editor.string
         guard conflictBlocks.allSatisfy({ Self.conflictMatches($0, in: original as NSString) }) else { return }
         let blocks = conflictBlocks
+        let preview = sourceControlRevision
+        let baseline: String?
+        if let preview, case .text(_, _, _, let text) = preview.content { baseline = text }
+        else { baseline = nil }
         conflictStyleTask?.cancel()
-        suspendConflictControls()
+        suspendConflictControls(keepingPresentation: true)
         conflictStyleTask = Task { [weak self] in
-            let edits = await Self.conflictStyleEdits(blocks, style: style)
+            let conversion = await Self.convertConflictStyle(blocks, in: original, to: style, baseline: baseline)
             guard let self, !Task.isCancelled, editor.string.utf8.elementsEqual(original.utf8) else { return }
-            guard let edits, !edits.isEmpty else {
-                conflictStyleTask = nil
+            conflictStyleTask = nil
+            guard let conversion else {
                 conflictPresentationCurrent = true
                 updateConflictControls()
                 updateConflictActions()
                 return
             }
-            if let preview = sourceControlRevision, case .text(_, _, _, let baseline) = preview.content {
-                let updated = NSMutableString(string: original)
-                for edit in edits.reversed() { updated.replaceCharacters(in: edit.range, with: edit.text) }
-                let text = updated as String
-                let analysis = await Self.analyzeConflictPreview(text, baseline: baseline)
-                guard !Task.isCancelled, editor.string.utf8.elementsEqual(original.utf8) else { return }
-                conflictStyleTask = nil
+            let (edits, text, analysis) = conversion
+            if preview != nil {
                 let position = editor.capturePosition()
                 PanelLayout.withoutAnimation {
                     savedText = text as NSString
@@ -2229,9 +2229,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                     restoreEditorPosition(position)
                 }
             } else {
-                conflictStyleTask = nil
                 let mapped = MultiCaretEditing.mapped(editor.caretSelections, after: edits)
                 if editor.applyMultiEdits(edits, selections: mapped, actionName: "Change Conflict Format") {
+                    showEditorConflicts(analysis.conflicts)
                     focusContent()
                 } else {
                     conflictPresentationCurrent = true
@@ -2248,18 +2248,20 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     @concurrent
-    private static func conflictStyleEdits(_ blocks: [JJConflict], style: JJConflict.Style) async -> [EditorTextEdit]? {
+    private static func convertConflictStyle(
+        _ blocks: [JJConflict], in original: String, to style: JJConflict.Style, baseline: String?
+    ) async -> (edits: [EditorTextEdit], text: String, analysis: JJTextAnalysis)? {
         var edits: [EditorTextEdit] = []
         for block in blocks where block.style != style {
             guard !Task.isCancelled, let text = block.rendered(as: style) else { return nil }
             edits.append(EditorTextEdit(range: block.range, text: text))
         }
-        return edits
-    }
-
-    @concurrent
-    private static func analyzeConflictPreview(_ text: String, baseline: String?) async -> JJTextAnalysis {
-        JJLineDiff.analyze(base: baseline, current: text, isConflicted: true, recordedConflict: text)
+        guard !edits.isEmpty else { return nil }
+        let updated = NSMutableString(string: original)
+        for edit in edits.reversed() { updated.replaceCharacters(in: edit.range, with: edit.text) }
+        let text = updated as String
+        let analysis = JJLineDiff.analyze(base: baseline, current: text, isConflicted: true, recordedConflict: text)
+        return (edits, text, analysis)
     }
 
     private func updateEditedState() {

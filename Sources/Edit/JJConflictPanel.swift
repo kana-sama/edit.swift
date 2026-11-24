@@ -114,7 +114,7 @@ final class JJConflictActions: JJEditorActionBar {
 
         var title: String {
             switch self {
-            case .useSide: "Use Side"
+            case .useSide: "Accept Snapshot"
             case .applyDiff: "Apply Diff"
             case .undoDiff: "Undo Diff"
             case .editResult: "Edit Result…"

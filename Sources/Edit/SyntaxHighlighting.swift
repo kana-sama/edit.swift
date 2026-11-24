@@ -96,9 +96,13 @@ final class SyntaxHighlighting {
 
     private func display(_ result: [SyntaxSpan]) {
         let needsRedraw = hasRenderingColors || backedColorRange != nil || !result.isEmpty
-        clearColors()
         spans = result
-        guard needsRedraw, let editor, let manager = editor.textLayoutManager else { return }
+        if needsRedraw { refreshColors() }
+    }
+
+    func refreshColors() {
+        clearColors()
+        guard let editor, let manager = editor.textLayoutManager else { return }
         let viewport = manager.textViewportLayoutController
         let scroll = editor.enclosingScrollView
         let origin = scroll?.visibleContentOrigin
@@ -143,6 +147,7 @@ final class SyntaxHighlighting {
         let previous = backedColorRange.map { NSIntersectionRange($0, document) }
         let visible = visible.map { NSIntersectionRange($0, document) }
         let colors = visible.map { spans(overlapping: $0) } ?? []
+        let markers = visible.flatMap { editor.jjConflictDecorations?.markerRanges(in: $0) } ?? []
         guard (previous?.length ?? 0) > 0 || (visible?.length ?? 0) > 0 else {
             backedColorRange = nil
             return
@@ -160,11 +165,14 @@ final class SyntaxHighlighting {
                     let range = NSIntersectionRange(visible, NSRange(location: span.start, length: span.end - span.start))
                     storage.addAttribute(.foregroundColor, value: span.color.nativeColor, range: range)
                 }
+                for marker in markers {
+                    storage.addAttribute(.foregroundColor, value: NSColor.systemPurple, range: marker)
+                }
             }
             storage.endEditing()
         }
         editor.typingAttributes = typingAttributes
-        backedColorRange = colors.isEmpty ? nil : visible
+        backedColorRange = colors.isEmpty && markers.isEmpty ? nil : visible
     }
 
     private func visibleRange() -> NSRange? {
@@ -186,19 +194,25 @@ final class SyntaxHighlighting {
     }
 
     private func paint(_ range: NSTextRange, using manager: NSTextLayoutManager) {
-        guard !spans.isEmpty else { return }
+        guard !spans.isEmpty || editor?.jjConflictDecorations?.hasHighlights == true else { return }
         let origin = manager.documentRange.location
         let start = manager.offset(from: origin, to: range.location)
         let end = start + manager.offset(from: range.location, to: range.endLocation)
         guard start < end else { return }
 
         let visible = NSRange(location: start, length: end - start)
-        for span in spans(overlapping: visible) {
-            guard let from = manager.location(range.location, offsetBy: max(0, span.start - start)),
-                  let to = manager.location(from, offsetBy: min(end, span.end) - max(start, span.start)),
-                  let target = NSTextRange(location: from, end: to) else { continue }
-            manager.addRenderingAttribute(.foregroundColor, value: span.color.nativeColor, for: target)
+        func paintColor(_ color: NSColor, in span: NSRange) {
+            guard let from = manager.location(range.location, offsetBy: span.location - start),
+                  let to = manager.location(from, offsetBy: span.length),
+                  let target = NSTextRange(location: from, end: to) else { return }
+            manager.addRenderingAttribute(.foregroundColor, value: color, for: target)
             hasRenderingColors = true
+        }
+        for span in spans(overlapping: visible) {
+            paintColor(span.color.nativeColor, in: NSIntersectionRange(visible, NSRange(location: span.start, length: span.end - span.start)))
+        }
+        for marker in editor?.jjConflictDecorations?.markerRanges(in: visible) ?? [] {
+            paintColor(.systemPurple, in: marker)
         }
     }
 
