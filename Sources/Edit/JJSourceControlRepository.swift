@@ -24,8 +24,11 @@ struct JJSourceControlRevision: Identifiable, Equatable, Sendable {
     let isWorkingCopy: Bool
     let isDivergent: Bool
 
+    var isRoot: Bool { parents.isEmpty }
+
     var subject: String {
-        description.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).first
+        if isRoot { return "Repository Root" }
+        return description.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).first
             .map(String.init).flatMap { $0.isEmpty ? nil : $0 } ?? "(No description)"
     }
 }

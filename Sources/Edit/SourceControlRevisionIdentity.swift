@@ -8,6 +8,7 @@ struct SourceControlRevisionStatus {
     let color: NSColor
 
     static func statuses(for revision: JJSourceControlRevision) -> [Self] {
+        guard !revision.isRoot else { return [] }
         var statuses: [Self] = []
         if revision.isWorkingCopy { statuses.append(.init(symbol: "at", name: "Working copy", color: .controlAccentColor)) }
         if revision.isImmutable { statuses.append(.init(symbol: "lock.fill", name: "Immutable", color: .systemTeal)) }

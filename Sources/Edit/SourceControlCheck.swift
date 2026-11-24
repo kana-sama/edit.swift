@@ -220,7 +220,13 @@ enum SourceControlCheck {
         }
         try expect(!FileManager.default.fileExists(atPath: external.path) && (try? String(contentsOf: file, encoding: .utf8)) == working,
                    "discard the selected added file and preserve unrelated changes")
+        try await command(executable, folder, ["tag", "set", "read-only-description", "-r", history.changeID])
+        try await waitFor("mark the historical change immutable for the description check") {
+            panel.graphView.revisions.contains { $0.changeID == history.changeID && $0.isImmutable } &&
+                panel.selection?.isWorkingCopy == true && panel.detail != nil && panel.graphView.table.isEnabled
+        }
         try await checkDescription(in: document.window, panel: panel)
+        try await command(executable, folder, ["tag", "delete", "read-only-description"])
         try await checkDetailTransitions(panel, executable: executable, folder: folder)
         document.setFolder(plain)
         try expect(document.isSidebarVisible && document.sidebarMode == .worktree && sidebarMenu.menu.item(withTitle: "Jujutsu")?.isEnabled == false,
@@ -700,8 +706,18 @@ enum SourceControlCheck {
         save.performClick(nil)
         try await waitFor("apply the new multiline revset to the real graph") {
             panel.graphView.table.isEnabled && panel.graphView.revisions.count == 1 &&
-                panel.graphView.revisions.first?.isWorkingCopy == false
+                panel.graphView.revisions.first?.isRoot == true
         }
+        guard let rootCell = panel.graphView.table.view(atColumn: 0, row: 0, makeIfNecessary: true),
+              let rootSubject: NSTextField = descendant(of: rootCell, where: { $0.identifier?.rawValue == "JujutsuRevisionSubject" })
+        else { throw Failure("find the repository root graph cell") }
+        try expect(rootSubject.isHidden && rootCell.accessibilityLabel() == "Repository Root" &&
+                   descendant(of: rootCell, where: { (_: NSImageView) in true }) == nil,
+                   "draw only the graph node for the repository root and name it for accessibility")
+        panel.graphView.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await waitFor("display the root details") { panel.selection?.isRoot == true && panel.detail != nil }
+        try expect(button(in: panel.view, where: { $0.title == "Repository Root" })?.isEnabled == false,
+                   "identify the root in the details without offering a description editor")
         guard let custom = picker.entriesForCheck.first(where: { $0.name == newName }) else {
             throw Failure("find the saved multiline revset")
         }
@@ -866,7 +882,7 @@ enum SourceControlCheck {
         try checkViewport()
         try expect(scroll.visibleContentOrigin.y < 2, "start the long description at the top of its viewport")
 
-        guard let index = panel.graphView.revisions.firstIndex(where: \.isImmutable) else {
+        guard let index = panel.graphView.revisions.firstIndex(where: { $0.isImmutable && !$0.isRoot }) else {
             throw Failure("find an immutable change to read")
         }
         let immutable = panel.graphView.revisions[index]

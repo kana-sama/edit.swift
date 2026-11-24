@@ -362,7 +362,8 @@ private final class SourceControlGraphCell: NSTableCellView {
 
     func setRevision(_ revision: JJSourceControlRevision, path: SourceControlGraphRow, laneCount: Int) {
         self.revision = revision
-        let bookmarkNames = revision.bookmarks.isEmpty ? nil : "Bookmarks: \(revision.bookmarks.joined(separator: ", "))"
+        let bookmarks = revision.isRoot ? [] : revision.bookmarks
+        let bookmarkNames = bookmarks.isEmpty ? nil : "Bookmarks: \(bookmarks.joined(separator: ", "))"
         // Keep lanes connected across rows while reserving text space only for the lanes this row uses.
         graph.laneSpacing = min(9, 54 / CGFloat(max(1, laneCount - 1)))
         graphWidth.constant = 18 + CGFloat(path.rightmostLane) * graph.laneSpacing
@@ -382,17 +383,19 @@ private final class SourceControlGraphCell: NSTableCellView {
             + CGFloat(max(0, statuses.count - 1)) * statusIcons.spacing
         statusGap.constant = statuses.isEmpty ? 0 : 5
         statusIcons.isHidden = statuses.isEmpty
-        bookmarkName.stringValue = revision.bookmarks.first ?? ""
-        bookmarkName.isHidden = revision.bookmarks.isEmpty
-        bookmarkGap.constant = revision.bookmarks.isEmpty ? 0 : 6
-        bookmarkCount.stringValue = revision.bookmarks.count > 1 ? "+\(revision.bookmarks.count - 1)" : ""
+        subject.isHidden = revision.isRoot
+        bookmarkName.stringValue = bookmarks.first ?? ""
+        bookmarkName.isHidden = bookmarks.isEmpty
+        bookmarkGap.constant = bookmarks.isEmpty ? 0 : 6
+        bookmarkCount.stringValue = bookmarks.count > 1 ? "+\(bookmarks.count - 1)" : ""
         bookmarkCount.isHidden = bookmarkCount.stringValue.isEmpty
         countWidth.constant = bookmarkCount.isHidden ? 0 : ceil(bookmarkCount.intrinsicContentSize.width)
         countGap.constant = bookmarkCount.isHidden ? 0 : 4
         updateColors()
-        let labels = revisionStatuses.map(\.name) + [revision.subject, revision.author] + (bookmarkNames.map { [$0] } ?? [])
+        let labels = revision.isRoot ? [revision.subject] :
+            revisionStatuses.map(\.name) + [revision.subject, revision.author] + (bookmarkNames.map { [$0] } ?? [])
         setAccessibilityLabel(labels.filter { !$0.isEmpty }.joined(separator: ", "))
-        setAccessibilityHelp(SourceControlRevisionCard.creationDates(for: revision).joined(separator: "\n"))
+        setAccessibilityHelp(revision.isRoot ? nil : SourceControlRevisionCard.creationDates(for: revision).joined(separator: "\n"))
     }
 
     override var backgroundStyle: NSView.BackgroundStyle {

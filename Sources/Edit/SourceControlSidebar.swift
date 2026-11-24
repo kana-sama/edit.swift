@@ -370,7 +370,9 @@ final class SourceControlSidebar: NSObject {
         let revision = presentation?.target.revision
         PanelLayout.withoutAnimation {
             detailTitle.title = revision?.subject ?? "Select a change"
-            detailTitle.toolTip = revision.map { $0.isImmutable ? "View change description" : "Edit change description" }
+            detailTitle.toolTip = revision.flatMap {
+                $0.isRoot ? nil : ($0.isImmutable ? "View change description" : "Edit change description")
+            }
             if let revision { detailMetadata.update(revision, showsAuthor: false, showsAllStatuses: true) }
             detailMetadata.isHidden = revision == nil
             renderFiles()
@@ -432,10 +434,11 @@ final class SourceControlSidebar: NSObject {
         let showingSelection = selection != nil && presentedDetail?.target == selectedDetailTarget
         let canUseDetail = canAct && showingSelection
         let holdingPresentation = canBrowse && presentedDetail?.result != nil
-        for button in [actionsButton, detailTitle] {
-            button.isEnabled = canUseDetail || holdingPresentation
-            button.blocksInput = !canUseDetail
-        }
+        actionsButton.isEnabled = canUseDetail || holdingPresentation
+        actionsButton.blocksInput = !canUseDetail
+        let isShowingRoot = presentedDetail?.target.revision.isRoot == true
+        detailTitle.isEnabled = !isShowingRoot && (canUseDetail || holdingPresentation)
+        detailTitle.blocksInput = isShowingRoot || !canUseDetail
         descriptionPopover.update(selection, canMutate: canAct)
         graphView.table.isEnabled = canAct
         fileTree.outline.isEnabled = canAct && detail != nil
@@ -501,7 +504,7 @@ final class SourceControlSidebar: NSObject {
         guard self.workspace == workspace else { return }
         switch response {
         case .alertFirstButtonReturn:
-            guard !revision.parents.isEmpty else { return }
+            guard !revision.isRoot else { return }
             await mutate(.edit(revision.id, ignoreImmutable: true), selectingWorkingCopy: true, expectedOperation: operation)
         case .alertSecondButtonReturn:
             await mutate(.new(revision.id), selectingWorkingCopy: true, expectedOperation: operation)
@@ -512,11 +515,11 @@ final class SourceControlSidebar: NSObject {
 
     static func changeActivationAlert(for revision: JJSourceControlRevision) -> NSAlert {
         let alert = NSAlert()
-        let isRoot = revision.parents.isEmpty
+        let isRoot = revision.isRoot
         let subject = "“\(revision.subject)”"
         alert.messageText = "Edit this change or start a new one?"
         alert.informativeText = if isRoot {
-            "\(subject) is the repository root. You can start a new change on top of it."
+            "You can start a new change on top of the repository root."
         } else {
             "\(subject) is immutable. Edit Change overrides Jujutsu’s protection. Saving may rewrite this change and its descendants."
         }
@@ -600,7 +603,7 @@ final class SourceControlSidebar: NSObject {
     }
 
     @objc private func showDescription(_ sender: Any?) {
-        guard !stale, !busy, let selection, presentedDetail?.target == selectedDetailTarget else { return }
+        guard !stale, !busy, let selection, !selection.isRoot, presentedDetail?.target == selectedDetailTarget else { return }
         panes.setChangeExpanded(true)
         updateDisclosures()
         view.layoutSubtreeIfNeeded()
