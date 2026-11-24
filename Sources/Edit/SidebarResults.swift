@@ -249,7 +249,8 @@ class SidebarResultExcerptCell: NSTableCellView {
         NSLayoutConstraint.activate([
             excerptLeading,
             excerpt.heightAnchor.constraint(lessThanOrEqualTo: heightAnchor),
-            excerpt.centerYAnchor.constraint(equalTo: centerYAnchor),
+            // Center the visible monospaced glyphs within the row and its action buttons.
+            excerpt.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -2),
             fullExcerptWidth,
         ])
     }
