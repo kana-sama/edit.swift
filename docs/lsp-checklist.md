@@ -13,7 +13,7 @@ The identifiers after each title are request or notification methods. Command ID
 - [ ] **Go to Type Definition** (`textDocument/typeDefinition`)
 - [ ] **Go to Implementation** (`textDocument/implementation`)
 - [x] **Find All References** (`textDocument/references`) [ZLS specification](features/lsp/spec.md#references-in-the-sidebar)
-- [ ] **Document Highlights** (`textDocument/documentHighlight`) — Highlight occurrences of the same symbol in the current file and distinguish reads from writes.
+- [x] **Document Highlights** (`textDocument/documentHighlight`) — Highlight occurrences of the same symbol in the current file. [Specification](features/lsp-document-highlights/spec.md)
 - [ ] **Document Symbols** (`textDocument/documentSymbol`) — Browse the current file's outline and jump to classes, functions, and other declarations.
 - [ ] **Workspace Symbols** (`workspace/symbol`) — Search for symbols by name across the project.
 - [ ] **Call Hierarchy** (`textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls`) — Browse incoming and outgoing calls.

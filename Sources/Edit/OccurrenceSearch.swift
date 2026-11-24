@@ -15,6 +15,9 @@ enum OccurrenceSearch {
     private static let markdownWordPattern = try? NSRegularExpression(
         pattern: #"[\p{Alphabetic}\p{Number}\p{Nonspacing_Mark}](?:[\p{Alphabetic}\p{Number}\p{Nonspacing_Mark}_]?[\p{Alphabetic}\p{Number}\p{Nonspacing_Mark}])*"#
     )
+    static let zigIdentifierPattern = try! NSRegularExpression(
+        pattern: #"@"(?:\\.|[^"\\])*"|@?[\p{L}_][\p{L}\p{M}\p{N}_]*"#
+    )
 
     private static func wordPattern(allowing extra: String = "") -> NSRegularExpression? {
         let punctuation = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?".filter { !extra.contains($0) }
@@ -40,18 +43,26 @@ enum OccurrenceSearch {
         let activeEnd: Int?
 
         func wordMatches(language: SyntaxLanguage) -> [NSRange] {
-            guard let group = selections.last, group.count == 1, let selection = group.first else { return [] }
             let source = text as NSString
+            guard let activeWord = wordRange(in: source, language: language) else { return [] }
+            let query = Query(text: source.substring(with: activeWord), caseSensitive: true, wholeWord: true)
+            return matches(query, in: source)
+        }
+
+        func zigSymbolRange() -> NSRange? {
+            wordRange(in: text as NSString, language: .zig, pattern: OccurrenceSearch.zigIdentifierPattern)
+        }
+
+        private func wordRange(in source: NSString, language: SyntaxLanguage, pattern: NSRegularExpression? = nil) -> NSRange? {
+            guard let group = selections.last, group.count == 1, let selection = group.first else { return nil }
             guard selection.location <= source.length, selection.upperBound <= source.length,
                   let scope = searchScopes(in: source).first(where: {
                       $0.location <= selection.location && selection.upperBound <= $0.upperBound
-                  }), let startWord = word(at: selection.location, source: source, scope: scope, language: language),
-                  selection.upperBound <= startWord.upperBound else { return [] }
+                  }), let startWord = word(at: selection.location, source: source, scope: scope, language: language, pattern: pattern),
+                  selection.upperBound <= startWord.upperBound else { return nil }
             let position = activeEnd ?? selection.location
-            guard let activeWord = position == selection.location ? startWord :
-                word(at: position, source: source, scope: scope, language: language) else { return [] }
-            let query = Query(text: source.substring(with: activeWord), caseSensitive: true, wholeWord: true)
-            return matches(query, in: source)
+            return position == selection.location ? startWord :
+                word(at: position, source: source, scope: scope, language: language, pattern: pattern)
         }
 
         func selectionMatches(options: FindOptions, activeFindQuery: String?, session: Query?) -> [NSRange] {
@@ -139,7 +150,8 @@ enum OccurrenceSearch {
         }
     }
 
-    private static func word(at position: Int, source: NSString, scope: NSRange, language: SyntaxLanguage) -> NSRange? {
+    private static func word(at position: Int, source: NSString, scope: NSRange, language: SyntaxLanguage,
+                             pattern: NSRegularExpression?) -> NSRange? {
         guard !Task.isCancelled, position >= scope.location, position <= scope.upperBound else { return nil }
         let line = LineEditing.line(at: position, in: source)
         var start = max(line.start, scope.location)
@@ -152,7 +164,7 @@ enum OccurrenceSearch {
         guard start < end else { return nil }
         let range = NSRange(location: start, length: end - start)
         let text = source.substring(with: range)
-        let pattern = switch language {
+        let languagePattern = switch language {
         case .c, .cpp: cWordPattern
         case .javascript, .javascriptJSX, .typescript, .tsx: scriptWordPattern
         case .css: cssWordPattern
@@ -161,7 +173,7 @@ enum OccurrenceSearch {
         default: defaultWordPattern
         }
         var result: NSRange?
-        pattern?.enumerateMatches(in: text, range: NSRange(location: 0, length: range.length)) { match, _, stop in
+        (pattern ?? languagePattern)?.enumerateMatches(in: text, range: NSRange(location: 0, length: range.length)) { match, _, stop in
             guard let match else { return }
             let word = NSRange(location: match.range.location + start, length: match.range.length)
             if word.location <= position && position <= word.upperBound { result = word }

@@ -14,6 +14,7 @@ final class OccurrenceHighlighting {
     private var language = SyntaxLanguage.plainText
     private var findOptions = FindOptions()
     private var activeFindQuery: String?
+    private var usesSemanticWords = false
     private var occurrenceSession: Session?
     private var textSnapshot: String?
     private var wordTask: Task<Void, Never>?
@@ -25,6 +26,7 @@ final class OccurrenceHighlighting {
     private var layingOut = false
     private(set) var wordRanges: [NSRange] = []
     private(set) var selectionRanges: [NSRange] = []
+    var semanticWordHighlights: ((Int) async -> [NSRange])?
 
     init(editor: EditorTextView) {
         self.editor = editor
@@ -77,6 +79,14 @@ final class OccurrenceHighlighting {
         layout()
     }
 
+    func setSemanticWordHighlightsEnabled(_ enabled: Bool) {
+        guard usesSemanticWords != enabled else { return }
+        usesSemanticWords = enabled
+        wordRanges = []
+        refreshWords(input())
+        layout()
+    }
+
     func updateFind(options: FindOptions, activeQuery: String?) {
         guard options != findOptions || activeQuery != activeFindQuery else { return }
         findOptions = options
@@ -123,6 +133,22 @@ final class OccurrenceHighlighting {
         }
         let generation = wordGeneration
         let language = self.language
+        if usesSemanticWords, let semanticWordHighlights {
+            wordTask = Task { [weak self] in
+                do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
+                guard let word = input.zigSymbolRange() else { return }
+                let activeEnd = input.activeEnd ?? word.location
+                let offset = NSLocationInRange(activeEnd, word) ? activeEnd : word.location
+                let ranges = await semanticWordHighlights(offset).filter { range in
+                    range.length > 0 && (input.scopes?.contains {
+                        $0.location <= range.location && range.upperBound <= $0.upperBound
+                    } ?? true)
+                }
+                guard !Task.isCancelled else { return }
+                self?.applyWords(Array(Set(ranges).sorted { $0.location < $1.location }.prefix(999)), generation: generation)
+            }
+            return
+        }
         wordTask = Task.detached(priority: .userInitiated) { [weak self] in
             do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
             let ranges = input.wordMatches(language: language)

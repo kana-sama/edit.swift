@@ -34,6 +34,8 @@ enum LanguageServerCheck {
             const helper = @import("helper.zig");
             const third = @import("other use.zig");
             pub fn run() usize { const emoji = "👋"; _ = emoji; return helper.identify() + third.useIt(); }
+            fn first() usize { const shadowed = 1; return shadowed; }
+            fn second() usize { const shadowed = 2; return shadowed; }
 
             """
         let helperText = """
@@ -89,6 +91,7 @@ enum LanguageServerCheck {
                    "anchor the language server icon at the trailing edge of the header")
         try expect(lsp.canPerform(.stop) && lsp.canPerform(.restart) && !lsp.canPerform(.start), "ready server controls")
         let readyControls = try checkPopoverControls(in: lsp, toggle: .stop, capture: captureServers)
+        try await checkDocumentHighlights(in: document, capture: captureHover)
 
         let use = (mainText as NSString).range(of: "identify")
         try expect(await lsp.probe(at: use.location + 2, word: use) == use, "definition link over Unicode source")
@@ -190,6 +193,47 @@ enum LanguageServerCheck {
         let updatedHover = await lsp.hover(at: moved.location + 2, word: moved)
         try expect(updatedHover?.range == moved && updatedHover?.text.contains("Returns a value.") == true,
                    "restart synchronizes unsaved text")
+    }
+
+    private static func checkDocumentHighlights(in document: DocumentWindow, capture: (NSView, String) throws -> Void) async throws {
+        guard let provider = document.editor.occurrenceHighlighting.semanticWordHighlights else {
+            throw Failure("connect semantic word highlighting to the editor")
+        }
+        let source = document.editor.string as NSString
+        let word = "shadowed"
+        let wordRanges = try NSRegularExpression(pattern: word)
+            .matches(in: source as String, range: NSRange(location: 0, length: source.length)).map(\.range)
+        try expect(wordRanges.count == 4 && document.languageFeatures.session.supportsDocumentHighlight,
+                   "use a ready semantic provider and two distinct symbols named \(word)")
+
+        let bounds = NSRect(x: 0, y: 0, width: 590, height: 160)
+        let window = EditorFocusCheckWindow(contentRect: bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        let (scroll, editor) = EditorTextView.scrollingEditor(in: bounds)
+        window.contentView = scroll
+        defer { window.close() }
+        editor.string = source as String
+        editor.didChangeText()
+        window.layoutIfNeeded()
+        window.makeFirstResponder(editor)
+        let highlights = editor.occurrenceHighlighting
+        highlights.semanticWordHighlights = provider
+        highlights.setSemanticWordHighlightsEnabled(true)
+        let firstCaret = NSRange(location: wordRanges[1].location + 2, length: 0)
+        editor.setCaretSelections([firstCaret])
+        try await wait("highlight only references to the first local symbol") { highlights.wordRanges == Array(wordRanges.prefix(2)) }
+        try expect(editor.selectedRange() == firstCaret, "semantic highlights do not change the caret")
+        try capture(scroll, "document-highlights")
+
+        let secondCaret = NSRange(location: wordRanges[3].location + 2, length: 0)
+        editor.setCaretSelections([secondCaret])
+        try await wait("move highlights to the second local symbol") { highlights.wordRanges == Array(wordRanges.suffix(2)) }
+        highlights.setSemanticWordHighlightsEnabled(false)
+        try await wait("fall back to all text matches when the semantic provider is unavailable") {
+            highlights.wordRanges == wordRanges
+        }
     }
 
     private static func checkPathOrder(in root: URL) throws {

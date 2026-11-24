@@ -7,7 +7,7 @@ The behavior reference is [VS Code 1.147.0](https://code.visualstudio.com/update
 - For an empty primary selection, use the word at its position. The word includes either caret edge. Where the language defines a word pattern, use it to extract the query. The default treats `_` as part of a word. The textual provider matches case-sensitive whole words using the default VS Code separators. Draw the first 999 results, including the source occurrence if it qualifies as one of them. A position between separators, with neither edge touching a word, clears the word highlights.
 - Use the primary selection for the word query in multi-caret mode. If a primary selection fits entirely inside one word, the word highlights can coexist with the selected-text highlights. A selection spanning beyond that word clears the word highlights.
 - Compute the word query for explicit caret moves and selection gestures while the editor has focus in the key window. VS Code debounces these events for about 50 ms. Clear word highlights when typing, leaving the editor, or changing documents. Selection and language updates in an unfocused editor keep word highlights cleared. A result for an obsolete buffer, caret, selection, or language cannot repaint the editor.
-- Edit follows VS Code's built-in textual behavior. VS Code language providers can additionally supply symbol references and separate read and write marks.
+- In a supported buffer with a ready language server, [Document Highlights](../lsp-document-highlights/spec.md) supply the word highlight ranges.
 
 ## Selected text
 

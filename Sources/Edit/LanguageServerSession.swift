@@ -41,6 +41,7 @@ final class LanguageServerSession {
     var supportsDefinition: Bool { isReady && capabilities?.definition == true }
     var supportsReferences: Bool { isReady && capabilities?.references == true }
     var supportsHover: Bool { isReady && capabilities?.hover == true }
+    var supportsDocumentHighlight: Bool { isReady && capabilities?.documentHighlight == true }
 
     private var canControl: Bool { isEligible && rootLookup == nil }
     private var isReady: Bool { canControl && phase == .ready && document.url != nil }
@@ -184,6 +185,15 @@ final class LanguageServerSession {
         let snapshot = document
         let generation = generation
         let result = try await connection.hover(at: offset, in: snapshot)
+        try validate(revision: snapshot.revision, generation: generation)
+        return result
+    }
+
+    func documentHighlights(at offset: Int) async throws -> [NSRange] {
+        guard supportsDocumentHighlight, let connection else { throw LSPFailure.unavailable }
+        let snapshot = document
+        let generation = generation
+        let result = try await connection.documentHighlights(at: offset, in: snapshot)
         try validate(revision: snapshot.revision, generation: generation)
         return result
     }

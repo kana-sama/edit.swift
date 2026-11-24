@@ -7,9 +7,6 @@ final class EditorLanguageInteraction: NSObject {
         let word: NSRange
     }
 
-    private static let wordPattern = try! NSRegularExpression(
-        pattern: #"@"(?:\\.|[^"\\])*"|@?[\p{L}_][\p{L}\p{M}\p{N}_]*"#
-    )
     private static let hoverDelay: Duration = .milliseconds(300)
 
     private weak var editor: EditorTextView?
@@ -193,7 +190,7 @@ final class EditorLanguageInteraction: NSObject {
         guard lower < upper else { return nil }
         let slice = source.substring(with: NSRange(location: lower, length: upper - lower))
         var target: Hit?
-        Self.wordPattern.enumerateMatches(in: slice, range: NSRange(location: 0, length: upper - lower)) { match, _, stop in
+        OccurrenceSearch.zigIdentifierPattern.enumerateMatches(in: slice, range: NSRange(location: 0, length: upper - lower)) { match, _, stop in
             guard let match else { return }
             let range = NSRange(location: lower + match.range.location, length: match.range.length)
             if range.location > offset { stop.pointee = true; return }

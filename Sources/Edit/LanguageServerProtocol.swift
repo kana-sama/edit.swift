@@ -75,16 +75,18 @@ struct LSPTextIndex {
         return LSPPosition(line: lower, character: offset - lineStarts[lower])
     }
 
-    func nsRange(_ range: LSPRange) -> NSRange? {
-        guard range.start <= range.end, let start = offset(of: range.start),
-              let end = offset(of: range.end), start <= end else { return nil }
+    func nsRange(_ range: LSPRange, clampingColumns: Bool = true) -> NSRange? {
+        guard range.start <= range.end, let start = offset(of: range.start, clampingColumns: clampingColumns),
+              let end = offset(of: range.end, clampingColumns: clampingColumns), start <= end else { return nil }
         return NSRange(location: start, length: end - start)
     }
 
-    private func offset(of position: LSPPosition) -> Int? {
+    private func offset(of position: LSPPosition, clampingColumns: Bool) -> Int? {
         guard lineStarts.indices.contains(position.line), position.character >= 0 else { return nil }
         let start = lineStarts[position.line]
-        let offset = start + min(position.character, lineEnds[position.line] - start)
+        let length = lineEnds[position.line] - start
+        guard clampingColumns || position.character <= length else { return nil }
+        let offset = start + min(position.character, length)
         return isScalarBoundary(offset) ? offset : nil
     }
 

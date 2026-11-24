@@ -15,12 +15,14 @@ struct LSPCapabilities: Decodable, Sendable {
     let definition: Bool
     let references: Bool
     let hover: Bool
+    let documentHighlight: Bool
     let openClose: Bool
     let change: Change
     let positionEncoding: String
 
     private enum CodingKeys: String, CodingKey {
         case definitionProvider, referencesProvider, hoverProvider, textDocumentSync, positionEncoding
+        case documentHighlightProvider
     }
 
     private struct SyncOptions: Decodable {
@@ -37,6 +39,7 @@ struct LSPCapabilities: Decodable, Sendable {
         definition = supports(.definitionProvider)
         references = supports(.referencesProvider)
         hover = supports(.hoverProvider)
+        documentHighlight = supports(.documentHighlightProvider)
         positionEncoding = try values.decodeIfPresent(String.self, forKey: .positionEncoding) ?? "utf-16"
         if let kind = try? values.decode(Change.self, forKey: .textDocumentSync) {
             openClose = kind != .none
@@ -68,6 +71,7 @@ enum LSPFailure: LocalizedError {
 final class LanguageServerConnection: @unchecked Sendable {
     private enum Request: Sendable {
         case initialize, definition(Int), references(Int, Bool), hover(Int)
+        case documentHighlight(Int)
 
         var method: String {
             switch self {
@@ -75,6 +79,7 @@ final class LanguageServerConnection: @unchecked Sendable {
             case .definition: "textDocument/definition"
             case .references: "textDocument/references"
             case .hover: "textDocument/hover"
+            case .documentHighlight: "textDocument/documentHighlight"
             }
         }
     }
@@ -113,6 +118,7 @@ final class LanguageServerConnection: @unchecked Sendable {
 
     private struct Reply<Value: Decodable>: Decodable { let result: Value? }
     private struct Initialize: Decodable { let capabilities: LSPCapabilities }
+    private struct DocumentHighlight: Decodable { let range: LSPRange }
 
     private struct Definitions: Decodable {
         let locations: [LSPLocation]
@@ -203,6 +209,15 @@ final class LanguageServerConnection: @unchecked Sendable {
         return hover.flatMap { $0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
     }
 
+    func documentHighlights(at offset: Int, in snapshot: LSPDocument) async throws -> [NSRange] {
+        let response = try await request(.documentHighlight(offset), document: snapshot)
+        let ranges = try JSONDecoder().decode(Reply<[DocumentHighlight]>.self, from: response).result?.map(\.range) ?? []
+        return try await onQueue {
+            guard let index = self.index, self.document?.revision == snapshot.revision else { throw CancellationError() }
+            return ranges.compactMap { index.nsRange($0, clampingColumns: false) }
+        }
+    }
+
     private static func fileLocations(_ locations: [LSPLocation]) -> [LSPLocation] {
         var seen = Set<LSPLocation>()
         return locations.filter { location in
@@ -268,13 +283,15 @@ final class LanguageServerConnection: @unchecked Sendable {
                                      "textDocument": ["definition": ["linkSupport": true],
                                                       "hover": ["contentFormat": ["markdown", "plaintext"]]]]]
         }
+        guard let url = document?.url else { throw LSPFailure.invalidPosition }
+        var params: [String: Any] = ["textDocument": ["uri": url.absoluteString]]
         let offset: Int
         switch request {
         case .initialize: return [:]
-        case .definition(let value), .references(let value, _), .hover(let value): offset = value
+        case .definition(let value), .references(let value, _), .hover(let value), .documentHighlight(let value): offset = value
         }
-        guard let url = document?.url, let position = index?.position(at: offset) else { throw LSPFailure.invalidPosition }
-        var params: [String: Any] = ["textDocument": ["uri": url.absoluteString], "position": position.parameters]
+        guard let position = index?.position(at: offset) else { throw LSPFailure.invalidPosition }
+        params["position"] = position.parameters
         if case .references(_, let include) = request { params["context"] = ["includeDeclaration": include] }
         return params
     }

@@ -52,6 +52,9 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         document.editor.languageHover = { [weak self] offset, word in await self?.hover(at: offset, word: word) }
         document.editor.languageFollowLink = { [weak self] offset, word in self?.followLink(at: offset, word: word) }
         document.editor.languageFollowHoverLink = { [weak self] location, word in self?.followHoverLink(location, from: word) }
+        document.editor.occurrenceHighlighting.semanticWordHighlights = { [weak self] offset in
+            await self?.documentHighlights(at: offset) ?? []
+        }
     }
 
     func updateDocument() {
@@ -98,6 +101,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         let canInteract = session.supportsDefinition || session.supportsHover
         document.editor.languageInteractionEnabled = canInteract
         if !canInteract { cancelLookup() }
+        document.editor.occurrenceHighlighting.setSemanticWordHighlightsEnabled(session.supportsDocumentHighlight)
         status.update(visible: session.isEligible, state: session.state,
                       enabled: Set(LanguageServerCommand.allCases.filter(canPerform)))
         document.titleBar.languageServerStatusChanged()
@@ -169,6 +173,12 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
               isCurrent(query) else { return nil }
         return EditorLanguageHover(text: result.content, isMarkdown: result.isMarkdown,
                                    range: result.range?.nsRange(in: query.text) ?? word)
+    }
+
+    func documentHighlights(at offset: Int) async -> [NSRange] {
+        guard session.supportsDocumentHighlight, let query = query(),
+              let ranges = try? await session.documentHighlights(at: offset), isCurrent(query) else { return [] }
+        return ranges
     }
 
     private func followHoverLink(_ location: LSPLocation, from word: NSRange) {
