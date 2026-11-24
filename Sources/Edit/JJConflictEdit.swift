@@ -7,12 +7,15 @@ struct JJConflictEdit: Sendable {
         let block: NSRange
         let payload: NSRange
         let originalPayload: String
+        var appliedSides: Set<Int>? = nil
     }
 
+    let id = UUID()
     let original: JJConflict
     var block: NSRange
     var result: NSRange?
     var hasSeparator: Bool
+    var appliedSides: Set<Int> = []
     private let originalPayload: String
 
     init(_ conflict: JJConflict) {
@@ -36,9 +39,11 @@ struct JJConflictEdit: Sendable {
     }
 
     func draft(in source: NSString) -> SavedDraft? {
-        guard let payload, NSMaxRange(payload) <= source.length,
-              !source.substring(with: payload).utf8.elementsEqual(originalPayload.utf8) else { return nil }
-        return SavedDraft(block: block, payload: payload, originalPayload: originalPayload)
+        guard let payload, NSMaxRange(payload) <= source.length else { return nil }
+        let isEdited = !source.substring(with: payload).utf8.elementsEqual(originalPayload.utf8)
+        guard isEdited || !appliedSides.isEmpty else { return nil }
+        return SavedDraft(block: block, payload: payload, originalPayload: originalPayload,
+                          appliedSides: appliedSides.isEmpty ? nil : appliedSides)
     }
 
     func displayed(in source: NSString) -> JJConflict? {
@@ -83,10 +88,11 @@ struct JJConflictEdit: Sendable {
         return shifted
     }
 
-    func withInsertedSeparator() -> Self {
+    func withInitialResult(length: Int) -> Self {
         var updated = self
         updated.hasSeparator = true
-        updated.block.length += original.lineEnding.utf16.count
+        updated.block.length += length + original.lineEnding.utf16.count
+        updated.result?.length = length
         return updated
     }
 
@@ -122,10 +128,14 @@ struct JJConflictEdit: Sendable {
                 let separator = conflict.resultSeparator.isEmpty ? conflict.lineEnding : conflict.resultSeparator
                 let storedPayload = displayed.substring(with: draft.payload)
                 let separatorLength = separator.utf16.count
-                guard storedPayload.utf8.suffix(separator.utf8.count).elementsEqual(separator.utf8) else { return [] }
+                let applied = draft.appliedSides ?? []
+                guard applied.isSubset(of: Set(conflict.segments.compactMap { $0.kind.diffSide })) else { return [] }
+                let hasSeparator = !storedPayload.isEmpty
+                if hasSeparator, !storedPayload.utf8.suffix(separator.utf8.count).elementsEqual(separator.utf8) { return [] }
                 edit.block = draft.block
-                edit.hasSeparator = true
-                edit.result?.length = draft.payload.length - separatorLength
+                edit.hasSeparator = hasSeparator
+                edit.result?.length = draft.payload.length - (hasSeparator ? separatorLength : 0)
+                edit.appliedSides = applied
                 delta += difference
                 nextDraft += 1
             }

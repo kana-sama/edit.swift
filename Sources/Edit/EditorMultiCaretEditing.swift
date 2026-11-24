@@ -405,7 +405,7 @@ extension EditorTextView {
         conflictEditsAfter: [JJConflictEdit]? = nil
     ) -> Bool {
         let edits = replacements.filter { $0.range.length > 0 || !$0.text.isEmpty }
-        guard !edits.isEmpty, let storage = textStorage else { return false }
+        guard !edits.isEmpty || conflictEditsAfter != nil, let storage = textStorage else { return false }
         let previous = caretSelections
         let previousFocus = captureFocusSnapshot()
         let previousFocusNavigation = multiCaret.focusNavigation
@@ -420,7 +420,7 @@ extension EditorTextView {
             breakUndoCoalescing()
             manager?.disableUndoRegistration()
             replacingConflictStructure = conflictEditsAfter != nil
-            let allowed = withFocusEditsAllowed {
+            let allowed = edits.isEmpty || withFocusEditsAllowed {
                 shouldChangeText(inRanges: edits.map { NSValue(range: $0.range) }, replacementStrings: edits.map(\.text))
             }
             replacingConflictStructure = false

@@ -328,6 +328,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             _ = replaceProjectedSelection(with: NSPasteboard.general.string(forType: .string))
             return
         }
+        if pasteIntoEmptyConflictSnapshot() { return }
         if !pasteAtCarets(from: .general) && !pasteLine(from: .general) {
             super.paste(sender)
         }
@@ -335,12 +336,12 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     override func pasteAsPlainText(_ sender: Any?) {
         if jjInlineDiff?.projectedEditRange != nil { paste(sender) }
-        else { super.pasteAsPlainText(sender) }
+        else if !pasteIntoEmptyConflictSnapshot() { super.pasteAsPlainText(sender) }
     }
 
     override func pasteAsRichText(_ sender: Any?) {
         if jjInlineDiff?.projectedEditRange != nil { paste(sender) }
-        else { super.pasteAsRichText(sender) }
+        else if !pasteIntoEmptyConflictSnapshot() { super.pasteAsRichText(sender) }
     }
 
     func copyLine(to pasteboard: NSPasteboard, cutting: Bool) {
@@ -446,6 +447,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             } else {
                 super.insertText(string, replacementRange: restoredRange)
             }
+            return
+        }
+        if let plainText = (string as? String) ?? (string as? NSAttributedString)?.string,
+           insertInEmptyConflictSnapshot(plainText, at: replacementRange.location == NSNotFound ? selectedRange() : replacementRange) {
             return
         }
         if !insertAtCarets(string, replacementRange: replacementRange) {
@@ -994,6 +999,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     @discardableResult
     private func replace(_ range: NSRange, with replacement: String, selection: NSRange? = nil, coalesce: Bool = false) -> Bool {
         guard isEditable, range.length > 0 || !replacement.isEmpty, let textStorage else { return false }
+        if insertInEmptyConflictSnapshot(replacement, at: range) { return true }
         if !coalesce { breakUndoCoalescing() }
         guard shouldChangeText(in: range, replacementString: replacement) else { return false }
         withTextEdits([EditorTextEdit(range: range, text: replacement)]) {
@@ -1005,6 +1011,22 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         if !coalesce { breakUndoCoalescing() }
         scrollRangeToVisible(next)
         return true
+    }
+
+    private func pasteIntoEmptyConflictSnapshot() -> Bool {
+        guard !conflictEdits.isEmpty, let text = NSPasteboard.general.string(forType: .string) else { return false }
+        return insertInEmptyConflictSnapshot(text, at: selectedRange())
+    }
+
+    private func insertInEmptyConflictSnapshot(_ text: String, at range: NSRange) -> Bool {
+        guard isEditable, !hasMarkedText(), !hasSecondarySelections, range.length == 0, !text.isEmpty,
+              let snapshot = conflictEdits.first(where: { !$0.hasSeparator && $0.result == range }) else { return false }
+        let edit = EditorTextEdit(range: range, text: text + snapshot.original.lineEnding)
+        let tracked = conflictEdits.compactMap { item in
+            item.id == snapshot.id ? item.withInitialResult(length: text.utf16.count) : item.remapped(after: [edit])
+        }
+        let caret = NSRange(location: range.location + text.utf16.count, length: 0)
+        return applyMultiEdits([edit], selections: [caret], actionName: "Edit Snapshot", conflictEditsAfter: tracked)
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {

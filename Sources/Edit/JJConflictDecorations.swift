@@ -4,15 +4,16 @@ import AppKit
 final class JJConflictDecorations {
     struct ActionBlock {
         let conflict: JJConflict
-        var overlap: JJConflict.Segment.Kind? = nil
+        let id: UUID
+        var appliedSides: Set<Int> = []
+        var overlapSide: Int? = nil
         var hasDraft = false
     }
 
-    private struct ActionRow {
-        let conflict: JJConflict
-        let buttons: [JJConflictActions.Action]
-        let compact: Bool
-        let view: JJConflictActions
+    private struct ActionKey: Hashable {
+        // Replacing the snapshot can move every following marker to a different offset.
+        let blockID: UUID
+        let action: JJConflictActions.Action
     }
 
     private struct Row: Equatable {
@@ -26,7 +27,7 @@ final class JJConflictDecorations {
     private var highlights: [JJConflict.Highlight] = []
     private var rows: [Row] = []
     private var blocks: [ActionBlock] = []
-    private var actionRows: [Int: ActionRow] = [:]
+    private var actionRows: [ActionKey: JJConflictActions] = [:]
     private var actionsEnabled = true
 
     init(editor: EditorTextView) {
@@ -42,7 +43,7 @@ final class JJConflictDecorations {
         let changedMarkers = !previousMarkers.elementsEqual(markers)
         self.highlights = highlights
         if changedMarkers { editor?.syntaxHighlighting?.refreshColors() }
-        layout()
+        layout(positionsActions: false)
     }
 
     func setActionBlocks(_ blocks: [ActionBlock]) {
@@ -55,7 +56,7 @@ final class JJConflictDecorations {
     func setActionsEnabled(_ enabled: Bool) {
         guard actionsEnabled != enabled else { return }
         actionsEnabled = enabled
-        for row in actionRows.values { row.view.setEnabled(enabled) }
+        for row in actionRows.values { row.setEnabled(enabled) }
     }
 
     func markerRanges(in visible: NSRange) -> [NSRange] {
@@ -65,12 +66,15 @@ final class JJConflictDecorations {
         }
     }
 
-    func layout() {
+    func layout(positionsActions: Bool = true) {
         guard let editor, let scroll = editor.enclosingScrollView,
-              let manager = editor.textLayoutManager,
-              let viewport = manager.textViewportLayoutController.viewportRange else {
+              let manager = editor.textLayoutManager else {
             display([])
             removeActionRows()
+            return
+        }
+        guard let viewport = manager.textViewportLayoutController.viewportRange else {
+            for row in actionRows.values { row.setAnchorAvailable(false) }
             return
         }
         let visible = editor.charRange(viewport, in: manager)
@@ -83,62 +87,60 @@ final class JJConflictDecorations {
         }
         display(visibleRows)
 
-        layoutActions(in: visible, editor: editor, scroll: scroll)
+        if positionsActions { layoutActions(in: visible, editor: editor, scroll: scroll) }
     }
 
     private func layoutActions(in visible: NSRange, editor: EditorTextView, scroll: NSScrollView) {
         let viewport = JJEditorActionBar.viewport(in: scroll)
-        var visibleActions: [Int: ActionRow] = [:]
-        func place(_ buttons: [JJConflictActions.Action], at location: Int, for conflict: JJConflict,
-                   emphasizesResolution: Bool = false) {
-            guard NSLocationInRange(location, visible),
-                  let line = editor.laidOutLineBounds(at: location) else { return }
+        var visibleActions: [ActionKey: JJConflictActions] = [:]
+        func place(_ action: JJConflictActions.Action, at location: Int, in block: ActionBlock,
+                   applied: Bool = false, overlaps: Bool = false) {
+            let key = ActionKey(blockID: block.id, action: action)
+            guard NSLocationInRange(location, visible) else { return }
+            guard let line = editor.laidOutLineBounds(at: location) else {
+                // Keep the last position across transient TextKit invalidation.
+                actionRows[key]?.setAnchorAvailable(false)
+                visibleActions[key] = actionRows[key]
+                return
+            }
             let anchor = scroll.convert(line, from: editor)
             guard anchor.midY >= viewport.minY, anchor.midY <= viewport.maxY else { return }
-            let compact = buttons.count > 1 && viewport.width < 205
-            let row: ActionRow
-            if let existing = actionRows[location], existing.conflict == conflict, existing.buttons == buttons,
-               existing.compact == compact {
-                row = existing
-            } else {
-                let bar = JJConflictActions(buttons, compact: compact) { [weak self] action in
-                    self?.onAction?(conflict, action)
-                }
-                bar.setEnabled(actionsEnabled)
-                row = ActionRow(conflict: conflict, buttons: buttons, compact: compact, view: bar)
-                actionRows[location]?.view.removeFromSuperview()
-            }
-            row.view.emphasizeResolution(emphasizesResolution)
-            var frame = row.view.frame(over: anchor, in: viewport, scroll: scroll)
+            let row = actionRows[key] ?? JJConflictActions(action) { [weak self] in self?.perform(key) }
+            row.setAnchorAvailable(true)
+            row.update(enabled: actionsEnabled, applied: applied, overlaps: overlaps, hasDraft: block.hasDraft)
+            var frame = row.frame(over: anchor, in: viewport, scroll: scroll)
             frame.origin.y = floor(anchor.midY - frame.height / 2)
-            if row.view.frame != frame { row.view.frame = frame }
-            if row.view.superview !== scroll { scroll.addSubview(row.view, positioned: .above, relativeTo: nil) }
-            visibleActions[location] = row
+            if row.frame != frame { row.frame = frame }
+            if row.superview !== scroll { scroll.addSubview(row, positioned: .above, relativeTo: nil) }
+            visibleActions[key] = row
         }
         if editor.isEditable {
             for block in blocks where NSIntersectionRange(block.conflict.range, visible).length > 0 {
-                let conflict = block.conflict
-                for segment in conflict.segments {
-                    let button: JJConflictActions.Action = switch segment.kind {
-                    case .snapshot(let side) where block.hasDraft && side == conflict.resultSide: .editResult
-                    case let .snapshot(side): .useSide(side)
-                    case .diff where block.overlap == segment.kind: .manualMerge(segment)
-                    case .diff: .applyDiff(segment)
+                for segment in block.conflict.segments {
+                    switch segment.kind {
+                    case .snapshot(let side) where side == block.conflict.resultSide:
+                        place(.markResolved, at: segment.anchor.location, in: block)
+                    case .snapshot:
+                        break
+                    case .diff(_, let side):
+                        place(.applyDiff(side: side), at: segment.anchor.location, in: block,
+                              applied: block.appliedSides.contains(side), overlaps: block.overlapSide == side)
                     }
-                    place([button], at: segment.anchor.location, for: conflict)
-                }
-                if let end = conflict.highlights.last?.range.location {
-                    let buttons: [JJConflictActions.Action] = block.hasDraft ? [.markResolved] : [.editResult, .markResolved]
-                    place(buttons, at: end, for: conflict, emphasizesResolution: block.hasDraft)
                 }
             }
         }
-        for (location, old) in actionRows where visibleActions[location] == nil { old.view.removeFromSuperview() }
+        for (key, old) in actionRows where visibleActions[key] == nil { old.removeFromSuperview() }
         actionRows = visibleActions
     }
 
+    private func perform(_ key: ActionKey) {
+        guard actionsEnabled, let block = blocks.first(where: { $0.id == key.blockID }) else { return }
+        if case .applyDiff(let side) = key.action, block.appliedSides.contains(side) { return }
+        onAction?(block.conflict, key.action)
+    }
+
     private func removeActionRows() {
-        for row in actionRows.values { row.view.removeFromSuperview() }
+        for row in actionRows.values { row.removeFromSuperview() }
         actionRows.removeAll()
     }
 

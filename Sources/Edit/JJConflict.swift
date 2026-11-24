@@ -44,6 +44,11 @@ struct JJConflict: Equatable, Sendable {
     struct Segment: Equatable, Sendable {
         enum Kind: Equatable, Sendable {
             case snapshot(side: Int), diff(base: Int, side: Int)
+
+            var diffSide: Int? {
+                if case let .diff(_, side) = self { return side }
+                return nil
+            }
         }
 
         let anchor: NSRange

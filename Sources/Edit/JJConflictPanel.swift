@@ -112,74 +112,75 @@ final class JJConflictPanel: NSView {
 
 @MainActor
 final class JJConflictActions: JJEditorActionBar {
-    enum Action: Equatable {
-        case useSide(Int), applyDiff(JJConflict.Segment), manualMerge(JJConflict.Segment), editResult, markResolved
+    enum Action: Hashable {
+        case applyDiff(side: Int), markResolved
 
         var title: String {
             switch self {
-            case .useSide: "Accept Snapshot"
             case .applyDiff: "Apply Diff"
-            case .manualMerge: "Merge Manually"
-            case .editResult: "Edit Snapshot"
             case .markResolved: "Mark Resolved"
             }
         }
 
-        var help: String {
-            switch self {
-            case .manualMerge: "This diff overlaps the result. Edit the snapshot to combine the changes."
-            case .editResult: "Move the caret to the editable snapshot."
-            case .markResolved: "Replace the conflict with the current snapshot."
-            default: title
-            }
-        }
-
-        var compactSymbol: String? {
-            switch self {
-            case .editResult: "pencil"
-            case .markResolved: "checkmark"
-            default: nil
-            }
-        }
+        var isResolution: Bool { self == .markResolved }
     }
 
-    private let onAction: (Action) -> Void
-    private let actions: [Action]
-    private var buttons: [NSButton] = []
+    private let onAction: () -> Void
+    private let action: Action
+    private let button: NSButton
+    private var canAct = true
+    private var hasAnchor = true
+    private var applied = false
 
-    init(_ actions: [Action], compact: Bool, onAction: @escaping (Action) -> Void) {
-        self.actions = actions
+    init(_ action: Action, onAction: @escaping () -> Void) {
+        self.action = action
         self.onAction = onAction
+        button = NSButton(title: action.title, target: nil, action: nil)
         super.init(frame: .zero)
         identifier = .init("JujutsuConflictActions")
         setAccessibilityRole(.group)
         setAccessibilityLabel("Conflict Actions")
-        buttons = actions.enumerated().map { index, action in
-            let symbol = compact ? action.compactSymbol : nil
-            let button = NSButton(title: action.title, target: nil, action: nil)
-            configure(button, identifier: "JujutsuConflict\(action.title.filter(\.isLetter))",
-                      label: action.title, action: #selector(performAction(_:)), symbol: symbol)
-            button.tag = index
-            button.font = .systemFont(ofSize: 11, weight: action == .markResolved ? .semibold : .medium)
-            button.toolTip = action.help
-            button.setAccessibilityHelp(action.help)
-            button.heightAnchor.constraint(equalToConstant: 18).isActive = true
-            if symbol != nil { button.widthAnchor.constraint(equalToConstant: 22).isActive = true }
-            return button
-        }
-        installControls(buttons, edgeInsets: NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4))
+        configure(button, identifier: "JujutsuConflict\(action.title.filter(\.isLetter))",
+                  label: action.title, action: #selector(performAction))
+        button.font = .systemFont(ofSize: 11, weight: action.isResolution ? .semibold : .medium)
+        button.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        installControls([button], edgeInsets: NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4))
     }
 
     required init?(coder: NSCoder) { nil }
 
+    func update(enabled: Bool, applied: Bool, overlaps: Bool, hasDraft: Bool) {
+        self.applied = applied
+        setEnabled(enabled)
+        let help: String
+        if action.isResolution { help = "Replace the conflict with the current snapshot." }
+        else if applied { help = "This diff has been applied. Undo the application to apply it again." }
+        else if overlaps { help = "This diff overlaps the result. Edit the snapshot to combine the changes." }
+        else { help = action.title }
+        if button.toolTip != help {
+            button.toolTip = help
+            button.setAccessibilityHelp(help)
+        }
+        let tint: NSColor? = action.isResolution && hasDraft ? .controlAccentColor : nil
+        if button.contentTintColor != tint { button.contentTintColor = tint }
+    }
+
     func setEnabled(_ enabled: Bool) {
-        for button in buttons { button.isEnabled = enabled }
+        canAct = enabled
+        updateAvailability()
     }
 
-    func emphasizeResolution(_ emphasized: Bool) {
-        guard let index = actions.firstIndex(of: .markResolved) else { return }
-        buttons[index].contentTintColor = emphasized ? .controlAccentColor : nil
+    func setAnchorAvailable(_ available: Bool) {
+        hasAnchor = available
+        updateAvailability()
     }
 
-    @objc private func performAction(_ sender: NSButton) { onAction(actions[sender.tag]) }
+    private func updateAvailability() {
+        let enabled = canAct && hasAnchor && !applied
+        if button.isEnabled != enabled { button.isEnabled = enabled }
+    }
+
+    @objc private func performAction() {
+        if button.isEnabled { onAction() }
+    }
 }
