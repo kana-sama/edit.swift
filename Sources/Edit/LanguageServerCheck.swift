@@ -291,12 +291,13 @@ enum LanguageServerCheck {
         editor.mouseMoved(with: try event(.mouseMoved, []))
         try expect(editor.languageDefinitionLinkRange == nil, "clear the definition link without Command")
         try await wait("show the documentation hover") { editor.languageHoverWindowForCheck != nil }
-        guard let view = editor.languageHoverWindowForCheck?.contentView,
+        guard let panel = editor.languageHoverWindowForCheck, let view = panel.contentView,
               let declaration = hoverBody(.declaration, in: view), let docs = hoverBody(.documentation, in: view)
         else { throw Failure("find the declaration and documentation for a live ZLS function") }
         try expect(docs.isSelectable && !docs.isEditable && docs.string.contains("Returns a value.") &&
                    declaration.isSelectable && declaration.string.contains("fn identify()"),
                    "show selectable documentation and its signature")
+        try checkFirstHoverSelection(in: panel, text: docs, editor: editor)
         editor.cancelOperation(nil)
         try expect(editor.languageHoverWindowForCheck == nil, "Escape dismisses language documentation")
         editor.mouseMoved(with: try event(.mouseMoved, .command))
@@ -304,6 +305,26 @@ enum LanguageServerCheck {
         let down = try event(.leftMouseDown, .command, clicks: 1)
         NSApp.postEvent(try event(.leftMouseUp, .command, clicks: 1), atStart: true)
         editor.mouseDown(with: down)
+    }
+
+    private static func checkFirstHoverSelection(in panel: NSWindow, text: NSTextView, editor: EditorTextView) throws {
+        let phrase = (text.string as NSString).range(of: "Returns a value")
+        try orderQuietHover(panel)
+        try expect(phrase.location != NSNotFound && text.selectedRange().length == 0 &&
+                   !panel.isKeyWindow && panel.firstResponder !== text && editor.window?.firstResponder === editor,
+                   "start selecting while the editor still has focus")
+        let first = text.firstRect(forCharacterRange: NSRange(location: phrase.location, length: 1), actualRange: nil)
+        let last = text.firstRect(forCharacterRange: NSRange(location: NSMaxRange(phrase) - 1, length: 1), actualRange: nil)
+        let start = panel.convertPoint(fromScreen: NSPoint(x: first.minX + 1, y: first.midY))
+        let end = panel.convertPoint(fromScreen: NSPoint(x: last.maxX - 1, y: last.midY))
+        let press = try hoverMouseEvent(.leftMouseDown, at: start, in: panel)
+        try expect(text.acceptsFirstMouse(for: press), "accept the starting press of the first text drag")
+        let drag = try hoverMouseEvent(.leftMouseDragged, at: end, in: panel)
+        let release = try hoverMouseEvent(.leftMouseUp, at: end, in: panel)
+        try sendHoverGesture(press, followedBy: [drag, release], in: panel)
+        let range = text.selectedRange()
+        try expect(range.length >= 6 && NSIntersectionRange(phrase, range).length == range.length,
+                   "select documentation with one drag (\(range))")
     }
 
     private static func checkHoverLayout(in owner: NSWindow, capture: (NSView, String) throws -> Void) throws {
@@ -427,15 +448,7 @@ enum LanguageServerCheck {
         if let layout = editor.textLayoutManager { layout.ensureLayout(for: layout.documentRange) }
         guard let symbol = editor.highlightRects(for: [word]).first else { throw Failure("layout the inferred-type use") }
         let location = editor.convert(NSPoint(x: symbol.midX, y: symbol.midY), to: nil)
-        func event(_ type: NSEvent.EventType, at point: NSPoint, in window: NSWindow) throws -> NSEvent {
-            guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
-                                                 timestamp: ProcessInfo.processInfo.systemUptime,
-                                                 windowNumber: window.windowNumber, context: nil,
-                                                 eventNumber: 1, clickCount: type == .mouseMoved ? 0 : 1, pressure: 1)
-            else { throw Failure("create a hover link event") }
-            return event
-        }
-        editor.mouseMoved(with: try event(.mouseMoved, at: location, in: document.window))
+        editor.mouseMoved(with: try hoverMouseEvent(.mouseMoved, at: location, in: document.window))
         try await wait("show the inferred-type hover from ZLS") { editor.languageHoverWindowForCheck != nil }
         guard let panel = editor.languageHoverWindowForCheck, let view = panel.contentView,
               let text = hoverBody(.goTo, in: view), let declaration = hoverBody(.declaration, in: view)
@@ -448,6 +461,7 @@ enum LanguageServerCheck {
         try expect(linkedFile.path == file.path && url.fragment == "L3",
                    "retain the local line link from the actual ZLS Markdown (\(url.absoluteString), expected \(file.absoluteString)#L3)")
         try capture(view)
+        try orderQuietHover(panel)
         let screen = text.firstRect(forCharacterRange: NSRange(location: link.location + 2, length: 1), actualRange: nil)
         try expect(!screen.isEmpty, "lay out the hover link target")
         let point = panel.convertPoint(fromScreen: NSPoint(x: screen.midX, y: screen.midY))
@@ -463,18 +477,44 @@ enum LanguageServerCheck {
         let prosePoint = panel.convertPoint(fromScreen: NSPoint(x: prose.midX, y: prose.midY))
         try expect(EditApplication.clickCursor(in: panel, at: prosePoint) === NSCursor.iBeam,
                    "keep the text cursor over the declaration")
-        let press = try event(.leftMouseDown, at: point, in: panel)
-        NSApp.postEvent(try event(.leftMouseUp, at: point, in: panel), atStart: true)
-        NSApp.postEvent(press, atStart: true)
-        guard let down = NSApp.nextEvent(matching: .leftMouseDown, until: .distantPast, inMode: .default, dequeue: true)
-        else { throw Failure("queue the link click") }
-        text.mouseDown(with: down)
-        if NSApp.currentEvent === down {
-            _ = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: true)
-        }
-        try await wait("open the definition at the linked line in Edit") {
+        let press = try hoverMouseEvent(.leftMouseDown, at: point, in: panel)
+        try expect(!panel.isKeyWindow && panel.firstResponder !== text && document.window.firstResponder === editor,
+                   "start the click while the editor still has focus")
+        try expect(text.acceptsFirstMouse(for: press), "deliver the first click to the link in the non-key hover")
+        let release = try hoverMouseEvent(.leftMouseUp, at: point, in: panel)
+        try sendHoverGesture(press, followedBy: [release], in: panel)
+        try await wait("open the definition at the linked line on the first click") {
             document.fileURL == file && editor.selectedRange().location == lineOffset &&
                 document.window.firstResponder === editor && editor.languageHoverWindowForCheck == nil
+        }
+    }
+
+    private static func hoverMouseEvent(_ type: NSEvent.EventType, at point: NSPoint, in window: NSWindow) throws -> NSEvent {
+        guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil, eventNumber: 1,
+                                             clickCount: type == .mouseMoved ? 0 : 1,
+                                             pressure: type == .leftMouseDown || type == .leftMouseDragged ? 1 : 0)
+        else { throw Failure("create a hover mouse event") }
+        return event
+    }
+
+    private static func orderQuietHover(_ panel: NSWindow) throws {
+        try expect(panel.alphaValue == 0 && panel.ignoresMouseEvents && !NSApp.isActive, "keep the hover fixture non-interactive")
+        panel.setFrameOrigin(NSPoint(x: -10_000, y: -10_000))
+        panel.orderBack(nil)
+        try expect(panel.isVisible && !panel.isKeyWindow, "order the transparent hover without giving it focus")
+    }
+
+    private static func sendHoverGesture(_ press: NSEvent, followedBy events: [NSEvent], in panel: NSWindow) throws {
+        for event in events.reversed() { NSApp.postEvent(event, atStart: true) }
+        NSApp.postEvent(press, atStart: true)
+        guard let down = NSApp.nextEvent(matching: .leftMouseDown, until: .distantPast, inMode: .default, dequeue: true)
+        else { throw Failure("queue the first press in the hover") }
+        panel.sendEvent(down)
+        while let event = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantPast,
+                                          inMode: .default, dequeue: true) {
+            if panel.isVisible { panel.sendEvent(event) }
         }
     }
 

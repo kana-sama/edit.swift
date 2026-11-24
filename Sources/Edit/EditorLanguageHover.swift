@@ -322,6 +322,7 @@ final class HoverTextView: NSTextView {
     }
 
     override var needsPanelToBecomeKey: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     func measure(at width: CGFloat) -> NSSize? {
         if frame.width != width { setFrameSize(NSSize(width: width, height: frame.height)) }
