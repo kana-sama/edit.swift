@@ -13,6 +13,7 @@ struct LSPCapabilities: Decodable, Sendable {
     enum Change: Int, Decodable { case none, full, incremental }
 
     let definition: Bool
+    let declaration: Bool
     let references: Bool
     let hover: Bool
     let documentHighlight: Bool
@@ -25,7 +26,7 @@ struct LSPCapabilities: Decodable, Sendable {
     let positionEncoding: String
 
     private enum CodingKeys: String, CodingKey {
-        case definitionProvider, referencesProvider, hoverProvider, textDocumentSync, positionEncoding
+        case definitionProvider, declarationProvider, referencesProvider, hoverProvider, textDocumentSync, positionEncoding
         case documentHighlightProvider, documentSymbolProvider, workspaceSymbolProvider, renameProvider
     }
 
@@ -43,6 +44,7 @@ struct LSPCapabilities: Decodable, Sendable {
             return (try? values.nestedContainer(keyedBy: CodingKeys.self, forKey: key)) != nil
         }
         definition = supports(.definitionProvider)
+        declaration = supports(.declarationProvider)
         references = supports(.referencesProvider)
         hover = supports(.hoverProvider)
         documentHighlight = supports(.documentHighlightProvider)
@@ -80,7 +82,7 @@ enum LSPFailure: LocalizedError {
 /// continuations are confined to queue. DispatchIO keeps stalled reads and writes off that queue.
 final class LanguageServerConnection: @unchecked Sendable {
     private enum Request: Sendable {
-        case initialize, definition(Int), references(Int, Bool), hover(Int)
+        case initialize, definition(Int), declaration(Int), references(Int, Bool), hover(Int)
         case documentHighlight(Int), documentSymbols, workspaceSymbols(String)
         case prepareRename(Int), rename(Int, String)
 
@@ -88,6 +90,7 @@ final class LanguageServerConnection: @unchecked Sendable {
             switch self {
             case .initialize: "initialize"
             case .definition: "textDocument/definition"
+            case .declaration: "textDocument/declaration"
             case .references: "textDocument/references"
             case .hover: "textDocument/hover"
             case .documentHighlight: "textDocument/documentHighlight"
@@ -225,6 +228,12 @@ final class LanguageServerConnection: @unchecked Sendable {
         return Self.fileLocations(locations)
     }
 
+    func declaration(at offset: Int, in snapshot: LSPDocument) async throws -> [LSPLocation] {
+        let response = try await request(.declaration(offset), document: snapshot)
+        let locations = try JSONDecoder().decode(Reply<Definitions>.self, from: response).result?.locations ?? []
+        return Self.fileLocations(locations)
+    }
+
     func references(at offset: Int, includeDeclaration: Bool, in snapshot: LSPDocument) async throws -> [LSPLocation] {
         let response = try await request(.references(offset, includeDeclaration), document: snapshot)
         let locations = try JSONDecoder().decode(Reply<[LSPLocation]>.self, from: response).result ?? []
@@ -339,6 +348,7 @@ final class LanguageServerConnection: @unchecked Sendable {
                     "capabilities": ["general": ["positionEncodings": ["utf-16"]],
                                      "workspace": ["workspaceFolders": true, "workspaceEdit": ["documentChanges": true]],
                                      "textDocument": ["definition": ["linkSupport": true],
+                                                      "declaration": ["linkSupport": true],
                                                       "hover": ["contentFormat": ["markdown", "plaintext"]],
                                                       "documentSymbol": ["hierarchicalDocumentSymbolSupport": true],
                                                       "rename": ["prepareSupport": true]]]]
@@ -350,7 +360,7 @@ final class LanguageServerConnection: @unchecked Sendable {
         switch request {
         case .initialize, .workspaceSymbols: return [:]
         case .documentSymbols: return params
-        case .definition(let value), .references(let value, _), .hover(let value), .documentHighlight(let value),
+        case .definition(let value), .declaration(let value), .references(let value, _), .hover(let value), .documentHighlight(let value),
              .prepareRename(let value), .rename(let value, _): offset = value
         }
         guard let position = index?.position(at: offset) else { throw LSPFailure.invalidPosition }

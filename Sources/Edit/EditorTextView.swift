@@ -74,6 +74,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var onRenameSymbol: (() -> Bool)?
     var onCancelSymbolRename: (() -> Bool)?
     var isRenamingSymbol = false
+    var languageContextItems: ((EditorLanguageInteraction.Hit) -> [NSMenuItem])?
     var languageInteractionEnabled = false {
         didSet {
             guard languageInteractionEnabled != oldValue else { return }
@@ -331,6 +332,22 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         if editMultipleLines(.insert(above: false)) { return }
         guard let text = textStorage?.mutableString else { return }
         apply(LineEditing.insertLine(text, selection: selectedRange(), above: false))
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+        for (title, action) in [("Cut", #selector(cut(_:))), ("Copy", #selector(copy(_:))),
+                                ("Paste", #selector(paste(_:)))] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
+        }
+        if languageInteractionEnabled, let hit = languageInteraction.hit(at: event.locationInWindow),
+           let items = languageContextItems?(hit), !items.isEmpty {
+            menu.addItem(.separator())
+            items.forEach(menu.addItem)
+        }
+        return menu
     }
 
     override func copy(_ sender: Any?) {

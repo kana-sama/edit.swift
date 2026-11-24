@@ -22,6 +22,22 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         let openGeneration: UInt64
     }
 
+    private enum SymbolNavigation {
+        case definition, declaration, references
+
+        var failureMessage: String {
+            switch self {
+            case .definition, .declaration: "Could not navigate to symbol"
+            case .references: "Could not find references"
+            }
+        }
+    }
+
+    private struct SymbolMenuTarget {
+        let hit: EditorLanguageInteraction.Hit
+        let query: Query
+    }
+
     private unowned let document: DocumentWindow
     private unowned let app: Edit
     let session = LanguageServerSession()
@@ -53,6 +69,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         document.editor.languageHover = { [weak self] offset, word in await self?.hover(at: offset, word: word) }
         document.editor.languageFollowLink = { [weak self] offset, word in self?.followLink(at: offset, word: word) }
         document.editor.languageFollowHoverLink = { [weak self] location, word in self?.followHoverLink(location, from: word) }
+        document.editor.languageContextItems = { [weak self] hit in self?.contextItems(at: hit) ?? [] }
         document.editor.onRenameSymbol = { [weak self] in self?.symbolRename.start() ?? false }
         document.editor.onCancelSymbolRename = { [weak self] in self?.symbolRename.cancel(restoreFocus: true) ?? false }
         document.editor.occurrenceHighlighting.semanticWordHighlights = { [weak self] offset in
@@ -105,7 +122,8 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
 
     private func stateChanged() {
         if session.state != .ready { symbolRename.cancel(restoreFocus: true) }
-        let canInteract = session.supportsDefinition || session.supportsHover
+        let canInteract = session.supportsDefinition || session.supportsHover || session.supportsDeclaration
+            || session.supportsReferences || session.supportsRename
         document.editor.languageInteractionEnabled = canInteract
         if !canInteract { cancelLookup() }
         document.editor.occurrenceHighlighting.setSemanticWordHighlightsEnabled(session.supportsDocumentHighlight)
@@ -144,9 +162,57 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     }
 
     func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        if let target = (item as? NSMenuItem)?.representedObject as? SymbolMenuTarget {
+            guard isCurrent(target.query), query() != nil else { return false }
+            switch item.action {
+            case #selector(goToDeclaration(_:)): return session.supportsDeclaration
+            case #selector(findSymbolReferences(_:)): return session.supportsReferences
+            case #selector(renameContextSymbol(_:)): return symbolRename.canStart
+            default: return false
+            }
+        }
         guard let name = (item as? NSMenuItem)?.representedObject as? String,
               let command = LanguageServerCommand(rawValue: name) else { return false }
         return canPerform(command)
+    }
+
+    private func contextItems(at hit: EditorLanguageInteraction.Hit) -> [NSMenuItem] {
+        guard let query = query() else { return [] }
+        let target = SymbolMenuTarget(hit: hit, query: query)
+        var items: [NSMenuItem] = []
+        if session.supportsDeclaration {
+            items.append(symbolMenuItem("Go to Declaration", action: #selector(goToDeclaration(_:)), target: target))
+        }
+        if session.supportsReferences {
+            items.append(symbolMenuItem("Find References", action: #selector(findSymbolReferences(_:)), target: target))
+        }
+        if symbolRename.canStart {
+            items.append(symbolMenuItem("Rename…", action: #selector(renameContextSymbol(_:)), target: target))
+        }
+        return items
+    }
+
+    private func symbolMenuItem(_ title: String, action: Selector, target: SymbolMenuTarget) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.representedObject = target
+        return item
+    }
+
+    @objc private func goToDeclaration(_ item: NSMenuItem) {
+        guard validateUserInterfaceItem(item), let target = item.representedObject as? SymbolMenuTarget else { return }
+        navigateSymbol(.declaration, at: target.hit.offset, word: target.hit.word, query: target.query)
+    }
+
+    @objc private func findSymbolReferences(_ item: NSMenuItem) {
+        guard validateUserInterfaceItem(item), let target = item.representedObject as? SymbolMenuTarget else { return }
+        navigateSymbol(.references, at: target.hit.offset, word: target.hit.word, query: target.query)
+    }
+
+    @objc private func renameContextSymbol(_ item: NSMenuItem) {
+        guard validateUserInterfaceItem(item), let target = item.representedObject as? SymbolMenuTarget,
+              document.window.makeFirstResponder(document.editor) else { return }
+        _ = symbolRename.start(at: target.hit)
     }
 
     private func query() -> Query? {
@@ -197,6 +263,10 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
 
     func followLink(at offset: Int, word: NSRange) {
         guard session.supportsDefinition, let query = query() else { return }
+        navigateSymbol(.definition, at: offset, word: word, query: query)
+    }
+
+    private func navigateSymbol(_ command: SymbolNavigation, at offset: Int, word: NSRange, query: Query) {
         let origin = document.navigationLocation(at: NSRange(location: offset, length: 0))
         cancelLookup()
         navigationID &+= 1
@@ -205,12 +275,18 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
             guard let self else { return }
             defer { if navigationID == id { navigationTask = nil } }
             do {
-                let locations = try await session.definition(at: offset)
+                if command == .references {
+                    try await findReferences(at: offset, word: word, query: query, id: id, navigationOrigin: origin)
+                    return
+                }
+                let locations = try await command == .declaration
+                    ? session.declaration(at: offset) : session.definition(at: offset)
                 guard isCurrent(query) else { return }
                 switch locations.count {
                 case 0:
                     document.editor.invalidateLanguageInteraction()
-                case 1 where isCurrentLocation(locations[0], at: offset, in: query):
+                    if command == .declaration { document.editor.showLanguageFeedback("No declaration found", at: word) }
+                case 1 where command == .definition && isCurrentLocation(locations[0], at: offset, in: query):
                     if session.supportsReferences {
                         try await findReferences(at: offset, word: word, query: query, id: id, navigationOrigin: origin)
                     }
@@ -221,7 +297,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
                     chooseDefinition(locations, at: word, navigationOrigin: origin)
                 }
             } catch {
-                if isCurrent(query) { document.editor.showLanguageFeedback("Could not navigate to symbol", at: word) }
+                if isCurrent(query) { document.editor.showLanguageFeedback(command.failureMessage, at: word) }
             }
         }
     }

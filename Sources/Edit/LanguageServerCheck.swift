@@ -80,6 +80,9 @@ enum LanguageServerCheck {
         try await wait("discover ZLS while an untitled buffer is active") { lsp.statusIndicatorForCheck == .ready }
         try expect(try await app.openFile(notes, in: document) === document, "open a non-Zig file in the project folder")
         try expect(lsp.statusIndicatorForCheck == .ready && lsp.canPerform(.stop), "keep folder controls available over a text file")
+        let clipboardTitles = ["Cut", "Copy", "Paste"]
+        let plainMenu = try editorMenu(in: document, at: NSRange(location: 0, length: 5))
+        try expect(plainMenu.items.map(\.title) == clipboardTitles, "plain text offers only clipboard commands")
         try expect(try await app.openFile(main, in: document) === document, "open the Zig fixture")
         try await wait("initialize ZLS from PATH (\(lsp.session.state.title))") { lsp.session.supportsDefinition }
         document.window.layoutIfNeeded()
@@ -154,9 +157,39 @@ enum LanguageServerCheck {
         try await wait("follow the single use without opening a new References view") {
             document.editor.selectedRange().location == last.location
         }
+        let symbolTitles = ["Go to Declaration", "Find References", "Rename…"]
+        let whitespace = try editorMenu(in: document, at: NSRange(location: first.location - 1, length: 1))
+        try expect(whitespace.items.map(\.title) == clipboardTitles, "whitespace offers only clipboard commands")
+        let declarationMenu = try editorMenu(in: document, at: last, controlClick: true)
+        try expect(declarationMenu.items.filter { !$0.isSeparatorItem }.map(\.title) == clipboardTitles + symbolTitles &&
+                   declarationMenu.items.filter(\.isSeparatorItem).count == 1,
+                   "group the three symbol commands below the clipboard commands")
+        declarationMenu.performActionForItem(at: declarationMenu.indexOfItem(withTitle: "Go to Declaration"))
+        try await wait("navigate to the declaration from the context menu") {
+            document.editor.selectedRange().location == first.location
+        }
+        let offSymbol = NSRange(location: 0, length: 0)
+        document.editor.setCaretSelections([offSymbol])
+        let referencesMenu = try editorMenu(in: document, at: first)
+        try expect(document.editor.selectedRange() == offSymbol, "constructing the menu leaves the caret in place")
+        referencesMenu.performActionForItem(at: referencesMenu.indexOfItem(withTitle: "Find References"))
+        try await wait("find the clicked symbol's reference with the caret elsewhere") {
+            document.editor.selectedRange().location == last.location
+        }
+        document.editor.setCaretSelections([offSymbol])
+        let renameMenu = try editorMenu(in: document, at: last)
+        renameMenu.performActionForItem(at: renameMenu.indexOfItem(withTitle: "Rename…"))
+        try await wait("open the inline field for the clicked symbol with the caret elsewhere") {
+            (document.window.firstResponder as? NSTextView)?.string == "onlyValue"
+        }
+        try expect(document.editor.onCancelSymbolRename?() == true && document.editor.selectedRange() == offSymbol,
+                   "cancel the context rename and keep the original caret")
 
         try expect(try await app.openFile(typed, in: document) === document, "open the referenced-type fixture")
         try await wait("synchronize the referenced-type fixture") { lsp.session.supportsHover }
+        if let stale = declarationMenu.item(withTitle: "Go to Declaration") {
+            try expect(!lsp.validateUserInterfaceItem(stale), "ignore the old symbol action after switching files")
+        }
         let debug = (typedText as NSString).range(of: "debug")
         let debugHover = await lsp.hover(at: debug.location + 1, word: debug)
         let debugSections = debugHover.flatMap { ZLSHover(markdown: $0.text) }
@@ -181,6 +214,8 @@ enum LanguageServerCheck {
         try expect(try await app.openFile(main, in: document) === document, "navigate after stopping ZLS")
         try await wait("resolve the stopped document's workspace") { lsp.canPerform(.start) }
         try expect(lsp.session.state.title == "Stopped", "stop holds while switching files in the same project")
+        let stoppedMenu = try editorMenu(in: document, at: use)
+        try expect(stoppedMenu.items.map(\.title) == clipboardTitles, "hide symbol commands when ZLS is stopped")
         guard let start = ControlCommand.languageServerCommands(for: document).first(where: { $0.id == "lsp.start" })
         else { throw Failure("find Start LSP in Command Mode") }
         try expect(start.isAvailable(in: document, focus: document.editor), "Start LSP is available in Command Mode")
@@ -321,6 +356,20 @@ enum LanguageServerCheck {
                                           characters: character, charactersIgnoringModifiers: character,
                                           isARepeat: false, keyCode: code) else { throw Failure("create a keyboard event") }
         return event
+    }
+
+    private static func editorMenu(in document: DocumentWindow, at word: NSRange, controlClick: Bool = false) throws -> NSMenu {
+        let editor = document.editor
+        document.window.layoutIfNeeded()
+        if let layout = editor.textLayoutManager { layout.ensureLayout(for: layout.documentRange) }
+        guard let rect = editor.highlightRects(for: [word]).first else { throw Failure("lay out the context menu target") }
+        let point = editor.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+        guard let event = NSEvent.mouseEvent(with: controlClick ? .leftMouseDown : .rightMouseDown,
+                                             location: point, modifierFlags: controlClick ? .control : [],
+                                             timestamp: 0, windowNumber: document.window.windowNumber,
+                                             context: nil, eventNumber: 0, clickCount: 1, pressure: 1),
+              let menu = editor.menu(for: event) else { throw Failure("create the editor context menu") }
+        return menu
     }
 
     private static func checkEditorHoverAndClick(in document: DocumentWindow, word: NSRange) async throws {

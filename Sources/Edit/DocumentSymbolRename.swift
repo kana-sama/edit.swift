@@ -56,14 +56,15 @@ final class DocumentSymbolRename: NSObject, NSTextFieldDelegate {
             !editor.hasMarkedText() && editor.conflictEdits.isEmpty && editor.jjInlineDiff?.projectedEditRange == nil
     }
 
-    func start() -> Bool {
+    func start(at hit: EditorLanguageInteraction.Hit? = nil) -> Bool {
         if operation != nil { return true }
         guard canStart, let document, let root = session.workspaceRoot, let url = document.fileURL,
               let selection = document.editor.caretSelections.last else { return false }
         let editor = document.editor
         let source = Source(url: url, root: root, text: editor.string, generation: session.generation,
                             revision: session.revision, openGeneration: document.openRequestGeneration,
-                            selection: selection, offset: editor.activeEnd(of: selection))
+                            selection: selection, offset: hit?.offset ?? editor.activeEnd(of: selection))
+        let anchor = hit?.word ?? selection
         let id = UUID()
         operation = id
         editor.isRenamingSymbol = true
@@ -82,7 +83,7 @@ final class DocumentSymbolRename: NSObject, NSTextFieldDelegate {
                 guard let prepared, let range = index.nsRange(prepared.range, clampingColumns: false),
                       range.length > 0, editor.focusAllowsEdits([range]) else {
                     finish(restoreFocus: false)
-                    editor.showLanguageFeedback("No symbol to rename", at: selection)
+                    editor.showLanguageFeedback("No symbol to rename", at: anchor)
                     return
                 }
                 let text = source.text as NSString
@@ -99,7 +100,7 @@ final class DocumentSymbolRename: NSObject, NSTextFieldDelegate {
             } catch {
                 let report = isCurrent(id, source: source)
                 if operation == id { finish(restoreFocus: false) }
-                if report { editor.showLanguageFeedback(error.localizedDescription, at: selection) }
+                if report { editor.showLanguageFeedback(error.localizedDescription, at: anchor) }
             }
         }
         return true

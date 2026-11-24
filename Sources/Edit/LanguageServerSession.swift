@@ -39,6 +39,7 @@ final class LanguageServerSession {
     var canStop: Bool { canControl && (phase == .starting || phase == .ready) }
     var canRestart: Bool { canControl && phase != .stopping }
     var supportsDefinition: Bool { isReady && capabilities?.definition == true }
+    var supportsDeclaration: Bool { isReady && capabilities?.declaration == true }
     var supportsReferences: Bool { isReady && capabilities?.references == true }
     var supportsHover: Bool { isReady && capabilities?.hover == true }
     var supportsDocumentHighlight: Bool { isReady && capabilities?.documentHighlight == true }
@@ -181,6 +182,15 @@ final class LanguageServerSession {
         let snapshot = document
         let generation = generation
         let result = try await connection.references(at: offset, includeDeclaration: includeDeclaration, in: snapshot)
+        try validate(revision: snapshot.revision, generation: generation)
+        return result
+    }
+
+    func declaration(at offset: Int) async throws -> [LSPLocation] {
+        guard supportsDeclaration, let connection else { throw LSPFailure.unavailable }
+        let snapshot = document
+        let generation = generation
+        let result = try await connection.declaration(at: offset, in: snapshot)
         try validate(revision: snapshot.revision, generation: generation)
         return result
     }

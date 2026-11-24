@@ -2,7 +2,7 @@ import AppKit
 
 @MainActor
 final class EditorLanguageInteraction: NSObject {
-    private struct Hit {
+    struct Hit {
         let offset: Int
         let word: NSRange
     }
@@ -174,7 +174,7 @@ final class EditorLanguageInteraction: NSObject {
         modifiers.intersection([.command, .control, .option, .shift]) == .command
     }
 
-    private func hit(at location: NSPoint) -> Hit? {
+    func hit(at location: NSPoint) -> Hit? {
         guard let editor, let window = editor.window, let source = editor.textStorage?.mutableString,
               source.length > 0, !editor.hasMarkedText(), !editor.isHiddenOrHasHiddenAncestor,
               window.attachedSheet == nil, window.contentLayoutRect.contains(location) else { return nil }
