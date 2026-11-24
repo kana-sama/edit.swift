@@ -73,6 +73,7 @@ enum SourceControlCheck {
         try expect(panel.graphView.revisions.contains { $0.subject == "Historical change" }, "show multiple revisions in the graph")
         try expect(panel.graphView.revisions.filter(\.isWorkingCopy).count == 1, "mark exactly one working-copy graph node")
         try checkLayout(in: document, panel: panel)
+        try await checkRevisionHover(panel.graphView.revisions)
         try await checkRevsets(in: document, panel: panel, workspace: workspace, app: app)
 
         let tree = panel.fileTree.outline
@@ -761,10 +762,80 @@ enum SourceControlCheck {
                    bookmarkFrame.minX >= authorFrame.maxX && abs(bookmarkFrame.midY - authorFrame.midY) < 1 &&
                    [workingSubject, author, bookmarks].allSatisfy { $0.maximumNumberOfLines == 1 },
                    "show a readable single-line bookmark label after the author at minimum width")
-        try expect(working.toolTip?.contains(name) == true && branch.toolTip?.contains("Created ·") == true &&
-                   branch.toolTip?.contains("Commit created ·") == false &&
-                   historical.toolTip?.contains("Change created ·") == true && historical.toolTip?.contains("Commit created ·") == true,
-                   "show full bookmark names and both dates in tooltips, collapsing equal dates")
+        try expect(working.toolTip == nil && working.accessibilityLabel()?.contains(name) == true &&
+                   branch.accessibilityHelp()?.contains("Created ·") == true &&
+                   historical.accessibilityHelp()?.contains("Commit created ·") == true,
+                   "expose full bookmarks and dates to accessibility without the plain-text tooltip")
+    }
+
+    private static func checkRevisionHover(_ revisions: [JJSourceControlRevision]) async throws {
+        guard let working = revisions.firstIndex(where: \.isWorkingCopy),
+              let historical = revisions.firstIndex(where: { $0.subject == "Historical change" }),
+              let branch = revisions.first(where: { $0.subject == "Side branch" }) else {
+            throw Failure("find the hover card fixture changes")
+        }
+        let graph = SourceControlGraphView()
+        let bounds = NSRect(x: -10000, y: -10000, width: 260, height: 140)
+        let window = EditorFocusCheckWindow(contentRect: bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        window.isReleasedWhenClosed = false
+        window.contentView = graph.view
+        window.orderBack(nil)
+        defer { window.close() }
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.makeFirstResponder(graph.table)
+        graph.install(revisions, selected: revisions[historical].id)
+        window.layoutIfNeeded()
+
+        func pointer(at row: Int) throws -> NSEvent {
+            let rect = graph.table.rect(ofRow: row)
+            let point = graph.table.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+            guard let event = NSEvent.mouseEvent(with: .mouseMoved, location: point, modifierFlags: [], timestamp: 0,
+                                                 windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                                                 clickCount: 0, pressure: 0) else { throw Failure("create a hover event") }
+            return event
+        }
+        func card() -> NSWindow? {
+            window.childWindows?.first { $0.contentView?.identifier?.rawValue == "JujutsuRevisionHoverCard" }
+        }
+        func label(_ name: String, in root: NSView) -> NSTextField? {
+            descendant(of: root) { $0.identifier?.rawValue == "JujutsuRevisionCard\(name)" }
+        }
+
+        graph.table.mouseMoved(with: try pointer(at: historical))
+        graph.table.mouseMoved(with: try pointer(at: working))
+        try expect(card() == nil, "wait for the pointer to settle on a graph row")
+        try await waitFor("show the hovered revision card") { card()?.isVisible == true }
+        guard let preview = card(), let content = preview.contentView else { throw Failure("find the native hover surface") }
+        try expect(!preview.canBecomeKey && preview.ignoresMouseEvents && window.firstResponder === graph.table &&
+                   graph.table.selectedRow == historical,
+                   "preview a different row without moving selection or keyboard focus")
+        try expect(label("Subject", in: content)?.stringValue == "Working change" &&
+                   label("Author", in: content)?.stringValue == revisions[working].author &&
+                   label("Bookmarks", in: content)?.stringValue.contains("review/jj-sidebar-layout-with-a-long-bookmark") == true &&
+                   label("Description", in: content)?.stringValue.hasPrefix("A long description") == true,
+                   "show the subject, author, full bookmark name, and body as distinct parts of the card")
+        try expect(SourceControlRevisionCard.creationDates(for: revisions[historical]).count == 2 &&
+                   SourceControlRevisionCard.creationDates(for: branch).count == 1,
+                   "show both creation times only when they differ")
+
+        let clip = graph.view.contentView
+        try expect(content.bounds.width >= 300 && content.bounds.height < 330, "bound the size of a long hover preview")
+        clip.scroll(to: NSPoint(x: 0, y: graph.table.rowHeight))
+        try expect(card() == nil, "dismiss the card when its graph scrolls")
+        clip.scroll(to: .zero)
+        graph.table.mouseMoved(with: try pointer(at: historical))
+        try await waitFor("show both creation dates in the historical card") {
+            guard let content = card()?.contentView, let dates = label("Dates", in: content)?.stringValue else { return false }
+            return dates.contains("Change created ·") && dates.contains("Commit created ·")
+        }
+        graph.table.mouseExited(with: try pointer(at: historical))
+        try expect(card() == nil, "dismiss the card on leaving its row")
+        graph.table.mouseMoved(with: try pointer(at: working))
+        window.simulatedKeyStatus = false
+        try await Task.sleep(for: .milliseconds(500))
+        try expect(card() == nil && !NSApp.isActive, "cancel a pending card when the editor window loses key status")
     }
 
     private static func checkRevisionBanner(in document: DocumentWindow, above body: NSView) throws {

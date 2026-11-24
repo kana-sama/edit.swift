@@ -7,6 +7,7 @@ final class SourceControlGraphView: NSObject, NSTableViewDataSource, NSTableView
     var onSelect: ((JJSourceControlRevision) -> Void)?
     var onEdit: ((JJSourceControlRevision) -> Void)?
     var menu: ((JJSourceControlRevision) -> NSMenu?)?
+    private let revisionHover = SourceControlRevisionHover()
 
     private(set) var revisions: [JJSourceControlRevision] = []
     private var paths: [SourceControlGraphRow] = []
@@ -31,6 +32,14 @@ final class SourceControlGraphView: NSObject, NSTableViewDataSource, NSTableView
         table.target = self
         table.doubleAction = #selector(editRow(_:))
         table.setAccessibilityLabel("Change graph")
+        table.hoverRowChanged = { [weak self] row in
+            guard let self else { return }
+            if let row, revisions.indices.contains(row) {
+                revisionHover.track(revisions[row], row: row, in: table)
+            } else {
+                dismissRevisionCard()
+            }
+        }
         table.menuForRow = { [weak self] row in
             guard let self, revisions.indices.contains(row), table.isEnabled else { return nil }
             table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
@@ -43,6 +52,10 @@ final class SourceControlGraphView: NSObject, NSTableViewDataSource, NSTableView
     }
 
     func install(_ revisions: [JJSourceControlRevision], selected: String?) {
+        if let row = revisionHover.row,
+           !revisions.indices.contains(row) || self.revisions[row] != revisions[row] {
+            dismissRevisionCard()
+        }
         let top = table.rows(in: view.documentVisibleRect).location
         let oldAnchor = self.revisions.indices.contains(top) ? self.revisions[top].changeID : nil
         let offset = oldAnchor == nil ? 0 : view.documentVisibleRect.minY - table.rect(ofRow: top).minY
@@ -59,6 +72,8 @@ final class SourceControlGraphView: NSObject, NSTableViewDataSource, NSTableView
         }
         restoring = false
     }
+
+    func dismissRevisionCard() { revisionHover.dismiss() }
 
     func select(_ id: String?, revealing: Bool) {
         let previous = restoring
@@ -132,9 +147,44 @@ final class SourceControlGraphView: NSObject, NSTableViewDataSource, NSTableView
 @MainActor
 final class SourceControlGraphTable: NSTableView {
     var menuForRow: ((Int) -> NSMenu?)?
+    var hoverRowChanged: ((Int?) -> Void)?
+    private var hoverTrackingArea: NSTrackingArea?
+
+    override var isEnabled: Bool {
+        didSet { if !isEnabled { hoverRowChanged?(nil) } }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea { removeTrackingArea(hoverTrackingArea) }
+        let area = NSTrackingArea(rect: .zero, options: [.activeInKeyWindow, .inVisibleRect, .mouseEnteredAndExited, .mouseMoved],
+                                  owner: self)
+        addTrackingArea(area)
+        hoverTrackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { updateHover(with: event) }
+    override func mouseMoved(with event: NSEvent) { updateHover(with: event) }
+    override func mouseExited(with event: NSEvent) { hoverRowChanged?(nil) }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow !== window { hoverRowChanged?(nil) }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    private func updateHover(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let row = row(at: point)
+        guard isEnabled, visibleRect.contains(point), row >= 0 else {
+            hoverRowChanged?(nil)
+            return
+        }
+        hoverRowChanged?(row)
+    }
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        menuForRow?(row(at: convert(event.locationInWindow, from: nil)))
+        hoverRowChanged?(nil)
+        return menuForRow?(row(at: convert(event.locationInWindow, from: nil)))
     }
 }
 
@@ -182,6 +232,7 @@ private final class SourceControlGraphCell: NSTableCellView {
         super.init(frame: frame)
         identifier = Self.identifier
         subject.identifier = NSUserInterfaceItemIdentifier("JujutsuRevisionSubject")
+        subject.allowsExpansionToolTips = false
         subject.font = .systemFont(ofSize: 12, weight: .medium)
         subject.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         subject.maximumNumberOfLines = 1
@@ -207,7 +258,6 @@ private final class SourceControlGraphCell: NSTableCellView {
 
     func setRevision(_ revision: JJSourceControlRevision, path: SourceControlGraphRow, laneCount: Int) {
         subject.stringValue = revision.subject
-        let description = revision.description.isEmpty ? revision.subject : revision.description
         let bookmarkNames = revision.bookmarks.isEmpty ? nil : "Bookmarks: \(revision.bookmarks.joined(separator: ", "))"
         // Keep lanes connected across rows while reserving text space only for the lanes this row uses.
         graph.laneSpacing = min(9, 54 / CGFloat(max(1, laneCount - 1)))
@@ -219,10 +269,8 @@ private final class SourceControlGraphCell: NSTableCellView {
         metadata.update(revision)
         updateColors()
         let identity = metadata.accessibilityLabel()
-        let dates = Self.creationDates(for: revision)
         setAccessibilityLabel([revision.subject, identity, bookmarkNames].compactMap { $0 }.joined(separator: ", "))
-        setAccessibilityHelp(dates)
-        toolTip = [description, identity, bookmarkNames, dates].compactMap { $0 }.joined(separator: "\n")
+        setAccessibilityHelp(SourceControlRevisionCard.creationDates(for: revision).joined(separator: "\n"))
     }
 
     override var backgroundStyle: NSView.BackgroundStyle {
@@ -235,19 +283,6 @@ private final class SourceControlGraphCell: NSTableCellView {
         metadata.setEmphasized(emphasized)
         graph.emphasized = emphasized
         graph.needsDisplay = true
-    }
-
-    private static func creationDates(for revision: JJSourceControlRevision) -> String {
-        let style = Date.FormatStyle.dateTime.year().month(.abbreviated).day().hour().minute().second()
-        let author = revision.authorDate.formatted(style)
-        if revision.authorDate == revision.committerDate { return "Created · \(author)" }
-
-        let committer = revision.committerDate.formatted(style)
-        if author == committer {
-            let precise = style.secondFraction(.fractional(3))
-            return "Change created · \(revision.authorDate.formatted(precise))\nCommit created · \(revision.committerDate.formatted(precise))"
-        }
-        return "Change created · \(author)\nCommit created · \(committer)"
     }
 }
 

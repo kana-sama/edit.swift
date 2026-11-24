@@ -161,6 +161,7 @@ final class SourceControlSidebar: NSObject {
     }
 
     private func stopObserving() {
+        graphView.dismissRevisionCard()
         discovery?.cancel()
         discovery = nil
         graphRequest?.cancel()
@@ -410,6 +411,7 @@ final class SourceControlSidebar: NSObject {
     }
 
     private func showGraphMessage(_ text: String?) {
+        if text != nil { graphView.dismissRevisionCard() }
         graphMessage.isHidden = text == nil
         graphMessage.stringValue = text ?? ""
         graphView.view.isHidden = text != nil
@@ -706,6 +708,7 @@ final class SourceControlSidebar: NSObject {
     }
 
     @objc private func toggleGraph(_ sender: Any?) {
+        graphView.dismissRevisionCard()
         panes.setGraphExpanded(!panes.graphExpanded)
         updateDisclosures()
     }

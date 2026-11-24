@@ -33,6 +33,7 @@ final class SourceControlRevisionIdentity: NSView {
         bookmarks.font = .systemFont(ofSize: 11)
         bookmarks.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         for label in [changeID, author, bookmarks] {
+            label.allowsExpansionToolTips = false
             label.maximumNumberOfLines = 1
             label.cell?.usesSingleLineMode = true
             label.lineBreakMode = .byTruncatingTail
