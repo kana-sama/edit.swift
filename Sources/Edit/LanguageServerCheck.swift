@@ -10,6 +10,7 @@ enum LanguageServerCheck {
     static func run(in app: Edit, document: DocumentWindow, capture: (NSWindow) throws -> Void,
                     captureHover: (NSView, String) throws -> Void,
                     captureServers: (NSView, LanguageServerCommand) throws -> Void) async throws {
+        try checkHoverPlacement()
         try checkHoverLayout(in: document.window, capture: captureHover)
         try checkStructuredHover(in: document.window, capture: captureHover)
         let folder = FileManager.default.temporaryDirectory.appending(path: "ZLS fixture \(UUID().uuidString)", directoryHint: .isDirectory)
@@ -350,7 +351,8 @@ enum LanguageServerCheck {
             guard let panel = EditorHoverPopover(owner: owner, appearance: owner.effectiveAppearance, anchor: anchor,
                                                   presentation: .markdown(content), onNavigate: { _ in }, onEnter: {}, onExit: {}),
                   let view = panel.window.contentView,
-                  let text = descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHoverText" }) as? NSTextView
+                  let text = descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHoverText" }) as? NSTextView,
+                  let scroll = text.enclosingScrollView
             else { throw Failure("lay out a fenced code hover") }
             defer { panel.close(restoreFocus: false) }
             try capture(view, id)
@@ -358,7 +360,8 @@ enum LanguageServerCheck {
             try expect(type.location != NSNotFound, "show the type below the code")
             let first = text.firstRect(forCharacterRange: NSRange(location: 0, length: 1), actualRange: nil)
             let last = text.firstRect(forCharacterRange: type, actualRange: nil)
-            insets.append((panel.frame.maxY - first.maxY, last.minY - panel.frame.minY))
+            let viewport = panel.window.convertToScreen(scroll.convert(scroll.bounds, to: nil))
+            insets.append((viewport.maxY - first.maxY, last.minY - viewport.minY))
             hasCodeBackground = hasCodeBackground || attributed.attribute(.backgroundColor, at: 0, effectiveRange: nil) != nil
             let lineBreak = (code as NSString).range(of: "\n")
             if lineBreak.location != NSNotFound {
@@ -369,6 +372,33 @@ enum LanguageServerCheck {
         try expect(insets.allSatisfy { abs($0.top - $0.bottom) < 2 }, "fit the hover with balanced vertical padding (\(insets))")
         try expect(!hasCodeBackground, "avoid text background stripes in fenced code")
         try expect(codeLineGap.map { abs($0) < 1 } == true, "keep consecutive code lines at the normal line height")
+    }
+
+    private static func checkHoverPlacement() throws {
+        let screen = NSRect(x: -1_000, y: 50, width: 1_000, height: 800)
+        let content = NSSize(width: 450, height: 245)
+        let middle = NSRect(x: screen.midX, y: screen.midY, width: 26, height: 16)
+        let top = NSRect(x: screen.maxX - 7, y: screen.maxY - 25, width: 6, height: 16)
+        let left = NSRect(x: screen.minX + 1, y: screen.midY, width: 6, height: 16)
+        for (anchor, above) in [(middle, true), (top, false), (left, true)] {
+            guard let placement = EditorHoverPlacement(anchor: anchor, contentSize: content, screen: screen)
+            else { throw Failure("place the hover on the screen") }
+            let frame = placement.frame
+            let tipX = frame.minX + placement.shape.pointerX
+            let gap = above ? frame.minY - anchor.maxY : anchor.minY - frame.maxY
+            try expect(screen.contains(frame) && abs(tipX - anchor.midX) < 1 && (3...5).contains(gap),
+                       "point to the symbol with clearance above or below, including at screen edges")
+            try expect((placement.shape.contentFrame.minY > 0) == above,
+                       "put the pointer on the edge that faces the symbol")
+        }
+
+        let shortScreen = NSRect(x: screen.minX, y: screen.minY, width: screen.width, height: 400)
+        let anchor = NSRect(x: shortScreen.midX, y: shortScreen.midY, width: 26, height: 16)
+        guard let placement = EditorHoverPlacement(anchor: anchor, contentSize: content, screen: shortScreen)
+        else { throw Failure("fit a hover beside its symbol with limited vertical space") }
+        try expect(shortScreen.contains(placement.frame) && !placement.frame.intersects(anchor) &&
+                   placement.shape.contentFrame.height < content.height,
+                   "shorten the viewport before it would cover the symbol")
     }
 
     private static func checkStructuredHover(in owner: NSWindow, capture: (NSView, String) throws -> Void) throws {
@@ -413,6 +443,36 @@ enum LanguageServerCheck {
             try expect(links.textStorage?.attribute(.link, at: offset, effectiveRange: nil) is URL, "preserve each target URL")
         }
         try capture(view, "hover-sections")
+        if let light = NSAppearance(named: .aqua) {
+            let upperAnchor = NSRect(x: anchor.minX, y: area.maxY - 32, width: anchor.width, height: anchor.height)
+            guard let lightPanel = EditorHoverPopover(owner: owner, appearance: light, anchor: upperAnchor,
+                                                       presentation: presentation, onNavigate: { _ in }, onEnter: {}, onExit: {}),
+                  let lightView = lightPanel.window.contentView
+            else { throw Failure("draw the light hover near the top of the screen") }
+            defer { lightPanel.close(restoreFocus: false) }
+            try expect(lightPanel.frame.maxY < upperAnchor.minY, "leave the symbol above the light hover's pointer")
+            try capture(lightView, "hover-sections-light")
+        }
+
+        let columns = try kinds.map { kind in
+            guard let label = descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHover.\(kind.rawValue).label" }) as? NSTextField,
+                  let body = hoverBody(kind, in: view)
+            else { throw Failure("find both columns in the \(kind.rawValue) row") }
+            try expect(label.alignment == .right && label.textColor == .secondaryLabelColor,
+                       "right-align and mute the \(kind.rawValue) label")
+            let labelEdge = label.convert(label.alignmentRect(forFrame: label.bounds), to: nil).maxX
+            let bodyStart = body.convert(body.textContainerOrigin, to: nil).x
+            let labelBaseline = label.convert(NSPoint(x: 0, y: label.isFlipped ? label.firstBaselineOffsetFromTop :
+                label.bounds.height - label.firstBaselineOffsetFromTop), to: nil).y
+            let firstLine = body.firstRect(forCharacterRange: NSRange(location: 0, length: 1), actualRange: nil)
+            let textLine = panel.window.convertFromScreen(firstLine)
+            try expect((textLine.minY...textLine.maxY).contains(labelBaseline), "align the \(kind.rawValue) label with its first line")
+            return (labelEdge: labelEdge, bodyStart: bodyStart)
+        }
+        let firstColumn = columns[0]
+        try expect(columns.allSatisfy { abs($0.labelEdge - firstColumn.labelEdge) < 1 &&
+                   abs($0.bodyStart - firstColumn.bodyStart) < 1 && $0.labelEdge < $0.bodyStart },
+                   "share a label edge and a content column across the hover rows (\(columns))")
 
         let longDocumentation = raw + String(repeating: "\n\nA documentation paragraph in a long hover.", count: 20)
         let longPresentation = EditorHoverPresentation(text: longDocumentation, isMarkdown: true)

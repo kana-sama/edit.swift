@@ -5,7 +5,7 @@ enum EditorHoverPresentation: Sendable {
         enum Kind: String, Sendable {
             case declaration = "Declaration"
             case type = "Type"
-            case documentation = "Documentation"
+            case documentation = "Description"
             case goTo = "Go to"
 
             var isCode: Bool { self == .declaration || self == .type }
@@ -17,6 +17,13 @@ enum EditorHoverPresentation: Sendable {
 
     case markdown(EditorHoverContent)
     case structured([Section])
+
+    var maximumWidth: CGFloat {
+        switch self {
+        case .markdown: 460
+        case .structured: 560
+        }
+    }
 
     init(text: String, isMarkdown: Bool) {
         guard isMarkdown, let hover = ZLSHover(markdown: text) else {
@@ -72,26 +79,34 @@ private final class HoverSectionsView: NSView {
 
     init?(_ sections: [EditorHoverPresentation.Section], maximumWidth: CGFloat) {
         let inset: CGFloat = 12
-        let sectionSpacing: CGFloat = 11
-        let labelSpacing: CGFloat = 4
-        let availableWidth = maximumWidth - 2 * inset
+        let rowSpacing: CGFloat = 8
+        let columnSpacing: CGFloat = 14
+        let codePadding = NSSize(width: 6, height: 4)
         let rows: [(label: NSTextField, body: HoverTextView, isCode: Bool)] = sections.map { section in
             let name = section.kind.rawValue
             let label = NSTextField(labelWithString: name)
             label.identifier = .init("EditorLanguageHover.\(name).label")
-            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-            label.textColor = .labelColor
+            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
+            label.textColor = .secondaryLabelColor
+            label.alignment = .right
             label.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
 
-            let padding = section.kind.isCode ? NSSize(width: 8, height: 6) : .zero
-            let body = HoverTextView(width: availableWidth, text: section.content.attributedText(), inset: padding)
+            let body = HoverTextView(width: maximumWidth, text: section.content.attributedText(), inset: .zero)
             body.identifier = .init("EditorLanguageHover.\(name).body")
             return (label: label, body: body, isCode: section.kind.isCode)
         }
-        var preferredWidth: CGFloat = 172
+        let labelWidth = rows.map { row in
+            let insets = row.label.alignmentRectInsets
+            return ceil(row.label.fittingSize.width - insets.left - insets.right)
+        }.max() ?? 0
+        let bodyLeading = inset + labelWidth + columnSpacing
+        let trailingInset = inset + codePadding.width
+        let availableWidth = maximumWidth - bodyLeading - trailingInset
+        guard availableWidth > 0 else { return nil }
+        var preferredWidth: CGFloat = 104
         for row in rows {
             guard let size = row.body.measure(at: availableWidth) else { return nil }
-            preferredWidth = max(preferredWidth, size.width, ceil(row.label.fittingSize.width))
+            preferredWidth = max(preferredWidth, size.width)
         }
         let bodyWidth = min(availableWidth, preferredWidth)
         textViews = rows.map { $0.body }
@@ -99,15 +114,19 @@ private final class HoverSectionsView: NSView {
 
         var top = inset
         for (index, row) in rows.enumerated() {
+            guard let size = row.body.measure(at: bodyWidth), let bodyBaseline = row.body.firstTextBaseline else { return nil }
+            let padding = row.isCode ? codePadding : .zero
             let labelHeight = ceil(row.label.fittingSize.height)
-            row.label.frame = row.label.frame(forAlignmentRect: NSRect(x: inset, y: top, width: bodyWidth, height: labelHeight))
+            let labelBaseline = row.label.firstBaselineOffsetFromTop
+            let baseline = top + max(labelBaseline, padding.height + bodyBaseline)
+            let labelFrame = NSRect(x: inset, y: baseline - labelBaseline, width: labelWidth, height: labelHeight)
+            row.label.frame = row.label.frame(forAlignmentRect: labelFrame)
             addSubview(row.label)
-            top += labelHeight + labelSpacing
 
-            guard let size = row.body.measure(at: bodyWidth) else { return nil }
-            let bodyFrame = NSRect(x: inset, y: top, width: bodyWidth, height: size.height)
+            let bodyFrame = NSRect(x: bodyLeading, y: baseline - bodyBaseline, width: bodyWidth, height: size.height)
+            let paddedBody = bodyFrame.insetBy(dx: -padding.width, dy: -padding.height)
             if row.isCode {
-                let background = NSBox(frame: bodyFrame)
+                let background = NSBox(frame: paddedBody)
                 background.boxType = .custom
                 background.titlePosition = .noTitle
                 background.borderWidth = 0
@@ -118,10 +137,10 @@ private final class HoverSectionsView: NSView {
             }
             row.body.frame = bodyFrame
             addSubview(row.body)
-            top += size.height
-            if index < rows.count - 1 { top += sectionSpacing }
+            top = max(labelFrame.maxY, paddedBody.maxY)
+            if index < rows.count - 1 { top += rowSpacing }
         }
-        setFrameSize(NSSize(width: bodyWidth + 2 * inset, height: top + inset))
+        setFrameSize(NSSize(width: bodyLeading + bodyWidth + trailingInset, height: top + inset))
     }
 
     required init?(coder: NSCoder) { fatalError("Hover sections are created in code.") }

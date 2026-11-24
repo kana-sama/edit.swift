@@ -182,6 +182,36 @@ struct EditorHoverContent: Sendable {
     }
 }
 
+struct EditorHoverPlacement {
+    static let screenInset: CGFloat = 8
+    private static let gap: CGFloat = 4
+
+    let frame: NSRect
+    let shape: AnchoredPopoverShape
+
+    init?(anchor: NSRect, contentSize: NSSize, screen: NSRect) {
+        let available = screen.insetBy(dx: Self.screenInset, dy: Self.screenInset)
+        let width = contentSize.width
+        let pointerHeight = AnchoredPopoverShape.pointerHeight
+        let wantedHeight = min(contentSize.height, 320) + pointerHeight
+        let spaceAbove = available.maxY - anchor.maxY - Self.gap
+        let spaceBelow = anchor.minY - available.minY - Self.gap
+        let above = spaceAbove >= wantedHeight || spaceAbove >= spaceBelow
+        let height = min(wantedHeight, above ? spaceAbove : spaceBelow)
+        guard height > pointerHeight else { return nil }
+
+        // Use the screen margin near an edge so the tip can stay over the symbol.
+        let pointerInset = AnchoredPopoverShape.pointerEdgeInset
+        let minX = min(available.minX, max(screen.minX, anchor.midX - pointerInset))
+        let maxX = max(available.maxX, min(screen.maxX, anchor.midX + pointerInset))
+        let x = min(max(anchor.midX - width / 2, minX), maxX - width)
+        let y = above ? anchor.maxY + Self.gap : anchor.minY - Self.gap - height
+        frame = NSRect(x: x, y: y, width: width, height: height)
+        shape = AnchoredPopoverShape(contentSize: NSSize(width: width, height: height - pointerHeight),
+                                     pointerX: anchor.midX - x, pointsDown: above)
+    }
+}
+
 @MainActor
 final class EditorHoverPopover {
     private let panel: HoverPanel
@@ -195,26 +225,18 @@ final class EditorHoverPopover {
     init?(owner: NSWindow, appearance: NSAppearance, anchor: NSRect, presentation: EditorHoverPresentation,
           onNavigate: @escaping (LSPLocation) -> Void, onEnter: @escaping () -> Void, onExit: @escaping () -> Void) {
         guard !anchor.isEmpty, let screen = owner.screen ?? NSScreen.main else { return nil }
-        let area = screen.visibleFrame.insetBy(dx: 8, dy: 8)
-        guard let layout = EditorHoverLayout(presentation, maximumWidth: min(460, area.width)) else { return nil }
-        let panelWidth = layout.view.frame.width
-        let contentHeight = layout.view.frame.height
-        let gap: CGFloat = 4
-        let spaceAbove = max(0, area.maxY - anchor.maxY - gap)
-        let spaceBelow = max(0, anchor.minY - area.minY - gap)
-        let wantedHeight = min(contentHeight, 320)
-        let above = spaceAbove >= wantedHeight || spaceAbove >= spaceBelow
-        let panelHeight = min(wantedHeight, max(42, above ? spaceAbove : spaceBelow))
-        let x = min(max(anchor.minX, area.minX), area.maxX - panelWidth)
-        let y = min(max(above ? anchor.maxY + gap : anchor.minY - gap - panelHeight, area.minY), area.maxY - panelHeight)
-        let frame = NSRect(x: x, y: y, width: panelWidth, height: panelHeight)
+        let screenFrame = screen.visibleFrame
+        let maximumWidth = min(presentation.maximumWidth, screenFrame.width - 2 * EditorHoverPlacement.screenInset)
+        guard let layout = EditorHoverLayout(presentation, maximumWidth: maximumWidth),
+              let placement = EditorHoverPlacement(anchor: anchor, contentSize: layout.view.frame.size, screen: screenFrame)
+        else { return nil }
 
         self.anchor = anchor
-        panel = HoverPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        content = HoverSurface(size: frame.size, layout: layout,
+        panel = HoverPanel(contentRect: placement.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        content = HoverSurface(placement: placement, layout: layout,
                                onNavigate: onNavigate, onEnter: onEnter, onExit: onExit)
         panel.contentView = content
-        panel.setFrame(frame, display: false)
+        panel.setFrame(placement.frame, display: false)
         panel.isReleasedWhenClosed = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -242,7 +264,7 @@ private final class HoverPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-private final class HoverSurface: NSVisualEffectView, NSTextViewDelegate {
+private final class HoverSurface: AnchoredPopoverSurface, NSTextViewDelegate {
     private let onNavigate: (LSPLocation) -> Void
     private let onEnter: () -> Void
     private let onExit: () -> Void
@@ -251,27 +273,21 @@ private final class HoverSurface: NSVisualEffectView, NSTextViewDelegate {
 
     var selecting: Bool { textViews.contains(where: \.selecting) }
 
-    init(size: NSSize, layout: EditorHoverLayout,
+    init(placement: EditorHoverPlacement, layout: EditorHoverLayout,
          onNavigate: @escaping (LSPLocation) -> Void, onEnter: @escaping () -> Void, onExit: @escaping () -> Void) {
         self.onNavigate = onNavigate
         self.onEnter = onEnter
         self.onExit = onExit
         textViews = layout.textViews
-        super.init(frame: NSRect(origin: .zero, size: size))
+        super.init(frame: NSRect(origin: .zero, size: placement.frame.size))
         identifier = .init("EditorLanguageHover")
-        material = .popover
-        blendingMode = .behindWindow
-        state = .active
-        wantsLayer = true
-        layer?.cornerRadius = 10
-        layer?.cornerCurve = .continuous
-        layer?.masksToBounds = true
+        applyOutline(placement.shape)
 
         for text in textViews { text.delegate = self }
 
-        let scroll = NSScrollView(frame: bounds)
+        let scroll = NSScrollView(frame: placement.shape.contentFrame)
         scroll.drawsBackground = false
-        scroll.hasVerticalScroller = layout.view.frame.height > size.height
+        scroll.hasVerticalScroller = layout.view.frame.height > scroll.frame.height
         scroll.scrollerStyle = .overlay
         scroll.autohidesScrollers = true
         scroll.documentView = layout.view
@@ -323,6 +339,13 @@ final class HoverTextView: NSTextView {
 
     override var needsPanelToBecomeKey: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    var firstTextBaseline: CGFloat? {
+        guard let layout = textLayoutManager,
+              let fragment = layout.textLayoutFragment(for: layout.documentRange.location),
+              let line = fragment.textLineFragments.first else { return nil }
+        return textContainerOrigin.y + fragment.layoutFragmentFrame.minY + line.glyphOrigin.y
+    }
 
     func measure(at width: CGFloat) -> NSSize? {
         if frame.width != width { setFrameSize(NSSize(width: width, height: frame.height)) }

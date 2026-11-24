@@ -1,15 +1,13 @@
 import AppKit
 
 struct TerminalDockPopoverLayout {
-    static let pointerHeight: CGFloat = 6
-    static let pointerHalfWidth: CGFloat = 7
-    private static let cornerRadius: CGFloat = 12
+    static let pointerHeight = AnchoredPopoverShape.pointerHeight
+    static let pointerHalfWidth = AnchoredPopoverShape.pointerHalfWidth
 
     let frame: NSRect
-    let content: NSRect
-    let pointerX: CGFloat
-    private let pointerBaseX: CGFloat
-    private let above: Bool
+    let shape: AnchoredPopoverShape
+    var content: NSRect { shape.contentFrame }
+    var pointerX: CGFloat { shape.pointerX }
 
     init(anchor: NSRect, size: NSSize, screen: NSRect, preferAbove: Bool) {
         let available = screen.insetBy(dx: 4, dy: 4)
@@ -20,39 +18,15 @@ struct TerminalDockPopoverLayout {
         let belowY = anchor.minY - gap - height
         let fitsAbove = aboveY + height <= available.maxY
         let fitsBelow = belowY >= available.minY
-        above = preferAbove ? fitsAbove || !fitsBelow : !fitsBelow && fitsAbove
+        let above = preferAbove ? fitsAbove || !fitsBelow : !fitsBelow && fitsAbove
         let x = min(max(anchor.midX - width / 2, available.minX), available.maxX - width)
         let y = min(max(above ? aboveY : belowY, available.minY), available.maxY - height)
         frame = NSRect(x: x, y: y, width: width, height: height)
-        content = NSRect(x: 0, y: above ? Self.pointerHeight : 0, width: width, height: size.height)
-        let clearance = Self.cornerRadius + Self.pointerHalfWidth + 1
-        pointerX = min(max(anchor.midX - x, 2), width - 2)
-        pointerBaseX = min(max(pointerX, clearance), width - clearance)
+        shape = AnchoredPopoverShape(contentSize: NSSize(width: width, height: size.height),
+                                     pointerX: anchor.midX - x, pointsDown: above)
     }
 
-    func outline() -> CGPath {
-        let w = content.width
-        let h = content.height
-        let rightBase = pointerBaseX + Self.pointerHalfWidth
-        let leftBase = pointerBaseX - Self.pointerHalfWidth
-        let r = Self.cornerRadius
-        let tip = h + Self.pointerHeight
-        let path = CGMutablePath()
-        path.move(to: CGPoint(x: r, y: 0))
-        path.addArc(tangent1End: CGPoint(x: w, y: 0), tangent2End: CGPoint(x: w, y: h), radius: r)
-        path.addArc(tangent1End: CGPoint(x: w, y: h), tangent2End: CGPoint(x: rightBase, y: h), radius: r)
-        path.addLine(to: CGPoint(x: rightBase, y: h))
-        path.addLine(to: CGPoint(x: pointerX + 1.5, y: tip - 0.6))
-        path.addQuadCurve(to: CGPoint(x: pointerX - 1.5, y: tip - 0.6),
-                          control: CGPoint(x: pointerX, y: tip + 0.6))
-        path.addLine(to: CGPoint(x: leftBase, y: h))
-        path.addArc(tangent1End: CGPoint(x: 0, y: h), tangent2End: .zero, radius: r)
-        path.addArc(tangent1End: .zero, tangent2End: CGPoint(x: r, y: 0), radius: r)
-        path.closeSubpath()
-        guard above else { return path }
-        var flip = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: frame.height)
-        return path.copy(using: &flip) ?? path
-    }
+    func outline() -> CGPath { shape.outline() }
 }
 
 @MainActor
@@ -169,21 +143,13 @@ private final class DockPopoverPanel: NSPanel {
 }
 
 @MainActor
-private final class DockPopoverSurface: NSVisualEffectView {
+private final class DockPopoverSurface: AnchoredPopoverSurface {
     private let content: NSView
-    private let outline = CAShapeLayer()
 
     init(content: NSView) {
         self.content = content
         super.init(frame: .zero)
         identifier = .init("Edit.Terminal.DockPicker")
-        material = .popover
-        blendingMode = .behindWindow
-        state = .active
-        wantsLayer = true
-        outline.fillColor = nil
-        outline.lineWidth = 1
-        layer?.addSublayer(outline)
         addSubview(content)
     }
 
@@ -192,27 +158,6 @@ private final class DockPopoverSurface: NSVisualEffectView {
 
     func apply(_ layout: TerminalDockPopoverLayout) {
         content.frame = layout.content
-        let path = layout.outline()
-        maskImage = NSImage(size: layout.frame.size, flipped: false) { _ in
-            guard let context = NSGraphicsContext.current?.cgContext else { return false }
-            context.setFillColor(CGColor(gray: 1, alpha: 1))
-            context.addPath(path)
-            context.fillPath()
-            return true
-        }
-        outline.frame = bounds
-        outline.path = path
-        updateOutlineColor()
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        updateOutlineColor()
-    }
-
-    private func updateOutlineColor() {
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            outline.strokeColor = NSColor.separatorColor.cgColor
-        }
+        applyOutline(layout.shape)
     }
 }
