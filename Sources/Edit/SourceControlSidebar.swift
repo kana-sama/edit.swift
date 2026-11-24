@@ -2,6 +2,18 @@ import AppKit
 
 @MainActor
 final class SourceControlSidebar: NSObject {
+    private struct DetailTarget: Equatable {
+        let revision: JJSourceControlRevision
+        let operationID: String
+    }
+
+    private struct DetailPresentation {
+        let target: DetailTarget
+        let result: Result<JJSourceControlDetail, Error>?
+    }
+
+    private static let presentationGrace: Duration = .milliseconds(750)
+
     let view: NSView = SourceControlFocusView()
     let graphView = SourceControlGraphView()
     private(set) lazy var fileTree = SidebarFileTree(document: document, app: app, mode: .sourceControl)
@@ -14,12 +26,12 @@ final class SourceControlSidebar: NSObject {
     private let workingCopyButton = NSButton()
     private let operationsButton = NSButton()
     private let newButton = NSButton()
-    private let actionsButton = NSButton()
+    private let actionsButton = SourceControlDetailButton()
     private static let collapsedChevron = disclosureImage("chevron.forward")
     private static let expandedChevron = disclosureImage("chevron.down")
     private let graphMessage = NSTextField(wrappingLabelWithString: "")
     private let graphLimit = NSTextField(labelWithString: "")
-    private let detailTitle = NSButton()
+    private let detailTitle = SourceControlDetailButton()
     private let detailMetadata = SourceControlRevisionIdentity()
     private let fileCount = NSTextField(labelWithString: "")
     private let fileHeading = NSTextField(labelWithString: "Changed Files")
@@ -56,7 +68,8 @@ final class SourceControlSidebar: NSObject {
     private var discovery: Task<Void, Never>?
     private var graphRequest: Task<Void, Never>?
     private var detailRequest: Task<Void, Never>?
-    private var expiry: Task<Void, Never>?
+    private var graphExpiry: Task<Void, Never>?
+    private var detailExpiry: Task<Void, Never>?
     private var busy = false
     private var stale = false
     private var revsets = SourceControlRevsets()
@@ -64,8 +77,7 @@ final class SourceControlSidebar: NSObject {
     private var revealWorkingCopy = false
     private(set) var graph: JJSourceControlGraph?
     private(set) var selection: JJSourceControlRevision?
-    private(set) var detail: JJSourceControlDetail?
-    private var displayedFiles: [JJSourceControlFile] = []
+    private var presentedDetail: DetailPresentation?
     private var hasPresentedGraph = false
     private let graphBody = NSView()
     private let changeBody = NSView()
@@ -78,10 +90,22 @@ final class SourceControlSidebar: NSObject {
         graphView.table.isEnabled && !graphView.table.isHiddenOrHasHiddenAncestor ? graphView.table : view
     }
 
+    var detail: JJSourceControlDetail? {
+        guard let presentedDetail, presentedDetail.target == selectedDetailTarget,
+              case .success(let detail) = presentedDetail.result else { return nil }
+        return detail
+    }
+
+    private var selectedDetailTarget: DetailTarget? {
+        guard let graph, let selection else { return nil }
+        return DetailTarget(revision: selection, operationID: graph.operationID)
+    }
+
 #if EDIT_AGENT_CHECKS
     var operationsViewForCheck: NSView { operations.checkView }
     var descriptionViewForCheck: NSView { descriptionPopover.checkView }
     var revsetPickerForCheck: SourceControlRevsetPicker { revsetPicker }
+    var detailReadDelayForCheck: Duration?
 #endif
 
     private enum PanelError: LocalizedError {
@@ -101,7 +125,8 @@ final class SourceControlSidebar: NSObject {
         discovery?.cancel()
         graphRequest?.cancel()
         detailRequest?.cancel()
-        expiry?.cancel()
+        graphExpiry?.cancel()
+        detailExpiry?.cancel()
         if let subscription { app.jjChanges.unsubscribe(subscription) }
     }
 
@@ -117,11 +142,8 @@ final class SourceControlSidebar: NSObject {
         revealWorkingCopy = false
         hasPresentedGraph = false
         selection = nil
-        detail = nil
-        displayedFiles = []
         graphView.install([], selected: nil)
-        fileTree.clearSourceControl()
-        renderDetail()
+        presentDetail(nil)
         if active { discover() }
     }
 
@@ -148,8 +170,9 @@ final class SourceControlSidebar: NSObject {
         graphRequest = nil
         detailRequest?.cancel()
         detailRequest = nil
-        expiry?.cancel()
-        expiry = nil
+        graphExpiry?.cancel()
+        graphExpiry = nil
+        cancelDetailExpiry()
         app.jjChanges.unsubscribe(subscription)
         subscription = nil
         operations.close()
@@ -205,17 +228,16 @@ final class SourceControlSidebar: NSObject {
         guard active, let workspace else { return }
         graphRequest?.cancel()
         detailRequest?.cancel()
+        detailRequest = nil
         stale = true
         if graph == nil { showGraphMessage("Loading changes…") }
         updateControls()
-        if expiry == nil {
-            expiry = Task { [weak self] in
-                try? await Task.sleep(for: .milliseconds(750))
+        scheduleDetailExpiry()
+        if graphExpiry == nil {
+            graphExpiry = Task { [weak self] in
+                try? await Task.sleep(for: Self.presentationGrace)
                 guard let self, !Task.isCancelled, stale else { return }
                 showGraphMessage("Updating changes…")
-                fileMessage.stringValue = "Updating changed files…"
-                fileMessage.isHidden = false
-                fileTree.view.isHidden = true
             }
         }
         let revset = revsets.selected
@@ -232,21 +254,17 @@ final class SourceControlSidebar: NSObject {
                 finishGraphRequest()
                 graph = nil
                 selection = nil
-                detail = nil
-                displayedFiles = []
                 graphView.install([], selected: nil)
-                fileTree.clearSourceControl()
-                renderDetail()
+                requestDetail()
                 showGraphMessage(error.localizedDescription)
-                updateControls()
             }
         }
     }
 
     private func finishGraphRequest() {
         graphRequest = nil
-        expiry?.cancel()
-        expiry = nil
+        graphExpiry?.cancel()
+        graphExpiry = nil
         stale = false
     }
 
@@ -255,10 +273,10 @@ final class SourceControlSidebar: NSObject {
         let changedOperation = graph?.operationID != result.operationID
         graph = result
         if changedOperation { operations.invalidate() }
-        displayGraph(forceDetail: changedOperation)
+        displayGraph()
     }
 
-    private func displayGraph(forceDetail: Bool) {
+    private func displayGraph() {
         guard let graph else { return }
         let rows = graph.revisions
         graphLimit.isHidden = !graph.isTruncated || rows.isEmpty
@@ -280,11 +298,7 @@ final class SourceControlSidebar: NSObject {
         }
         hasPresentedGraph = true
         revealWorkingCopy = false
-        if next?.id != old?.id || forceDetail || detail == nil {
-            requestDetail(keepingFiles: next?.changeID == old?.changeID && !fileTree.view.isHidden)
-        }
-        else { renderDetail() }
-        updateControls()
+        requestDetail()
     }
 
     private func choose(_ revision: JJSourceControlRevision) {
@@ -294,40 +308,73 @@ final class SourceControlSidebar: NSObject {
         requestDetail()
     }
 
-    private func requestDetail(keepingFiles: Bool = false) {
+    private func requestDetail() {
         detailRequest?.cancel()
-        detail = nil
-        if !keepingFiles { displayedFiles = [] }
-        renderDetail()
+        detailRequest = nil
+        guard let workspace, let target = selectedDetailTarget else {
+            cancelDetailExpiry()
+            presentDetail(nil)
+            updateControls()
+            return
+        }
+        if detail != nil {
+            cancelDetailExpiry()
+            renderFiles()
+            updateControls()
+            return
+        }
+        if presentedDetail?.result == nil {
+            presentDetail(DetailPresentation(target: target, result: nil))
+        } else {
+            scheduleDetailExpiry()
+        }
         updateControls()
-        guard let workspace, let graph, let revision = selection else { return }
-        let operation = graph.operationID
         detailRequest = Task { [weak self] in
+            let result: Result<JJSourceControlDetail, Error>
             do {
-                let result = try await JJSourceControlRepository.detail(for: revision, in: workspace, at: operation)
-                guard let self, !Task.isCancelled, selection?.id == revision.id, self.graph?.operationID == operation else { return }
-                detail = result
-                renderDetail()
-                updateControls()
+#if EDIT_AGENT_CHECKS
+                if let delay = self?.detailReadDelayForCheck { try await Task.sleep(for: delay) }
+#endif
+                result = .success(try await JJSourceControlRepository.detail(for: target.revision, in: workspace, at: target.operationID))
             } catch {
-                guard let self, !Task.isCancelled else { return }
-                displayedFiles = []
-                renderFiles()
-                fileMessage.stringValue = error.localizedDescription
-                fileMessage.isHidden = false
+                result = .failure(error)
             }
+            guard let self, !Task.isCancelled, active, self.workspace == workspace, selectedDetailTarget == target else { return }
+            detailRequest = nil
+            cancelDetailExpiry()
+            presentDetail(DetailPresentation(target: target, result: result))
+            updateControls()
         }
     }
 
-    private func renderDetail() {
-        let revision = selection
-        detailTitle.title = revision?.subject ?? "Select a change"
-        detailTitle.image = revision.flatMap { Self.symbol($0.isImmutable ? "chevron.right" : "pencil", size: 10) }
-        detailTitle.toolTip = revision.map { $0.isImmutable ? "View change description" : "Edit change description" }
-        if let revision { detailMetadata.update(revision, showsBookmarks: false) }
-        detailMetadata.isHidden = revision == nil
-        fileHeading.isHidden = revision == nil
-        renderFiles()
+    private func scheduleDetailExpiry() {
+        guard detailExpiry == nil, presentedDetail?.result != nil else { return }
+        detailExpiry = Task { [weak self] in
+            try? await Task.sleep(for: Self.presentationGrace)
+            guard let self, !Task.isCancelled, let target = selectedDetailTarget else { return }
+            detailExpiry = nil
+            presentDetail(DetailPresentation(target: target, result: nil))
+            updateControls()
+        }
+    }
+
+    private func cancelDetailExpiry() {
+        detailExpiry?.cancel()
+        detailExpiry = nil
+    }
+
+    private func presentDetail(_ presentation: DetailPresentation?) {
+        presentedDetail = presentation
+        let revision = presentation?.target.revision
+        PanelLayout.withoutAnimation {
+            detailTitle.title = revision?.subject ?? "Select a change"
+            detailTitle.image = revision.flatMap { Self.symbol($0.isImmutable ? "chevron.right" : "pencil", size: 10) }
+            detailTitle.toolTip = revision.map { $0.isImmutable ? "View change description" : "Edit change description" }
+            if let revision { detailMetadata.update(revision, showsBookmarks: false) }
+            detailMetadata.isHidden = revision == nil
+            fileHeading.isHidden = revision == nil
+            renderFiles()
+        }
     }
 
     func updateLiveFile() {
@@ -336,20 +383,37 @@ final class SourceControlSidebar: NSObject {
     }
 
     private func renderFiles() {
-        if let detail, let revision = selection, let workspace, let graph {
-            let live = document.jjLiveFileStatus
-            if revision.isWorkingCopy, let live, live.workspace == workspace,
-               live.operationID == graph.operationID, live.commitID == revision.id {
-                displayedFiles = live.applying(to: detail.files)
-            } else {
-                displayedFiles = detail.files
-            }
-            fileTree.updateSourceControl(revision: revision, workspace: workspace, operationID: graph.operationID, files: displayedFiles)
+        guard let presentedDetail, let workspace else {
+            fileTree.clearSourceControl()
+            showFiles(count: nil, message: nil)
+            return
         }
-        fileCount.stringValue = detail == nil && displayedFiles.isEmpty ? "" : String(displayedFiles.count)
-        fileTree.view.isHidden = displayedFiles.isEmpty
-        fileMessage.isHidden = selection == nil || !displayedFiles.isEmpty
-        fileMessage.stringValue = detail == nil ? "Loading changed files…" : "No changed files"
+        let target = presentedDetail.target
+        let revision = target.revision
+        switch presentedDetail.result {
+        case .success(let detail):
+            let live = document.jjLiveFileStatus
+            let files: [JJSourceControlFile]
+            if revision.isWorkingCopy, let live, live.workspace == workspace,
+               live.operationID == target.operationID, live.commitID == revision.id {
+                files = live.applying(to: detail.files)
+            } else {
+                files = detail.files
+            }
+            fileTree.updateSourceControl(revision: revision, workspace: workspace, operationID: target.operationID, files: files)
+            showFiles(count: files.count, message: files.isEmpty ? "No changed files" : nil)
+        case .failure(let error):
+            showFiles(count: nil, message: error.localizedDescription)
+        case nil:
+            showFiles(count: nil, message: "Loading changed files…")
+        }
+    }
+
+    private func showFiles(count: Int?, message: String?) {
+        fileCount.stringValue = count.map(String.init) ?? ""
+        fileTree.view.isHidden = (count ?? 0) == 0
+        fileMessage.isHidden = message == nil
+        fileMessage.stringValue = message ?? ""
     }
 
     private func showGraphMessage(_ text: String?) {
@@ -366,8 +430,13 @@ final class SourceControlSidebar: NSObject {
         operationsButton.isEnabled = canBrowse && !busy
         newButton.isEnabled = canAct
         workingCopyButton.isEnabled = canAct
-        actionsButton.isEnabled = canAct && selection != nil
-        detailTitle.isEnabled = canAct && selection != nil
+        let showingSelection = selection != nil && presentedDetail?.target == selectedDetailTarget
+        let canUseDetail = canAct && showingSelection
+        let holdingPresentation = canBrowse && presentedDetail?.result != nil
+        for button in [actionsButton, detailTitle] {
+            button.isEnabled = canUseDetail || holdingPresentation
+            button.blocksInput = !canUseDetail
+        }
         descriptionPopover.update(selection, canMutate: canAct)
         graphView.table.isEnabled = canAct
         fileTree.outline.isEnabled = canAct && detail != nil
@@ -503,7 +572,7 @@ final class SourceControlSidebar: NSObject {
     }
 
     @objc private func showDescription(_ sender: Any?) {
-        guard let selection else { return }
+        guard !stale, !busy, let selection, presentedDetail?.target == selectedDetailTarget else { return }
         panes.setChangeExpanded(true)
         updateDisclosures()
         view.layoutSubtreeIfNeeded()
@@ -578,7 +647,7 @@ final class SourceControlSidebar: NSObject {
     }
 
     @objc private func showActions(_ sender: NSButton) {
-        guard let selection, let menu = menu(for: selection) else { return }
+        guard let selection, presentedDetail?.target == selectedDetailTarget, let menu = menu(for: selection) else { return }
         menu.popUp(positioning: nil, at: NSPoint(x: sender.bounds.maxX - menu.size.width, y: sender.bounds.minY), in: sender)
     }
 
@@ -607,7 +676,7 @@ final class SourceControlSidebar: NSObject {
         panes.setGraphExpanded(true)
         updateDisclosures()
         revealWorkingCopy = true
-        if graph.revisions.contains(where: { $0.id == graph.workingCopy.id }) { displayGraph(forceDetail: false) }
+        if graph.revisions.contains(where: { $0.id == graph.workingCopy.id }) { displayGraph() }
         else {
             includeWorkingCopy = true
             requestGraph()
@@ -713,7 +782,7 @@ final class SourceControlSidebar: NSObject {
             panes.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor), panes.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
         updateDisclosures()
-        renderDetail()
+        presentDetail(nil)
     }
 
     private func configureGraph() {
@@ -841,6 +910,19 @@ final class SourceControlSidebar: NSObject {
 @MainActor
 private final class SourceControlFocusView: NSView {
     override var acceptsFirstResponder: Bool { true }
+}
+
+@MainActor
+private final class SourceControlDetailButton: NSButton {
+    // Keep a displayed button’s paint stable while its details are stale.
+    var blocksInput = false
+
+    override var acceptsFirstResponder: Bool { !blocksInput && super.acceptsFirstResponder }
+    override func hitTest(_ point: NSPoint) -> NSView? { blocksInput ? nil : super.hitTest(point) }
+    override func isAccessibilityEnabled() -> Bool { !blocksInput && super.isAccessibilityEnabled() }
+    override func sendAction(_ action: Selector?, to target: Any?) -> Bool {
+        !blocksInput && super.sendAction(action, to: target)
+    }
 }
 
 private extension Array {

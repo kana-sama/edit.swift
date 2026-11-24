@@ -106,6 +106,11 @@ enum SourceControlCheck {
         let contextMenu = panel.graphView.table.menuForRow?(historyRow)
         try expect(contextMenu?.item(withTitle: "Squash into Parent")?.isEnabled == true && contextMenu?.item(withTitle: "Abandon Change…")?.isEnabled == true,
                    "offer change actions when opening the context menu on an unselected row")
+        document.window.layoutIfNeeded()
+        let previousTitle = button(in: panel.view, where: { $0.title == "Working change" })
+        try expect(previousTitle?.isAccessibilityEnabled() == false &&
+                   !panel.fileTree.view.isHidden && row(named: "Removed.txt", in: tree) != nil && !tree.isEnabled,
+                   "keep the complete previous Change pane visible while the next detail loads")
         try await waitFor("browse a historical change while keeping the working-copy pointer") {
             panel.selection?.subject == "Historical change" && panel.detail?.files.count == 1
         }
@@ -166,6 +171,7 @@ enum SourceControlCheck {
         try expect(!FileManager.default.fileExists(atPath: external.path) && (try? String(contentsOf: file, encoding: .utf8)) == working,
                    "discard the selected added file and preserve unrelated changes")
         try await checkDescription(in: document.window, panel: panel)
+        try await checkDetailTransitions(panel, executable: executable, folder: folder)
         document.setFolder(plain)
         try expect(document.isSidebarVisible && document.sidebarMode == .worktree && sidebarMenu.menu.item(withTitle: "Jujutsu")?.isEnabled == false,
                    "leave Jujutsu and disable its switcher item when leaving the workspace")
@@ -470,7 +476,8 @@ enum SourceControlCheck {
         try expect(editor.string == edited, "redo the complete description edit")
         save.performClick(nil)
         try await waitFor("save only the description text through Jujutsu") {
-            panel.selection?.description == edited && content.window?.isVisible != true && panel.graphView.table.isEnabled
+            panel.selection?.description == edited && panel.detail != nil &&
+                content.window?.isVisible != true && panel.graphView.table.isEnabled
         }
 
         open.performClick(nil)
@@ -485,7 +492,7 @@ enum SourceControlCheck {
         }
         let immutable = panel.graphView.revisions[index]
         panel.graphView.table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
-        try await waitFor("select the immutable change") { panel.selection?.id == immutable.id }
+        try await waitFor("present the immutable change") { panel.selection?.id == immutable.id && panel.detail != nil }
         guard let view = button(in: panel.view, where: { $0.toolTip == "View change description" }) else {
             throw Failure("find the read-only description action")
         }
@@ -496,6 +503,54 @@ enum SourceControlCheck {
                    editor.string == (immutable.description.isEmpty ? "No description" : immutable.description),
                    "show a full read-only description that can be copied")
         save.performClick(nil)
+    }
+
+    private static func checkDetailTransitions(_ panel: SourceControlSidebar, executable: URL, folder: URL) async throws {
+        let first = "First empty change"
+        let second = "Second empty change"
+        let historical = "Historical change"
+        for subject in [first, second] { try await command(executable, folder, ["new", "-m", subject]) }
+        try await waitFor("load both empty changes") {
+            panel.graph?.workingCopy.subject == second && panel.graphView.table.isEnabled
+        }
+
+        func select(_ subject: String) throws {
+            guard let row = panel.graphView.revisions.firstIndex(where: { $0.subject == subject }) else {
+                throw Failure("find \(subject) in the graph")
+            }
+            panel.graphView.table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        }
+
+        func shows(_ subject: String, _ message: String) -> Bool {
+            button(in: panel.view, where: { $0.title == subject }) != nil &&
+                descendant(of: panel.view, where: { (label: NSTextField) in
+                    label.stringValue == message && !label.isHiddenOrHasHiddenAncestor
+                }) != nil
+        }
+        try select(first)
+        try await waitFor("present the first empty change") { shows(first, "No changed files") && panel.detail != nil }
+        try select(second)
+        try expect(panel.selection?.subject == second && shows(first, "No changed files") && panel.detail == nil,
+                   "keep the empty presentation complete as the graph selection moves")
+        try await waitFor("present the second empty change without a loading frame") {
+            shows(second, "No changed files") && panel.detail != nil
+        }
+
+        panel.detailReadDelayForCheck = .seconds(2)
+        defer { panel.detailReadDelayForCheck = nil }
+        try select(first)
+        try await Task.sleep(for: .milliseconds(500))
+        try select(historical)
+        let switchedAgain = ContinuousClock.now
+        try await waitFor("show stable loading for the final selection after the grace period") {
+            shows(historical, "Loading changed files…") && panel.detail == nil
+        }
+        try expect(switchedAgain.duration(to: .now) < .milliseconds(650), "expire the previous pane on its original deadline")
+        try await waitFor("publish only the final selection when the slow read finishes") {
+            panel.selection?.subject == historical && panel.detail?.files.count == 1 &&
+                button(in: panel.view, where: { $0.title == historical }) != nil &&
+                !panel.fileTree.view.isHidden && row(named: "Tracked.txt", in: panel.fileTree.outline) != nil
+        }
     }
 
     private static func checkOperationDirection(in window: NSWindow, panel: SourceControlSidebar) async throws {
