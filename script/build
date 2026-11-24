@@ -22,6 +22,13 @@ compiler="$(xcrun --find swiftc)"
 sdk="$(xcrun --sdk macosx --show-sdk-path)"
 minimum_version="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' resources/Info.plist)"
 target="$(uname -m)-apple-macosx$minimum_version"
+build_system=swiftbuild
+swiftpm_scratch="$sdk_cache/swiftpm"
+# Swift Build 6.4 can invalidate Debug products when it switches between CLT toolchain IDs.
+if [[ "$configuration" == debug && "$compiler" == /Library/Developer/CommandLineTools/* ]]; then
+    build_system=native
+    swiftpm_scratch="$sdk_cache/swiftpm-native"
+fi
 sources=()
 while IFS= read -r -d '' path; do
     if [[ "$bundle_name" == Edit && "$path" == *Check.swift ]]; then continue; fi
@@ -31,7 +38,7 @@ done < <(/usr/bin/find -s Sources/Edit -type f -name '*.swift' -print0)
 # Include toolchain and SDK identities so updates invalidate the finished bundle.
 build_fingerprint() {
     {
-        printf '%s\n' "$configuration" "$bundle_name" "$target" "$compiler" "$sdk" &&
+        printf '%s\n' "$configuration" "$bundle_name" "$target" "$compiler" "$sdk" "$build_system" &&
         /usr/bin/stat -L -f '%i:%m:%c:%z' "$compiler" "$sdk/SDKSettings.plist" &&
         /usr/bin/shasum -a 256 "${sources[@]}" Package.swift Package.resolved resources/Info.plist resources/Edit.icns \
             script/build script/build-syntax script/app-bundle.sh script/publish-app.c Sources/Edit/Resources/Seti/* \
@@ -54,24 +61,41 @@ fi
 mkdir -p "$sdk_cache/clang" "$sdk_cache/modules" "$output"
 stage="$(mktemp -d "$output/.edit-bundle.XXXXXX")"
 app="$stage/$bundle_name.app"
-trap 'finish_app_stage "$stage" "$app"' EXIT
+syntax_pid=
+finish_build() {
+    if [[ -n "$syntax_pid" ]]; then
+        wait "$syntax_pid" || true
+    fi
+    finish_app_stage "$stage" "$app"
+}
+trap finish_build EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # SwiftPM links the editor product and its pinned dependencies. Package the
 # executable under the same native bundle layout used by the app and checks.
-swiftpm_scratch="$sdk_cache/swiftpm"
 editor_build=(/usr/bin/env "SWIFTPM_MODULECACHE_OVERRIDE=$sdk_cache/clang" "$(xcrun --find swift)" build
-    --build-system swiftbuild
+    --build-system "$build_system"
     --scratch-path "$swiftpm_scratch"
     --cache-path "$sdk_cache/swiftpm-cache"
     --config-path "$sdk_cache/swiftpm-config"
     --security-path "$sdk_cache/swiftpm-security"
     --configuration "$configuration" --triple "$target" --sdk "$sdk" --force-resolved-versions)
+
+./script/build-syntax "$sdk_cache" "$sdk" "$target" > "$stage/syntax-library" &
+syntax_pid=$!
 "${editor_build[@]}" --product "$product" >&2
-products="$("${editor_build[@]}" --show-bin-path)"
+wait "$syntax_pid"
+syntax_pid=
+
+products="$swiftpm_scratch/$configuration"
+if [[ "$build_system" != native || ! -x "$products/$product" ]]; then
+    products="$("${editor_build[@]}" --show-bin-path)"
+fi
 
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/syntax" "$app/Contents/Frameworks"
 cp -p "$products/$product" "$app/Contents/MacOS/Edit"
-syntax_library="$(./script/build-syntax "$sdk_cache" "$sdk" "$target")"
+syntax_library="$(<"$stage/syntax-library")"
 cp -p "$syntax_library" "$app/Contents/Frameworks/libEditSyntax.dylib"
 cp -R resources/syntax/queries resources/syntax/licenses resources/syntax/README.md "$app/Contents/Resources/syntax/"
 cp "$swiftpm_scratch/checkouts/SwiftTerm/LICENSE" "$app/Contents/Resources/SwiftTerm-LICENSE.txt"
