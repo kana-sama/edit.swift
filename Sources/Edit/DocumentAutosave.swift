@@ -41,7 +41,7 @@ final class DocumentAutosave {
         }
         guard pending?.generation != generation, writingGeneration != generation,
               failure?.generation != generation else { return }
-        pending = Request(generation: generation, text: document.editor.string)
+        pending = Request(generation: generation, text: document.textForSaving)
         resume()
     }
 
@@ -68,7 +68,7 @@ final class DocumentAutosave {
         await waitForWrite()
         pending = nil
         if document.window.isDocumentEdited {
-            await write(Request(generation: generation, text: document.editor.string), retryFailed: true)
+            await write(Request(generation: generation, text: document.textForSaving), retryFailed: true)
         }
     }
 

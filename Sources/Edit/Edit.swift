@@ -745,7 +745,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         lastPlacement = previous.lastWindow
         var restored: [(index: Int, document: DocumentWindow)] = []
         var warnings: [String] = []
-        for (index, record) in previous.documents.enumerated() {
+        for (index, savedRecord) in previous.documents.enumerated() {
+            var record = savedRecord
             let url = record.path.map { URL(fileURLWithPath: $0) }
             let isScratch = url.map(scratchStore.identifiesScratch(at:)) ?? false
             let scratch: ScratchFile?
@@ -773,15 +774,28 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             let identity: FileIdentity?
             let syntax: SyntaxSnapshot?
             let openingConflicts: JJOpeningConflicts?
+            let restoredConflicts: [JJConflictEdit]
             if let draft = record.draft {
-                async let conflicts = JJOpeningConflicts.prepare(draft, at: isScratch ? nil : url)
-                identity = await Task.detached {
-                    record.path.flatMap { FileIdentity.at(URL(fileURLWithPath: $0)) }
-                }.value
+                if let drafts = record.conflictDrafts, !drafts.isEmpty {
+                    restoredConflicts = await JJConflictEdit.restore(drafts, in: draft)
+                    if restoredConflicts.isEmpty {
+                        let name = url?.lastPathComponent ?? "Untitled"
+                        warnings.append("“\(name)” opened as untitled because its conflict draft could not be restored.")
+                        record.path = nil
+                        record.revision = nil
+                    }
+                } else {
+                    restoredConflicts = []
+                }
+                let draftURL = record.path == nil ? nil : url
+                let conflictURL = isScratch || !restoredConflicts.isEmpty ? nil : draftURL
+                async let conflicts = JJOpeningConflicts.prepare(draft, at: conflictURL)
+                identity = await Task.detached { draftURL.flatMap { FileIdentity.at($0) } }.value
                 syntax = nil
                 openingConflicts = await conflicts
             } else {
                 identity = nil
+                restoredConflicts = []
                 if case .text(let file) = opened, folder == nil || file.identity != nil {
                     async let conflicts = JJOpeningConflicts.prepare(file.text, at: isScratch ? nil : file.url)
                     syntax = await placeholder.prepareOpeningSyntax(file, position: record.editorPosition,
@@ -799,7 +813,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             document.restorePlacement(record.placement)
             if let folder { document.setFolder(folder) }
             if let draft = record.draft {
-                document.restoreDraft(record, text: draft, identity: identity, scratch: scratch, openingConflicts: openingConflicts)
+                document.restoreDraft(record, text: draft, identity: identity, scratch: scratch,
+                                      openingConflicts: openingConflicts, restoredConflicts: restoredConflicts)
             } else if let opened, document.folderURL == nil || opened.identity != nil {
                 switch opened {
                 case .text(let file):
@@ -817,7 +832,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             document.restoreTerminal(record.terminal)
             document.restoreEditorPosition(record.editorPosition)
             if let scratch = document.scratchFile { await recordScratchOpen(scratch) }
-            else if !isScratch, let url { await recentFiles.record(url) }
+            else if !isScratch, let url, record.path != nil { await recentFiles.record(url) }
             if isQuitting { document.editor.isEditable = false }
             restored.append((index, document))
         }

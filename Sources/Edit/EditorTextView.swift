@@ -47,6 +47,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var onTextChange: (() -> Void)?
     var onJJCompositionChange: (() -> Void)?
     var onConflictSelectionChange: (() -> Void)?
+    var conflictEdits: [JJConflictEdit] = []
+    var replacingConflictStructure = false
     var onBlur: (() -> Void)?
     var onFindEditorInteraction: (() -> Void)?
     var onFindViewportChange: (() -> Void)?
@@ -165,13 +167,27 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
         guard focusSession == nil || focusEditsAllowed || replacementString == nil else { return false }
         guard replacementString == nil || allowsProjectedChange(in: affectedCharRange) else { return false }
+        if let replacementString, !allowsConflictEdit(in: affectedCharRange, replacement: replacementString) { return false }
         return super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
     }
 
     override func shouldChangeText(inRanges affectedRanges: [NSValue], replacementStrings: [String]?) -> Bool {
         guard focusSession == nil || focusEditsAllowed || replacementStrings == nil else { return false }
         guard replacementStrings == nil || affectedRanges.allSatisfy({ allowsProjectedChange(in: $0.rangeValue) }) else { return false }
+        if let replacementStrings {
+            guard affectedRanges.count == replacementStrings.count,
+                  zip(affectedRanges, replacementStrings).allSatisfy({
+                      allowsConflictEdit(in: $0.0.rangeValue, replacement: $0.1)
+                  }) else { return false }
+        }
         return super.shouldChangeText(inRanges: affectedRanges, replacementStrings: replacementStrings)
+    }
+
+    private func allowsConflictEdit(in range: NSRange, replacement: String) -> Bool {
+        guard !replacingConflictStructure, !updatingComposition, !conflictEdits.isEmpty else { return true }
+        guard let source = textStorage?.mutableString, range.location <= source.length,
+              range.length <= source.length - range.location else { return false }
+        return conflictEdits.allSatisfy { $0.allows(range, replacement: replacement, in: source) }
     }
 
     override func selectAll(_ sender: Any?) {
@@ -469,17 +485,18 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             return
         }
 
-        if multiCaretComposition == nil, hasSecondarySelections || focusSession != nil,
+        if multiCaretComposition == nil, hasSecondarySelections || focusSession != nil || !conflictEdits.isEmpty,
            let primary = caretSelections.last {
             let explicit = replacementRange.location != NSNotFound && replacementRange != primary
-            let target = explicit && focusSession != nil ? replacementRange : primary
-            guard focusAllowsEdits([target]) else { return }
-            let selections = explicit && focusSession != nil ? [target] : caretSelections
+            let tracked = !conflictEdits.isEmpty
+            let target = explicit && (focusSession != nil || tracked) ? replacementRange : primary
+            guard focusAllowsEdits([target]), allowsConflictEdit(in: target, replacement: preview ?? "") else { return }
+            let selections = explicit && (focusSession != nil || tracked) ? [target] : caretSelections
             let groups = explicit ? nil : focusedSelectionGroups
             let activeEnd = activeEnd(of: target)
             setCaretSelections([target], record: false)
             if isEditable, preview?.isEmpty == false, let storage = textStorage,
-               !explicit || focusSession != nil {
+               !explicit || focusSession != nil || tracked {
                 breakUndoCoalescing()
                 multiCaretComposition = MultiCaretComposition(
                     selections: selections, original: storage.attributedSubstring(from: target), preview: target,
@@ -1014,6 +1031,13 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         // Both preedit and its rollback are presentation. Subscribers still hold
         // the baseline onto which the real replacements will be applied.
         guard !updatingComposition else { return }
+        if !replacingConflictStructure, !conflictEdits.isEmpty {
+            let range = storage.editedRange
+            let previousLength = range.length - storage.changeInLength
+            let changes = applyingTextEdits ?? [EditorTextEdit(range: NSRange(location: range.location, length: previousLength),
+                                                             text: storage.mutableString.substring(with: range))]
+            conflictEdits = conflictEdits.compactMap { $0.remapped(after: changes) }
+        }
         onBufferEdit?(storage, applyingTextEdits)
     }
 

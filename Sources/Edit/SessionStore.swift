@@ -97,6 +97,7 @@ struct SessionDocument: Codable, Sendable {
     var showsEmptyFolder: Bool? = nil
     var terminal: DocumentTerminalState? = nil
     var draftRecovery: DraftRecoveryRevision? = nil
+    var conflictDrafts: [JJConflictEdit.SavedDraft]? = nil
 }
 
 struct EditorSession: Codable, Sendable {

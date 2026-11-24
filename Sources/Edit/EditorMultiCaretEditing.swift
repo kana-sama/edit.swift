@@ -401,13 +401,15 @@ extension EditorTextView {
     func applyMultiEdits(
         _ replacements: [MultiCaretEditing.Replacement], selections: [NSRange], validate: Bool = true,
         restoreFocus: EditorFocusSession.Snapshot? = nil,
-        restoreNavigation: [FocusNavigationSelection]? = nil, actionName: String? = nil
+        restoreNavigation: [FocusNavigationSelection]? = nil, actionName: String? = nil,
+        conflictEditsAfter: [JJConflictEdit]? = nil
     ) -> Bool {
         let edits = replacements.filter { $0.range.length > 0 || !$0.text.isEmpty }
         guard !edits.isEmpty, let storage = textStorage else { return false }
         let previous = caretSelections
         let previousFocus = captureFocusSnapshot()
         let previousFocusNavigation = multiCaret.focusNavigation
+        let previousConflictEdits = conflictEditsAfter.map { _ in conflictEdits }
         let manager = undoManager
         if validate {
             let ranges = edits.map(\.range)
@@ -417,9 +419,11 @@ extension EditorTextView {
                   zip(ranges, ranges.dropFirst()).allSatisfy({ NSMaxRange($0) <= $1.location }) else { return false }
             breakUndoCoalescing()
             manager?.disableUndoRegistration()
+            replacingConflictStructure = conflictEditsAfter != nil
             let allowed = withFocusEditsAllowed {
                 shouldChangeText(inRanges: edits.map { NSValue(range: $0.range) }, replacementStrings: edits.map(\.text))
             }
+            replacingConflictStructure = false
             manager?.enableUndoRegistration()
             guard allowed else { return false }
         } else {
@@ -443,6 +447,8 @@ extension EditorTextView {
 
         multiCaret.isApplying = true
         var restoredLiveFocus = false
+        replacingConflictStructure = conflictEditsAfter != nil
+        if let conflictEditsAfter { conflictEdits = conflictEditsAfter }
         withTextEdits(edits) {
             storage.beginEditing()
             for replacement in edits.reversed() {
@@ -451,6 +457,7 @@ extension EditorTextView {
             restoredLiveFocus = updateFocus(after: edits, restoring: restoreFocus)
             storage.endEditing()
         }
+        replacingConflictStructure = false
         setCaretSelections(selections, record: false,
                            focusNavigation: restoredLiveFocus ? restoreNavigation : nil)
         multiCaret.isApplying = true
@@ -465,7 +472,7 @@ extension EditorTextView {
         manager?.registerUndo(withTarget: self) { editor in
             MainActor.assumeIsolated {
                 editor.applyMultiEdits(inverse, selections: previous, validate: false, restoreFocus: previousFocus,
-                                       restoreNavigation: previousFocusNavigation)
+                                       restoreNavigation: previousFocusNavigation, conflictEditsAfter: previousConflictEdits)
             }
         }
         if let actionName { manager?.setActionName(actionName) }

@@ -4,12 +4,14 @@ import AppKit
 final class JJConflictDecorations {
     struct ActionBlock {
         let conflict: JJConflict
-        let applied: [JJConflict.Segment.Kind]
+        var overlap: JJConflict.Segment.Kind? = nil
+        var hasDraft = false
     }
 
     private struct ActionRow {
         let conflict: JJConflict
         let buttons: [JJConflictActions.Action]
+        let compact: Bool
         let view: JJConflictActions
     }
 
@@ -19,7 +21,7 @@ final class JJConflictDecorations {
         let details: [NSRect]
     }
 
-    var onAction: ((JJConflict, JJConflictActions.Action, NSView) -> Void)?
+    var onAction: ((JJConflict, JJConflictActions.Action) -> Void)?
     private weak var editor: EditorTextView?
     private var highlights: [JJConflict.Highlight] = []
     private var rows: [Row] = []
@@ -46,6 +48,7 @@ final class JJConflictDecorations {
     func setActionBlocks(_ blocks: [ActionBlock]) {
         self.blocks = blocks
         if blocks.isEmpty { removeActionRows() }
+        else { layout() }
         editor?.requestLineRefresh()
     }
 
@@ -86,22 +89,26 @@ final class JJConflictDecorations {
     private func layoutActions(in visible: NSRange, editor: EditorTextView, scroll: NSScrollView) {
         let viewport = JJEditorActionBar.viewport(in: scroll)
         var visibleActions: [Int: ActionRow] = [:]
-        func place(_ buttons: [JJConflictActions.Action], at location: Int, for conflict: JJConflict) {
+        func place(_ buttons: [JJConflictActions.Action], at location: Int, for conflict: JJConflict,
+                   emphasizesResolution: Bool = false) {
             guard NSLocationInRange(location, visible),
                   let line = editor.laidOutLineBounds(at: location) else { return }
             let anchor = scroll.convert(line, from: editor)
             guard anchor.midY >= viewport.minY, anchor.midY <= viewport.maxY else { return }
+            let compact = buttons.count > 1 && viewport.width < 205
             let row: ActionRow
-            if let existing = actionRows[location], existing.conflict == conflict, existing.buttons == buttons {
+            if let existing = actionRows[location], existing.conflict == conflict, existing.buttons == buttons,
+               existing.compact == compact {
                 row = existing
             } else {
-                let bar = JJConflictActions(buttons) { [weak self] action, anchor in
-                    self?.onAction?(conflict, action, anchor)
+                let bar = JJConflictActions(buttons, compact: compact) { [weak self] action in
+                    self?.onAction?(conflict, action)
                 }
                 bar.setEnabled(actionsEnabled)
-                row = ActionRow(conflict: conflict, buttons: buttons, view: bar)
+                row = ActionRow(conflict: conflict, buttons: buttons, compact: compact, view: bar)
                 actionRows[location]?.view.removeFromSuperview()
             }
+            row.view.emphasizeResolution(emphasizesResolution)
             var frame = row.view.frame(over: anchor, in: viewport, scroll: scroll)
             frame.origin.y = floor(anchor.midY - frame.height / 2)
             if row.view.frame != frame { row.view.frame = frame }
@@ -113,15 +120,16 @@ final class JJConflictDecorations {
                 let conflict = block.conflict
                 for segment in conflict.segments {
                     let button: JJConflictActions.Action = switch segment.kind {
+                    case .snapshot(let side) where block.hasDraft && side == conflict.resultSide: .editResult
                     case let .snapshot(side): .useSide(side)
-                    case .diff where block.applied.last == segment.kind: .undoDiff
-                    case .diff where block.applied.contains(segment.kind): .applied
+                    case .diff where block.overlap == segment.kind: .manualMerge(segment)
                     case .diff: .applyDiff(segment)
                     }
                     place([button], at: segment.anchor.location, for: conflict)
                 }
                 if let end = conflict.highlights.last?.range.location {
-                    place(block.applied.isEmpty ? [.editResult] : [.editResult, .useResult], at: end, for: conflict)
+                    let buttons: [JJConflictActions.Action] = block.hasDraft ? [.markResolved] : [.editResult, .markResolved]
+                    place(buttons, at: end, for: conflict, emphasizesResolution: block.hasDraft)
                 }
             }
         }

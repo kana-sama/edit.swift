@@ -298,6 +298,10 @@ enum SourceControlCheck {
         try expect(document.editor.string == example && document.conflictPanel == nil &&
                    document.scrollView.additionalSafeAreaInsets.top == 0,
                    "open a regular jj file containing literal markers without a conflict strip")
+        document.editor.insertText("x", replacementRange: NSRange(location: 0, length: 1))
+        try expect(document.editor.string == "x" + String(example.dropFirst()), "allow edits to literal markers in an ordinary file")
+        document.editor.undoManager?.undo()
+        try expect(document.editor.string == example, "restore the literal-marker example with ordinary Undo")
         guard case .text(let buffer) = try await Edit.readForOpening(file) else {
             throw Failure("read the conflicted text fixture")
         }
@@ -349,14 +353,37 @@ enum SourceControlCheck {
             editor.setCaretSelections([caret])
             editor.scrollRangeToVisible(caret)
         }
+        func click(_ label: String, on anchor: NSRange) async throws {
+            reveal(anchor)
+            try await waitFor("enable \(label) at the conflict row") { button(label, on: anchor)?.isEnabled == true }
+            button(label, on: anchor)?.performClick(nil)
+        }
+        func edit(_ range: NSRange, with text: String, actionName: String) throws {
+            let caret = NSRange(location: range.location + text.utf16.count, length: 0)
+            try expect(editor.applyMultiEdits([EditorTextEdit(range: range, text: text)], selections: [caret], actionName: actionName),
+                       "edit conflict fixture text for \(actionName)")
+        }
         try expect(format.segmentCount == 2 && format.label(forSegment: 0) == "Diff" && format.label(forSegment: 1) == "Snapshot",
                    "keep two direct format choices in the top panel")
         guard let firstDiff = originalBlocks[0].segments.first(where: { if case .diff = $0.kind { true } else { false } }),
-              let firstEnd = originalBlocks[0].highlights.last?.range else { throw Failure("find the first diff and result rows") }
+              let firstEnd = originalBlocks[0].highlights.last?.range,
+              let firstResult = originalBlocks[0].resultRange else { throw Failure("find the first diff and result rows") }
         try await waitFor("show direct buttons on the visible diff and closing markers") {
             button("Apply Diff", on: firstDiff.anchor) != nil &&
-                button("Edit Result…", on: firstEnd) != nil
+                button("Edit Snapshot", on: firstEnd) != nil && button("Mark Resolved", on: firstEnd) != nil
         }
+        let openingMarker = NSRange(location: originalBlocks[0].range.location, length: 1)
+        editor.insertText("x", replacementRange: openingMarker)
+        try expect(editor.string == original, "reject typing over a structural marker")
+        editor.setMarkedText("x", selectedRange: NSRange(location: 1, length: 0), replacementRange: openingMarker)
+        try expect(editor.string == original && !editor.hasMarkedText(), "reject input composition on a structural marker")
+        let spanningMarker = NSRange(location: NSMaxRange(firstResult) - 1, length: 2)
+        editor.insertText("", replacementRange: spanningMarker)
+        try expect(editor.string == original, "protect the newline separating the editable snapshot from the next marker")
+        let outside = (original as NSString).range(of: "// Unchanged 1")
+        let mixed = [EditorTextEdit(range: openingMarker, text: ""), EditorTextEdit(range: outside, text: "// Not applied")]
+        try expect(!editor.applyMultiEdits(mixed, selections: [openingMarker], actionName: "Replace Across Conflict") &&
+                   editor.string == original, "reject a batch that touches a protected marker without applying its other edits")
         let parts = Set(originalBlocks[0].highlights.flatMap(\.changes).map { (original as NSString).substring(with: $0) })
         try expect(parts == ["Base", "Beta", "Gamma"], "highlight only the changed words in the conflict diff lines")
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
@@ -368,61 +395,124 @@ enum SourceControlCheck {
                        "inset the top bar controls from both edges")
             try checkConflictColors(originalBlocks[0], in: editor)
         }
-        try render(document.window)
         panel.onNavigate?(1)
         try expect(editor.selectedRange().location == originalBlocks[1].range.location, "navigate to the next conflict")
-        reveal(originalBlocks[0].range)
-        try await waitFor("bring the first diff action back into view") { button("Apply Diff", on: firstDiff.anchor) != nil }
-        button("Apply Diff", on: firstDiff.anchor)?.performClick(nil)
+        try await click("Apply Diff", on: firstDiff.anchor)
         try await waitFor("offer manual editing when a diff overlaps the starting snapshot") {
-            document.conflictResultCheckView != nil
+            button("Merge Manually", on: firstDiff.anchor)?.isEnabled == true
         }
-        guard let result = document.conflictResultCheckView,
-              let resultEditor: EditorTextView = descendant(of: result, where: { $0.identifier?.rawValue == "JujutsuConflictResultText" }),
-              let notice: NSTextField = descendant(of: result, where: { $0.identifier?.rawValue == "JujutsuConflictOverlap" }),
-              let use: NSButton = descendant(of: result, where: { $0.identifier?.rawValue == "JujutsuConflictUseEditedResult" }) else {
-            throw Failure("open a result editor with the overlap message and a direct Use Result button")
+        try await click("Merge Manually", on: firstDiff.anchor)
+        try expect(document.window.firstResponder === editor && editor.string == original &&
+                   editor.selectedRange().location >= firstResult.location &&
+                   NSMaxRange(editor.selectedRange()) <= NSMaxRange(firstResult),
+                   "focus the snapshot in the existing editor without applying an overlapping diff")
+        let manual = "let first = \"Manual merge\""
+        editor.insertText(manual, replacementRange: firstResult)
+        editor.breakUndoCoalescing()
+        try expect(blocks(editor.string).first?.startingResult == manual + "\n" && blocks(editor.string).count == 2,
+                   "edit the snapshot directly in the buffer without resolving the conflict")
+
+        let outsideDraft = (editor.string as NSString).range(of: "// Unchanged 1")
+        let savedComment = "// Saved outside the draft"
+        try edit(outsideDraft, with: savedComment, actionName: "Edit Outside Conflict")
+        let expectedDisk = original.replacingOccurrences(of: "// Unchanged 1", with: savedComment)
+        try expect(await document.save(), "save ordinary edits while the conflict has an inline draft")
+        try expect(try String(contentsOf: file, encoding: .utf8) == expectedDisk &&
+                   blocks(editor.string).first?.startingResult == manual + "\n",
+                   "save the ordinary edit and preserve the original conflict on disk")
+        let record = try JSONDecoder().decode(SessionDocument.self, from: JSONEncoder().encode(document.sessionDocument()))
+        guard let draft = record.draft, let conflictDrafts = record.conflictDrafts else {
+            throw Failure("record the unfinished inline result in the saved session")
         }
-        try expect(!notice.isHidden && resultEditor.string == originalBlocks[0].startingResult && editor.string == original,
-                   "leave conflicting source text intact while editing the result")
-        resultEditor.string = "let first = \"Manual merge\"\n"
-        use.performClick(nil)
-        try await waitFor("use the edited result to replace just that conflict") {
-            editor.string.hasPrefix("let first = \"Manual merge\"\n") && blocks(editor.string).count == 1
+        let restored = await JJConflictEdit.restore(conflictDrafts, in: draft)
+        try expect(restored.first?.displayed(in: draft as NSString)?.startingResult == manual + "\n" &&
+                   JJConflictEdit.textForSaving(draft, edits: restored) == expectedDisk,
+                   "restore the visible inline result and keep the original conflict in the disk projection")
+
+        guard let manualEnd = blocks(editor.string).first?.highlights.last?.range else {
+            throw Failure("find the edited conflict closing marker")
         }
+        reveal(manualEnd)
+        try await waitFor("show the inline draft and its resolve action") {
+            button("Mark Resolved", on: manualEnd)?.isEnabled == true
+        }
+        try expect(!format.isEnabled, "keep the draft in its current format until it is resolved or undone")
+        try render(document.window)
+        try await click("Mark Resolved", on: manualEnd)
+        try await waitFor("use the manual snapshot to replace just its conflict") {
+            editor.string.hasPrefix(manual + "\n") && blocks(editor.string).count == 1
+        }
+        try expect(await document.save(), "save the accepted result")
+        let resolved = try String(contentsOf: file, encoding: .utf8)
+        try expect(resolved.hasPrefix(manual + "\n") && resolved.contains(savedComment) && blocks(resolved).count == 1,
+                   "persist the accepted result alongside the surviving conflict")
         undo.undo()
-        try await waitFor("restore the conflict and its controls with Undo") { editor.string == original && format.isEnabled }
+        try await waitFor("restore the manual snapshot and its protected block with Undo") {
+            blocks(editor.string).count == 2 && blocks(editor.string).first?.startingResult == manual + "\n"
+        }
+        let restoredDraft = editor.string
+        editor.insertText("x", replacementRange: openingMarker)
+        try expect(editor.string == restoredDraft, "protect marker text immediately after undoing resolution")
+        undo.undo()
+        undo.undo()
+        try await waitFor("undo the ordinary and inline edits before replaying diffs") { editor.string == original && format.isEnabled }
+        try expect(await document.save(), "restore the original conflicted file for the replay checks")
+
         // The second jj block has independent word changes on one line.
         let replayBlock = originalBlocks[1]
-        guard let replayEnd = replayBlock.highlights.last?.range else { throw Failure("locate the result actions") }
-        let patchAnchors = replayBlock.segments.compactMap { segment -> NSRange? in
-            if case .diff = segment.kind { return segment.anchor }
-            return nil
+        let patches = replayBlock.segments.filter { if case .diff = $0.kind { true } else { false } }
+        guard patches.count == 2, let partial = replayBlock.applyingDiff(for: patches[1], onto: replayBlock.startingResult) else {
+            throw Failure("find both replayable diffs on the second conflict")
         }
-        guard patchAnchors.count == 2 else { throw Failure("find both replayable diffs on the second conflict") }
-        let (firstPatch, lastPatch) = (patchAnchors[0], patchAnchors[1])
-        reveal(lastPatch)
-        try await waitFor("show the second direct Apply Diff action") { button("Apply Diff", on: lastPatch) != nil }
-        button("Apply Diff", on: lastPatch)?.performClick(nil)
-        try await waitFor("stage the second diff without changing the document") {
-            editor.string == original && button("Undo Diff", on: lastPatch) != nil
+        func currentSecondBlock() throws -> JJConflict {
+            let current = blocks(editor.string)
+            guard current.count == 2 else { throw Failure("keep the unresolved second conflict visible") }
+            return current[1]
         }
-        reveal(firstPatch)
-        try await waitFor("show the first direct Apply Diff action") { button("Apply Diff", on: firstPatch) != nil }
-        button("Apply Diff", on: firstPatch)?.performClick(nil)
-        try await waitFor("stage the first diff after the second") { button("Undo Diff", on: firstPatch) != nil }
-        button("Undo Diff", on: firstPatch)?.performClick(nil)
-        try await waitFor("undo only the last staged diff") { button("Apply Diff", on: firstPatch) != nil }
-        button("Apply Diff", on: firstPatch)?.performClick(nil)
-        reveal(replayEnd)
-        try await waitFor("offer a direct Use Result for the staged diff result") { button("Use Result", on: replayEnd) != nil }
-        try await waitFor("finish applying the requested diff") { button("Undo Diff", on: firstPatch) != nil }
-        button("Use Result", on: replayEnd)?.performClick(nil)
+        func currentFirstPatch() throws -> NSRange {
+            let block = try currentSecondBlock()
+            guard let first = block.segments.first(where: { if case .diff = $0.kind { true } else { false } }) else {
+                throw Failure("locate the first diff in the edited conflict")
+            }
+            return first.anchor
+        }
+        try await click("Apply Diff", on: patches[1].anchor)
+        try await waitFor("apply the second diff to the existing editor text") {
+            blocks(editor.string).last?.startingResult == partial
+        }
+        try await click("Apply Diff", on: try currentFirstPatch())
+        let combined = "let last = (x: 1, y: 2, z: 3)\n"
+        try await waitFor("combine both diffs in the visible snapshot") { blocks(editor.string).last?.startingResult == combined }
+        undo.undo()
+        try await waitFor("undo just the last applied diff with ordinary editor Undo") {
+            blocks(editor.string).last?.startingResult == partial
+        }
+        try await click("Apply Diff", on: try currentFirstPatch())
+        try await waitFor("reapply the first diff to the snapshot") { blocks(editor.string).last?.startingResult == combined }
+        let autosavedComment = "// Autosaved outside the draft"
+        let beforeReplay = (editor.string as NSString).range(of: "// Unchanged 2")
+        try edit(beforeReplay, with: autosavedComment, actionName: "Edit Before Replay")
+        document.requestAutosave()
+        let autosaved = original.replacingOccurrences(of: "// Unchanged 2", with: autosavedComment)
+        try await waitFor("autosave ordinary text while keeping the unfinished snapshot off disk") {
+            (try? String(contentsOf: file, encoding: .utf8)) == autosaved
+        }
+        try expect(blocks(editor.string).last?.startingResult == combined, "keep the inline result visible after autosaving its surroundings")
+        guard let replayEnd = try currentSecondBlock().highlights.last?.range else { throw Failure("locate the result actions") }
+        try await click("Mark Resolved", on: replayEnd)
         try await waitFor("resolve with both applied diffs and the original snapshot change") {
-            editor.string.hasSuffix("let last = (x: 1, y: 2, z: 3)\n") && blocks(editor.string) == [originalBlocks[0]]
+            editor.string.hasSuffix(combined) && editor.string.contains(autosavedComment) && blocks(editor.string) == [originalBlocks[0]]
         }
         undo.undo()
-        try await waitFor("undo the replay result before changing format") { editor.string == original && format.isEnabled }
+        try await waitFor("undo resolution and restore the combined inline draft") {
+            blocks(editor.string).count == 2 && blocks(editor.string).last?.startingResult == combined
+        }
+        undo.undo()
+        undo.undo()
+        undo.undo()
+        try await waitFor("undo the ordinary edit and both diff applications before changing format") {
+            editor.string == original && format.isEnabled
+        }
         reveal(originalBlocks[0].range)
         format.selectedSegment = 1
         if let action = format.action { format.sendAction(action, to: format.target) }
