@@ -6,7 +6,7 @@ final class JJConflictDecorations {
         let conflict: JJConflict
         let id: UUID
         var appliedSides: Set<Int> = []
-        var overlapSide: Int? = nil
+        var failedSides: Set<Int> = []
         var hasDraft = false
     }
 
@@ -38,11 +38,11 @@ final class JJConflictDecorations {
 
     func update(_ highlights: [JJConflict.Highlight]) {
         guard self.highlights != highlights else { return }
-        let previousMarkers = self.highlights.lazy.filter { $0.role == .marker }.map(\.range)
-        let markers = highlights.lazy.filter { $0.role == .marker }.map(\.range)
-        let changedMarkers = !previousMarkers.elementsEqual(markers)
+        let foregroundChanged = !self.highlights.elementsEqual(highlights) { first, second in
+            first.range == second.range && first.role == second.role
+        }
         self.highlights = highlights
-        if changedMarkers { editor?.syntaxHighlighting?.refreshColors() }
+        if foregroundChanged { editor?.syntaxHighlighting?.refreshColors() }
         layout(positionsActions: false)
     }
 
@@ -59,11 +59,30 @@ final class JJConflictDecorations {
         for row in actionRows.values { row.setEnabled(enabled) }
     }
 
-    func markerRanges(in visible: NSRange) -> [NSRange] {
+    func foregrounds(in visible: NSRange) -> [(range: NSRange, color: NSColor)] {
         guard visible.length > 0 else { return [] }
-        return highlightsInViewport(visible).compactMap {
-            $0.role == .marker ? NSIntersectionRange(visible, $0.range) : nil
+        return highlightsInViewport(visible).map { highlight in
+            let color = switch highlight.role {
+            case .marker: NSColor.textColor
+            case .addition: Self.addedText
+            case .removal: Self.removedText
+            }
+            return (NSIntersectionRange(visible, highlight.range), color)
         }
+    }
+
+    private static let addedText = NSColor(name: nil) { appearance in
+        if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+            return NSColor(srgbRed: 0.53, green: 0.83, blue: 0.57, alpha: 1)
+        }
+        return NSColor(srgbRed: 0.07, green: 0.39, blue: 0.20, alpha: 1)
+    }
+
+    private static let removedText = NSColor(name: nil) { appearance in
+        if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+            return NSColor(srgbRed: 1, green: 0.56, blue: 0.58, alpha: 1)
+        }
+        return NSColor(srgbRed: 0.68, green: 0.15, blue: 0.20, alpha: 1)
     }
 
     func layout(positionsActions: Bool = true) {
@@ -79,7 +98,7 @@ final class JJConflictDecorations {
         }
         let visible = editor.charRange(viewport, in: manager)
         let visibleRows = highlightsInViewport(visible).compactMap { highlight -> Row? in
-            guard highlight.role != .marker else { return nil }
+            guard highlight.role == .marker || !highlight.changes.isEmpty else { return nil }
             let range = NSIntersectionRange(visible, highlight.range)
             guard let band = band(for: range, editor: editor) else { return nil }
             let details = JJInlineDiffLayout.detailRects(for: highlight.changes, in: range, editor: editor, manager: manager)
@@ -94,7 +113,7 @@ final class JJConflictDecorations {
         let viewport = JJEditorActionBar.viewport(in: scroll)
         var visibleActions: [ActionKey: JJConflictActions] = [:]
         func place(_ action: JJConflictActions.Action, at location: Int, in block: ActionBlock,
-                   applied: Bool = false, overlaps: Bool = false) {
+                   applied: Bool = false, failed: Bool = false) {
             let key = ActionKey(blockID: block.id, action: action)
             guard NSLocationInRange(location, visible) else { return }
             guard let line = editor.laidOutLineBounds(at: location) else {
@@ -107,7 +126,7 @@ final class JJConflictDecorations {
             guard anchor.midY >= viewport.minY, anchor.midY <= viewport.maxY else { return }
             let row = actionRows[key] ?? JJConflictActions(action) { [weak self] in self?.perform(key) }
             row.setAnchorAvailable(true)
-            row.update(enabled: actionsEnabled, applied: applied, overlaps: overlaps, hasDraft: block.hasDraft)
+            row.update(enabled: actionsEnabled, applied: applied, failed: failed, hasDraft: block.hasDraft)
             var frame = row.frame(over: anchor, in: viewport, scroll: scroll)
             frame.origin.y = floor(anchor.midY - frame.height / 2)
             if row.frame != frame { row.frame = frame }
@@ -124,7 +143,7 @@ final class JJConflictDecorations {
                         break
                     case .diff(_, let side):
                         place(.applyDiff(side: side), at: segment.anchor.location, in: block,
-                              applied: block.appliedSides.contains(side), overlaps: block.overlapSide == side)
+                              applied: block.appliedSides.contains(side), failed: block.failedSides.contains(side))
                     }
                 }
             }
@@ -155,13 +174,15 @@ final class JJConflictDecorations {
 
     func draw(in dirtyRect: NSRect, includesDetails: Bool = true) {
         for row in rows where row.band.minY < dirtyRect.maxY && row.band.maxY > dirtyRect.minY {
-            let background = row.role == .addition ? JJDiffColors.addedRow : JJDiffColors.removedRow
-            background.setFill()
-            NSRect(x: dirtyRect.minX, y: row.band.minY, width: dirtyRect.width, height: row.band.height)
-                .intersection(dirtyRect).fill()
-            guard includesDetails, !row.details.isEmpty else { continue }
-            (row.role == .addition ? JJDiffColors.addedDetail : JJDiffColors.removedDetail).setFill()
-            for rect in row.details where rect.intersects(dirtyRect) { rect.intersection(dirtyRect).fill() }
+            if row.role == .marker {
+                NSColor.systemPurple.withAlphaComponent(0.21).setFill()
+                NSRect(x: dirtyRect.minX, y: row.band.minY, width: dirtyRect.width, height: row.band.height)
+                    .intersection(dirtyRect).fill()
+            } else if includesDetails {
+                let color = row.role == .addition ? Self.addedText : Self.removedText
+                color.withAlphaComponent(0.20).setFill()
+                for rect in row.details where rect.intersects(dirtyRect) { rect.intersection(dirtyRect).fill() }
+            }
         }
     }
 

@@ -426,19 +426,33 @@ enum SourceControlCheck {
         }
         panel.onNavigate?(1)
         try expect(editor.selectedRange().location == originalBlocks[1].range.location, "navigate to the next conflict")
-        try await click("Apply Diff", on: firstDiff.anchor)
-        try await waitFor("focus the snapshot when a diff overlaps it") {
-            editor.selectedRange().location >= firstResult.location &&
-                NSMaxRange(editor.selectedRange()) <= NSMaxRange(firstResult)
+        reveal(firstDiff.anchor)
+        try await waitFor("show the overlapping diff action") { button("Apply Diff", on: firstDiff.anchor)?.isEnabled == true }
+        guard let failedButton = button("Apply Diff", on: firstDiff.anchor) else { throw Failure("find the overlapping diff action") }
+        let buttonFrame = scroll.convert(failedButton.bounds, from: failedButton)
+        let viewportBeforeClick = scroll.visibleContentOrigin
+        failedButton.performClick(nil)
+        try await waitFor("report the overlap on the original button") {
+            button("Can't Apply", on: firstDiff.anchor) === failedButton
         }
-        try expect(document.window.firstResponder === editor && editor.string == original &&
-                   button("Apply Diff", on: firstDiff.anchor)?.isEnabled == true,
-                   "keep Apply Diff available after an overlap without adding an action")
+        try expect(failedButton.isEnabled && failedButton.contentTintColor == .systemRed && editor.string == original &&
+                   scroll.convert(failedButton.bounds, from: failedButton) == buttonFrame &&
+                   scroll.visibleContentOrigin == viewportBeforeClick,
+                   "show the failure in place and keep the same button available for a retry")
+        try expect(document.window.firstResponder === editor && editor.selectedRange().location == firstResult.location,
+                   "focus the editable snapshot when it is visible")
+        try render(document.window)
         let manual = "let first = \"Manual merge\""
         editor.insertText(manual, replacementRange: firstResult)
         editor.breakUndoCoalescing()
         try expect(blocks(editor.string).first?.startingResult == manual + "\n" && blocks(editor.string).count == 2,
                    "edit the snapshot directly in the buffer without resolving the conflict")
+        guard let updatedAnchor = blocks(editor.string).first?.segments.first(where: { $0.kind == firstDiff.kind })?.anchor else {
+            throw Failure("find the diff after editing the snapshot")
+        }
+        try await waitFor("clear the button failure after editing the snapshot") {
+            button("Apply Diff", on: updatedAnchor) === failedButton
+        }
 
         let outsideDraft = (editor.string as NSString).range(of: "// Unchanged 1")
         let savedComment = "// Saved outside the draft"
@@ -466,7 +480,6 @@ enum SourceControlCheck {
             button("Mark Resolved", on: editedSnapshot)?.isEnabled == true
         }
         try expect(!format.isEnabled, "keep the draft in its current format until it is resolved or undone")
-        try render(document.window)
         try await click("Mark Resolved", on: editedSnapshot)
         try await waitFor("use the manual snapshot to replace just its conflict") {
             editor.string.hasPrefix(manual + "\n") && blocks(editor.string).count == 1
@@ -581,7 +594,7 @@ enum SourceControlCheck {
         let snapshotBlocks = blocks(editor.string)
         document.window.layoutIfNeeded()
         try expect(format.isEnabled, "install the new conflict presentation in the same update as the Snapshot text")
-        try checkConflictMarkerGlyphs(snapshotBlocks[0], in: editor)
+        try checkConflictColors(snapshotBlocks[0], in: editor)
         try expect(zip(snapshotBlocks, originalBlocks).allSatisfy { $0.sides == $1.sides },
                    "retain each side when changing the editable representation")
         editor.setCaretSelections([NSRange(location: snapshotBlocks[0].range.location, length: 0)])
@@ -602,7 +615,7 @@ enum SourceControlCheck {
         undo.undo()
         try await waitFor("undo a format switch") { editor.string == original && format.isEnabled }
         reveal(originalBlocks[0].range)
-        try checkConflictMarkerGlyphs(originalBlocks[0], in: editor)
+        try checkConflictColors(originalBlocks[0], in: editor)
         try expect(await document.save(), "save the restored conflict before opening its history")
 
         try await command(executable, folder, ["new", "-m", "Review child"])
@@ -661,48 +674,59 @@ enum SourceControlCheck {
     }
 
     private static func checkConflictColors(_ block: JJConflict, in editor: EditorTextView) throws {
-        for role in [JJConflict.Role.marker, .removal, .addition] {
-            guard let highlight = block.highlights.first(where: { $0.role == role }),
-                  let line = editor.laidOutLineBounds(at: highlight.range.location) else {
-                throw Failure("lay out each conflict color band")
+        func capture(_ rect: NSRect) throws -> NSBitmapImageRep {
+            guard let bitmap = editor.bitmapImageRepForCachingDisplay(in: rect) else {
+                throw Failure("capture the conflict row")
             }
-            // Sample away from text and from the floating action to verify the full row fill.
-            let sample = NSRect(x: editor.visibleRect.maxX - 108, y: line.midY - 1, width: 2, height: 2)
-            guard let bitmap = editor.bitmapImageRepForCachingDisplay(in: sample) else {
-                throw Failure("capture the conflict row background")
-            }
-            editor.cacheDisplay(in: sample, to: bitmap)
-            guard let color = bitmap.colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB) else {
-                throw Failure("read the conflict row background")
-            }
-            let (red, green, blue) = (color.redComponent, color.greenComponent, color.blueComponent)
-            let matches = switch role {
-            case .marker: abs(blue - green) < 0.025 && abs(red - green) < 0.025
-            case .removal: red > green + 0.03 && red > blue + 0.03
-            case .addition: green > red + 0.03 && green > blue + 0.03
-            }
-            try expect(matches, role == .marker ? "leave the marker background neutral" : "paint a full-width \(role) background")
+            editor.cacheDisplay(in: rect, to: bitmap)
+            return bitmap
         }
-        try checkConflictMarkerGlyphs(block, in: editor)
-    }
 
-    private static func checkConflictMarkerGlyphs(_ block: JJConflict, in editor: EditorTextView) throws {
-        let markerOffsets = Set(block.highlights.filter { $0.role == .marker }.map(\.range.location))
+        let highlights = Dictionary(uniqueKeysWithValues: block.highlights.map { ($0.range.location, $0) })
         let source = editor.string as NSString
         var offset = block.range.location
         while offset < NSMaxRange(block.range) {
             let range = source.lineRange(for: NSRange(location: offset, length: 0))
             guard let line = editor.laidOutLineBounds(at: offset) else { throw Failure("lay out the conflict text") }
-            let glyphs = NSRect(x: editor.textContainerInset.width + 4, y: line.minY, width: 65, height: line.height)
-            guard let bitmap = editor.bitmapImageRepForCachingDisplay(in: glyphs) else { throw Failure("capture the conflict text") }
-            editor.cacheDisplay(in: glyphs, to: bitmap)
-            let purple = (0..<bitmap.pixelsWide).contains { x in
-                (0..<bitmap.pixelsHigh).contains { y in
-                    guard let pixel = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { return false }
-                    return pixel.blueComponent > pixel.greenComponent + 0.12 && pixel.redComponent > pixel.greenComponent + 0.08
+            let highlight = highlights[offset]
+            let sample = NSRect(x: editor.visibleRect.maxX - 28, y: line.midY - 1, width: 2, height: 2)
+            guard let color = try capture(sample).colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB) else {
+                throw Failure("read the conflict row background")
+            }
+            let (red, green, blue) = (color.redComponent, color.greenComponent, color.blueComponent)
+            let marker = highlight?.role == .marker
+            let backgroundMatches = marker ? blue > green + 0.045 && red > green + 0.015
+                                          : abs(blue - green) < 0.025 && abs(red - green) < 0.025
+            try expect(backgroundMatches, "keep full-width violet backgrounds on marker rows only at \(source.substring(with: range).trimmingCharacters(in: .newlines)) (\(red), \(green), \(blue); marker: \(marker))")
+
+            if let highlight, !marker {
+                let glyphs = NSRect(x: editor.textContainerInset.width + 4, y: line.minY, width: 65, height: line.height)
+                let bitmap = try capture(glyphs)
+                let hasDiffColor = (0..<bitmap.pixelsWide).contains { x in
+                    (0..<bitmap.pixelsHigh).contains { y in
+                        guard let pixel = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { return false }
+                        if highlight.role == .addition {
+                            return pixel.greenComponent > pixel.redComponent + 0.18 && pixel.greenComponent > pixel.blueComponent + 0.13
+                        }
+                        return pixel.redComponent > pixel.greenComponent + 0.22 && pixel.redComponent > pixel.blueComponent + 0.20
+                    }
+                }
+                try expect(hasDiffColor, "paint \(highlight.role) glyphs in the diff color")
+
+                if let layout = editor.textLayoutManager,
+                   let detail = JJInlineDiffLayout.detailRects(for: highlight.changes, in: highlight.range, editor: editor, manager: layout).first {
+                    let bitmap = try capture(detail.insetBy(dx: 1, dy: 2))
+                    let hasTint = (0..<bitmap.pixelsWide).contains { x in
+                        (0..<bitmap.pixelsHigh).contains { y in
+                            guard let pixel = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { return false }
+                            let tint = highlight.role == .addition ? pixel.greenComponent - pixel.redComponent
+                                                                   : pixel.redComponent - pixel.greenComponent
+                            return tint > 0.03 && tint < 0.14
+                        }
+                    }
+                    try expect(hasTint, "tint the changed span of a \(highlight.role) line")
                 }
             }
-            try expect(purple == markerOffsets.contains(offset), "use purple only on marker glyphs at \(source.substring(with: range))")
             offset = NSMaxRange(range)
         }
     }

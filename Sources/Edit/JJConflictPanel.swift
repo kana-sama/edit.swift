@@ -112,6 +112,8 @@ final class JJConflictPanel: NSView {
 
 @MainActor
 final class JJConflictActions: JJEditorActionBar {
+    private static let failureTitle = "Can't Apply"
+
     enum Action: Hashable {
         case applyDiff(side: Int), markResolved
 
@@ -143,25 +145,40 @@ final class JJConflictActions: JJEditorActionBar {
         configure(button, identifier: "JujutsuConflict\(action.title.filter(\.isLetter))",
                   label: action.title, action: #selector(performAction))
         button.font = .systemFont(ofSize: 11, weight: action.isResolution ? .semibold : .medium)
+        if !action.isResolution {
+            let normalWidth = button.intrinsicContentSize.width
+            button.title = Self.failureTitle
+            let failureWidth = button.intrinsicContentSize.width
+            button.title = action.title
+            button.widthAnchor.constraint(equalToConstant: ceil(max(normalWidth, failureWidth))).isActive = true
+        }
         button.heightAnchor.constraint(equalToConstant: 18).isActive = true
         installControls([button], edgeInsets: NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4))
     }
 
     required init?(coder: NSCoder) { nil }
 
-    func update(enabled: Bool, applied: Bool, overlaps: Bool, hasDraft: Bool) {
+    func update(enabled: Bool, applied: Bool, failed: Bool, hasDraft: Bool) {
         self.applied = applied
         setEnabled(enabled)
+        let showsFailure = failed && !applied
+        let title = showsFailure ? Self.failureTitle : action.title
+        if button.title != title {
+            button.title = title
+            button.setAccessibilityLabel(showsFailure ? "Apply Diff failed" : action.title)
+        }
         let help: String
         if action.isResolution { help = "Replace the conflict with the current snapshot." }
         else if applied { help = "This diff has been applied. Undo the application to apply it again." }
-        else if overlaps { help = "This diff overlaps the result. Edit the snapshot to combine the changes." }
+        else if showsFailure { help = "This diff overlaps the result. Edit the snapshot to combine the changes." }
         else { help = action.title }
         if button.toolTip != help {
             button.toolTip = help
             button.setAccessibilityHelp(help)
         }
-        let tint: NSColor? = action.isResolution && hasDraft ? .controlAccentColor : nil
+        let tint: NSColor? = if showsFailure { .systemRed }
+        else if action.isResolution && hasDraft { .controlAccentColor }
+        else { nil }
         if button.contentTintColor != tint { button.contentTintColor = tint }
     }
 

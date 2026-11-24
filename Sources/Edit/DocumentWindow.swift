@@ -165,7 +165,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var conflictPresentationCurrent = false
     private var conflictStyleTask: Task<Void, Never>?
     private var conflictApplyTask: Task<Void, Never>?
-    private var conflictOverlap: (id: UUID, side: Int)?
+    private var failedConflictDiffs: [UUID: Set<Int>] = [:]
 
     var isShowingFilePreview: Bool { filePreview != nil }
     var showsEmptyFolder: Bool { emptyFolderView != nil }
@@ -1619,7 +1619,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             conflictStyleTask?.cancel()
             conflictApplyTask?.cancel()
             conflictApplyTask = nil
-            conflictOverlap = nil
+            failedConflictDiffs.removeAll()
             showEditorConflicts([])
         }
         pendingSourceControlDiffFile = nil
@@ -1967,7 +1967,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     ) {
         conflictStyleTask?.cancel()
         editor.conflictEdits.removeAll()
-        conflictOverlap = nil
+        failedConflictDiffs.removeAll()
         showEditorConflicts([])
         pendingSourceControlDiffFile = nil
         discardDraftCheckpoint()
@@ -2118,7 +2118,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.jjConflictDecorations?.setActionBlocks(editor.isEditable ? conflictBlocks.compactMap { conflict in
             guard let edit = tracked[conflict.range] else { return nil }
             return .init(conflict: conflict, id: edit.id, appliedSides: edit.appliedSides,
-                         overlapSide: conflictOverlap?.id == edit.id ? conflictOverlap?.side : nil,
+                         failedSides: failedConflictDiffs[edit.id] ?? [],
                          hasDraft: conflict.hasEditedResult || !edit.appliedSides.isEmpty)
         } : [])
         editor.jjConflictDecorations?.setActionsEnabled(true)
@@ -2169,12 +2169,18 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                     let replacement = result.utf8.elementsEqual(text.utf8) ? nil : conflict.displayedResult(result)
                     preserveEditorViewport { applyConflictResult(replacement, for: current, side: side) }
                     focusContent()
-                } else if let range = current.result {
-                    conflictOverlap = (id, side)
-                    let caret = NSRange(location: range.location, length: 0)
-                    editor.setCaretSelections([caret])
-                    focusContent()
-                    editor.scrollRangeToVisible(caret)
+                } else {
+                    failedConflictDiffs[id, default: []].insert(side)
+                    if let range = current.result, let line = editor.laidOutLineBounds(at: range.location) {
+                        let viewport = JJEditorActionBar.viewport(in: scrollView)
+                        let anchor = scrollView.convert(line, from: editor)
+                        if anchor.midY >= viewport.minY, anchor.midY <= viewport.maxY {
+                            preserveEditorViewport {
+                                editor.setCaretSelections([NSRange(location: range.location, length: 0)])
+                                focusContent()
+                            }
+                        }
+                    }
                     updateConflictActions()
                 }
             }

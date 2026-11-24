@@ -147,7 +147,7 @@ final class SyntaxHighlighting {
         let previous = backedColorRange.map { NSIntersectionRange($0, document) }
         let visible = visible.map { NSIntersectionRange($0, document) }
         let colors = visible.map { spans(overlapping: $0) } ?? []
-        let markers = visible.flatMap { editor.jjConflictDecorations?.markerRanges(in: $0) } ?? []
+        let conflictColors = visible.flatMap { editor.jjConflictDecorations?.foregrounds(in: $0) } ?? []
         guard (previous?.length ?? 0) > 0 || (visible?.length ?? 0) > 0 else {
             backedColorRange = nil
             return
@@ -165,14 +165,14 @@ final class SyntaxHighlighting {
                     let range = NSIntersectionRange(visible, NSRange(location: span.start, length: span.end - span.start))
                     storage.addAttribute(.foregroundColor, value: span.color.nativeColor, range: range)
                 }
-                for marker in markers {
-                    storage.addAttribute(.foregroundColor, value: NSColor.systemPurple, range: marker)
+                for (range, color) in conflictColors {
+                    storage.addAttribute(.foregroundColor, value: color, range: range)
                 }
             }
             storage.endEditing()
         }
         editor.typingAttributes = typingAttributes
-        backedColorRange = colors.isEmpty && markers.isEmpty ? nil : visible
+        backedColorRange = colors.isEmpty && conflictColors.isEmpty ? nil : visible
     }
 
     private func visibleRange() -> NSRange? {
@@ -211,8 +211,8 @@ final class SyntaxHighlighting {
         for span in spans(overlapping: visible) {
             paintColor(span.color.nativeColor, in: NSIntersectionRange(visible, NSRange(location: span.start, length: span.end - span.start)))
         }
-        for marker in editor?.jjConflictDecorations?.markerRanges(in: visible) ?? [] {
-            paintColor(.systemPurple, in: marker)
+        for (range, color) in editor?.jjConflictDecorations?.foregrounds(in: visible) ?? [] {
+            paintColor(color, in: range)
         }
     }
 
