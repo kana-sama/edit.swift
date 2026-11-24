@@ -304,6 +304,7 @@ enum SourceControlCheck {
         try expect(parts == ["Base", "Beta", "Gamma"], "highlight only the changed words in the conflict diff lines")
         document.window.appearance = NSAppearance(named: .darkAqua)
         document.window.layoutIfNeeded()
+        try checkEditorPanelLayout([panel], above: document.scrollView, in: document)
         try checkConflictBackgrounds(originalBlocks[0], in: editor)
         try render(document.window)
         panel.onNavigate?(1)
@@ -350,6 +351,11 @@ enum SourceControlCheck {
             !editor.isEditable && actions.superview == nil && blocks(editor.string).first?.style == .snapshot
         }
         try expect(try Data(contentsOf: file) == disk, "leave the working file untouched when switching a historical preview")
+        guard let banner = document.sourceControlRevisionBanner, let conflictPanel = document.conflictPanel else {
+            throw Failure("keep both editor panels in a historical conflict")
+        }
+        try checkEditorPanelLayout([banner, conflictPanel], above: document.scrollView, in: document)
+        try checkPanelsWithDetachedToolbar([banner, conflictPanel], in: document)
     }
 
     private static func checkConflictBackgrounds(_ block: JJConflict, in editor: EditorTextView) throws {
@@ -1177,8 +1183,8 @@ enum SourceControlCheck {
 
     private static func checkRevisionBanner(in document: DocumentWindow, above body: NSView) throws {
         let content = document.editorContentView
-        document.window.layoutIfNeeded()
         guard let banner = document.sourceControlRevisionBanner else { throw Failure("find the revision banner") }
+        try checkEditorPanelLayout([banner], above: body, in: document)
         let bounds = content.bounds
         func capture() throws -> NSBitmapImageRep {
             guard let bitmap = content.bitmapImageRepForCachingDisplay(in: bounds) else {
@@ -1191,7 +1197,9 @@ enum SourceControlCheck {
         banner.isHidden = true
         defer { banner.isHidden = false }
         let uncovered = try capture()
-        let area = content.convert(body.bounds, from: body).intersection(bounds).insetBy(dx: 8, dy: 8)
+        let bannerFrame = content.convert(banner.bounds, from: banner)
+        let exposedBody = NSRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: bannerFrame.minY - bounds.minY)
+        let area = content.convert(body.bounds, from: body).intersection(exposedBody).insetBy(dx: 8, dy: 8)
         try expect(!area.isEmpty, "give the selected revision a visible body below the strip")
         let xScale = CGFloat(visible.pixelsWide) / bounds.width
         let yScale = CGFloat(visible.pixelsHigh) / bounds.height
@@ -1202,6 +1210,56 @@ enum SourceControlCheck {
                            "keep all banner drawing above the revision body")
             }
         }
+    }
+
+    private static func checkEditorPanelLayout(_ panels: [NSView], above body: NSView, in document: DocumentWindow) throws {
+        document.window.layoutIfNeeded()
+        let content = document.editorContentView
+        guard let scroll = body as? NSScrollView ?? descendant(of: body, where: { (_: NSScrollView) in true }) else {
+            throw Failure("find the revision scroll surface")
+        }
+        let scrollFrame = content.convert(scroll.bounds, from: scroll)
+        var edge = content.safeAreaRect.maxY
+        var height: CGFloat = 0
+        for panel in panels {
+            let frame = content.convert(panel.bounds, from: panel)
+            try expect(abs(frame.maxY - edge) < 1, "stack editor panels below the native toolbar")
+            edge = frame.minY
+            height += frame.height
+        }
+        try expect(scroll.automaticallyAdjustsContentInsets && abs(scrollFrame.maxY - content.bounds.maxY) < 1,
+                   "keep the scroll surface extending behind the native toolbar")
+        try expect(abs(body.additionalSafeAreaInsets.top - height) < 1 &&
+                   abs(scrollFrame.maxY - scroll.contentInsets.top - edge) < 1,
+                   "reserve the editor panels in the automatic scroll inset")
+    }
+
+    private static func checkPanelsWithDetachedToolbar(_ panels: [NSView], in document: DocumentWindow) throws {
+        let window = document.window
+        guard let toolbar = window.toolbar else { throw Failure("find the native editor toolbar") }
+        let frame = NSRect(x: -10_000, y: -10_000, width: window.frame.width, height: 180)
+        let companion = NSWindow(contentRect: frame, styleMask: [.titled], backing: .buffered, defer: false)
+        companion.isReleasedWhenClosed = false
+        companion.alphaValue = 0
+        companion.ignoresMouseEvents = true
+        companion.collectionBehavior = [.fullScreenAuxiliary]
+        companion.toolbarStyle = window.toolbarStyle
+        defer {
+            companion.toolbar = nil
+            window.toolbar = toolbar
+            window.layoutIfNeeded()
+            document.titleBar.fullScreenTransitionDidFinish()
+            companion.close()
+        }
+        window.toolbar = nil
+        companion.toolbar = toolbar
+        companion.orderBack(nil)
+        companion.setFrame(frame, display: false)
+        companion.layoutIfNeeded()
+        document.titleBar.fullScreenTransitionDidFinish()
+        try expect(document.titleBar.toolbarWindow === companion && !NSApp.isActive,
+                   "test the panels with the toolbar in an inactive full-screen companion")
+        try checkEditorPanelLayout(panels, above: document.scrollView, in: document)
     }
 
     private static func button(in view: NSView, where test: (NSButton) -> Bool) -> NSButton? {

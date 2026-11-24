@@ -159,11 +159,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var lastLiveSourceControlCheckout: JJRepositoryState?
     private var sourceControlFileTransition: Task<Void, Never>?
     private(set) var sourceControlRevisionBanner: SourceControlRevisionBanner?
-    private var editorTopConstraint: NSLayoutConstraint?
-    private var filePreviewTopConstraint: NSLayoutConstraint?
-    private var previewTopConstraint: NSLayoutConstraint?
     private(set) var conflictPanel: JJConflictPanel?
-    private var conflictEditorTop: NSLayoutConstraint?
+    private var editorPanelConstraints: [NSLayoutConstraint] = []
     private var conflictBlocks: [JJConflict] = []
     private var conflictPresentationCurrent = false
     private var conflictStyleTask: Task<Void, Never>?
@@ -292,7 +289,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             Task { @MainActor in self?.titleBar.update() }
         }
         window.contentView = editorContentView
-        editorTopConstraint = pinToEditorContent(scrollView)
+        pinToEditorContent(scrollView)
         window.toolbarStyle = .unifiedCompact
         window.toolbar = titleBar.toolbar
         window.trackTitlebarPointer()
@@ -451,7 +448,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         guard let terminalPanel, isTerminalVisible else { return }
         let alreadyDocked = dock == .right ? terminalSidebar != nil : terminalDockView?.superview != nil
         guard !alreadyDocked else { return }
-        updateTerminalLayout {
+        preserveEditorViewport {
             detachTerminalPanel()
             if dock == .right {
                 showTerminalSidebar(terminalPanel)
@@ -565,13 +562,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         terminalPanel?.setVisible(false)
         if restoringContentFocus { focusContent() }
         let responder = window.firstResponder
-        updateTerminalLayout { detachTerminalPanel() }
+        preserveEditorViewport { detachTerminalPanel() }
         if let responder = responder as? NSView, responder.window === window, window.firstResponder !== responder {
             window.makeFirstResponder(responder)
         }
     }
 
-    private func updateTerminalLayout(_ change: () -> Void) {
+    private func preserveEditorViewport(_ change: () -> Void) {
         let origin = scrollView.visibleContentOrigin
         PanelLayout.withoutAnimation {
             change()
@@ -799,7 +796,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         revision = nil
         editor.isEditable = false
         filePreviewView = view
-        filePreviewTopConstraint = pinToEditorContent(view)
+        pinToEditorContent(view)
         window.initialFirstResponder = view
         scrollView.isHidden = true
         installText("", revealInWorktree: revealInWorktree)
@@ -810,7 +807,6 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         window.initialFirstResponder = editor
         self.filePreviewView = nil
         filePreview = nil
-        filePreviewTopConstraint = nil
         filePreviewView.stop()
         filePreviewView.removeFromSuperview()
         scrollView.isHidden = false
@@ -1008,34 +1004,19 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             installFilePreview(media, revealInWorktree: false)
         }
 
-        let banner = SourceControlRevisionBanner(preview)
-        sourceControlRevisionBanner = banner
-        let content = filePreviewView as NSView? ?? scrollView
-        let oldTop = filePreviewTopConstraint ?? editorTopConstraint
-        editorContentView.addSubview(banner)
-        oldTop?.isActive = false
-        let newTop = content.topAnchor.constraint(equalTo: banner.bottomAnchor)
-        previewTopConstraint = newTop
-        let guide = editorContentView.safeAreaLayoutGuide
-        NSLayoutConstraint.activate([
-            banner.topAnchor.constraint(equalTo: guide.topAnchor),
-            banner.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
-            banner.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
-            newTop,
-        ])
+        sourceControlRevisionBanner = SourceControlRevisionBanner(preview)
+        layoutEditorPanels()
         if case .text(_, _, let analysis, _) = preview.content { showEditorConflicts(analysis.conflicts) }
     }
 
     private func removeSourceControlRevision() {
         guard sourceControlRevision != nil else { return }
-        showEditorConflicts([])
         sourceControlRevision = nil
         editor.setJJLineMarks([])
-        previewTopConstraint?.isActive = false
-        previewTopConstraint = nil
         sourceControlRevisionBanner?.removeFromSuperview()
         sourceControlRevisionBanner = nil
-        (filePreviewTopConstraint ?? editorTopConstraint)?.isActive = true
+        if conflictPanel == nil { layoutEditorPanels() }
+        showEditorConflicts([])
     }
 
     func loadEmptyFolder() {
@@ -1073,23 +1054,49 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         installText("")
     }
 
-    @discardableResult
-    private func pinToEditorContent(_ view: NSView) -> NSLayoutConstraint {
+    private func pinToEditorContent(_ view: NSView) {
         view.translatesAutoresizingMaskIntoConstraints = false
         if let dock = terminalDockView, dock.superview === editorContentView {
             editorContentView.addSubview(view, positioned: .below, relativeTo: dock)
         } else {
             editorContentView.addSubview(view)
         }
-        let top = view.topAnchor.constraint(equalTo: editorContentView.topAnchor)
         NSLayoutConstraint.activate([
             view.leadingAnchor.constraint(equalTo: editorContentView.leadingAnchor),
             view.trailingAnchor.constraint(equalTo: editorContentView.trailingAnchor),
-            top,
+            view.topAnchor.constraint(equalTo: editorContentView.topAnchor),
             view.bottomAnchor.constraint(equalTo: editorContentView.bottomAnchor),
         ])
         setEditorBottomInset(terminalDockView?.coveredHeight ?? 0)
-        return top
+    }
+
+    private func layoutEditorPanels() {
+        preserveEditorViewport {
+            NSLayoutConstraint.deactivate(editorPanelConstraints)
+            editorPanelConstraints.removeAll()
+            let guide = editorContentView.safeAreaLayoutGuide
+            var top = guide.topAnchor
+            var height: CGFloat = 0
+            for case let panel? in [sourceControlRevisionBanner as NSView?, conflictPanel] {
+                if panel.superview == nil { editorContentView.addSubview(panel) }
+                editorPanelConstraints += [
+                    panel.topAnchor.constraint(equalTo: top),
+                    panel.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
+                    panel.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
+                ]
+                top = panel.bottomAnchor
+                height += panel.fittingSize.height
+            }
+            NSLayoutConstraint.activate(editorPanelConstraints)
+
+            // Keep the scrolling surface under the native toolbar, including when AppKit detaches it.
+            for case let view? in [scrollView as NSView?, filePreviewView] {
+                var insets = view.additionalSafeAreaInsets
+                if insets.top == height { continue }
+                insets.top = height
+                view.additionalSafeAreaInsets = insets
+            }
+        }
     }
 
     func restoreDraft(_ record: SessionDocument, text: String, identity: FileIdentity? = nil, scratch: ScratchFile? = nil) {
@@ -2012,12 +2019,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         guard !conflicts.isEmpty else {
             editor.jjConflictDecorations?.select(nil)
             if let panel = conflictPanel {
-                conflictEditorTop?.isActive = false
-                conflictEditorTop = nil
                 panel.suspend()
                 panel.removeFromSuperview()
                 conflictPanel = nil
-                (previewTopConstraint ?? editorTopConstraint)?.isActive = true
+                layoutEditorPanels()
             }
             return
         }
@@ -2029,18 +2034,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             editor.jjConflictDecorations?.actions.onEdit = { [weak self] in self?.revealConflict(offsetBy: 0) }
             editor.jjConflictDecorations?.actions.onResolve = { [weak self] block, side in self?.resolveConflict(block, using: side) }
             panel.onChangeStyle = { [weak self] style in self?.changeConflictStyle(to: style) }
-            editorContentView.addSubview(panel)
-            let guide = editorContentView.safeAreaLayoutGuide
-            let top = sourceControlRevisionBanner?.bottomAnchor ?? guide.topAnchor
-            (previewTopConstraint ?? editorTopConstraint)?.isActive = false
-            let editorTop = scrollView.topAnchor.constraint(equalTo: panel.bottomAnchor)
-            conflictEditorTop = editorTop
-            NSLayoutConstraint.activate([
-                panel.topAnchor.constraint(equalTo: top),
-                panel.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
-                panel.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
-                editorTop,
-            ])
+            layoutEditorPanels()
         }
         updateConflictControls()
     }

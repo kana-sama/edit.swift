@@ -10,6 +10,8 @@ Match the corresponding interaction in the current macOS system app by default. 
 
 Document windows use the compact unified AppKit toolbar with a fixed icon-only display. Let editor content scroll beneath the filename and system window buttons to receive the native scroll-edge material. Let the editor’s scroll view extend behind the native sidebar. Use AppKit’s safe area and automatic scroll insets so text begins in the exposed area and can pass under the titlebar and sidebar during scrolling.
 
+Overlay editor status strips below the native toolbar. Reserve their height in the scrolling surface’s safe area so the same document surface extends behind the toolbar in windowed and full-screen layouts.
+
 Use system appearance, semantic colors, text styles, control metrics, and SF Symbols for interface chrome. Respect platform preferences for contrast and reduced transparency. Keep persistent controls focused on actions the owner needs.
 
 ## Pointer cursor
