@@ -1,7 +1,7 @@
 import AppKit
 
 @MainActor
-final class DocumentSymbolRename: NSObject, NSTextFieldDelegate {
+final class DocumentSymbolRename {
     private struct Source: Sendable {
         let url: URL
         let root: URL
@@ -38,8 +38,6 @@ final class DocumentSymbolRename: NSObject, NSTextFieldDelegate {
     private let session: LanguageServerSession
     private var task: Task<Void, Never>?
     private var target: Target?
-    private var field: NSTextField?
-    private var fieldAnchor: NSRect?
     private var operation: UUID?
     private var isCommitting = false
 
@@ -76,13 +74,13 @@ final class DocumentSymbolRename: NSObject, NSTextFieldDelegate {
                 let prepared = try await session.prepareRename(at: source.offset)
                 guard isCurrent(id, source: source), document.window.firstResponder === editor,
                       editor.caretSelections.last == source.selection else {
-                    if operation == id { finish(restoreFocus: false) }
+                    if operation == id { finish() }
                     return
                 }
                 let index = LSPTextIndex(source.text)
                 guard let prepared, let range = index.nsRange(prepared.range, clampingColumns: false),
                       range.length > 0, editor.focusAllowsEdits([range]) else {
-                    finish(restoreFocus: false)
+                    finish()
                     editor.showLanguageFeedback("No symbol to rename", at: anchor)
                     return
                 }
@@ -93,13 +91,14 @@ final class DocumentSymbolRename: NSObject, NSTextFieldDelegate {
                     text.character(at: range.upperBound) == 34
                 let spelling = quoted ? "@\"\(sourceName)\"" : sourceName
                 let name = ZigRenameName.decoded(spelling) ?? prepared.placeholder ?? sourceName
-                guard showField(for: Target(source: source, range: range, name: name, spelling: spelling), in: editor) else {
-                    finish(restoreFocus: true)
+                guard editor.beginSymbolRename(in: range, source: source.text) else {
+                    finish()
                     return
                 }
+                target = Target(source: source, range: range, name: name, spelling: spelling)
             } catch {
                 let report = isCurrent(id, source: source)
-                if operation == id { finish(restoreFocus: false) }
+                if operation == id { finish() }
                 if report { editor.showLanguageFeedback(error.localizedDescription, at: anchor) }
             }
         }
@@ -107,30 +106,19 @@ final class DocumentSymbolRename: NSObject, NSTextFieldDelegate {
     }
 
     @discardableResult
-    func cancel(restoreFocus: Bool) -> Bool {
+    func cancel() -> Bool {
         guard operation != nil, !isCommitting else { return false }
-        finish(restoreFocus: restoreFocus)
+        finish()
         return true
     }
 
-    private func finish(restoreFocus: Bool) {
+    private func finish() {
         operation = nil
         task?.cancel()
         task = nil
         target = nil
+        document?.editor.endSymbolRename()
         document?.editor.isRenamingSymbol = false
-        removeField(restoreFocus: restoreFocus)
-    }
-
-    private func removeField(restoreFocus: Bool) {
-        guard let field else { return }
-        self.field = nil
-        fieldAnchor = nil
-        field.delegate = nil
-        if restoreFocus, let document, document.window.firstResponder === field.currentEditor() {
-            document.window.makeFirstResponder(document.editor)
-        }
-        field.removeFromSuperview()
     }
 
     private func isCurrent(_ id: UUID, source: Source) -> Bool {
@@ -141,95 +129,34 @@ final class DocumentSymbolRename: NSObject, NSTextFieldDelegate {
             document.openRequestGeneration == source.openGeneration
     }
 
-    private func showField(for target: Target, in editor: EditorTextView) -> Bool {
-        guard let window = editor.window else { return false }
-        editor.scrollRangeToVisible(target.range)
-        window.layoutIfNeeded()
-        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
-        guard let anchor = editor.highlightRects(for: [target.range]).first else { return false }
-        let field = NSTextField(frame: .zero)
-        field.identifier = .init("Edit.RenameSymbol.Name")
-        field.setAccessibilityLabel("Symbol Name")
-        field.font = editor.font ?? EditorTextView.defaultFont
-        field.stringValue = target.name
-        field.isBezeled = true
-        field.bezelStyle = .roundedBezel
-        field.drawsBackground = true
-        field.usesSingleLineMode = true
-        field.cell?.isScrollable = true
-        field.delegate = self
-        layout(field, at: anchor, name: target.name, in: editor)
-        self.target = target
-        self.field = field
-        fieldAnchor = anchor
-        editor.addSubview(field, positioned: .above, relativeTo: nil)
-        guard window.makeFirstResponder(field), let input = field.currentEditor() else { return false }
-        input.selectedRange = NSRange(location: 0, length: (target.name as NSString).length)
-        return true
-    }
-
-    private func layout(_ field: NSTextField, at anchor: NSRect, name: String, in editor: EditorTextView) {
-        let viewport = editor.visibleRect
-        let font = field.font ?? EditorTextView.defaultFont
-        let textWidth = (name as NSString).size(withAttributes: [.font: font]).width
-        let width = min(ceil(max(anchor.width, textWidth)) + 9, viewport.width)
-        let height = max(anchor.height, field.fittingSize.height)
-        field.frame = NSRect(x: min(max(viewport.minX, anchor.minX - 7), viewport.maxX - width),
-                             y: anchor.midY - height / 2, width: width, height: height).integral
-    }
-
-    func controlTextDidChange(_ notification: Notification) {
-        guard let field, notification.object as? NSTextField === field, let anchor = fieldAnchor,
-              let editor = document?.editor, let input = field.currentEditor() else { return }
-        layout(field, at: anchor, name: input.string, in: editor)
-    }
-
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-        guard control === field, !textView.hasMarkedText() else { return false }
-        switch selector {
-        case #selector(NSResponder.insertNewline(_:)):
-            submit(textView.string)
-            return true
-        case #selector(NSResponder.cancelOperation(_:)):
-            return cancel(restoreFocus: true)
-        default:
-            return false
-        }
-    }
-
-    func controlTextDidEndEditing(_ notification: Notification) {
-        guard let field, notification.object as? NSTextField === field else { return }
-        Task { [weak self, weak field] in
-            guard let self, let field, self.field === field, field.currentEditor() == nil else { return }
-            cancel(restoreFocus: false)
-        }
-    }
-
-    private func submit(_ name: String) {
-        guard let target, let id = operation, let document, isCurrent(id, source: target.source) else {
-            cancel(restoreFocus: true)
+    func submit() {
+        guard let target, let id = operation, let document, let draft = document.editor.symbolRenameText,
+              isCurrent(id, source: target.source) else {
+            cancel()
             return
         }
+        let name = target.spelling.hasPrefix("@\"")
+            ? ZigRenameName.decoded("@\"\(draft)\"") ?? draft : draft
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             NSSound.beep()
             return
         }
         guard !name.utf8.elementsEqual(target.name.utf8) else {
-            finish(restoreFocus: true)
+            finish()
             return
         }
-        removeField(restoreFocus: true)
+        document.editor.endSymbolRename()
         task = Task { [weak self] in
             guard let self else { return }
-            defer { if operation == id { finish(restoreFocus: false) } }
+            defer { if operation == id { finish() } }
             do {
                 guard let edit = try await session.rename(at: target.source.offset, to: name),
                       !edit.documents.isEmpty else { throw RenameFailure("ZLS found no edits for this symbol.") }
                 try await apply(edit, to: target, newName: name, id: id)
             } catch {
                 if operation == id, !Task.isCancelled {
-                    finish(restoreFocus: false)
+                    finish()
                     document.editor.showLanguageFeedback(error.localizedDescription, at: target.range)
                 }
             }

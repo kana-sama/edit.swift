@@ -179,10 +179,12 @@ enum LanguageServerCheck {
         document.editor.setCaretSelections([offSymbol])
         let renameMenu = try editorMenu(in: document, at: last)
         renameMenu.performActionForItem(at: renameMenu.indexOfItem(withTitle: "Rename…"))
-        try await wait("open the inline field for the clicked symbol with the caret elsewhere") {
-            (document.window.firstResponder as? NSTextView)?.string == "onlyValue"
+        try await wait("focus the clicked symbol inside the editor with the caret elsewhere") {
+            document.window.firstResponder === document.editor && document.editor.renameRange == last &&
+                document.editor.selectedRange() == last
         }
-        try expect(document.editor.onCancelSymbolRename?() == true && document.editor.selectedRange() == offSymbol,
+        document.editor.cancelOperation(nil)
+        try expect(document.editor.renameRange == nil && document.editor.selectedRange() == offSymbol,
                    "cancel the context rename and keep the original caret")
 
         try expect(try await app.openFile(typed, in: document) === document, "open the referenced-type fixture")
@@ -231,9 +233,7 @@ enum LanguageServerCheck {
         let updatedHover = await lsp.hover(at: moved.location + 2, word: moved)
         try expect(updatedHover?.range == moved && updatedHover?.text.contains("Returns a value.") == true,
                    "restart synchronizes unsaved text")
-        try await LanguageServerRenameCheck.run(in: app, document: document) { view in
-            try captureHover(view, "rename-symbol")
-        }
+        try await LanguageServerRenameCheck.run(in: app, document: document, capture: captureHover)
     }
 
     private static func checkDocumentHighlights(in document: DocumentWindow, capture: (NSView, String) throws -> Void) async throws {

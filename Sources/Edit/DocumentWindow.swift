@@ -215,7 +215,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func restoreNavigationSelection(_ selection: NavigationHistory.Selection) {
         guard hasTextDocument else { return }
-        applyNavigationSelection(selection.range(in: editor.string), backward: selection.isBackward)
+        applyNavigationSelection(selection.range(in: editor.sourceString), backward: selection.isBackward)
     }
 
     func navigate(to caret: NSRange, from origin: NavigationHistory.Location?) {
@@ -225,6 +225,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func applyNavigationSelection(_ range: NSRange, backward: Bool = false) {
+        if editor.renameRange != nil { _ = editor.onCancelSymbolRename?() }
         restoringNavigationSelection = true
         defer { restoringNavigationSelection = false }
         if let scope = editor.focusRanges,
@@ -1469,6 +1470,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func beginWorktreeMutation() {
+        if editor.renameRange != nil { _ = editor.onCancelSymbolRename?() }
         if editor.hasMarkedText() { editor.unmarkText() }
         activity.beginMutation(wasEditable: editor.isEditable)
         editor.isEditable = false
@@ -1683,7 +1685,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     @objc private func undoOrRedo(_ notification: Notification) {
-        guard let manager = notification.object as? UndoManager, manager === editor.undoManager else { return }
+        guard editor.renameRange == nil, let manager = notification.object as? UndoManager,
+              manager === editor.undoManager else { return }
         editor.bracketNavigation.reset()
         editor.occurrenceHighlighting.contentChanged()
         editor.requestLineRefresh()
@@ -2052,6 +2055,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         _ text: String, preparedSyntax: SyntaxSnapshot? = nil, openingConflicts: JJOpeningConflicts? = nil,
         confirmedConflicts: [JJConflict] = [], restoredConflicts: [JJConflictEdit] = [], revealInWorktree: Bool = true
     ) {
+        if editor.renameRange != nil { _ = editor.onCancelSymbolRename?() }
         navigationSelectionAnchor = nil
         let projection = restoredConflicts.isEmpty
             ? JJConflictEdit.project(openingConflicts?.blocks ?? confirmedConflicts, in: text)
@@ -2279,8 +2283,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         JJConflictEdit.drafts(in: editor.string, edits: editor.conflictEdits)
     }
 
-    var textForSaving: String { JJConflictEdit.textForSaving(editor.string, edits: editor.conflictEdits) }
-    var textWithConflictPrefixes: String { JJConflictEdit.textWithDrafts(editor.string, edits: editor.conflictEdits) }
+    var textForSaving: String { JJConflictEdit.textForSaving(editor.sourceString, edits: editor.conflictEdits) }
+    var textWithConflictPrefixes: String { JJConflictEdit.textWithDrafts(editor.sourceString, edits: editor.conflictEdits) }
 
     private func updateConflictActions() {
         let tracked = Dictionary(uniqueKeysWithValues: editor.conflictEdits.map { ($0.block, $0) })
@@ -2477,7 +2481,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func updateEditedState() {
         let matchesSaved = savedText.map { saved in
-            if editor.conflictEdits.isEmpty { return editor.textStorage?.mutableString.isEqual(saved) ?? false }
+            if editor.conflictEdits.isEmpty && editor.renameRange == nil {
+                return editor.textStorage?.mutableString.isEqual(saved) ?? false
+            }
             return saved.isEqual(to: textWithConflictPrefixes)
         } ?? false
         let isEdited = hasAppliedConflictDiff || !matchesSaved

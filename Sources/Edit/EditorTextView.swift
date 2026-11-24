@@ -28,6 +28,22 @@ private struct MultiCaretComposition {
     }
 }
 
+@MainActor
+private struct EditorRenameDraft {
+    var range: NSRange
+    let source: String
+    let original: NSAttributedString
+    let selection: NSRange
+    let affinity: NSSelectionAffinity
+    let focus: EditorFocusSession.Snapshot?
+    let undoManager = UndoManager()
+
+    func contains(_ range: NSRange) -> Bool {
+        range.location >= self.range.location && range.location <= self.range.upperBound &&
+            range.length <= self.range.upperBound - range.location
+    }
+}
+
 final class EditorTextView: NSTextView, NSTextViewDelegate {
     static let linePasteType = NSPasteboard.PasteboardType("dev.edit-swift.whole-line")
     private static let defaultFontSize: CGFloat = 12
@@ -73,7 +89,13 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var languageFollowHoverLink: ((LSPLocation, NSRange) -> Void)?
     var onRenameSymbol: (() -> Bool)?
     var onCancelSymbolRename: (() -> Bool)?
+    var onSubmitSymbolRename: (() -> Void)?
     var isRenamingSymbol = false
+    private var renameDraft: EditorRenameDraft?
+    private var renameShade: EditorRenameShade?
+    var renameRange: NSRange? { renameDraft?.range }
+    // The editor lays out the draft. File and language services read the underlying source.
+    var sourceString: String { renameDraft?.source ?? string }
     var languageContextItems: ((EditorLanguageInteraction.Hit) -> [NSMenuItem])?
     var languageInteractionEnabled = false {
         didSet {
@@ -167,6 +189,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         hideCaretDecorations()
         let focused = hasBufferFocus
         if !focused {
+            if renameDraft != nil { _ = onCancelSymbolRename?() }
             setCurrentLine(.zero)
             bracketNavigation.clearHighlights()
         }
@@ -184,9 +207,63 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         }
     }
 
-    override var undoManager: UndoManager? { editorUndoManager }
+    override var undoManager: UndoManager? { renameDraft?.undoManager ?? editorUndoManager }
+
+    func beginSymbolRename(in range: NSRange, source: String) -> Bool {
+        guard renameDraft == nil, let storage = textStorage, range.length > 0,
+              range.upperBound <= storage.length, window?.firstResponder === self else { return false }
+        breakUndoCoalescing()
+        renameDraft = EditorRenameDraft(range: range, source: source, original: storage.attributedSubstring(from: range),
+                                        selection: selectedRange(), affinity: selectionAffinity, focus: captureFocusSnapshot())
+        occurrenceHighlighting.reset()
+        bracketNavigation.clearHighlights()
+        setSelectedRange(range)
+        scrollRangeToVisible(range)
+        window?.layoutIfNeeded()
+        textLayoutManager?.textViewportLayoutController.layoutViewport()
+
+        let shade = EditorRenameShade(editor: self)
+        renameShade = shade
+        addSubview(shade, positioned: .above, relativeTo: nil)
+        shade.update()
+        return true
+    }
+
+    var symbolRenameText: String? {
+        guard let range = renameRange, let storage = textStorage, range.upperBound <= storage.length else { return nil }
+        return storage.mutableString.substring(with: range)
+    }
+
+    func endSymbolRename() {
+        guard let draft = renameDraft else { return }
+        withTransientComposition {
+            if hasMarkedText() {
+                super.unmarkText()
+                inputContext?.discardMarkedText()
+            }
+            if let focus = draft.focus { focusSession?.restore(focus) }
+            if let storage = textStorage, draft.range.upperBound <= storage.length,
+               !storage.mutableString.substring(with: draft.range).utf8.elementsEqual(draft.original.string.utf8) {
+                storage.replaceCharacters(in: draft.range, with: draft.original)
+            }
+            setSelectedRange(draft.selection, affinity: draft.affinity, stillSelecting: false)
+        }
+        renameDraft = nil
+        renameShade?.removeFromSuperview()
+        renameShade = nil
+        occurrenceHighlighting.selectionChanged()
+        requestLineRefresh()
+    }
+
+    private func allowsRenameEdit(_ range: NSRange, _ replacement: String?, in draft: EditorRenameDraft) -> Bool {
+        draft.contains(range) && replacement?.rangeOfCharacter(from: .newlines) == nil
+    }
 
     override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
+        if let draft = renameDraft {
+            guard replacementString == nil || allowsRenameEdit(affectedCharRange, replacementString, in: draft) else { return false }
+            return super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
+        }
         guard focusSession == nil || focusEditsAllowed || replacementString == nil else { return false }
         guard replacementString == nil || allowsProjectedChange(in: affectedCharRange) else { return false }
         if let replacementString, !allowsConflictEdit(in: affectedCharRange, replacement: replacementString) { return false }
@@ -194,6 +271,13 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func shouldChangeText(inRanges affectedRanges: [NSValue], replacementStrings: [String]?) -> Bool {
+        if let draft = renameDraft {
+            if let replacementStrings {
+                guard affectedRanges.count == 1, replacementStrings.count == 1,
+                      allowsRenameEdit(affectedRanges[0].rangeValue, replacementStrings[0], in: draft) else { return false }
+            }
+            return super.shouldChangeText(inRanges: affectedRanges, replacementStrings: replacementStrings)
+        }
         guard focusSession == nil || focusEditsAllowed || replacementStrings == nil else { return false }
         guard replacementStrings == nil || affectedRanges.allSatisfy({ allowsProjectedChange(in: $0.rangeValue) }) else { return false }
         if let replacementStrings {
@@ -213,6 +297,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func selectAll(_ sender: Any?) {
+        if let renameRange { setSelectedRange(renameRange); return }
         if !selectFocusedText(), jjInlineDiff?.handleSelectionCommand(#selector(selectAll(_:))) != true {
             super.selectAll(sender)
         }
@@ -231,6 +316,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     override func resignFirstResponder() -> Bool {
         guard super.resignFirstResponder() else { return false }
+        if renameDraft != nil { _ = onCancelSymbolRename?() }
         multiCaret.pendingSkip = false
         if multiCaretComposition != nil { unmarkText() }
         hideCaretDecorations()
@@ -242,6 +328,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func insertTab(_ sender: Any?) {
+        if renameDraft != nil { return }
         guard prepareProjectedLineCommand() else { return }
         if editMultipleLines(.tab) { return }
         guard !hasMarkedText(), let text = textStorage?.mutableString else {
@@ -257,6 +344,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func insertBacktab(_ sender: Any?) {
+        if renameDraft != nil { return }
         guard !hasMarkedText() else {
             super.insertBacktab(sender)
             return
@@ -265,6 +353,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func insertNewline(_ sender: Any?) {
+        if renameDraft != nil {
+            if hasMarkedText() { super.insertNewline(sender) }
+            else { onSubmitSymbolRename?() }
+            return
+        }
         guard prepareProjectedLineCommand() else { return }
         if editMultipleLines(.newline) { return }
         guard !hasMarkedText(), let text = textStorage?.mutableString else {
@@ -351,6 +444,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func copy(_ sender: Any?) {
+        if renameDraft != nil { super.copy(sender); return }
         if jjInlineDiff?.copyProjectedSelection(to: .general, cutting: false) == true { return }
         if copySelections(to: .general, cutting: false) { return }
         if selectedRange().length > 0 {
@@ -361,6 +455,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func cut(_ sender: Any?) {
+        if renameDraft != nil { super.cut(sender); return }
         if jjInlineDiff?.copyProjectedSelection(to: .general, cutting: true) == true { return }
         if copySelections(to: .general, cutting: true) { return }
         if selectedRange().length > 0 {
@@ -371,6 +466,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func paste(_ sender: Any?) {
+        if renameDraft != nil { super.pasteAsPlainText(sender); return }
         if jjInlineDiff?.projectedEditRange != nil {
             _ = replaceProjectedSelection(with: NSPasteboard.general.string(forType: .string))
             return
@@ -453,6 +549,16 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        if let draft = renameDraft {
+            let point = convert(event.locationInWindow, from: nil)
+            let offset = characterIndexForInsertion(at: point)
+            if draft.contains(NSRange(location: offset, length: 0)),
+               highlightRects(for: [draft.range]).contains(where: { $0.contains(point) }) {
+                super.mouseDown(with: event)
+                return
+            }
+            _ = onCancelSymbolRename?()
+        }
         if languageInteractionEnabled, languageInteraction.followClick(event) { return }
         onFindEditorInteraction?()
         if let focusSession, event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty {
@@ -468,7 +574,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func insertText(_ string: Any, replacementRange: NSRange) {
-        if updatingComposition {
+        if updatingComposition || renameDraft != nil {
             super.insertText(string, replacementRange: replacementRange)
             return
         }
@@ -509,7 +615,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-        guard !updatingComposition else {
+        guard !updatingComposition, renameDraft == nil else {
             super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
             return
         }
@@ -582,7 +688,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func unmarkText() {
-        if updatingComposition {
+        if updatingComposition || renameDraft != nil {
             super.unmarkText()
         } else if let composition = multiCaretComposition,
                   let preview = textStorage?.attributedSubstring(from: composition.preview).string {
@@ -657,25 +763,30 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func delete(_ sender: Any?) {
+        if renameDraft != nil { super.delete(sender); return }
         if !replaceProjectedSelection(with: "") { super.delete(sender) }
     }
 
     override func deleteBackward(_ sender: Any?) {
+        if renameDraft != nil { super.deleteBackward(sender); return }
         if replaceProjectedSelection(with: "") { return }
         if !deleteAtCarets(backward: true, word: false) { super.deleteBackward(sender) }
     }
 
     override func deleteForward(_ sender: Any?) {
+        if renameDraft != nil { super.deleteForward(sender); return }
         if replaceProjectedSelection(with: "") { return }
         if !deleteAtCarets(backward: false, word: false) { super.deleteForward(sender) }
     }
 
     override func deleteWordBackward(_ sender: Any?) {
+        if renameDraft != nil { super.deleteWordBackward(sender); return }
         if replaceProjectedSelection(with: "") { return }
         if !deleteAtCarets(backward: true, word: true) { super.deleteWordBackward(sender) }
     }
 
     override func deleteWordForward(_ sender: Any?) {
+        if renameDraft != nil { super.deleteWordForward(sender); return }
         if replaceProjectedSelection(with: "") { return }
         if !deleteAtCarets(backward: false, word: true) { super.deleteWordForward(sender) }
     }
@@ -713,6 +824,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func doCommand(by selector: Selector) {
+        if renameDraft != nil { super.doCommand(by: selector); return }
         if jjInlineDiff?.handleSelectionCommand(selector) == true { return }
         let before = selectedRange()
         if !moveSecondarySelections(command: selector) {
@@ -772,7 +884,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if window?.firstResponder === self, handleMultiCaretKey(event) { return true }
+        if renameDraft == nil, window?.firstResponder === self, handleMultiCaretKey(event) { return true }
         return super.performKeyEquivalent(with: event)
     }
 
@@ -781,6 +893,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         if event.keyCode == 120, modifiers.isEmpty {
             if isRenamingSymbol || (!event.isARepeat && onRenameSymbol?() == true) { return }
         }
+        if renameDraft != nil { super.keyDown(with: event); return }
         if handleMultiCaretKey(event) { return }
         if modifiers == .command && event.charactersIgnoringModifiers == "\u{F728}" && !hasMarkedText() {
             deleteToEndOfLine(nil)
@@ -1099,6 +1212,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
+        if renameDraft != nil { requestLineRefresh(); return }
         if !updatingComposition, !multiCaret.isApplying {
             nativeSelectionChanged()
             occurrenceHighlighting.selectionChanged()
@@ -1107,6 +1221,14 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         jjInlineDiff?.selectionChanged()
         onConflictSelectionChange?()
         if !updatingComposition { onNavigationSelectionChange?() }
+    }
+
+    func textView(_ textView: NSTextView, willChangeSelectionFromCharacterRange oldRange: NSRange,
+                  toCharacterRange newRange: NSRange) -> NSRange {
+        guard let range = renameRange, !updatingComposition else { return newRange }
+        let start = min(max(newRange.location, range.location), range.upperBound)
+        let end = min(max(newRange.upperBound, start), range.upperBound)
+        return NSRange(location: start, length: end - start)
     }
 
     func withTextEdits(_ edits: [EditorTextEdit], _ apply: () -> Void) {
@@ -1121,6 +1243,15 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         syntaxHighlighting?.storageDidEdit(storage, replacements: applyingTextEdits)
         if languageInteractionEnabled { languageInteraction.invalidate(afterTextEdit: true) }
         layoutSpacing.sourceDidEdit()
+        if let draft = renameDraft {
+            if !updatingComposition {
+                let length = draft.range.length + storage.changeInLength
+                renameDraft?.range.length = length
+                focusSession?.resizeMarkedRange(draft.range, to: length)
+            }
+            requestLineRefresh()
+            return
+        }
         // Both preedit and its rollback are presentation. Subscribers still hold
         // the baseline onto which the real replacements will be applied.
         guard !updatingComposition else { return }
@@ -1136,6 +1267,12 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func textDidChange(_ notification: Notification) {
+        if renameDraft != nil {
+            textLayoutManager?.textViewportLayoutController.layoutViewport()
+            renameShade?.update()
+            requestLineRefresh()
+            return
+        }
         jjInlineDiff?.sourceTextChanged()
         guard !updatingComposition else {
             onJJCompositionChange?()
@@ -1167,6 +1304,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     override func textViewportLayoutControllerDidLayout(_ controller: NSTextViewportLayoutController) {
         super.textViewportLayoutControllerDidLayout(controller)
+        if let range = renameRange, range.length > 0 { renameShade?.update() }
         requestLineRefresh()
     }
 
@@ -1219,13 +1357,15 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             self.jjInlineDiff?.layout()
             self.jjConflictDecorations?.layout()
             if let scroll = self.enclosingScrollView { self.jjDecorations?.layout(in: scroll) }
+            self.renameShade?.update()
             self.lineRefreshPending = false
             self.onFindViewportChange?()
         }
     }
 
     func refreshCurrentLine() {
-        refreshCaretDecorations()
+        if renameDraft == nil { refreshCaretDecorations() }
+        else { hideCaretDecorations() }
         refreshFocusDecoration()
         guard hasBufferFocus else {
             setCurrentLine(.zero)
@@ -1346,7 +1486,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         occurrenceHighlighting.draw(in: dirtyRect)
         bracketNavigation.draw(in: dirtyRect)
         onDrawFindHighlights?(dirtyRect)
-        drawSecondarySelections(in: dirtyRect)
+        if renameDraft == nil { drawSecondarySelections(in: dirtyRect) }
     }
 }
 
@@ -1414,6 +1554,7 @@ private final class EditorScrollView: NSScrollView {
 
     private func refreshScrollDecorations() {
         guard let editor = documentView as? EditorTextView else { return }
+        if editor.renameRange != nil { editor.requestLineRefresh() }
         editor.jjDecorations?.layout(in: self)
         editor.jjConflictDecorations?.alignActionsHorizontally(in: self)
         let clip = contentView
