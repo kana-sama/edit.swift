@@ -6,7 +6,7 @@ enum EditorHoverPresentation: Sendable {
             case declaration = "Declaration"
             case type = "Type"
             case documentation = "Description"
-            case goTo = "Go to"
+            case references = "References"
 
             var isCode: Bool { self == .declaration || self == .type }
         }
@@ -40,7 +40,7 @@ enum EditorHoverPresentation: Sendable {
             sections.append(Section(kind: .documentation, content: EditorHoverContent(text: documentation, isMarkdown: true)))
         }
         if !hover.references.isEmpty {
-            sections.append(Section(kind: .goTo, content: EditorHoverContent(references: hover.references)))
+            sections.append(Section(kind: .references, content: EditorHoverContent(references: hover.references)))
         }
         self = .structured(sections)
     }

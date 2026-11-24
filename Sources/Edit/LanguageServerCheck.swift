@@ -424,7 +424,7 @@ enum LanguageServerCheck {
                                               presentation: presentation, onNavigate: { _ in }, onEnter: {}, onExit: {}),
               let view = panel.window.contentView else { throw Failure("show the structured hover") }
         defer { panel.close(restoreFocus: false) }
-        let kinds: [EditorHoverPresentation.Section.Kind] = [.declaration, .type, .documentation, .goTo]
+        let kinds: [EditorHoverPresentation.Section.Kind] = [.declaration, .type, .documentation, .references]
         let headingPositions = try kinds.map { kind in
             guard let label = descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHover.\(kind.rawValue).label" }) as? NSTextField,
                   label.stringValue == kind.rawValue && label.accessibilityRole()?.rawValue == "AXHeading"
@@ -438,7 +438,7 @@ enum LanguageServerCheck {
                    "dedent the signature and remove only the outer type parentheses")
         try expect(hoverBody(.documentation, in: view)?.string.hasPrefix("Log a debug message.") == true,
                    "render the documentation in its own text view")
-        guard let links = hoverBody(.goTo, in: view), links.string == "A, B, C" else { throw Failure("show comma-separated links") }
+        guard let links = hoverBody(.references, in: view), links.string == "A, B, C" else { throw Failure("show comma-separated links") }
         for offset in [0, 3, 6] {
             try expect(links.textStorage?.attribute(.link, at: offset, effectiveRange: nil) is URL, "preserve each target URL")
         }
@@ -478,7 +478,7 @@ enum LanguageServerCheck {
         let longPresentation = EditorHoverPresentation(text: longDocumentation, isMarkdown: true)
         guard let longPanel = EditorHoverPopover(owner: owner, appearance: owner.effectiveAppearance, anchor: anchor,
                                                   presentation: longPresentation, onNavigate: { _ in }, onEnter: {}, onExit: {}),
-              let longView = longPanel.window.contentView, let lastSection = hoverBody(.goTo, in: longView),
+              let longView = longPanel.window.contentView, let lastSection = hoverBody(.references, in: longView),
               let scroll = lastSection.enclosingScrollView, let document = scroll.documentView
         else { throw Failure("lay out the long structured hover") }
         defer { longPanel.close(restoreFocus: false) }
@@ -511,12 +511,12 @@ enum LanguageServerCheck {
         editor.mouseMoved(with: try hoverMouseEvent(.mouseMoved, at: location, in: document.window))
         try await wait("show the inferred-type hover from ZLS") { editor.languageHoverWindowForCheck != nil }
         guard let panel = editor.languageHoverWindowForCheck, let view = panel.contentView,
-              let text = hoverBody(.goTo, in: view), let declaration = hoverBody(.declaration, in: view)
+              let text = hoverBody(.references, in: view), let declaration = hoverBody(.declaration, in: view)
         else { throw Failure("find the inferred-type hover content") }
         let link = (text.string as NSString).range(of: "FontVariant", options: .backwards)
         guard link.location != NSNotFound,
               let url = text.textStorage?.attribute(.link, at: link.location, effectiveRange: nil) as? URL
-        else { throw Failure("make the FontVariant name in Go to clickable") }
+        else { throw Failure("make the FontVariant name in the hover's References row clickable") }
         let linkedFile = FileBuffer.canonicalURL(URL(filePath: url.path))
         try expect(linkedFile.path == file.path && url.fragment == "L3",
                    "retain the local line link from the actual ZLS Markdown (\(url.absoluteString), expected \(file.absoluteString)#L3)")
