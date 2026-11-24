@@ -18,19 +18,23 @@ struct LSPCapabilities: Decodable, Sendable {
     let documentHighlight: Bool
     let documentSymbols: Bool
     let workspaceSymbols: Bool
+    let rename: Bool
+    let prepareRename: Bool
     let openClose: Bool
     let change: Change
     let positionEncoding: String
 
     private enum CodingKeys: String, CodingKey {
         case definitionProvider, referencesProvider, hoverProvider, textDocumentSync, positionEncoding
-        case documentHighlightProvider, documentSymbolProvider, workspaceSymbolProvider
+        case documentHighlightProvider, documentSymbolProvider, workspaceSymbolProvider, renameProvider
     }
 
     private struct SyncOptions: Decodable {
         let openClose: Bool?
         let change: Change?
     }
+
+    private struct RenameOptions: Decodable { let prepareProvider: Bool? }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -44,6 +48,8 @@ struct LSPCapabilities: Decodable, Sendable {
         documentHighlight = supports(.documentHighlightProvider)
         documentSymbols = supports(.documentSymbolProvider)
         workspaceSymbols = supports(.workspaceSymbolProvider)
+        rename = supports(.renameProvider)
+        prepareRename = (try? values.decode(RenameOptions.self, forKey: .renameProvider))?.prepareProvider == true
         positionEncoding = try values.decodeIfPresent(String.self, forKey: .positionEncoding) ?? "utf-16"
         if let kind = try? values.decode(Change.self, forKey: .textDocumentSync) {
             openClose = kind != .none
@@ -76,6 +82,7 @@ final class LanguageServerConnection: @unchecked Sendable {
     private enum Request: Sendable {
         case initialize, definition(Int), references(Int, Bool), hover(Int)
         case documentHighlight(Int), documentSymbols, workspaceSymbols(String)
+        case prepareRename(Int), rename(Int, String)
 
         var method: String {
             switch self {
@@ -86,6 +93,8 @@ final class LanguageServerConnection: @unchecked Sendable {
             case .documentHighlight: "textDocument/documentHighlight"
             case .documentSymbols: "textDocument/documentSymbol"
             case .workspaceSymbols: "workspace/symbol"
+            case .prepareRename: "textDocument/prepareRename"
+            case .rename: "textDocument/rename"
             }
         }
     }
@@ -250,6 +259,16 @@ final class LanguageServerConnection: @unchecked Sendable {
         return result?.map(\.symbol).filter { $0.location.url.isFileURL } ?? []
     }
 
+    func prepareRename(at offset: Int, in snapshot: LSPDocument) async throws -> LSPPreparedRename? {
+        let response = try await request(.prepareRename(offset), document: snapshot)
+        return try JSONDecoder().decode(Reply<LSPPreparedRename>.self, from: response).result
+    }
+
+    func rename(at offset: Int, to name: String, in snapshot: LSPDocument) async throws -> LSPWorkspaceEdit? {
+        let response = try await request(.rename(offset, name), document: snapshot, timeout: 15)
+        return try JSONDecoder().decode(Reply<LSPWorkspaceEdit>.self, from: response).result
+    }
+
     private static func fileLocations(_ locations: [LSPLocation]) -> [LSPLocation] {
         var seen = Set<LSPLocation>()
         return locations.filter { location in
@@ -318,10 +337,11 @@ final class LanguageServerConnection: @unchecked Sendable {
             return ["processId": ProcessInfo.processInfo.processIdentifier, "rootUri": root.absoluteString,
                     "workspaceFolders": [workspace], "clientInfo": ["name": "Edit"],
                     "capabilities": ["general": ["positionEncodings": ["utf-16"]],
-                                     "workspace": ["workspaceFolders": true],
+                                     "workspace": ["workspaceFolders": true, "workspaceEdit": ["documentChanges": true]],
                                      "textDocument": ["definition": ["linkSupport": true],
                                                       "hover": ["contentFormat": ["markdown", "plaintext"]],
-                                                      "documentSymbol": ["hierarchicalDocumentSymbolSupport": true]]]]
+                                                      "documentSymbol": ["hierarchicalDocumentSymbolSupport": true],
+                                                      "rename": ["prepareSupport": true]]]]
         }
         if case .workspaceSymbols(let query) = request { return ["query": query] }
         guard let url = document?.url else { throw LSPFailure.invalidPosition }
@@ -330,11 +350,13 @@ final class LanguageServerConnection: @unchecked Sendable {
         switch request {
         case .initialize, .workspaceSymbols: return [:]
         case .documentSymbols: return params
-        case .definition(let value), .references(let value, _), .hover(let value), .documentHighlight(let value): offset = value
+        case .definition(let value), .references(let value, _), .hover(let value), .documentHighlight(let value),
+             .prepareRename(let value), .rename(let value, _): offset = value
         }
         guard let position = index?.position(at: offset) else { throw LSPFailure.invalidPosition }
         params["position"] = position.parameters
         if case .references(_, let include) = request { params["context"] = ["includeDeclaration": include] }
+        if case .rename(_, let name) = request { params["newName"] = name }
         return params
     }
 

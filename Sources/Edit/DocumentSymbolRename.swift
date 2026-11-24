@@ -1,0 +1,461 @@
+import AppKit
+
+@MainActor
+final class DocumentSymbolRename: NSObject, NSTextFieldDelegate {
+    private struct Source: Sendable {
+        let url: URL
+        let root: URL
+        let text: String
+        let generation: Int
+        let revision: Int
+        let openGeneration: UInt64
+        let selection: NSRange
+        let offset: Int
+    }
+
+    private struct Target {
+        let source: Source
+        let range: NSRange
+        let name: String
+        let spelling: String
+    }
+
+    private struct FileChange: Sendable {
+        let url: URL
+        let original: String
+        let updated: String
+        let edits: [EditorTextEdit]
+        let disk: FileBuffer?
+    }
+
+    private struct RenameFailure: LocalizedError {
+        let errorDescription: String?
+        init(_ message: String) { errorDescription = message }
+    }
+
+    private weak var document: DocumentWindow?
+    private weak var app: Edit?
+    private let session: LanguageServerSession
+    private var task: Task<Void, Never>?
+    private var target: Target?
+    private var field: NSTextField?
+    private var fieldAnchor: NSRect?
+    private var operation: UUID?
+    private var isCommitting = false
+
+    init(document: DocumentWindow, app: Edit, session: LanguageServerSession) {
+        self.document = document
+        self.app = app
+        self.session = session
+    }
+
+    var canStart: Bool {
+        guard operation == nil, let document, let app, !app.isQuitting, session.supportsRename else { return false }
+        let editor = document.editor
+        return document.hasEditableTextDocument && document.canReplaceBuffer && editor.isEditable &&
+            !editor.hasMarkedText() && editor.conflictEdits.isEmpty && editor.jjInlineDiff?.projectedEditRange == nil
+    }
+
+    func start() -> Bool {
+        if operation != nil { return true }
+        guard canStart, let document, let root = session.workspaceRoot, let url = document.fileURL,
+              let selection = document.editor.caretSelections.last else { return false }
+        let editor = document.editor
+        let source = Source(url: url, root: root, text: editor.string, generation: session.generation,
+                            revision: session.revision, openGeneration: document.openRequestGeneration,
+                            selection: selection, offset: editor.activeEnd(of: selection))
+        let id = UUID()
+        operation = id
+        editor.isRenamingSymbol = true
+        editor.invalidateLanguageInteraction()
+        task = Task { [weak self] in
+            guard let self else { return }
+            defer { if operation == id { task = nil } }
+            do {
+                let prepared = try await session.prepareRename(at: source.offset)
+                guard isCurrent(id, source: source), document.window.firstResponder === editor,
+                      editor.caretSelections.last == source.selection else {
+                    if operation == id { finish(restoreFocus: false) }
+                    return
+                }
+                let index = LSPTextIndex(source.text)
+                guard let prepared, let range = index.nsRange(prepared.range, clampingColumns: false),
+                      range.length > 0, editor.focusAllowsEdits([range]) else {
+                    finish(restoreFocus: false)
+                    editor.showLanguageFeedback("No symbol to rename", at: selection)
+                    return
+                }
+                let text = source.text as NSString
+                let sourceName = text.substring(with: range)
+                let quoted = range.location >= 2 && range.upperBound < text.length &&
+                    text.substring(with: NSRange(location: range.location - 2, length: 2)) == "@\"" &&
+                    text.character(at: range.upperBound) == 34
+                let spelling = quoted ? "@\"\(sourceName)\"" : sourceName
+                let name = ZigRenameName.decoded(spelling) ?? prepared.placeholder ?? sourceName
+                guard showField(for: Target(source: source, range: range, name: name, spelling: spelling), in: editor) else {
+                    finish(restoreFocus: true)
+                    return
+                }
+            } catch {
+                let report = isCurrent(id, source: source)
+                if operation == id { finish(restoreFocus: false) }
+                if report { editor.showLanguageFeedback(error.localizedDescription, at: selection) }
+            }
+        }
+        return true
+    }
+
+    @discardableResult
+    func cancel(restoreFocus: Bool) -> Bool {
+        guard operation != nil, !isCommitting else { return false }
+        finish(restoreFocus: restoreFocus)
+        return true
+    }
+
+    private func finish(restoreFocus: Bool) {
+        operation = nil
+        task?.cancel()
+        task = nil
+        target = nil
+        document?.editor.isRenamingSymbol = false
+        removeField(restoreFocus: restoreFocus)
+    }
+
+    private func removeField(restoreFocus: Bool) {
+        guard let field else { return }
+        self.field = nil
+        fieldAnchor = nil
+        field.delegate = nil
+        if restoreFocus, let document, document.window.firstResponder === field.currentEditor() {
+            document.window.makeFirstResponder(document.editor)
+        }
+        field.removeFromSuperview()
+    }
+
+    private func isCurrent(_ id: UUID, source: Source) -> Bool {
+        guard !Task.isCancelled, operation == id, let document, let app, !app.isQuitting else { return false }
+        return document.fileURL == source.url && document.hasEditableTextDocument && document.window.attachedSheet == nil &&
+            !document.editor.hasMarkedText() && document.editor.conflictEdits.isEmpty &&
+            session.revision == source.revision && session.generation == source.generation &&
+            document.openRequestGeneration == source.openGeneration
+    }
+
+    private func showField(for target: Target, in editor: EditorTextView) -> Bool {
+        guard let window = editor.window else { return false }
+        editor.scrollRangeToVisible(target.range)
+        window.layoutIfNeeded()
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        guard let anchor = editor.highlightRects(for: [target.range]).first else { return false }
+        let field = NSTextField(frame: .zero)
+        field.identifier = .init("Edit.RenameSymbol.Name")
+        field.setAccessibilityLabel("Symbol Name")
+        field.font = editor.font ?? EditorTextView.defaultFont
+        field.stringValue = target.name
+        field.isBezeled = true
+        field.bezelStyle = .roundedBezel
+        field.drawsBackground = true
+        field.usesSingleLineMode = true
+        field.cell?.isScrollable = true
+        field.delegate = self
+        layout(field, at: anchor, name: target.name, in: editor)
+        self.target = target
+        self.field = field
+        fieldAnchor = anchor
+        editor.addSubview(field, positioned: .above, relativeTo: nil)
+        guard window.makeFirstResponder(field), let input = field.currentEditor() else { return false }
+        input.selectedRange = NSRange(location: 0, length: (target.name as NSString).length)
+        return true
+    }
+
+    private func layout(_ field: NSTextField, at anchor: NSRect, name: String, in editor: EditorTextView) {
+        let viewport = editor.visibleRect
+        let font = field.font ?? EditorTextView.defaultFont
+        let textWidth = (name as NSString).size(withAttributes: [.font: font]).width
+        let width = min(ceil(max(anchor.width, textWidth)) + 9, viewport.width)
+        let height = max(anchor.height, field.fittingSize.height)
+        field.frame = NSRect(x: min(max(viewport.minX, anchor.minX - 7), viewport.maxX - width),
+                             y: anchor.midY - height / 2, width: width, height: height).integral
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        guard let field, notification.object as? NSTextField === field, let anchor = fieldAnchor,
+              let editor = document?.editor, let input = field.currentEditor() else { return }
+        layout(field, at: anchor, name: input.string, in: editor)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard control === field, !textView.hasMarkedText() else { return false }
+        switch selector {
+        case #selector(NSResponder.insertNewline(_:)):
+            submit(textView.string)
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            return cancel(restoreFocus: true)
+        default:
+            return false
+        }
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard let field, notification.object as? NSTextField === field else { return }
+        Task { [weak self, weak field] in
+            guard let self, let field, self.field === field, field.currentEditor() == nil else { return }
+            cancel(restoreFocus: false)
+        }
+    }
+
+    private func submit(_ name: String) {
+        guard let target, let id = operation, let document, isCurrent(id, source: target.source) else {
+            cancel(restoreFocus: true)
+            return
+        }
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            NSSound.beep()
+            return
+        }
+        guard !name.utf8.elementsEqual(target.name.utf8) else {
+            finish(restoreFocus: true)
+            return
+        }
+        removeField(restoreFocus: true)
+        task = Task { [weak self] in
+            guard let self else { return }
+            defer { if operation == id { finish(restoreFocus: false) } }
+            do {
+                guard let edit = try await session.rename(at: target.source.offset, to: name),
+                      !edit.documents.isEmpty else { throw RenameFailure("ZLS found no edits for this symbol.") }
+                try await apply(edit, to: target, newName: name, id: id)
+            } catch {
+                if operation == id, !Task.isCancelled {
+                    finish(restoreFocus: false)
+                    document.editor.showLanguageFeedback(error.localizedDescription, at: target.range)
+                }
+            }
+        }
+    }
+
+    private func apply(_ edit: LSPWorkspaceEdit, to target: Target, newName: String, id: UUID) async throws {
+        let source = target.source
+        let spelling = target.spelling
+        let oldName = target.name
+        let build = Task.detached(priority: .userInitiated) {
+            try Self.plan(edit, source: source, spelling: spelling, oldName: oldName, newName: newName)
+        }
+        let files = try await withTaskCancellationHandler {
+            try await build.value
+        } onCancel: { build.cancel() }
+        guard let app, isCurrent(id, source: source) else { throw CancellationError() }
+        try await app.performWorktreeMutation(affecting: files.map(\.url)) {
+            guard isCurrent(id, source: source) else { throw CancellationError() }
+            var open: [(DocumentWindow, FileChange)] = []
+            var closed: [FileChange] = []
+            for file in files {
+                let windows = app.documents.filter { $0.fileURL == file.url && $0.hasEditableTextDocument }
+                if windows.isEmpty {
+                    guard file.disk != nil else { throw CancellationError() }
+                    closed.append(file)
+                }
+                for document in windows {
+                    let editor = document.editor
+                    guard editor.textStorage != nil, !editor.hasMarkedText(), editor.conflictEdits.isEmpty,
+                          editor.jjInlineDiff?.projectedEditRange == nil,
+                          editor.string.utf8.elementsEqual(file.original.utf8) else {
+                        throw RenameFailure("“\(file.url.lastPathComponent)” has edits that ZLS has not seen.")
+                    }
+                    guard editor.focusAllowsEdits(file.edits.map(\.range)) else {
+                        throw RenameFailure("Exit Focus in “\(file.url.lastPathComponent)” to rename this symbol.")
+                    }
+                    open.append((document, file))
+                }
+            }
+            isCommitting = true
+            defer { isCommitting = false }
+            let diskChanges = closed
+            let results = try await Task.detached(priority: .userInitiated) { try Self.write(diskChanges) }.value
+            for result in results {
+                if let previous = result.replacedIdentity, let current = result.file.identity {
+                    for document in app.documents { document.worktreeSidebar?.fileReplaced(previous, with: current) }
+                }
+            }
+            for (document, file) in open {
+                let editor = document.editor
+                let selections = MultiCaretEditing.mapped(editor.caretSelections, after: file.edits)
+                editor.applyMultiEdits(file.edits, selections: selections, validate: false, actionName: "Rename Symbol")
+            }
+        }
+    }
+
+    private nonisolated static func plan(_ edit: LSPWorkspaceEdit, source: Source, spelling: String,
+                                         oldName: String, newName: String) throws -> [FileChange] {
+        let origin = FileBuffer.canonicalURL(source.url)
+        let root = FileBuffer.canonicalURL(source.root)
+        var files: [FileChange] = []
+        var seen: Set<URL> = []
+        var validatedSpellings: Set<Data> = []
+        for document in edit.documents where !document.edits.isEmpty {
+            try Task.checkCancellation()
+            let url = FileBuffer.canonicalURL(document.url)
+            guard url.isFileURL, url.pathComponents.starts(with: root.pathComponents), seen.insert(url).inserted else {
+                throw RenameFailure("ZLS returned a rename target outside the project or listed it more than once.")
+            }
+            let isOrigin = url == origin
+            if let version = document.version, !isOrigin || version != source.revision {
+                throw RenameFailure("“\(url.lastPathComponent)” changed after ZLS prepared the rename.")
+            }
+            let disk = isOrigin ? nil : try FileBuffer.read(url)
+            let original = disk?.text ?? source.text
+            let text = original as NSString
+            let index = LSPTextIndex(original)
+            var edits: [EditorTextEdit] = []
+            for edit in document.edits {
+                guard let range = index.nsRange(edit.range, clampingColumns: false), range.length > 0 else {
+                    throw RenameFailure("ZLS returned an invalid symbol range in “\(url.lastPathComponent)”.")
+                }
+                let old = text.substring(with: range)
+                guard ZigRenameName.isToken(old, at: range, in: text),
+                      old.utf8.elementsEqual(spelling.utf8) || ZigRenameName.decoded(old)?.utf8.elementsEqual(oldName.utf8) == true else {
+                    throw RenameFailure("The symbol in “\(url.lastPathComponent)” has changed.")
+                }
+                if validatedSpellings.insert(Data(edit.newText.utf8)).inserted {
+                    guard ZigRenameName.decoded(edit.newText)?.utf8.elementsEqual(newName.utf8) == true else {
+                        throw RenameFailure("ZLS did not return a valid spelling for the new symbol name.")
+                    }
+                }
+                edits.append(EditorTextEdit(range: range, text: edit.newText))
+            }
+            edits.sort { ($0.range.location, $0.range.length) < ($1.range.location, $1.range.length) }
+            var unique: [EditorTextEdit] = []
+            for edit in edits {
+                if let previous = unique.last {
+                    if previous.range == edit.range, previous.text.utf8.elementsEqual(edit.text.utf8) { continue }
+                    guard previous.range.upperBound <= edit.range.location else {
+                        throw RenameFailure("ZLS returned overlapping edits in “\(url.lastPathComponent)”.")
+                    }
+                }
+                unique.append(edit)
+            }
+            let updated = NSMutableString(string: original)
+            for edit in unique.reversed() { updated.replaceCharacters(in: edit.range, with: edit.text) }
+            files.append(FileChange(url: url, original: original, updated: updated as String, edits: unique, disk: disk))
+        }
+        guard !files.isEmpty else { throw RenameFailure("ZLS found no edits for this symbol.") }
+        return files
+    }
+
+    private nonisolated static func write(_ changes: [FileChange]) throws -> [FileBuffer.SaveResult] {
+        var written: [(original: FileBuffer, result: FileBuffer.SaveResult)] = []
+        do {
+            for change in changes {
+                guard let disk = change.disk else { throw CancellationError() }
+                let result = try FileBuffer.save(change.updated, to: change.url, format: disk.format, expected: disk.revision)
+                written.append((disk, result))
+            }
+        } catch {
+            var unrecovered: [String] = []
+            for (original, result) in written.reversed() {
+                do {
+                    _ = try FileBuffer.save(original.text, to: original.url, format: original.format, expected: result.file.revision)
+                } catch {
+                    unrecovered.append(original.url.lastPathComponent)
+                }
+            }
+            if !unrecovered.isEmpty {
+                throw RenameFailure("Could not restore \(unrecovered.joined(separator: ", ")) after a rename failed.")
+            }
+            throw error
+        }
+        return written.map(\.result)
+    }
+}
+
+private enum ZigRenameName {
+    private static let reserved = Set("""
+        _ addrspace align allowzero and anyframe anytype asm break callconv catch comptime const continue defer else enum
+        errdefer error export extern fn for if inline noalias noinline nosuspend opaque or orelse packed pub resume return
+        linksection struct suspend switch test threadlocal try union unreachable var volatile while anyerror anyopaque
+        bool c_char c_short c_ushort c_int c_uint c_long c_ulong c_longlong c_ulonglong c_longdouble comptime_float
+        comptime_int f16 f32 f64 f80 f128 false isize noreturn null true type undefined usize void
+        """.split(whereSeparator: \.isWhitespace).map(String.init))
+
+    static func decoded(_ spelling: String) -> String? {
+        let bytes = spelling.utf8
+        guard bytes.starts(with: [64, 34]) else {
+            guard let first = bytes.first, isLetter(first), bytes.dropFirst().allSatisfy({
+                isLetter($0) || (48...57).contains($0)
+            }), !reserved.contains(spelling) else { return nil }
+            if (first == 105 || first == 117), bytes.count > 1, bytes.dropFirst().allSatisfy({ (48...57).contains($0) }) {
+                return nil
+            }
+            return spelling
+        }
+        guard bytes.count >= 3, bytes.last == 34 else { return nil }
+
+        // Zig quotes names with string-literal escapes. Compare the decoded bytes so the
+        // same name can be written with either a bare identifier or an escaped spelling.
+        var source = bytes.dropFirst(2).dropLast().makeIterator()
+        var result: [UInt8] = []
+        while let byte = source.next() {
+            switch byte {
+            case 34, 0...31, 127: return nil
+            case 92:
+                switch source.next() {
+                case 34: result.append(34)
+                case 39: result.append(39)
+                case 92: result.append(92)
+                case 110: result.append(10)
+                case 114: result.append(13)
+                case 116: result.append(9)
+                case 120:
+                    guard let first = source.next(), let high = hexValue(first),
+                          let second = source.next(), let low = hexValue(second) else { return nil }
+                    result.append(UInt8(16 * high + low))
+                case 117:
+                    guard source.next() == 123 else { return nil }
+                    var digits = 0
+                    var value: UInt32 = 0
+                    var next = source.next()
+                    while let byte = next, let digit = hexValue(byte), digits < 6 {
+                        digits += 1
+                        value = 16 * value + digit
+                        next = source.next()
+                    }
+                    guard next == 125, digits > 0, let scalar = UnicodeScalar(value) else { return nil }
+                    result.append(contentsOf: String(scalar).utf8)
+                default: return nil
+                }
+            default:
+                result.append(byte)
+            }
+        }
+        return String(validating: result, as: UTF8.self)
+    }
+
+    static func isToken(_ spelling: String, at range: NSRange, in text: NSString) -> Bool {
+        if spelling.hasPrefix("@\"") { return true }
+        if range.location > 0 {
+            let previous = text.character(at: range.location - 1)
+            if isNameContinuation(previous) || previous == 64 { return false }
+            if previous == 34, range.location > 1, text.character(at: range.location - 2) == 64 { return false }
+        }
+        return range.upperBound == text.length || !isNameContinuation(text.character(at: range.upperBound))
+    }
+
+    private static func isLetter(_ byte: UInt8) -> Bool {
+        (65...90).contains(byte) || (97...122).contains(byte) || byte == 95
+    }
+
+    private static func isNameContinuation(_ unit: UInt16) -> Bool {
+        guard let byte = UInt8(exactly: unit) else { return false }
+        return isLetter(byte) || (48...57).contains(byte)
+    }
+
+    private static func hexValue(_ byte: UInt8) -> UInt32? {
+        switch byte {
+        case 48...57: UInt32(byte - 48)
+        case 65...70: UInt32(byte - 55)
+        case 97...102: UInt32(byte - 87)
+        default: nil
+        }
+    }
+}

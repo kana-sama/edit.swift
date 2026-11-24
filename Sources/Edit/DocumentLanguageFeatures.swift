@@ -25,6 +25,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     private unowned let document: DocumentWindow
     private unowned let app: Edit
     let session = LanguageServerSession()
+    private lazy var symbolRename = DocumentSymbolRename(document: document, app: app, session: session)
     private lazy var status = LanguageServerStatusPopover { [weak self] command in self?.perform(command) }
     var statusButton: NSButton { status.button }
 #if EDIT_AGENT_CHECKS
@@ -52,6 +53,8 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         document.editor.languageHover = { [weak self] offset, word in await self?.hover(at: offset, word: word) }
         document.editor.languageFollowLink = { [weak self] offset, word in self?.followLink(at: offset, word: word) }
         document.editor.languageFollowHoverLink = { [weak self] location, word in self?.followHoverLink(location, from: word) }
+        document.editor.onRenameSymbol = { [weak self] in self?.symbolRename.start() ?? false }
+        document.editor.onCancelSymbolRename = { [weak self] in self?.symbolRename.cancel(restoreFocus: true) ?? false }
         document.editor.occurrenceHighlighting.semanticWordHighlights = { [weak self] offset in
             await self?.documentHighlights(at: offset) ?? []
         }
@@ -69,6 +72,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         sourceURL = url
         sourceFolder = folder
         searchesParentProjects = inferRoot
+        symbolRename.cancel(restoreFocus: true)
         cancelLookup()
         document.editor.invalidateLanguageInteraction()
         session.setDocument(url: url, folder: folder, searchesParentProjects: inferRoot,
@@ -81,6 +85,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         let revision = session.revision
         session.updateText(document.textWithConflictPrefixes)
         if session.revision != revision {
+            symbolRename.cancel(restoreFocus: true)
             cancelLookup()
             document.editor.invalidateLanguageInteraction()
         }
@@ -88,6 +93,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
 
     func close() {
         isClosed = true
+        symbolRename.cancel(restoreFocus: false)
         navigationID &+= 1
         cancelLookup()
         referenceTask?.cancel()
@@ -98,6 +104,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     }
 
     private func stateChanged() {
+        if session.state != .ready { symbolRename.cancel(restoreFocus: true) }
         let canInteract = session.supportsDefinition || session.supportsHover
         document.editor.languageInteractionEnabled = canInteract
         if !canInteract { cancelLookup() }

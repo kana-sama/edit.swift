@@ -196,6 +196,9 @@ enum LanguageServerCheck {
         let updatedHover = await lsp.hover(at: moved.location + 2, word: moved)
         try expect(updatedHover?.range == moved && updatedHover?.text.contains("Returns a value.") == true,
                    "restart synchronizes unsaved text")
+        try await LanguageServerRenameCheck.run(in: app, document: document) { view in
+            try captureHover(view, "rename-symbol")
+        }
     }
 
     private static func checkDocumentHighlights(in document: DocumentWindow, capture: (NSView, String) throws -> Void) async throws {

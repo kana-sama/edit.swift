@@ -44,6 +44,7 @@ final class LanguageServerSession {
     var supportsDocumentHighlight: Bool { isReady && capabilities?.documentHighlight == true }
     var supportsDocumentSymbols: Bool { isReady && capabilities?.documentSymbols == true }
     var supportsWorkspaceSymbols: Bool { isServerReady && capabilities?.workspaceSymbols == true }
+    var supportsRename: Bool { isReady && capabilities?.rename == true }
     var workspaceRoot: URL? { root }
 
     private var canControl: Bool { isEligible && rootLookup == nil }
@@ -216,6 +217,25 @@ final class LanguageServerSession {
         let snapshot = document
         let generation = generation
         let result = try await connection.workspaceSymbols(query: query, synchronizing: snapshot)
+        try validate(revision: snapshot.revision, generation: generation)
+        return result
+    }
+
+    func prepareRename(at offset: Int) async throws -> LSPPreparedRename? {
+        guard supportsRename, let connection else { throw LSPFailure.unavailable }
+        guard capabilities?.prepareRename == true else { return nil }
+        let snapshot = document
+        let generation = generation
+        let result = try await connection.prepareRename(at: offset, in: snapshot)
+        try validate(revision: snapshot.revision, generation: generation)
+        return result
+    }
+
+    func rename(at offset: Int, to name: String) async throws -> LSPWorkspaceEdit? {
+        guard supportsRename, let connection else { throw LSPFailure.unavailable }
+        let snapshot = document
+        let generation = generation
+        let result = try await connection.rename(at: offset, to: name, in: snapshot)
         try validate(revision: snapshot.revision, generation: generation)
         return result
     }

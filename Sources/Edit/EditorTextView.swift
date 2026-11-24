@@ -71,6 +71,9 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var languageHover: ((Int, NSRange) async -> EditorLanguageHover?)?
     var languageFollowLink: ((Int, NSRange) -> Void)?
     var languageFollowHoverLink: ((LSPLocation, NSRange) -> Void)?
+    var onRenameSymbol: (() -> Bool)?
+    var onCancelSymbolRename: (() -> Bool)?
+    var isRenamingSymbol = false
     var languageInteractionEnabled = false {
         didSet {
             guard languageInteractionEnabled != oldValue else { return }
@@ -670,6 +673,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             super.cancelOperation(sender)
             return
         }
+        if onCancelSymbolRename?() == true { return }
         if languageInteractionEnabled, languageInteraction.dismissHover() { return }
         if jjInlineDiff?.collapseAll() == true { return }
 
@@ -756,8 +760,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func keyDown(with event: NSEvent) {
-        if handleMultiCaretKey(event) { return }
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if event.keyCode == 120, modifiers.isEmpty {
+            if isRenamingSymbol || (!event.isARepeat && onRenameSymbol?() == true) { return }
+        }
+        if handleMultiCaretKey(event) { return }
         if modifiers == .command && event.charactersIgnoringModifiers == "\u{F728}" && !hasMarkedText() {
             deleteToEndOfLine(nil)
             return

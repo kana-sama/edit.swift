@@ -73,7 +73,7 @@ final class EditorLanguageInteraction: NSObject {
     }
 
     func track(at location: NSPoint, modifiers: NSEvent.ModifierFlags) {
-        guard let editor, editor.languageInteractionEnabled else { return }
+        guard let editor, editor.languageInteractionEnabled, !editor.isRenamingSymbol else { return }
         let target = hit(at: location)
         if Self.isCommandLink(modifiers) {
             updateProbe(for: target)

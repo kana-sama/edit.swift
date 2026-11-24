@@ -78,7 +78,7 @@ The identifiers after each title are request or notification methods. Command ID
 - [ ] **Format on Type** (`textDocument/onTypeFormatting`) — Format code after a trigger character, such as a closing brace.
 - [ ] **Format on Save** (`textDocument/formatting`)
 - [ ] **Code Actions on Save** (`textDocument/codeAction`) — Apply selected fixes automatically when saving.
-- [ ] **Rename Symbol** (`textDocument/prepareRename`, `textDocument/rename`) — Update references across affected files.
+- [x] **Rename Symbol** (`textDocument/prepareRename`, `textDocument/rename`) — Press F2 to rename a symbol and update references across affected files. [Specification](features/lsp-rename/spec.md)
 - [ ] **Linked Editing** (`textDocument/linkedEditingRange`) — Edit related ranges together, such as matching HTML tags.
 - [ ] **Auto Close Tags and Quotes** (`html/autoInsert`) [VS Code HTML Language Server][html]
 - [ ] **Update Imports and Links on File Move or Rename** (`workspace/willRenameFiles`, `markdown/getEditForFileRenames`) [LSP File Operations][lsp-workspace] · [Markdown Language Server][markdown]
