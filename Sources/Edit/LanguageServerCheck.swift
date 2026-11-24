@@ -425,7 +425,8 @@ enum LanguageServerCheck {
               let view = panel.window.contentView else { throw Failure("show the structured hover") }
         defer { panel.close(restoreFocus: false) }
         for kind in [EditorHoverPresentation.Section.Kind.declaration, .documentation] {
-            try expect(descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHover.\(kind.rawValue).label" }) == nil &&
+            let label = descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHover.\(kind.rawValue).label" })
+            try expect(label?.isHidden == true &&
                        hoverBody(kind, in: view)?.accessibilityLabel() == kind.rawValue,
                        "give the \(kind.rawValue) an accessible name without a visible label")
         }
@@ -440,8 +441,16 @@ enum LanguageServerCheck {
         else { throw Failure("find the divider above hover metadata") }
         let separatorFrame = separator.convert(separator.bounds, to: nil)
         try expect(frames[1].minY > separatorFrame.maxY && separatorFrame.minY > frames[2].maxY &&
-                   frames[0].minX == frames[1].minX && frames[1].minX == separatorFrame.minX,
-                   "align the signature and description and divide them from metadata")
+                   frames.allSatisfy { $0.minX == frames[0].minX },
+                   "preserve the shared content column and divide the description from metadata")
+        guard let type = hoverBody(.type, in: view),
+              let codeBackground = type.superview?.subviews.compactMap({ $0 as? NSBox }).first(where: {
+                  $0.boxType == .custom && $0.frame == type.frame.insetBy(dx: -6, dy: -4)
+              })
+        else { throw Failure("preserve the padded code background behind the type") }
+        try expect(codeBackground.cornerRadius == 6 && codeBackground.fillColor == .labelColor.withAlphaComponent(0.065) &&
+                   type.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont == EditorTextView.defaultFont,
+                   "preserve the type's background and code font")
         try expect(hoverBody(.declaration, in: view)?.string == "fn debug(\n    comptime format: []const u8,\n    args: anytype,\n) void" &&
                    hoverBody(.type, in: view)?.string == "fn (comptime []const u8, anytype) void",
                    "dedent the signature and remove only the outer type parentheses")
@@ -468,7 +477,8 @@ enum LanguageServerCheck {
                   let body = hoverBody(kind, in: view)
             else { throw Failure("find both columns in the \(kind.rawValue) row") }
             try expect(label.stringValue == kind.rawValue && label.accessibilityRole()?.rawValue == "AXHeading" &&
-                       label.alignment == .right && label.textColor == .labelColor,
+                       label.alignment == .right && label.textColor == .secondaryLabelColor &&
+                       label.font == .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium),
                        "show the aligned native \(kind.rawValue) label")
             let labelEdge = label.convert(label.alignmentRect(forFrame: label.bounds), to: nil).maxX
             let bodyStart = body.convert(body.textContainerOrigin, to: nil).x

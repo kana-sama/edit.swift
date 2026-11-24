@@ -118,7 +118,7 @@ struct EditorHoverContent: Sendable {
     }
 
     @MainActor
-    func attributedText(proseSize: CGFloat = 13, codeFont: NSFont = EditorTextView.defaultFont) -> NSAttributedString {
+    func attributedText() -> NSAttributedString {
         let result = NSMutableAttributedString()
         let codeBackground = NSColor.labelColor.withAlphaComponent(0.075)
         for (index, block) in blocks.enumerated() {
@@ -133,9 +133,9 @@ struct EditorHoverContent: Sendable {
                 paragraph.firstLineHeadIndent += 12
                 paragraph.headIndent += 12
             }
-            let size = block.heading == 1 ? proseSize + 2 : block.heading != nil ? proseSize + 1 : proseSize
+            let size: CGFloat = block.heading == 1 ? 15 : block.heading != nil ? 14 : 13
             let foreground: NSColor = block.isQuote ? .secondaryLabelColor : .labelColor
-            let baseFont = block.isCode ? codeFont : NSFont.systemFont(ofSize: size)
+            let baseFont = block.isCode ? EditorTextView.defaultFont : NSFont.systemFont(ofSize: size)
             let base = [NSAttributedString.Key.font: baseFont,
                         .foregroundColor: foreground, .paragraphStyle: paragraph] as [NSAttributedString.Key: Any]
 
