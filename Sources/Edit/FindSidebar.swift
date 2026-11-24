@@ -29,7 +29,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private let surface = NSView()
     var view: NSView { surface }
     private let searchContent = NSStackView()
-    private lazy var decorations = FindDecorations(editor: document.editor)
+    private var decorations: FindDecorations { document.resultDecorations }
 
     var queryResponder: NSView { findInput.input }
     private var searchVisible: Bool { document.isSearchSidebarVisible }
@@ -59,8 +59,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         bufferSnapshot = document.editor.string
         super.init()
         configure()
-        document.editor.onFindEditorInteraction = { [weak self] in self?.editorInteracted() }
-        document.editor.onFindViewportChange = { [weak self] in self?.decorations.layout() }
         document.editor.onBufferEdit = { [weak self] storage, edits in
             self?.bufferDidEdit(storage, edits: edits)
         }
@@ -291,12 +289,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     private func setupResults() {
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("SearchResult"))
-        column.resizingMask = .autoresizingMask
-        column.minWidth = 0
-        results.addTableColumn(column)
-        SidebarResults.configure(results, in: resultScroll)
-        results.setAccessibilityLabel("Search Results")
+        results.install(in: resultScroll, column: .init("SearchResult"), accessibilityLabel: "Search Results")
         results.dataSource = self
         results.delegate = self
         results.target = self
@@ -671,6 +664,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private func updateReplaceAvailability() { replaceButton.isEnabled = canPerform(.replaceAll) }
 
     func refreshDecorations() {
+        guard !document.isSidebarVisible || document.sidebarMode != .references else { return }
         let hit = validResults ? selected.map { matches[$0] } : nil
         let preview = previewRequested && searchVisible && settings.showsReplacement
             ? hit.map { ($0.range, $0.replacement(using: settings.replacement, in: resultSnapshot as NSString,

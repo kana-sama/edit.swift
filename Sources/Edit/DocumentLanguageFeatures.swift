@@ -29,11 +29,15 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     var statusButton: NSButton { status.button }
 #if EDIT_AGENT_CHECKS
     var statusPopoverForCheck: NSView? { status.contentForCheck }
+    var statusIndicatorForCheck: LanguageServerStatusPopover.Indicator? { status.indicator }
 #endif
     private var sourceURL: URL?
     private var sourceFolder: URL?
+    private var searchesParentProjects = false
     private var navigationTask: Task<Void, Never>?
     private var navigationID: UInt64 = 0
+    private var referenceTask: Task<Void, Never>?
+    private var referenceID: UInt64 = 0
     private var isClosed = false
 
     init(document: DocumentWindow, app: Edit) {
@@ -52,16 +56,19 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     func updateDocument() {
         guard !isClosed, !app.isQuitting else { return }
         let url = document.hasEditableTextDocument && document.resolvedSyntaxLanguage == .zig ? document.fileURL : nil
-        let folder = url == nil ? nil : document.folderURL
-        guard sourceURL != url || sourceFolder != folder else {
+        let folder = document.folderURL ?? document.displayedFileURL?.deletingLastPathComponent()
+        let inferRoot = document.folderURL == nil
+        guard sourceURL != url || sourceFolder != folder || searchesParentProjects != inferRoot else {
             documentTextChanged()
             return
         }
         sourceURL = url
         sourceFolder = folder
+        searchesParentProjects = inferRoot
         cancelLookup()
         document.editor.invalidateLanguageInteraction()
-        session.setDocument(url: url, folder: folder, text: url == nil ? "" : document.textWithConflictPrefixes)
+        session.setDocument(url: url, folder: folder, searchesParentProjects: inferRoot,
+                            text: url == nil ? "" : document.textWithConflictPrefixes)
         stateChanged()
     }
 
@@ -79,6 +86,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         isClosed = true
         navigationID &+= 1
         cancelLookup()
+        referenceTask?.cancel()
         status.close()
         document.editor.languageInteractionEnabled = false
         session.onStateChange = nil
@@ -89,7 +97,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         let canInteract = session.supportsDefinition || session.supportsHover
         document.editor.languageInteractionEnabled = canInteract
         if !canInteract { cancelLookup() }
-        status.update(visible: session.isEligible, title: session.state.title, detail: session.state.failureReason,
+        status.update(visible: session.isEligible, state: session.state,
                       enabled: Set(LanguageServerCommand.allCases.filter(canPerform)))
         document.titleBar.languageServerStatusChanged()
     }
@@ -164,6 +172,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
 
     func followLink(at offset: Int, word: NSRange) {
         guard session.supportsDefinition, let query = query() else { return }
+        let origin = document.navigationLocation(at: NSRange(location: offset, length: 0))
         cancelLookup()
         navigationID &+= 1
         let id = navigationID
@@ -177,12 +186,14 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
                 case 0:
                     document.editor.invalidateLanguageInteraction()
                 case 1 where isCurrentLocation(locations[0], at: offset, in: query):
-                    if session.supportsReferences { try await findReferences(at: offset, word: word, query: query, id: id) }
+                    if session.supportsReferences {
+                        try await findReferences(at: offset, word: word, query: query, id: id, navigationOrigin: origin)
+                    }
                 case 1:
                     navigationTask = nil
-                    await open(locations[0], id: id, source: word)
+                    await open(locations[0], id: id, source: word, navigationOrigin: origin)
                 default:
-                    chooseDefinition(locations, at: word)
+                    chooseDefinition(locations, at: word, navigationOrigin: origin)
                 }
             } catch {
                 if isCurrent(query) { document.editor.showLanguageFeedback("Could not navigate to symbol", at: word) }
@@ -190,7 +201,8 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         }
     }
 
-    private func findReferences(at offset: Int, word: NSRange, query: Query, id: UInt64) async throws {
+    private func findReferences(at offset: Int, word: NSRange, query: Query, id: UInt64,
+                                navigationOrigin: NavigationHistory.Location?) async throws {
         var locations = try await session.references(at: offset, includeDeclaration: true)
         guard isCurrent(query) else { return }
         if locations.count == 2, let uses = try? await session.references(at: offset, includeDeclaration: false), uses.count == 1 {
@@ -203,7 +215,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
             document.editor.showLanguageFeedback("No references found", at: word)
         case 1:
             navigationTask = nil
-            await open(matches[0], id: id, source: word)
+            await open(matches[0], id: id, source: word, navigationOrigin: navigationOrigin)
         default:
             guard let origin = LSPPosition.at(utf16Offset: offset, in: query.text),
                   let wordInText = Range(word, in: query.text) else { return }
@@ -222,15 +234,58 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
             }
             if results.count == 1 {
                 navigationTask = nil
-                await open(matches[results[0].index], id: id, source: word)
+                await open(matches[results[0].index], id: id, source: word, navigationOrigin: navigationOrigin)
                 return
             }
+            if let navigationOrigin { app.recordNavigation(navigationOrigin, reason: .selection) }
             document.sidebar.showReferences(symbol: String(query.text[wordInText]), originURL: query.url,
                                             originLine: origin.line, originColumn: origin.character,
-                                            results: results) { [weak self] row in
-                self?.openResult(matches[row.index])
-            }
+                                            results: results, preview: { [weak self] row in
+                self?.selectReference(matches[row.index], in: matches, activate: false)
+            }, activate: { [weak self] row in
+                self?.selectReference(matches[row.index], in: matches, activate: true)
+            }, didHide: { [weak self] in
+                self?.clearReferencePreview()
+            })
         }
+    }
+
+    private func selectReference(_ location: LSPLocation, in matches: [LSPLocation], activate: Bool) {
+        referenceTask?.cancel()
+        referenceID &+= 1
+        let id = referenceID
+        referenceTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if referenceID == id { referenceTask = nil } }
+            let target = location.url.standardizedFileURL
+            @MainActor func isCurrent() -> Bool {
+                !Task.isCancelled && !isClosed && !app.isQuitting && referenceID == id &&
+                    document.isSidebarVisible && document.sidebarMode == .references
+            }
+            guard isCurrent() else { return }
+            if target != document.fileURL?.standardizedFileURL {
+                guard (try? await app.openFile(target, in: document, focusEditor: false, shouldOpen: isCurrent)) != nil else { return }
+            }
+            guard isCurrent(), document.hasEditableTextDocument, document.editor.conflictEdits.isEmpty else { return }
+            let snapshot = document.editor.string
+            let index = LSPTextIndex(snapshot)
+            guard let range = index.nsRange(location.range) else { return }
+            if activate {
+                commitNavigation(to: range, origin: nil)
+            } else {
+                document.editor.scrollRangeToVisible(range)
+            }
+            let ranges = matches.filter { $0.url.standardizedFileURL == target }.compactMap { index.nsRange($0.range) }
+                .sorted { $0.location < $1.location }
+            document.resultDecorations.update(snapshot: snapshot, ranges: ranges, selected: range, preview: nil)
+        }
+    }
+
+    private func clearReferencePreview() {
+        referenceID &+= 1
+        referenceTask?.cancel()
+        referenceTask = nil
+        document.resultDecorations.update(snapshot: "", ranges: [], selected: nil, preview: nil)
     }
 
     private nonisolated static func referenceRows(_ locations: [LSPLocation], sourceURL: URL, sourceText: String) -> [ReferenceResult] {
@@ -267,7 +322,12 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         }
     }
 
-    private func chooseDefinition(_ locations: [LSPLocation], at word: NSRange) {
+    private struct DefinitionChoice {
+        let location: LSPLocation
+        let origin: NavigationHistory.Location?
+    }
+
+    private func chooseDefinition(_ locations: [LSPLocation], at word: NSRange, navigationOrigin: NavigationHistory.Location?) {
         guard !app.isAgentCheck, let window = document.editor.window else { return }
         let menu = NSMenu(title: "Peek Definition")
         for location in locations {
@@ -275,7 +335,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
             let item = NSMenuItem(title: title, action: #selector(openDefinition(_:)), keyEquivalent: "")
             item.toolTip = location.url.path
             item.target = self
-            item.representedObject = location
+            item.representedObject = DefinitionChoice(location: location, origin: navigationOrigin)
             menu.addItem(item)
         }
         let screen = document.editor.firstRect(forCharacterRange: word, actualRange: nil)
@@ -284,23 +344,19 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     }
 
     @objc private func openDefinition(_ item: NSMenuItem) {
-        guard let location = item.representedObject as? LSPLocation else { return }
-        openResult(location)
-    }
-
-    private func openResult(_ location: LSPLocation) {
+        guard let choice = item.representedObject as? DefinitionChoice else { return }
         cancelLookup()
         navigationID &+= 1
         let id = navigationID
-        Task { [weak self] in await self?.open(location, id: id, source: nil) }
+        Task { [weak self] in await self?.open(choice.location, id: id, source: nil, navigationOrigin: choice.origin) }
     }
 
-    private func open(_ location: LSPLocation, id: UInt64, source: NSRange?) async {
+    private func open(_ location: LSPLocation, id: UInt64, source: NSRange?, navigationOrigin: NavigationHistory.Location?) async {
         guard navigationID == id, !isClosed, !app.isQuitting else { return }
         let target = location.url.standardizedFileURL
         if target != document.fileURL?.standardizedFileURL {
             do {
-                guard try await app.openFile(target, in: document, shouldOpen: { [weak self] in
+                guard try await app.openFile(target, in: document, focusEditor: false, shouldOpen: { [weak self] in
                     self?.navigationID == id && self?.isClosed == false
                 }) != nil else { return }
             } catch {
@@ -310,13 +366,12 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         }
         guard navigationID == id, document.hasEditableTextDocument, document.editor.conflictEdits.isEmpty,
               let range = location.range.nsRange(in: document.editor.string) else { return }
+        commitNavigation(to: range, origin: navigationOrigin)
+    }
+
+    private func commitNavigation(to range: NSRange, origin: NavigationHistory.Location?) {
         let caret = NSRange(location: range.location, length: 0)
-        if let scope = document.editor.focusRanges, !scope.contains(where: { NSLocationInRange(caret.location, $0) }) {
-            document.editor.exitFocus()
-        }
-        document.focusContent()
-        document.editor.setCaretSelections([caret])
-        document.editor.scrollRangeToVisible(caret)
+        document.navigate(to: caret, from: origin)
     }
 
     private func cancelLookup() {

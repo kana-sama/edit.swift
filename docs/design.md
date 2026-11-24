@@ -16,6 +16,14 @@ When opening or switching buffers, prepare geometry-changing status strips befor
 
 Use system appearance, semantic colors, text styles, control metrics, and SF Symbols for interface chrome. Respect platform preferences for contrast and reduced transparency. Keep persistent controls focused on actions the owner needs.
 
+Place context-wide status controls at the trailing edge of the relevant header. Show a control when its context has a matching service or action. Use an icon and a compact status cue for the closed control. Give the icon an accessible name and tooltip. Put per-item names and actions together in the popover, with the identity leading and the actions trailing.
+
+## Sidebar results
+
+Reuse the editor’s existing result component and interaction patterns for new lists of document locations. Match Search’s row spacing, excerpts, highlight treatment, and focus behavior. Align file icons and names at the leading edge. When file groups are always open, treat each file heading as a label and skip it in mouse and keyboard selection.
+
+Clicking a result or moving with the arrow keys selects it and reveals its location while focus stays in the list. Space and Return activate the result and give focus to the editor. Keep the selected row available for subsequent navigation. When the preview goes to another file, update the document and highlighted location together, and apply the latest selection if several previews overlap.
+
 ## Pointer cursor
 
 Show the pointing hand as soon as the pointer enters any part of the clickable area of an enabled button, a selectable row in a list or tree, or another explicit click target. Use the foreground control's click area when it overlaps the editor. Include controls in the window titlebar and controls that appear beneath the pointer during hover. Use the arrow over disabled actions and empty chrome, including where text scrolls beneath the titlebar. Selectable text keeps its text cursor, including during inline renaming. Use the system resize cursor across the whole divider grip.

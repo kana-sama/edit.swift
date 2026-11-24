@@ -203,6 +203,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 500))
         view.clipsToBounds = true
         controller.view = view
+        document.editor.onFindEditorInteraction = { [weak self] in self?.editorInteracted() }
     }
 
     deinit { scratchReload?.cancel() }
@@ -292,6 +293,11 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         if !focusIsInSidebar { focusBeforeSidebar = document.window.firstResponder as? NSView }
     }
 
+    private func editorInteracted() {
+        if isVisible && mode == .references { references?.clearPreview() }
+        else { search?.editorInteracted() }
+    }
+
     private func returnFocus() {
         let window = document.window
         search?.clearTransientFocus()
@@ -359,7 +365,8 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     }
 
     func showReferences(symbol: String, originURL: URL, originLine: Int, originColumn: Int,
-                        results: [ReferenceResult], open: @escaping (ReferenceResult) -> Void) {
+                        results: [ReferenceResult], preview: @escaping (ReferenceResult) -> Void,
+                        activate: @escaping (ReferenceResult) -> Void, didHide: @escaping () -> Void) {
         guard !results.isEmpty else { return }
         let panel: ReferencesSidebar
         if let references {
@@ -371,7 +378,8 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
             installContent(panel.view)
         }
         panel.update(symbol: symbol, originURL: originURL, originLine: originLine, originColumn: originColumn,
-                     root: document.folderURL ?? originURL.deletingLastPathComponent(), results: results, open: open)
+                     root: document.folderURL ?? originURL.deletingLastPathComponent(), results: results,
+                     preview: preview, activate: activate, didHide: didHide)
         rememberFocus()
         showReferences()
     }
@@ -380,7 +388,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         guard let references else { return }
         selectMode(.references)
         present(focusing: focus ? references.focusResponder : nil)
-        references.revealSelection()
+        references.revealSelection(previewSelection: focus)
     }
 
     private func installContent(_ view: NSView) {
@@ -412,6 +420,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
 
     private func selectMode(_ mode: SidebarMode) {
         let changed = mode != self.mode
+        if changed && self.mode == .references && isVisible { references?.clearPreview() }
         rememberedMode = mode
         search?.view.isHidden = mode != .search
         worktree?.view.isHidden = mode != .worktree
@@ -645,6 +654,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
 
     private func setVisible(_ visible: Bool) {
         guard visible != isVisible else { return }
+        if !visible && mode == .references { references?.clearPreview() }
         isVisible = visible
         document.updateOccurrenceFindSettings()
     }

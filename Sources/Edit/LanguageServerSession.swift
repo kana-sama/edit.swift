@@ -28,7 +28,7 @@ final class LanguageServerSession {
     var revision: Int { document.revision }
     var state: State { root == nil && rootLookup != nil ? .starting : phase }
     var failureReason: String? { state.failureReason }
-    var isEligible: Bool { document.url != nil }
+    var isEligible: Bool { root != nil && recognizedScope == scope }
     var canStart: Bool {
         guard canControl else { return false }
         switch phase {
@@ -42,11 +42,17 @@ final class LanguageServerSession {
     var supportsReferences: Bool { isReady && capabilities?.references == true }
     var supportsHover: Bool { isReady && capabilities?.hover == true }
 
-    private var canControl: Bool { isEligible && root != nil && rootLookup == nil }
-    private var isReady: Bool { canControl && phase == .ready }
+    private var canControl: Bool { isEligible && rootLookup == nil }
+    private var isReady: Bool { canControl && phase == .ready && document.url != nil }
     private var phase = State.stopped
     private var document = LSPDocument(url: nil, text: "", revision: 0)
-    private var folder: URL?
+    private struct Scope: Equatable, Sendable {
+        let directory: URL
+        let searchesParentProjects: Bool
+    }
+    private var scope: Scope?
+    private var recognizedScope: Scope?
+    private var monitor: FileSystemEvents?
     private var root: URL?
     private var manuallyStopped: Set<URL> = []
     private var rootLookup: Task<Void, Never>?
@@ -56,28 +62,58 @@ final class LanguageServerSession {
     private var capabilities: LSPCapabilities?
 
     /// A non-nil URL denotes an eligible named Zig buffer. The caller owns language mode and editability.
-    func setDocument(url: URL?, folder: URL?, text: String) {
+    func setDocument(url: URL?, folder: URL?, searchesParentProjects: Bool, text: String) {
         let url = url?.standardizedFileURL
-        let folder = folder?.standardizedFileURL
-        guard url != document.url || folder != self.folder else {
+        let scope = folder.map { Scope(directory: $0.standardizedFileURL, searchesParentProjects: searchesParentProjects) }
+        let scopeChanged = scope != self.scope
+        guard url != document.url || scopeChanged else {
             updateText(text)
             return
         }
-        self.folder = folder
+        self.scope = scope
         document = LSPDocument(url: url, text: url == nil ? "" : text, revision: revision + 1)
-        rootLookup?.cancel()
-        rootLookup = nil
         sync?.cancel()
         sync = nil
-        guard let url else {
+        if scopeChanged {
+            monitor = scope.map { scope in
+                FileSystemEvents(directory: scope.directory) { [weak self] events in
+                    guard let self, self.scope == scope,
+                          events.contains(where: { ZigProjects.affectsDiscovery($0, in: scope.directory) }) else { return }
+                    discoverProject()
+                }
+            }
+        }
+        if !scopeChanged, url == nil, recognizedScope == scope, rootLookup == nil {
             connection?.updateDocument(document)
             onStateChange?()
             return
         }
+        discoverProject()
+    }
+
+    private func discoverProject() {
+        rootLookup?.cancel()
+        rootLookup = nil
+        guard let scope else {
+            recognizedScope = nil
+            activate(root: nil)
+            return
+        }
+        let file = document.url
+        let previousRoot = recognizedScope == scope ? root : nil
+        let search = Task.detached(priority: .utility) {
+            ZigProjects.root(in: scope.directory, activeFile: file, previousRoot: previousRoot,
+                             searchesParents: scope.searchesParentProjects)
+        }
         rootLookup = Task { [weak self] in
-            let root = await Task.detached(priority: .utility) { Self.projectRoot(for: url, folder: folder) }.value
+            let root = await withTaskCancellationHandler {
+                await search.value
+            } onCancel: {
+                search.cancel()
+            }
             guard !Task.isCancelled, let self else { return }
             self.rootLookup = nil
+            self.recognizedScope = scope
             self.activate(root: root)
         }
         onStateChange?()
@@ -117,6 +153,7 @@ final class LanguageServerSession {
     func close() {
         rootLookup?.cancel()
         rootLookup = nil
+        monitor = nil
         sync?.cancel()
         sync = nil
         document = LSPDocument(url: nil, text: "", revision: revision + 1)
@@ -156,14 +193,14 @@ final class LanguageServerSession {
         guard self.revision == revision, self.generation == generation else { throw CancellationError() }
     }
 
-    private func activate(root: URL) {
+    private func activate(root: URL?) {
         if self.root == root {
             if phase == .ready { connection?.updateDocument(document) }
             onStateChange?()
             return
         }
         self.root = root
-        replaceConnection(startingAt: manuallyStopped.contains(root) ? nil : root)
+        replaceConnection(startingAt: root.flatMap { manuallyStopped.contains($0) ? nil : $0 })
     }
 
     private func replaceConnection(startingAt root: URL?) {
@@ -229,25 +266,6 @@ final class LanguageServerSession {
         guard phase != self.phase else { return }
         self.phase = phase
         onStateChange?()
-    }
-
-    nonisolated static func projectRoot(for file: URL, folder: URL?) -> URL {
-        let parent = file.resolvingSymlinksInPath().deletingLastPathComponent().standardizedFileURL
-        var directory = parent
-        while true {
-            let hasManifest = ["build.zig", "build.zig.zon"].contains { name in
-                var isDirectory: ObjCBool = false
-                let path = directory.appending(path: name).path
-                return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && !isDirectory.boolValue
-            }
-            if hasManifest { return directory }
-            let next = directory.deletingLastPathComponent().standardizedFileURL
-            if next.path == directory.path || next.path.isEmpty { break }
-            directory = next
-        }
-        if let folder = folder?.resolvingSymlinksInPath().standardizedFileURL,
-           parent.pathComponents.starts(with: folder.pathComponents) { return folder }
-        return parent
     }
 
     private struct Launch: Sendable {

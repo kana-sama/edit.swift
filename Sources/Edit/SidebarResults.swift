@@ -66,6 +66,93 @@ enum SidebarResults {
 }
 
 @MainActor
+class SidebarResultTable: NSTableView {
+    var onReturn: (() -> Void)?
+    var onSpace: (() -> Void)?
+    var onEscape: (() -> Void)?
+    var onClickSelectedRow: ((Int) -> Void)?
+    var isFileHeader: ((Int) -> Bool)?
+
+    func install(in scrollView: NSScrollView, column identifier: NSUserInterfaceItemIdentifier,
+                 accessibilityLabel: String) {
+        let column = NSTableColumn(identifier: identifier)
+        column.resizingMask = .autoresizingMask
+        column.minWidth = 0
+        addTableColumn(column)
+        SidebarResults.configure(self, in: scrollView)
+        setAccessibilityLabel(accessibilityLabel)
+    }
+
+    override func selectRowIndexes(_ indexes: IndexSet, byExtendingSelection extend: Bool) {
+        if let isFileHeader, !indexes.isEmpty {
+            let results = IndexSet(indexes.filter { !isFileHeader($0) })
+            if !results.isEmpty { super.selectRowIndexes(results, byExtendingSelection: extend) }
+        } else {
+            super.selectRowIndexes(indexes, byExtendingSelection: extend)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let clicked = row(at: convert(event.locationInWindow, from: nil))
+        let plainClick = event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty
+        if clicked >= 0, let isFileHeader {
+            guard !isFileHeader(clicked) else { return }
+            if plainClick {
+                window?.makeFirstResponder(self)
+                if selectedRow == clicked { onClickSelectedRow?(clicked) }
+                else { selectRowIndexes(IndexSet(integer: clicked), byExtendingSelection: false) }
+                return
+            }
+        }
+        let clickedSelection = clicked >= 0 && clicked == selectedRow
+        super.mouseDown(with: event)
+
+        // AppKit sends a selection change when a different row is clicked.
+        if clickedSelection, selectedRow == clicked, event.clickCount == 1, plainClick {
+            onClickSelectedRow?(clicked)
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if modifiers.isEmpty {
+            switch event.keyCode {
+            case 36, 76:
+                if !event.isARepeat { onReturn?() }
+                return
+            case 49:
+                if !event.isARepeat { onSpace?() }
+                return
+            case 53:
+                onEscape?()
+                return
+            case 125, 126:
+                if let isFileHeader {
+                    moveResult(by: event.keyCode == 125 ? 1 : -1, isFileHeader: isFileHeader)
+                    return
+                }
+            default:
+                break
+            }
+        }
+        super.keyDown(with: event)
+    }
+
+    private func moveResult(by step: Int, isFileHeader: (Int) -> Bool) {
+        let boundary = step > 0 ? 0 : numberOfRows - 1
+        var candidate = selectedRow >= 0 ? selectedRow + step : boundary
+        while (0..<numberOfRows).contains(candidate) {
+            if !isFileHeader(candidate) {
+                selectRowIndexes(IndexSet(integer: candidate), byExtendingSelection: false)
+                scrollRowToVisible(candidate)
+                return
+            }
+            candidate += step
+        }
+    }
+}
+
+@MainActor
 final class SidebarResultFileHeader: NSTableCellView {
     private let name: NSTextField
     private let icon = NSImageView()
@@ -78,7 +165,7 @@ final class SidebarResultFileHeader: NSTableCellView {
         set { detail.stringValue = newValue }
     }
 
-    init(name: String, detail: String, prioritizesName: Bool = false) {
+    init(name: String, detail: String, prioritizesName: Bool = false, leadingInset: CGFloat = 4) {
         self.name = NSTextField(labelWithString: name)
         self.detail = NSTextField(labelWithString: detail)
         super.init(frame: .zero)
@@ -102,7 +189,7 @@ final class SidebarResultFileHeader: NSTableCellView {
         NSLayoutConstraint.activate([
             icon.widthAnchor.constraint(equalToConstant: 16),
             icon.heightAnchor.constraint(equalToConstant: 16),
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leadingInset),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             self.name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5),
             self.name.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -144,6 +231,7 @@ final class SidebarResultRow: NSTableRowView {
 @MainActor
 class SidebarResultExcerptCell: NSTableCellView {
     let excerpt = NSTextField(labelWithString: "")
+    lazy var excerptLeading = excerpt.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3)
     private(set) lazy var fullExcerptWidth = excerpt.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4)
 
     override init(frame frameRect: NSRect) {
@@ -159,7 +247,7 @@ class SidebarResultExcerptCell: NSTableCellView {
         excerpt.translatesAutoresizingMaskIntoConstraints = false
         addSubview(excerpt)
         NSLayoutConstraint.activate([
-            excerpt.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3),
+            excerptLeading,
             excerpt.heightAnchor.constraint(lessThanOrEqualTo: heightAnchor),
             excerpt.centerYAnchor.constraint(equalTo: centerYAnchor),
             fullExcerptWidth,

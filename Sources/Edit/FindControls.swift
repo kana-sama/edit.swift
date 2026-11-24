@@ -212,11 +212,7 @@ final class FindResultsScrollView: NSScrollView {
     }
 }
 
-final class FindResultsTable: NSTableView {
-    var onReturn: (() -> Void)?
-    var onSpace: (() -> Void)?
-    var onEscape: (() -> Void)?
-    var onClickSelectedRow: ((Int) -> Void)?
+final class FindResultsTable: SidebarResultTable {
     private var pointerTracking: NSTrackingArea?
     private var hoveredRow = -1
     private weak var hoveredCell: FindResultCell?
@@ -279,36 +275,6 @@ final class FindResultsTable: NSTableView {
         if row >= 0, let cell = view(atColumn: 0, row: row, makeIfNecessary: false) as? FindResultCell {
             configureHover(for: cell, row: row)
         }
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        let clicked = row(at: convert(event.locationInWindow, from: nil))
-        let clickedSelection = clicked >= 0 && clicked == selectedRow
-        super.mouseDown(with: event)
-
-        // A repeated click on the selected row does not notify the selection delegate.
-        guard clickedSelection, selectedRow == clicked, event.clickCount == 1,
-              event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else { return }
-        onClickSelectedRow?(clicked)
-    }
-
-    override func keyDown(with event: NSEvent) {
-        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
-        if modifiers.isEmpty {
-            if event.keyCode == 36 || event.keyCode == 76 {
-                if !event.isARepeat { onReturn?() }
-                return
-            }
-            if event.keyCode == 49 {
-                if !event.isARepeat { onSpace?() }
-                return
-            }
-            if event.keyCode == 53 {
-                onEscape?()
-                return
-            }
-        }
-        super.keyDown(with: event)
     }
 }
 

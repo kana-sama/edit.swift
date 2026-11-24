@@ -1301,6 +1301,16 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 guard let screenshot else { return }
                 let file = URL(fileURLWithPath: screenshot).deletingPathExtension().path + "-hover.png"
                 try self.captureCheckView(view, screenshot: file)
+            }, captureServers: { view in
+                guard let screenshot else { return }
+                let file = URL(fileURLWithPath: screenshot).deletingPathExtension().path + "-servers.png"
+                let popup = NSWindow(contentRect: view.frame, styleMask: .borderless, backing: .buffered, defer: false)
+                popup.isReleasedWhenClosed = false
+                popup.appearance = document.window.effectiveAppearance
+                popup.contentView = view
+                popup.layoutIfNeeded()
+                try self.captureCheckView(view, screenshot: file)
+                popup.contentView = nil
             })
         case "worktree" where screenshot == nil:
             try await WorktreeCheck.run(in: self)

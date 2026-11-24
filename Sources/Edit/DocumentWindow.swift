@@ -125,6 +125,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var pendingTerminalFocus: Bool?
     private(set) lazy var titleBar = DocumentTitleBar(document: self, app: app)
     private(set) lazy var languageFeatures = DocumentLanguageFeatures(document: self, app: app)
+    private(set) lazy var resultDecorations: FindDecorations = {
+        let decorations = FindDecorations(editor: editor)
+        editor.onFindViewportChange = { [weak decorations] in decorations?.layout() }
+        return decorations
+    }()
     private var navigationBufferID = UUID()
     private var navigationSelectionAnchor: NavigationHistory.Selection.Anchor?
     private var restoringNavigationSelection = false

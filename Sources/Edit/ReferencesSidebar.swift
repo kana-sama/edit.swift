@@ -10,54 +10,41 @@ struct ReferenceResult: Sendable {
 }
 
 @MainActor
-final class ReferencesSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
-    private final class FileGroup: NSObject {
-        let file: URL
-        let rows: [Row]
-
-        init(file: URL, results: [ReferenceResult]) {
-            self.file = file
-            rows = results.map(Row.init)
-        }
-    }
-
-    private final class Row: NSObject {
-        let result: ReferenceResult
-
-        init(_ result: ReferenceResult) { self.result = result }
+final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    private enum Row {
+        case file(URL)
+        case reference(ReferenceResult)
     }
 
     let view = NSView()
-    private let outline = ReferencesOutline()
+    private let table = SidebarResultTable()
     private let symbol = NSTextField(labelWithString: "")
     private let count = NSTextField(labelWithString: "")
-    private var files: [FileGroup] = []
+    private var rows: [Row] = []
     private var root: URL?
-    private var open: ((ReferenceResult) -> Void)?
-    var focusResponder: NSView { outline }
+    private var isReplacingResults = false
+    private var preview: ((ReferenceResult) -> Void)?
+    private var activate: ((ReferenceResult) -> Void)?
+    private var didHide: (() -> Void)?
+    var focusResponder: NSView { table }
 
     init(onReturnFocus: @escaping () -> Void) {
         super.init()
-        let identifier = NSUserInterfaceItemIdentifier("ReferenceResult")
-        let column = NSTableColumn(identifier: identifier)
-        column.minWidth = 0
-        column.resizingMask = .autoresizingMask
-        outline.addTableColumn(column)
-        outline.outlineTableColumn = column
-        outline.autoresizesOutlineColumn = false
-        outline.indentationPerLevel = 12
-        outline.floatsGroupRows = false
-        outline.dataSource = self
-        outline.delegate = self
-        outline.setAccessibilityLabel("Reference Results")
-        outline.onActivate = { [weak self] row in self?.activate(row) }
-        outline.onEscape = onReturnFocus
-
         let scroll = NSScrollView()
-        SidebarResults.configure(outline, in: scroll)
+        table.install(in: scroll, column: .init("ReferenceResult"), accessibilityLabel: "Reference Results")
+        table.dataSource = self
+        table.delegate = self
+        table.isFileHeader = { [weak self] row in self?.reference(at: row) == nil }
+        table.onClickSelectedRow = { [weak self] row in self?.previewRow(row) }
+        table.onReturn = { [weak self] in self?.activateSelection() }
+        table.onSpace = { [weak self] in self?.activateSelection() }
+        table.onEscape = { [weak self] in
+            self?.clearPreview()
+            onReturnFocus()
+        }
+
         scroll.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scroll)
-
         symbol.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
         symbol.lineBreakMode = .byTruncatingMiddle
         symbol.maximumNumberOfLines = 1
@@ -85,136 +72,101 @@ final class ReferencesSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     }
 
     func update(symbol: String, originURL: URL, originLine: Int, originColumn: Int,
-                root: URL?, results: [ReferenceResult], open: @escaping (ReferenceResult) -> Void) {
+                root: URL?, results: [ReferenceResult], preview: @escaping (ReferenceResult) -> Void,
+                activate: @escaping (ReferenceResult) -> Void, didHide: @escaping () -> Void) {
         self.root = root?.standardizedFileURL
-        self.open = open
-        files = Dictionary(grouping: results, by: { $0.url.standardizedFileURL })
+        self.preview = preview
+        self.activate = activate
+        self.didHide = didHide
+        rows = Dictionary(grouping: results, by: { $0.url.standardizedFileURL })
             .sorted { $0.key.path < $1.key.path }
-            .map { file, hits in
-                FileGroup(file: file, results: hits.sorted { ($0.line, $0.column, $0.index) < ($1.line, $1.column, $1.index) })
+            .flatMap { file, hits -> [Row] in
+                [.file(file)] + hits.sorted { ($0.line, $0.column, $0.index) < ($1.line, $1.column, $1.index) }
+                    .map(Row.reference)
             }
         self.symbol.stringValue = symbol
         count.stringValue = results.count == 1 ? "1 reference" : "\(results.count) references"
-        outline.reloadData()
-        if let file = files.first(where: { $0.file == originURL.standardizedFileURL }) {
-            outline.expandItem(file)
-            let nearest = file.rows.first { row in
-                let result = row.result
-                return result.line > originLine || (result.line == originLine &&
-                    (result.column >= originColumn || result.match.length > originColumn - result.column))
-            } ?? file.rows.last
-            if let nearest { select(nearest) }
-        } else if let first = files.first {
-            select(first)
-        }
+
+        let origin = originURL.standardizedFileURL
+        let fromOrigin = rows.indices.filter { reference(at: $0)?.url.standardizedFileURL == origin }
+        let nearest = fromOrigin.first { row in
+            guard let result = reference(at: row) else { return false }
+            return result.line > originLine || (result.line == originLine &&
+                (result.column >= originColumn || result.match.length > originColumn - result.column))
+        } ?? fromOrigin.last ?? rows.indices.first { reference(at: $0) != nil }
+        isReplacingResults = true
+        table.reloadData()
+        if let nearest { table.selectRowIndexes(IndexSet(integer: nearest), byExtendingSelection: false) }
+        isReplacingResults = false
     }
 
-    func revealSelection() {
-        guard outline.selectedRow >= 0 else { return }
+    func revealSelection(previewSelection: Bool) {
+        let row = table.selectedRow
+        guard row >= 0 else { return }
         view.layoutSubtreeIfNeeded()
-        outline.scrollRowToVisible(outline.selectedRow)
+        table.scrollRowToVisible(row)
+        if previewSelection { previewRow(row) }
     }
 
-    private func select(_ item: NSObject) {
-        let row = outline.row(forItem: item)
-        guard row >= 0 else { return }
-        outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+    func clearPreview() { didHide?() }
+
+    private func reference(at row: Int) -> ReferenceResult? {
+        guard rows.indices.contains(row), case .reference(let result) = rows[row] else { return nil }
+        return result
     }
 
-    private func activate(_ row: Int) {
-        guard row >= 0 else { return }
-        switch outline.item(atRow: row) {
-        case let file as FileGroup:
-            if outline.isItemExpanded(file) { outline.collapseItem(file) }
-            else { outline.expandItem(file) }
-        case let hit as Row:
-            open?(hit.result)
-        default:
-            break
-        }
+    private func previewRow(_ row: Int) {
+        if let result = reference(at: row) { preview?(result) }
     }
 
-    func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        if item == nil { return files.count }
-        return (item as? FileGroup)?.rows.count ?? 0
+    private func activateSelection() {
+        if let result = reference(at: table.selectedRow) { activate?(result) }
     }
 
-    func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        if let file = item as? FileGroup { return file.rows[index] }
-        return files[index]
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { reference(at: row) != nil }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        if !isReplacingResults { previewRow(table.selectedRow) }
     }
 
-    func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool { item is FileGroup }
-
-    func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         let identifier = NSUserInterfaceItemIdentifier("ReferenceResultRow")
-        if let reused = outlineView.makeView(withIdentifier: identifier, owner: nil) as? SidebarResultRow { return reused }
+        if let reused = tableView.makeView(withIdentifier: identifier, owner: nil) as? SidebarResultRow { return reused }
         let row = SidebarResultRow()
         row.identifier = identifier
         return row
     }
 
-    func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
-        if let file = item as? FileGroup {
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        switch rows[row] {
+        case .file(let file):
             let identifier = NSUserInterfaceItemIdentifier("ReferenceFile")
-            let header = outlineView.makeView(withIdentifier: identifier, owner: nil) as? SidebarResultFileHeader
-                ?? SidebarResultFileHeader(name: "", detail: "", prioritizesName: true)
+            let header = tableView.makeView(withIdentifier: identifier, owner: nil) as? SidebarResultFileHeader
+                ?? SidebarResultFileHeader(name: "", detail: "", prioritizesName: true, leadingInset: 1)
             header.identifier = identifier
-            header.updateFile(file.file.lastPathComponent, url: file.file)
-            header.detailText = containingPath(for: file.file)
-            header.toolTip = file.file.path
+            header.updateFile(file.lastPathComponent, url: file)
+            header.detailText = containingPath(for: file)
+            header.toolTip = file.path
             return header
+        case .reference(let result):
+            let identifier = NSUserInterfaceItemIdentifier("ReferenceExcerpt")
+            let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? SidebarResultExcerptCell
+                ?? SidebarResultExcerptCell(frame: .zero)
+            cell.identifier = identifier
+            cell.excerptLeading.constant = 12
+            cell.configureExcerpt(SidebarResults.excerpt(of: result.excerpt as NSString, match: result.match))
+            cell.setAccessibilityLabel("Line \(result.line + 1), \(cell.excerpt.stringValue)")
+            return cell
         }
-        guard let hit = (item as? Row)?.result else { return nil }
-        let identifier = NSUserInterfaceItemIdentifier("ReferenceExcerpt")
-        let cell = outlineView.makeView(withIdentifier: identifier, owner: nil) as? SidebarResultExcerptCell
-            ?? SidebarResultExcerptCell(frame: .zero)
-        cell.identifier = identifier
-        cell.configureExcerpt(SidebarResults.excerpt(of: hit.excerpt as NSString, match: hit.match))
-        cell.setAccessibilityLabel("Line \(hit.line + 1), \(cell.excerpt.stringValue)")
-        return cell
     }
 
     private func containingPath(for file: URL) -> String {
         let path = file.deletingLastPathComponent().path
         guard let root = root?.path else { return path }
-        if path == root { return "." }
+        if path == root { return "" }
         let prefix = root.hasSuffix("/") ? root : root + "/"
         return path.hasPrefix(prefix) ? String(path.dropFirst(prefix.count)) : path
-    }
-}
-
-private final class ReferencesOutline: NSOutlineView {
-    var onActivate: ((Int) -> Void)?
-    var onEscape: (() -> Void)?
-
-    override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        let row = self.row(at: point)
-        let disclosure = row >= 0 && frameOfOutlineCell(atRow: row).contains(point)
-        super.mouseDown(with: event)
-        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
-        guard row >= 0, !disclosure, event.clickCount == 1, modifiers.isEmpty,
-              let release = NSApp.currentEvent, release.type == .leftMouseUp, release.window === window,
-              release.timestamp >= event.timestamp,
-              self.row(at: convert(release.locationInWindow, from: nil)) == row else { return }
-        onActivate?(row)
-    }
-
-    override func keyDown(with event: NSEvent) {
-        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
-        if modifiers.isEmpty {
-            switch event.keyCode {
-            case 36, 76:
-                if !event.isARepeat { onActivate?(selectedRow) }
-                return
-            case 53:
-                if !event.isARepeat { onEscape?() }
-                return
-            default:
-                break
-            }
-        }
-        super.keyDown(with: event)
     }
 }

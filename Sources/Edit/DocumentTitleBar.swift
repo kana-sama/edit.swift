@@ -6,9 +6,11 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     static let fileItemIdentifier = NSToolbarItem.Identifier("Edit.FileTitle")
     static let terminalItemIdentifier = NSToolbarItem.Identifier("Edit.Terminal.Title")
     static let sidebarItemIdentifier = NSToolbarItem.Identifier("Edit.SidebarTitle")
+    static let languageServerItemIdentifier = NSToolbarItem.Identifier("Edit.LanguageServer")
     static let terminalItemIdentifiers: [NSToolbarItem.Identifier] = [.inspectorTrackingSeparator, terminalItemIdentifier]
     private static let sidebarItemIdentifiers: [NSToolbarItem.Identifier] = [sidebarItemIdentifier, .sidebarTrackingSeparator]
     private static let itemIdentifiers = [folderItemIdentifier, fileItemIdentifier]
+    private static let serverItemIdentifiers: [NSToolbarItem.Identifier] = [.flexibleSpace, languageServerItemIdentifier]
     private static let leadingInset: CGFloat = 8
 
     private unowned let document: DocumentWindow
@@ -25,6 +27,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     private var sidebarHeaderVisible = false
     private var terminalHeaderVisible = false
     private var terminalDocked = false
+    private var languageServerVisible = false
     private let dividerContinuation = TitleBarDividers(frame: .zero)
     private var siblingRequest: Task<Void, Never>?
     private(set) var agentContextMenu: NSMenu?
@@ -118,17 +121,27 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             sidebarHeaderVisible ? Self.sidebarItemIdentifiers : [.sidebarTrackingSeparator]
         let trailing: [NSToolbarItem.Identifier] = terminalDocked
             ? (terminalHeaderVisible ? Self.terminalItemIdentifiers : [.inspectorTrackingSeparator]) : []
-        return leading + Self.itemIdentifiers + trailing
+        let server = languageServerVisible ? Self.serverItemIdentifiers : []
+        return leading + Self.itemIdentifiers + server + trailing
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        Self.sidebarItemIdentifiers + Self.itemIdentifiers + Self.terminalItemIdentifiers
+        Self.sidebarItemIdentifiers + Self.itemIdentifiers + Self.serverItemIdentifiers + Self.terminalItemIdentifiers
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         if identifier == Self.sidebarItemIdentifier { return sidebar?.makeSidebarHeader() }
         if identifier == Self.terminalItemIdentifier { return document.makeTerminalTitleItem() }
+        if identifier == Self.languageServerItemIdentifier {
+            let item = NSToolbarItem(itemIdentifier: identifier)
+            item.label = "Language Servers"
+            item.isBordered = false
+            item.autovalidates = false
+            item.visibilityPriority = .high
+            item.view = document.languageFeatures.statusButton
+            return item
+        }
         guard Self.itemIdentifiers.contains(identifier) else { return nil }
         let item = NSToolbarItem(itemIdentifier: identifier)
         item.isBordered = false
@@ -164,8 +177,6 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             let title = FileTitleView()
             title.addArrangedSubview(icon)
             title.addArrangedSubview(label)
-            title.addArrangedSubview(document.languageFeatures.statusButton)
-            title.setCustomSpacing(8, after: label)
             title.alignment = .centerY
             title.spacing = 2
             title.setVisibilityPriority(.detachOnlyIfNecessary, for: label)
@@ -261,7 +272,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         let controls = zoom.map { $0.convert($0.bounds, to: nil).maxX + 8 } ?? 84
         // Keep the icon and a compact file name inside the editor pane as the divider moves.
         let button = document.languageFeatures.statusButton
-        let serverWidth = button.isHidden ? 0 : ceil(button.intrinsicContentSize.width) + 8
+        let serverWidth = languageServerVisible ? ceil(button.intrinsicContentSize.width) + 12 : 0
         let width = max(0, floor(exposed.maxX - max(exposed.minX, controls) - 40 - serverWidth))
         // Explicit widths let the toolbar grow the labels again after compressing them.
         let folder = document.folderURL == nil ? 0 : min(folderLabel?.intrinsicContentSize.width ?? 0, 160, width * 0.4)
@@ -270,7 +281,22 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         if fileWidth?.constant != file { fileWidth?.constant = file }
     }
 
-    func languageServerStatusChanged() { fitLabels() }
+    func languageServerStatusChanged() {
+        let visible = !document.languageFeatures.statusButton.isHidden
+        guard languageServerVisible != visible else { return }
+        languageServerVisible = visible
+        updateItems {
+            if visible {
+                let index = toolbar.items.firstIndex { $0.itemIdentifier == .inspectorTrackingSeparator } ?? toolbar.items.count
+                changeItem(.flexibleSpace, in: toolbar, visible: true, at: index)
+                changeItem(Self.languageServerItemIdentifier, in: toolbar, visible: true, at: index + 1)
+            } else {
+                changeItem(Self.languageServerItemIdentifier, in: toolbar, visible: false, at: 0)
+                changeItem(.flexibleSpace, in: toolbar, visible: false, at: 0)
+            }
+            fitLabels()
+        }
+    }
 
     func update() {
         if let folder = document.folderURL {
