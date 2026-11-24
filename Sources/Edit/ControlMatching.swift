@@ -10,6 +10,7 @@ struct ControlEntry: Sendable {
     var folderFileIdentity: FileIdentity? = nil
     var iconLanguage: String? = nil
     var scratch: ScratchFile? = nil
+    var navigation: ControlNavigation? = nil
 
     var fileURL: URL? { recent?.url ?? folderFileURL }
     var openedAt: Date? { recent?.opened ?? scratch?.openedAt }

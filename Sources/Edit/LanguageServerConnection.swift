@@ -16,13 +16,15 @@ struct LSPCapabilities: Decodable, Sendable {
     let references: Bool
     let hover: Bool
     let documentHighlight: Bool
+    let documentSymbols: Bool
+    let workspaceSymbols: Bool
     let openClose: Bool
     let change: Change
     let positionEncoding: String
 
     private enum CodingKeys: String, CodingKey {
         case definitionProvider, referencesProvider, hoverProvider, textDocumentSync, positionEncoding
-        case documentHighlightProvider
+        case documentHighlightProvider, documentSymbolProvider, workspaceSymbolProvider
     }
 
     private struct SyncOptions: Decodable {
@@ -40,6 +42,8 @@ struct LSPCapabilities: Decodable, Sendable {
         references = supports(.referencesProvider)
         hover = supports(.hoverProvider)
         documentHighlight = supports(.documentHighlightProvider)
+        documentSymbols = supports(.documentSymbolProvider)
+        workspaceSymbols = supports(.workspaceSymbolProvider)
         positionEncoding = try values.decodeIfPresent(String.self, forKey: .positionEncoding) ?? "utf-16"
         if let kind = try? values.decode(Change.self, forKey: .textDocumentSync) {
             openClose = kind != .none
@@ -71,7 +75,7 @@ enum LSPFailure: LocalizedError {
 final class LanguageServerConnection: @unchecked Sendable {
     private enum Request: Sendable {
         case initialize, definition(Int), references(Int, Bool), hover(Int)
-        case documentHighlight(Int)
+        case documentHighlight(Int), documentSymbols, workspaceSymbols(String)
 
         var method: String {
             switch self {
@@ -80,6 +84,8 @@ final class LanguageServerConnection: @unchecked Sendable {
             case .references: "textDocument/references"
             case .hover: "textDocument/hover"
             case .documentHighlight: "textDocument/documentHighlight"
+            case .documentSymbols: "textDocument/documentSymbol"
+            case .workspaceSymbols: "workspace/symbol"
             }
         }
     }
@@ -117,7 +123,17 @@ final class LanguageServerConnection: @unchecked Sendable {
     }
 
     private struct Reply<Value: Decodable>: Decodable { let result: Value? }
-    private struct Initialize: Decodable { let capabilities: LSPCapabilities }
+    private struct Initialize: Decodable {
+        struct ServerInfo: Decodable {
+            let name: String
+            let version: String?
+        }
+
+        let capabilities: LSPCapabilities
+        let serverInfo: ServerInfo?
+
+        var dropsClosedFilesFromWorkspace: Bool { serverInfo?.name == "zls" && serverInfo?.version == "0.17.0" }
+    }
     private struct DocumentHighlight: Decodable { let range: LSPRange }
 
     private struct Definitions: Decodable {
@@ -154,6 +170,8 @@ final class LanguageServerConnection: @unchecked Sendable {
     private var stopping = false
     private var closed = false
     private var capabilities: LSPCapabilities?
+    private var dropsClosedFilesFromWorkspace = false
+    private var workspaceSymbolsNeedRefresh = false
     private var document: LSPDocument?
     private var index: LSPTextIndex?
 
@@ -178,6 +196,7 @@ final class LanguageServerConnection: @unchecked Sendable {
             guard !self.stopping else { throw CancellationError() }
             try self.notify("initialized", [:])
             self.capabilities = capabilities
+            self.dropsClosedFilesFromWorkspace = result.dropsClosedFilesFromWorkspace
         }
         return capabilities
     }
@@ -216,6 +235,19 @@ final class LanguageServerConnection: @unchecked Sendable {
             guard let index = self.index, self.document?.revision == snapshot.revision else { throw CancellationError() }
             return ranges.compactMap { index.nsRange($0, clampingColumns: false) }
         }
+    }
+
+    func documentSymbols(in snapshot: LSPDocument) async throws -> [LSPSymbol] {
+        guard let url = snapshot.url else { throw LSPFailure.unavailable }
+        let response = try await request(.documentSymbols, document: snapshot)
+        let result = try JSONDecoder().decode(Reply<LSPDocumentSymbols>.self, from: response).result
+        return result?.symbols(in: url).filter { $0.location.url.standardizedFileURL == url } ?? []
+    }
+
+    func workspaceSymbols(query: String, synchronizing snapshot: LSPDocument) async throws -> [LSPSymbol] {
+        let response = try await request(.workspaceSymbols(query), document: snapshot, timeout: 15)
+        let result = try JSONDecoder().decode(Reply<[LSPDocumentSymbols.SymbolInformation]>.self, from: response).result
+        return result?.map(\.symbol).filter { $0.location.url.isFileURL } ?? []
     }
 
     private static func fileLocations(_ locations: [LSPLocation]) -> [LSPLocation] {
@@ -262,6 +294,13 @@ final class LanguageServerConnection: @unchecked Sendable {
         do {
             guard !stopping, !closed else { throw CancellationError() }
             if let snapshot { try synchronize(snapshot) }
+            if case .workspaceSymbols = request, workspaceSymbolsNeedRefresh {
+                // ZLS 0.17.0 drops a document from its workspace index on didClose.
+                // Reload once before the next search, even if several documents closed.
+                try notify("workspace/didChangeWorkspaceFolders", ["event": ["added": [], "removed": [workspace]]])
+                try notify("workspace/didChangeWorkspaceFolders", ["event": ["added": [workspace], "removed": []]])
+                workspaceSymbolsNeedRefresh = false
+            }
             let params = try parameters(for: request)
             try send(["id": id, "method": request.method, "params": params])
             let expiry = DispatchWorkItem { [weak self] in
@@ -281,13 +320,16 @@ final class LanguageServerConnection: @unchecked Sendable {
                     "capabilities": ["general": ["positionEncodings": ["utf-16"]],
                                      "workspace": ["workspaceFolders": true],
                                      "textDocument": ["definition": ["linkSupport": true],
-                                                      "hover": ["contentFormat": ["markdown", "plaintext"]]]]]
+                                                      "hover": ["contentFormat": ["markdown", "plaintext"]],
+                                                      "documentSymbol": ["hierarchicalDocumentSymbolSupport": true]]]]
         }
+        if case .workspaceSymbols(let query) = request { return ["query": query] }
         guard let url = document?.url else { throw LSPFailure.invalidPosition }
         var params: [String: Any] = ["textDocument": ["uri": url.absoluteString]]
         let offset: Int
         switch request {
-        case .initialize: return [:]
+        case .initialize, .workspaceSymbols: return [:]
+        case .documentSymbols: return params
         case .definition(let value), .references(let value, _), .hover(let value), .documentHighlight(let value): offset = value
         }
         guard let position = index?.position(at: offset) else { throw LSPFailure.invalidPosition }
@@ -306,6 +348,7 @@ final class LanguageServerConnection: @unchecked Sendable {
         if previous?.url != snapshot.url, capabilities.openClose {
             if let previousURL = previous?.url {
                 try notify("textDocument/didClose", ["textDocument": ["uri": previousURL.absoluteString]])
+                if dropsClosedFilesFromWorkspace { workspaceSymbolsNeedRefresh = true }
             }
             if let url = snapshot.url {
                 try notify("textDocument/didOpen", ["textDocument": ["uri": url.absoluteString, "languageId": "zig",

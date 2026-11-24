@@ -332,6 +332,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     @objc func showGoToFile(_ sender: Any?) { showControl(.files) }
     @objc func showCommandMode(_ sender: Any?) { showControl(.commands) }
     @objc func showLanguageModes(_ sender: Any?) { showControl(.languages) }
+    @objc func showDocumentSymbols(_ sender: Any?) { showControl(.documentSymbols) }
+    @objc func showWorkspaceSymbols(_ sender: Any?) { showControl(.workspaceSymbols) }
 
 #if EDIT_AGENT_CHECKS
     func checkHeaderLanguagePicker(in document: DocumentWindow) throws {
@@ -347,10 +349,14 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     private func showControl(_ mode: ControlPanel.Mode, in source: DocumentWindow? = nil) {
         guard let document = source ?? activeDocument, !isQuitting,
-              mode != .languages || document.hasTextDocument else { return }
+              mode != .languages && mode != .documentSymbols || document.hasTextDocument else { return }
         let panel = controlPanel ?? ControlPanel(app: self)
         controlPanel = panel
         panel.toggle(in: document, mode: mode)
+    }
+
+    func languageServerStateDidChange(in document: DocumentWindow) {
+        controlPanel?.languageServerStateDidChange(in: document)
     }
 
     func scratchesDidChange(updated: [ScratchFile] = []) {
@@ -656,9 +662,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case #selector(goBack(_:)): return canNavigate(.back)
         case #selector(goForward(_:)): return canNavigate(.forward)
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
-        case #selector(showGoToFile(_:)), #selector(showCommandMode(_:)):
+        case #selector(showGoToFile(_:)), #selector(showCommandMode(_:)), #selector(showWorkspaceSymbols(_:)):
             return activeDocument.map { $0.window.attachedSheet == nil } ?? false
-        case #selector(showLanguageModes(_:)):
+        case #selector(showLanguageModes(_:)), #selector(showDocumentSymbols(_:)):
             return activeDocument.map { $0.hasTextDocument && $0.window.attachedSheet == nil } ?? false
         case #selector(newWindow(_:)): return true
         case #selector(openDocument(_:)):
@@ -1255,6 +1261,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         let go = addMenu("Go")
         go.addCommand("Go Back", #selector(goBack(_:)), "-", [.control]).target = self
         go.addCommand("Go Forward", #selector(goForward(_:)), "-", [.control, .shift]).target = self
+        go.addItem(.separator())
+        go.addCommand("Go to Line or Symbol…", #selector(showDocumentSymbols(_:))).target = self
+        go.addCommand("Go to Workspace Symbol…", #selector(showWorkspaceSymbols(_:))).target = self
 
         let window = addMenu("Window")
         window.addCommand("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m")

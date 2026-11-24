@@ -14,8 +14,8 @@ The identifiers after each title are request or notification methods. Command ID
 - [ ] **Go to Implementation** (`textDocument/implementation`)
 - [x] **Find All References** (`textDocument/references`) [ZLS specification](features/lsp/spec.md#references-in-the-sidebar)
 - [x] **Document Highlights** (`textDocument/documentHighlight`) — Highlight occurrences of the same symbol in the current file. [Specification](features/lsp-document-highlights/spec.md)
-- [ ] **Document Symbols** (`textDocument/documentSymbol`) — Browse the current file's outline and jump to classes, functions, and other declarations.
-- [ ] **Workspace Symbols** (`workspace/symbol`) — Search for symbols by name across the project.
+- [x] **Document Symbols** (`textDocument/documentSymbol`) — Use `:` in Control to browse and jump to declarations in the current file. [Specification](features/lsp-symbol-navigation/spec.md#go-to-line-or-symbol)
+- [x] **Workspace Symbols** (`workspace/symbol`) — Use `#` in Control to search for symbols by name across the project. [Specification](features/lsp-symbol-navigation/spec.md#go-to-workspace-symbol)
 - [ ] **Call Hierarchy** (`textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls`) — Browse incoming and outgoing calls.
 - [ ] **Type Hierarchy** (`textDocument/prepareTypeHierarchy`, `typeHierarchy/supertypes`, `typeHierarchy/subtypes`) — Browse supertypes and subtypes.
 - [ ] **Monikers** (`textDocument/moniker`) — Navigate to the same symbol across projects when a compatible index is available.

@@ -105,6 +105,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         status.update(visible: session.isEligible, state: session.state,
                       enabled: Set(LanguageServerCommand.allCases.filter(canPerform)))
         document.titleBar.languageServerStatusChanged()
+        app.languageServerStateDidChange(in: document)
     }
 
     func canPerform(_ command: LanguageServerCommand) -> Bool {

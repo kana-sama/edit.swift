@@ -42,9 +42,13 @@ final class LanguageServerSession {
     var supportsReferences: Bool { isReady && capabilities?.references == true }
     var supportsHover: Bool { isReady && capabilities?.hover == true }
     var supportsDocumentHighlight: Bool { isReady && capabilities?.documentHighlight == true }
+    var supportsDocumentSymbols: Bool { isReady && capabilities?.documentSymbols == true }
+    var supportsWorkspaceSymbols: Bool { isServerReady && capabilities?.workspaceSymbols == true }
+    var workspaceRoot: URL? { root }
 
     private var canControl: Bool { isEligible && rootLookup == nil }
-    private var isReady: Bool { canControl && phase == .ready && document.url != nil }
+    private var isServerReady: Bool { canControl && phase == .ready }
+    private var isReady: Bool { isServerReady && document.url != nil }
     private var phase = State.stopped
     private var document = LSPDocument(url: nil, text: "", revision: 0)
     private struct Scope: Equatable, Sendable {
@@ -194,6 +198,24 @@ final class LanguageServerSession {
         let snapshot = document
         let generation = generation
         let result = try await connection.documentHighlights(at: offset, in: snapshot)
+        try validate(revision: snapshot.revision, generation: generation)
+        return result
+    }
+
+    func documentSymbols() async throws -> [LSPSymbol] {
+        guard supportsDocumentSymbols, let connection else { throw LSPFailure.unavailable }
+        let snapshot = document
+        let generation = generation
+        let result = try await connection.documentSymbols(in: snapshot)
+        try validate(revision: snapshot.revision, generation: generation)
+        return result
+    }
+
+    func workspaceSymbols(query: String) async throws -> [LSPSymbol] {
+        guard supportsWorkspaceSymbols, let connection else { throw LSPFailure.unavailable }
+        let snapshot = document
+        let generation = generation
+        let result = try await connection.workspaceSymbols(query: query, synchronizing: snapshot)
         try validate(revision: snapshot.revision, generation: generation)
         return result
     }

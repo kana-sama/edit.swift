@@ -92,6 +92,9 @@ enum LanguageServerCheck {
         try expect(lsp.canPerform(.stop) && lsp.canPerform(.restart) && !lsp.canPerform(.start), "ready server controls")
         let readyControls = try checkPopoverControls(in: lsp, toggle: .stop, capture: captureServers)
         try await checkDocumentHighlights(in: document, capture: captureHover)
+        try await ControlPanel(app: app).checkSymbols(in: document, documentSymbol: "run", workspaceSymbol: "identify",
+                                                       workspaceFile: helper, workspaceSource: notes, capture: captureHover)
+        try await wait("restore the main Zig fixture after checking symbol navigation") { lsp.session.supportsDefinition }
 
         let use = (mainText as NSString).range(of: "identify")
         try expect(await lsp.probe(at: use.location + 2, word: use) == use, "definition link over Unicode source")

@@ -4,7 +4,37 @@ import AppKit
 final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private unowned let app: Edit
     private let panel = ControlWindow()
-    enum Mode { case files, commands, languages }
+    enum Mode {
+        case files, commands, languages, documentSymbols, workspaceSymbols
+
+        var isSymbolMode: Bool { self == .documentSymbols || self == .workspaceSymbols }
+        var acceptsPins: Bool { self == .files || self == .commands }
+        var hasPrefix: Bool { self == .commands || isSymbolMode }
+
+        init?(prefix: Character?) {
+            switch prefix {
+            case ">": self = .commands
+            case ":": self = .documentSymbols
+            case "#": self = .workspaceSymbols
+            default: return nil
+            }
+        }
+    }
+
+    private struct NavigationContext: Equatable {
+        let folder: URL?
+        let openGeneration: UInt64
+        let serverGeneration: Int
+        let revision: Int
+
+        @MainActor init(_ document: DocumentWindow) {
+            let session = document.languageFeatures.session
+            folder = document.folderURL
+            openGeneration = document.openRequestGeneration
+            serverGeneration = session.generation
+            revision = session.revision
+        }
+    }
 
     private let input = NSTextField()
     private let leadingIcon = NSImageView()
@@ -42,6 +72,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     private var folderScan: (scope: FolderFileSearch.Scope, task: Task<FolderFileSearch.Index, Never>)?
     private var scratchLoad: Task<[ScratchFile], Error>?
     private var resultsFolder: URL?
+    private var navigationContext: NavigationContext?
+    private var documentSymbols: (context: NavigationContext, symbols: [LSPSymbol])?
     private var generation = 0
     private var opening = 0
     private var pending = false
@@ -57,16 +89,25 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         if self.document === document, self.mode == mode {
             dismiss(restoreFocus: true)
         } else if self.document === document {
-            switchMode(to: mode, query: self.mode == .languages ? "" : input.stringValue)
+            let preservesQuery = self.mode.acceptsPins && mode.acceptsPins
+            switchMode(to: mode, query: preservesQuery ? input.stringValue : "")
         } else {
             show(in: document, mode: mode)
         }
     }
 
     func folderDidChange(in document: DocumentWindow) {
-        guard self.document === document, mode == .files else { return }
-        configure(.files)
+        guard self.document === document, mode == .files || mode.isSymbolMode else { return }
+        configure(mode)
+        if mode.isSymbolMode { apply([], selected: nil, emptyMessage: nil) }
         search()
+    }
+
+    func languageServerStateDidChange(in document: DocumentWindow) {
+        guard self.document === document, mode.isSymbolMode else { return }
+        let contextChanged = navigationContext != NavigationContext(document)
+        if contextChanged { apply([], selected: nil, emptyMessage: nil) }
+        search(preserving: selectedID)
     }
 
     func scratchesDidChange(recencyOnly: Bool = false) {
@@ -94,14 +135,15 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         input.stringValue = query
         clearButton.isHidden = query.isEmpty
         let searchesFolder = mode == .files && document.folderURL != nil
-        let source = searchesFolder ? [] : sourceEntries()
+        let deferred = searchesFolder || mode.isSymbolMode
+        let source = deferred ? [] : sourceEntries()
         let pinnedFiles = mode == .files && !searchesFolder ? pinnedFileEntries(reusing: source) : []
-        let rows = searchesFolder ? [] : ControlMatching.rank(includingPins(pinnedFiles, in: source), query: query,
-                                                               alternateCharacters: alternateCharacters(for: query),
-                                                               preferShorterTitles: mode == .commands)
-        apply(searchesFolder ? [] : orderedRows(rows, pinnedFiles: pinnedFiles, query: query),
-              selected: retry?.id ?? initialID, error: retry?.message)
-        if mode == .files {
+        let rows = ControlMatching.rank(includingPins(pinnedFiles, in: source), query: query,
+                                        alternateCharacters: alternateCharacters(for: query),
+                                        preferShorterTitles: mode == .commands)
+        apply(orderedRows(rows, pinnedFiles: pinnedFiles, query: query), selected: retry?.id ?? initialID,
+              error: retry?.message, emptyMessage: mode.isSymbolMode ? nil : "No matching results")
+        if mode == .files || mode.isSymbolMode {
             if searchesFolder, retry?.message == nil { feedback.isHidden = true }
             search(preserving: retry?.id ?? initialID, error: retry?.message)
         }
@@ -122,19 +164,32 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
 
     private func configure(_ mode: Mode) {
         self.mode = mode
-        leadingIcon.image = mode == .commands ? Self.commandImage : Self.searchImage
         let hint: String
         switch mode {
-        case .files: hint = document?.folderURL == nil ? "Search recent files" : "Search files"
-        case .commands: hint = "Search commands"
-        case .languages: hint = "Search languages"
+        case .files:
+            hint = document?.folderURL == nil ? "Search recent files" : "Search files"
+            leadingIcon.image = Self.searchImage
+        case .commands:
+            hint = "Search commands"
+            leadingIcon.image = Self.commandImage
+        case .languages:
+            hint = "Search languages"
+            leadingIcon.image = Self.searchImage
+        case .documentSymbols:
+            hint = "Enter a line number or document symbol"
+            leadingIcon.image = Self.documentSymbolImage
+        case .workspaceSymbols:
+            hint = "Search workspace symbols"
+            leadingIcon.image = Self.workspaceSymbolImage
         }
         input.placeholderString = hint
         input.setAccessibilityLabel(hint)
     }
 
     private func switchMode(to mode: Mode, query: String) {
+        let resetsRows = self.mode != mode && (self.mode.isSymbolMode || mode.isSymbolMode)
         configure(mode)
+        if resetsRows { apply([], selected: nil, emptyMessage: nil) }
         input.stringValue = query
         focusQuery()
         if let field = input.currentEditor() as? NSTextView {
@@ -170,6 +225,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         scratchLoad?.cancel()
         scratchLoad = nil
         resultsFolder = nil
+        navigationContext = nil
+        documentSymbols = nil
         pending = false
         deferredRefresh = false
         pinsChangedInPlace = false
@@ -245,6 +302,22 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
         return image
     }()
+
+    private static let documentSymbolImage = markerImage(":")
+    private static let workspaceSymbolImage = markerImage("#")
+
+    private static func markerImage(_ marker: String) -> NSImage {
+        NSImage(size: NSSize(width: 18, height: 18), flipped: true) { rect in
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedSystemFont(ofSize: 16, weight: .semibold),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]
+            let label = NSAttributedString(string: marker, attributes: attributes)
+            let size = label.size()
+            label.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
+            return true
+        }
+    }
 
     private func setSearching(_ searching: Bool) {
         leadingIcon.isHidden = searching
@@ -424,7 +497,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     }
 
     private func orderedRows(_ results: [ControlMatch], pinnedFiles: [ControlEntry], query: String) -> [ControlMatch] {
-        guard mode != .languages, query.allSatisfy(\.isWhitespace), !pins.entries.isEmpty else { return results }
+        guard mode.acceptsPins, query.allSatisfy(\.isWhitespace), !pins.entries.isEmpty else { return results }
         let prefix: [ControlMatch]
         if mode == .files {
             prefix = ControlMatching.rank(pinnedFiles, query: "")
@@ -446,6 +519,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
 
     private func sourceEntries() -> [ControlEntry] {
         if mode == .files { return fileEntries() }
+        if mode.isSymbolMode { return [] }
         guard let document else { return [] }
         if mode == .languages {
             let automatic = SyntaxLanguage.detected(at: document.fileURL)
@@ -513,9 +587,15 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         generation &+= 1
         let current = generation
         pinsChangedInPlace = false
+        let query = input.stringValue
+        clearButton.isHidden = query.isEmpty
+        if mode.isSymbolMode {
+            _ = scanFolder(nil)
+            searchNavigation(query, generation: current, selected: id, message: error)
+            return
+        }
         let rows = sourceEntries()
         let pinnedFiles = mode == .files ? pinnedFileEntries(reusing: rows) : []
-        let query = input.stringValue
         let folder = mode == .files ? document?.folderURL : nil
         let path = folder == nil ? nil : FolderFileSearch.DirectoryQuery(query)
         let scope = folder.map { FolderFileSearch.Scope(folder: $0, components: path?.components) }
@@ -527,7 +607,6 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let rowsWithPins = folder == nil ? includingPins(pinnedFiles, in: rows) : rows
         let isFileSearch = mode == .files
         let isCommandSearch = mode == .commands
-        clearButton.isHidden = query.isEmpty
         if error == nil { feedback.stringValue = "" }
         pending = true
         request = Task { [weak self] in
@@ -585,6 +664,94 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
     }
 
+    private func searchNavigation(_ input: String, generation current: Int, selected id: String?, message: String?) {
+        guard let document else { return }
+        let context = NavigationContext(document)
+        navigationContext = context
+        request = nil
+        pending = false
+        setSearching(false)
+        let query = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let workspace = mode == .workspaceSymbols
+        let isLine = !workspace && ControlNavigation.lineQuery(query)
+        let session = document.languageFeatures.session
+        if isLine, !document.hasTextDocument {
+            apply([], selected: nil, error: "No text document is open")
+            return
+        }
+        if !isLine, workspace ? !session.supportsWorkspaceSymbols : !session.supportsDocumentSymbols {
+            let unavailable = workspace ? "Workspace symbols require an active language server"
+                : (query.isEmpty && document.hasTextDocument ? "Enter a line number" : "Document symbols require an active language server")
+            apply([], selected: nil, error: message ?? unavailable)
+            return
+        }
+        if workspace, query.isEmpty {
+            apply([], selected: nil, error: message, emptyMessage: nil)
+            return
+        }
+
+        let lineText = isLine ? document.editor.string : nil
+        let cachedSymbols = documentSymbols.flatMap { $0.context == context ? $0.symbols : nil }
+        let alternate = alternateCharacters(for: query)
+        let folder = context.folder ?? session.workspaceRoot
+        pending = true
+        request = Task { [weak self, weak document] in
+            do {
+                let symbols: [LSPSymbol]
+                if isLine {
+                    symbols = []
+                } else if workspace {
+                    try await Task.sleep(for: .milliseconds(120))
+                    let primary = try await session.workspaceSymbols(query: query)
+                    let translated = String(query.map { alternate[$0] ?? $0 })
+                    if primary.isEmpty, translated != query {
+                        symbols = try await session.workspaceSymbols(query: translated)
+                    } else {
+                        symbols = primary
+                    }
+                } else if let cachedSymbols {
+                    symbols = cachedSymbols
+                } else {
+                    symbols = try await session.documentSymbols()
+                }
+
+                try Task.checkCancellation()
+                let worker = Task.detached(priority: .userInitiated) {
+                    if let lineText {
+                        return ControlNavigation.lineResult(query, text: lineText).map { [$0] } ?? []
+                    }
+                    return ControlNavigation.symbolResults(symbols, query: query, workspace: workspace,
+                                                           folder: folder, alternateCharacters: alternate)
+                }
+                let rows = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
+                guard let self, let document, current == generation, !Task.isCancelled else { return }
+                guard context == NavigationContext(document) else { search(preserving: id, error: message); return }
+                if !workspace && !isLine { documentSymbols = (context, symbols) }
+                pending = false
+                setSearching(false)
+                apply(rows, selected: id, error: message,
+                      emptyMessage: isLine ? "Line number is outside the document" : "No matching symbols")
+            } catch {
+                guard let self, current == generation, !Task.isCancelled else { return }
+                if error is CancellationError, let document, context != NavigationContext(document) {
+                    search(preserving: id, error: message)
+                } else {
+                    pending = false
+                    setSearching(false)
+                    apply([], selected: nil, error: message ?? error.localizedDescription)
+                }
+            }
+        }
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard let self, current == generation, pending else { return }
+            setSearching(true)
+            try? await Task.sleep(for: .milliseconds(350))
+            guard current == generation, pending else { return }
+            apply([], selected: nil, emptyMessage: nil)
+        }
+    }
+
     private func alternateCharacters(for query: String) -> [Character: Character] {
         guard !query.allSatisfy(\.isWhitespace) else { return [:] }
         return keyboardLayouts.alternatives(for: query)
@@ -602,21 +769,22 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     }
 
     func controlTextDidChange(_ obj: Notification) {
-        if mode == .files, input.stringValue.hasPrefix(">"),
+        if mode == .files, let next = Mode(prefix: input.stringValue.first),
            (input.currentEditor() as? NSTextView)?.hasMarkedText() != true {
-            switchMode(to: .commands, query: String(input.stringValue.dropFirst()))
+            switchMode(to: next, query: String(input.stringValue.dropFirst()))
         } else {
             search()
         }
     }
 
-    private func apply(_ results: [ControlMatch], selected id: String?, error: String? = nil) {
+    private func apply(_ results: [ControlMatch], selected id: String?, error: String? = nil,
+                       emptyMessage: String? = "No matching results") {
         entries = results
         cachedPinnedRows = nil
         updatingRows = true
         table.reloadData()
-        feedback.stringValue = error ?? (entries.isEmpty ? "No matching results" : "")
-        feedback.isHidden = error == nil && !entries.isEmpty
+        feedback.stringValue = error ?? (entries.isEmpty ? emptyMessage : nil) ?? ""
+        feedback.isHidden = feedback.stringValue.isEmpty
         position()
         if !results.isEmpty {
             let row = id.flatMap { key in results.firstIndex { $0.entry.id == key } } ?? 0
@@ -704,7 +872,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
                 return nil
             case (36, _), (76, _):
                 return nil
-            case (51, []) where mode == .commands && field?.selectedRange() == NSRange(location: 0, length: 0):
+            case (51, []) where mode.hasPrefix && field?.selectedRange() == NSRange(location: 0, length: 0):
                 switchMode(to: .files, query: input.stringValue)
                 (input.currentEditor() as? NSTextView)?.setSelectedRange(NSRange(location: 0, length: 0))
                 return nil
@@ -750,12 +918,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     }
 
     private func pin(at row: Int) -> ControlPin? {
-        guard mode != .languages, entries.indices.contains(row) else { return nil }
+        guard mode.acceptsPins, entries.indices.contains(row) else { return nil }
         return pins.pin(matching: entries[row].entry)
     }
 
     private func togglePin(at row: Int) {
-        guard !pending, mode != .languages, entries.indices.contains(row) else { return }
+        guard !pending, mode.acceptsPins, entries.indices.contains(row) else { return }
         let entry = entries[row].entry
         let pin: ControlPin
         if let scratch = entry.scratch {
@@ -876,6 +1044,102 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     @objc private func activateClickedRow() { _ = activate(row: table.clickedRow) }
 
     #if EDIT_AGENT_CHECKS
+    func checkSymbols(in document: DocumentWindow, documentSymbol: String, workspaceSymbol: String,
+                      workspaceFile: URL, workspaceSource: URL? = nil,
+                      capture: (NSView, String) throws -> Void) async throws {
+        guard app.isAgentCheck, let originalFile = document.fileURL else { throw CheckFailure.invalidSymbols("open a Zig file") }
+        let originalCaret = document.editor.selectedRange()
+        defer { dismiss(restoreFocus: false) }
+
+        func enter(_ query: String) async throws {
+            show(in: document)
+            focusQuery()
+            guard let field = input.currentEditor() as? NSTextView else { throw CheckFailure.invalidSearchField }
+            field.insertText(query, replacementRange: field.selectedRange())
+            while pending { await request?.value }
+        }
+
+        try await enter(":0")
+        guard mode == .documentSymbols, entries.isEmpty, feedback.stringValue == "Line number is outside the document" else {
+            throw CheckFailure.invalidSymbols("reject line zero in colon mode")
+        }
+        try await enter(":2")
+        let buffer = document.editor.string as NSString
+        let secondLine = buffer.lineRange(for: NSRange(location: 0, length: 0)).upperBound
+        guard mode == .documentSymbols, leadingIcon.image === Self.documentSymbolImage,
+              input.stringValue == "2", table.selectedRow == 0, entries.map(\.entry.title) == ["Line 2"] else {
+            throw CheckFailure.invalidSymbols("interpret a colon followed by a number as a line")
+        }
+        guard let enterKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                             windowNumber: panel.windowNumber, context: nil, characters: "\r",
+                                             charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36),
+              intercept(enterKey) == nil, self.document == nil, document.editor.selectedRange().location == secondLine,
+              document.window.firstResponder === document.editor else {
+            throw CheckFailure.invalidSymbols("jump to the one-based line with Return and restore editor focus")
+        }
+
+        try await enter(":\(documentSymbol.uppercased())")
+        guard mode == .documentSymbols, input.stringValue == documentSymbol.uppercased(),
+              let row = entries.firstIndex(where: { $0.entry.title == documentSymbol }),
+              case .symbol(let local, _) = entries[row].entry.navigation,
+              let localCaret = symbolCaret(local, in: document), let view = panel.contentView else {
+            throw CheckFailure.invalidSymbols("find a document symbol case-insensitively")
+        }
+        try capture(view, "document-symbols")
+        activate(row: row)
+        guard self.document == nil, document.fileURL == originalFile, document.editor.selectedRange() == localCaret else {
+            throw CheckFailure.invalidSymbols("jump to the selected symbol in the active document")
+        }
+
+        try await enter("#\(workspaceSymbol)")
+        guard mode == .workspaceSymbols, leadingIcon.image === Self.workspaceSymbolImage,
+              input.stringValue == workspaceSymbol, let view = panel.contentView,
+              let row = entries.firstIndex(where: {
+                  guard $0.entry.title == workspaceSymbol, case .symbol(let location, _) = $0.entry.navigation else { return false }
+                  return location.url.standardizedFileURL == workspaceFile.standardizedFileURL &&
+                      $0.entry.detail == workspaceFile.lastPathComponent
+              }), case .symbol(let projectLocation, _) = entries[row].entry.navigation else {
+            throw CheckFailure.invalidSymbols("find a project symbol in another file and show its path")
+        }
+        try capture(view, "workspace-symbols")
+        guard let jump = activate(row: row) else { throw CheckFailure.invalidSymbols("open the workspace symbol") }
+        await jump.value
+        guard self.document == nil, document.fileURL == workspaceFile,
+              document.editor.selectedRange() == symbolCaret(projectLocation, in: document),
+              document.window.firstResponder === document.editor else {
+            throw CheckFailure.invalidSymbols("open the workspace symbol at its location in the same window")
+        }
+        await app.navigate(.back)
+        guard document.fileURL == originalFile, document.editor.selectedRange() == localCaret else {
+            throw CheckFailure.invalidSymbols("return to the originating file and caret using Go Back")
+        }
+        if let workspaceSource {
+            guard try await app.openFile(workspaceSource, in: document) === document,
+                  !document.languageFeatures.session.supportsDocumentSymbols else {
+                throw CheckFailure.invalidSymbols("open a non-Zig file in the same project")
+            }
+            let session = document.languageFeatures.session
+            let deadline = ContinuousClock.now + .seconds(5)
+            while !session.supportsWorkspaceSymbols && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(15))
+            }
+            guard session.supportsWorkspaceSymbols else {
+                throw CheckFailure.invalidSymbols("wait for workspace symbols on a non-Zig file (\(session.state.title))")
+            }
+            try await enter("#\(workspaceSymbol)")
+            guard mode == .workspaceSymbols, entries.contains(where: {
+                $0.entry.title == workspaceSymbol && $0.entry.detail == workspaceFile.lastPathComponent
+            }) else {
+                throw CheckFailure.invalidSymbols("find the workspace symbol while a non-Zig file is open (\(feedback.stringValue), \(entries.map(\.entry.title)))")
+            }
+            dismiss(restoreFocus: false)
+            guard try await app.openFile(originalFile, in: document) === document else {
+                throw CheckFailure.invalidSymbols("restore the original Zig fixture")
+            }
+        }
+        document.editor.setCaretSelections([originalCaret], record: false)
+    }
+
     func checkHidden(in document: DocumentWindow) async throws {
         guard app.isAgentCheck else { return }
         show(in: document)
@@ -1435,6 +1699,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         case invalidFolderResults(String)
         case invalidPins(String)
         case invalidScratches(String)
+        case invalidSymbols(String)
         case shortcutEscaped
 
         var errorDescription: String? {
@@ -1445,6 +1710,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             case .invalidFolderResults(let stage): "Control failed the folder search check for \(stage)."
             case .invalidPins(let stage): "Control pins could not \(stage)."
             case .invalidScratches(let stage): "Control could not \(stage)."
+            case .invalidSymbols(let stage): "Control could not \(stage)."
             }
         }
     }
@@ -1464,6 +1730,9 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             document.setSyntaxLanguage(language)
             dismiss(restoreFocus: true)
             return nil
+        }
+        if let target = entry.navigation {
+            return activateNavigation(target, entry: entry, in: document)
         }
         if (entry.folderFileURL != nil || entry.scratch != nil) && document.folderURL != resultsFolder {
             configure(mode)
@@ -1494,6 +1763,61 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
     }
 
+    private func activateNavigation(_ target: ControlNavigation, entry: ControlEntry,
+                                    in document: DocumentWindow) -> Task<Void, Never>? {
+        guard navigationContext == NavigationContext(document) else { search(preserving: entry.id); return nil }
+        let origin = document.navigationLocation
+        switch target {
+        case let .line(range, text):
+            guard document.hasTextDocument, document.editor.string.utf8.elementsEqual(text.utf8) else {
+                search(preserving: entry.id)
+                return nil
+            }
+            dismiss(restoreFocus: true)
+            document.navigate(to: range, from: origin)
+            return nil
+        case let .symbol(location, _):
+            let url = location.url.standardizedFileURL
+            if url == document.fileURL?.standardizedFileURL {
+                guard let caret = symbolCaret(location, in: document) else {
+                    apply(entries, selected: entry.id, error: "Symbol location is no longer available")
+                    return nil
+                }
+                dismiss(restoreFocus: true)
+                document.navigate(to: caret, from: origin)
+                return nil
+            }
+
+            let query = input.stringValue
+            let mode = mode
+            let openGeneration = document.openRequestGeneration
+            dismiss(restoreFocus: true)
+            let dismissedOpening = opening
+            return Task {
+                @MainActor func stillWanted() -> Bool {
+                    opening == dismissedOpening && self.document == nil && !app.isQuitting
+                }
+                guard document.openRequestGeneration == openGeneration, stillWanted() else { return }
+                do {
+                    guard try await app.openFile(url, in: document, focusEditor: false, shouldOpen: stillWanted) != nil,
+                          document.openRequestGeneration == openGeneration &+ 1, stillWanted() else { return }
+                    guard let caret = symbolCaret(location, in: document) else { throw LSPFailure.invalidPosition }
+                    document.navigate(to: caret, from: origin)
+                } catch {
+                    guard document.openRequestGeneration == openGeneration &+ 1, stillWanted(),
+                          app.isAgentCheck || document.window.isKeyWindow else { return }
+                    show(in: document, mode: mode, retry: (query, entry.id, error.localizedDescription))
+                }
+            }
+        }
+    }
+
+    private func symbolCaret(_ location: LSPLocation, in document: DocumentWindow) -> NSRange? {
+        guard document.hasEditableTextDocument, document.editor.conflictEdits.isEmpty,
+              let range = location.range.nsRange(in: document.editor.string) else { return nil }
+        return NSRange(location: range.location, length: 0)
+    }
+
     private func runCommand(_ entry: ControlEntry, in document: DocumentWindow) {
         guard let command = commands[entry.id], command.isAvailable(in: document, focus: originalFocus) else {
             search(preserving: entry.id)
@@ -1510,6 +1834,14 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
         if command.item.action == #selector(Edit.showLanguageModes(_:)) {
             switchMode(to: .languages, query: "")
+            return
+        }
+        if command.item.action == #selector(Edit.showDocumentSymbols(_:)) {
+            switchMode(to: .documentSymbols, query: "")
+            return
+        }
+        if command.item.action == #selector(Edit.showWorkspaceSymbols(_:)) {
+            switchMode(to: .workspaceSymbols, query: "")
             return
         }
         dismiss(restoreFocus: true)
@@ -1554,6 +1886,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             icon.setAccessibilityElement(false)
             views.append(icon)
         }
+        if let target = match.entry.navigation, let image = Self.navigationImage(for: target) {
+            let icon = NSImageView(image: image)
+            icon.contentTintColor = .secondaryLabelColor
+            icon.setAccessibilityElement(false)
+            icon.widthAnchor.constraint(equalToConstant: 17).isActive = true
+            views.append(icon)
+        }
         views.append(title)
         if let detail = match.entry.detail {
             views.append(makeLabel(detail, highlights: match.detailCharacters, secondary: true, lineBreak: .byTruncatingHead))
@@ -1568,6 +1907,23 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         stack.alignment = .centerY
         stack.spacing = 7
         return stack
+    }
+
+    private static func navigationImage(for target: ControlNavigation) -> NSImage? {
+        let symbol: String
+        switch target {
+        case .line: symbol = "line.3.horizontal"
+        case .symbol(_, let kind):
+            switch kind {
+            case 6, 9, 12, 25: symbol = "f.cursive"
+            case 5, 10, 11, 23: symbol = "cube"
+            case 2, 3, 4: symbol = "shippingbox"
+            case 7, 8, 13, 14, 22: symbol = "curlybraces"
+            default: symbol = "circle"
+            }
+        }
+        return NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
     }
 
     private func pinMarker(for row: Int) -> NSImageView {
