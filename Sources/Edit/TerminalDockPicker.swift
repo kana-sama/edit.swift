@@ -60,6 +60,25 @@ private final class DockPreviewButton: NSButton {
     override var isFlipped: Bool { true }
     override var intrinsicContentSize: NSSize { NSSize(width: 96, height: 82) }
 
+    // A click must reach the choice even when the nonactivating panel isn't key.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { isEnabled }
+
+    // Track the delivered click events directly so even a queued release can choose a dock.
+    override func mouseDown(with event: NSEvent) {
+        isHighlighted = isEnabled
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        isHighlighted = isEnabled && bounds.contains(convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        isHighlighted = false
+        if isEnabled && bounds.contains(convert(event.locationInWindow, from: nil)) {
+            sendAction(action, to: target)
+        }
+    }
+
     private var miniature: NSRect {
         NSRect(x: 4, y: 5, width: bounds.width - 8, height: bounds.height - 28)
     }

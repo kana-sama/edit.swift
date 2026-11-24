@@ -379,10 +379,25 @@ enum TerminalCheck {
             let reopened = try require(window.childWindows?.first { $0.contentView?.identifier?.rawValue == pickerID },
                                        "find the reopened dock picker")
             let choice = try require(view(otherID, in: reopened.contentView) as? NSButton, "find the other dock after reopening")
-            let choose = try require(choice.action, "connect the other dock choice")
-            try expect(NSApp.sendAction(choose, to: choice.target, from: choice) && !reopened.isVisible &&
+            let point = choice.convert(NSPoint(x: choice.bounds.maxX - 10, y: choice.bounds.midY), to: nil)
+            try expect(!reopened.isKeyWindow && reopened.contentView?.hitTest(point) === choice,
+                       "target the visible dock choice while the picker is not key")
+            let down = try require(NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [],
+                                                     timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: reopened.windowNumber,
+                                                     context: nil, eventNumber: 1, clickCount: 1, pressure: 1),
+                                   "create the dock picker press")
+            let up = try require(NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [],
+                                                   timestamp: down.timestamp, windowNumber: reopened.windowNumber,
+                                                   context: nil, eventNumber: 1, clickCount: 1, pressure: 0),
+                                 "create the dock picker release")
+            NSApp.postEvent(up, atStart: true)
+            reopened.sendEvent(down)
+            if let release = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: true) {
+                reopened.sendEvent(release)
+            }
+            try expect(!reopened.isVisible && document.isTerminalDockedRight == (dock == .below) &&
                        terminal.window === window && window.firstResponder === terminal,
-                       "move the live terminal and return focus to it after choosing a dock")
+                       "move the live terminal and restore its focus on the first click")
         }
     }
 
