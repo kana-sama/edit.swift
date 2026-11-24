@@ -351,6 +351,26 @@ enum SourceControlCheck {
         try expect(originalBlocks.count == 2 && originalBlocks.allSatisfy { $0.sides.count == 3 && $0.style == .diff },
                    "read every block and every side from a jj diff conflict")
         let commentTarget = (original as NSString).range(of: "let commentTarget = true")
+        let scroll = document.scrollView
+        func gutterIsAligned() throws -> Bool {
+            guard let start = document.displayedConflicts.last?.range.location, start > 0 else { return false }
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            func hasPurpleStripe(at offset: Int) throws -> Bool {
+                guard let row = editor.laidOutLineBounds(at: offset) else { throw Failure("lay out the conflict gutter row") }
+                let gutterX = editor.convert(scroll.visibleContentOrigin, to: scroll).x
+                let rect = NSRect(x: max(gutterX, scroll.contentView.frame.minX) + 2,
+                                  y: scroll.convert(row, from: editor).midY - 3, width: 3, height: 6)
+                guard let bitmap = scroll.bitmapImageRepForCachingDisplay(in: rect) else { throw Failure("capture the conflict gutter") }
+                scroll.cacheDisplay(in: rect, to: bitmap)
+                return (0..<bitmap.pixelsHigh).contains { y in
+                    (0..<bitmap.pixelsWide).contains { x in
+                        guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { return false }
+                        return min(color.redComponent, color.blueComponent) > color.greenComponent + 0.22
+                    }
+                }
+            }
+            return try !hasPurpleStripe(at: start - 1) && hasPurpleStripe(at: start)
+        }
         func unchangedCommentColor() -> NSColor? {
             let range = (editor.string as NSString).range(of: "// Unchanged 1")
             guard range.location != NSNotFound else { return nil }
@@ -361,8 +381,14 @@ enum SourceControlCheck {
         try await waitFor("paint the unchanged Swift comment before the edit") {
             unchangedCommentColor() == SyntaxColor.comment.nativeColor
         }
+        let originBeforeGutterCheck = scroll.visibleContentOrigin
+        editor.scrollRangeToVisible(NSRange(location: originalBlocks[1].range.location, length: 0))
+        try expect(try gutterIsAligned(), "paint the stripe starting on the opening conflict marker")
         editor.setSelectedRange(NSRange(location: commentTarget.location, length: 0))
         editor.toggleLineComments(nil)
+        let alignedAfterComment = try gutterIsAligned()
+        if !alignedAfterComment { try render(document.window) }
+        try expect(alignedAfterComment, "keep the first frame of the purple gutter aligned after Toggle Line Comments")
         let keptCommentColor = unchangedCommentColor() == SyntaxColor.comment.nativeColor
         if !keptCommentColor { try render(document.window) }
         try expect(keptCommentColor && editor.string.contains("// let commentTarget = true"),
@@ -370,7 +396,9 @@ enum SourceControlCheck {
         undo.undo()
         try expect(editor.string == original && unchangedCommentColor() == SyntaxColor.comment.nativeColor,
                    "preserve the following comment color on Undo before reanalysis")
+        try expect(try gutterIsAligned(), "keep the purple gutter aligned on Undo before reanalysis")
         undo.removeAllActions()
+        scroll.scrollToVisibleContentOrigin(originBeforeGutterCheck)
         guard let navigation: NSSegmentedControl = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictNavigation" }) else {
             throw Failure("find the conflict navigation")
         }
@@ -378,7 +406,6 @@ enum SourceControlCheck {
             throw Failure("find Pending Changes beside the format control")
         }
         try expect(pending.state == .off && pending.isEnabled, "offer Pending Changes as an optional diff view")
-        let scroll = document.scrollView
         func actionBars() -> [JJConflictActions] { editor.subviews.compactMap { $0 as? JJConflictActions } }
         func headerBounds(_ anchor: NSRange) -> NSRect? {
             guard let first = editor.laidOutLineBounds(at: anchor.location),

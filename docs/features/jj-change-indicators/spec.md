@@ -57,6 +57,8 @@ Take conflict status from metadata for the entire current jj tree. This includes
 
 Within a confirmed conflict block, the conflict marker takes precedence over ordinary diff. Outside it, show ordinary marks where the comparison is reliable. Resolving one block in the buffer removes its marker. Remaining blocks retain their markers and keep the file and ancestors purple. Resolving the last block restores the ordinary status of the file and its ancestors, taking other descendants into account. Undo restores the unresolved state. While a block is being edited, incomplete delimiters alone are insufficient evidence of resolution. Reconcile the provisional buffer state with jj after the text reaches disk.
 
+Keep the gutter stripe attached to the current text of each tracked conflict. Edits before or inside a block move the stripe with the block in the first frame, before the repository comparison returns.
+
 The [Jujutsu text conflict panel](../jj-text-conflicts/spec.md) adds highlighting, navigation, and resolution for confirmed text blocks.
 
 See [Jujutsu's materialized conflict formats](https://docs.jj-vcs.dev/latest/conflicts/).

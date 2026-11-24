@@ -39,6 +39,7 @@ final class JJEditorDecorations {
     private weak var nativeScroller: NSScroller?
     private var scrollerStyle: NSScroller.Style?
     private var lineStarts: [Int] = []
+    private var projectedConflictStarts: Set<Int> = []
     private(set) var marks: [JJLineMark] = []
     var allowsNavigation = true
     private var lastMarkLines: [Int] = []
@@ -66,7 +67,9 @@ final class JJEditorDecorations {
 
     func setMarks(_ marks: [JJLineMark], lineStarts: [Int]) {
         allowsNavigation = true
-        guard marks != self.marks || lineStarts != self.lineStarts else { return }
+        let projectedStarts = Set(editor?.conflictEdits.map(\.block.location) ?? [])
+        guard marks != self.marks || lineStarts != self.lineStarts || projectedStarts != projectedConflictStarts else { return }
+        projectedConflictStarts = projectedStarts
         self.marks = marks.sorted {
             if $0.lines.lowerBound != $1.lines.lowerBound { return $0.lines.lowerBound < $1.lines.lowerBound }
             return $0.kind.drawingPriority < $1.kind.drawingPriority
@@ -78,17 +81,21 @@ final class JJEditorDecorations {
             return lastLine
         }
         if marks.isEmpty {
-            gutter.removeFromSuperview()
             track.removeFromSuperview()
             trackMarks.removeAll()
-        } else if let scroll = editor?.enclosingScrollView {
+        }
+        if let scroll = editor?.enclosingScrollView {
             layout(in: scroll)
-            updateTrackMarks()
+            if !marks.isEmpty { updateTrackMarks() }
         }
     }
 
     func layout(in scroll: NSScrollView) {
-        guard !marks.isEmpty, let editor else { return }
+        guard let editor else { return }
+        if marks.isEmpty && editor.conflictEdits.isEmpty {
+            gutter.removeFromSuperview()
+            return
+        }
         let clip = scroll.contentView.frame
         let exposedOrigin = editor.convert(scroll.visibleContentOrigin, to: scroll)
         let gutterFrame = NSRect(x: max(clip.minX, exposedOrigin.x), y: clip.minY, width: gutterWidth + 5,
@@ -101,6 +108,7 @@ final class JJEditorDecorations {
         if gutter.frame != gutterInEditor { gutter.frame = gutterInEditor }
         gutter.needsDisplay = true
 
+        guard !marks.isEmpty else { return }
         let scroller = scroll.verticalScroller
         let style = scroll.scrollerStyle
         let styleChanged = style != scrollerStyle
@@ -294,6 +302,29 @@ final class JJEditorDecorations {
                 }
             }
         }
+        drawProjectedConflicts(in: dirtyRect, editor: editor)
+    }
+
+    private func drawProjectedConflicts(in dirtyRect: NSRect, editor: EditorTextView) {
+        guard !editor.conflictEdits.isEmpty, let text = editor.textStorage?.mutableString,
+              let layout = editor.textLayoutManager, let viewport = layout.textViewportLayoutController.viewportRange else { return }
+        let visible = NSIntersectionRange(editor.charRange(viewport, in: layout), NSRange(location: 0, length: text.length))
+        for edit in editor.conflictEdits {
+            if edit.block.location >= visible.upperBound { break }
+            let range = NSIntersectionRange(edit.block, visible)
+            guard range.length > 0 else { continue }
+            var offset = LineEditing.line(at: range.location, in: text).start
+            while offset < range.upperBound {
+                if let row = editor.laidOutLineBounds(at: offset) {
+                    let rect = gutter.convert(row, from: editor)
+                    let stripe = NSRect(x: 2, y: rect.minY, width: 3, height: rect.height)
+                    if stripe.intersects(dirtyRect) { fill(stripe, kind: .conflict) }
+                }
+                let next = LineEditing.line(at: offset, in: text).end
+                guard next > offset else { break }
+                offset = next
+            }
+        }
     }
 
     private func visibleGutterMarks(in editor: EditorTextView) -> [GutterMark] {
@@ -305,11 +336,16 @@ final class JJEditorDecorations {
         var index = firstMarkEnding(atOrAfter: firstLine)
         var positions: [GutterMark] = []
         while index < marks.count && marks[index].lines.lowerBound <= lastLine {
-            if let marker = gutterMark(marks[index], firstLine: firstLine, lastLine: lastLine, in: editor),
+            let mark = marks[index]
+            index += 1
+            let start = mark.lines.lowerBound
+            // Projected blocks already follow buffer edits. The matching cached mark belongs
+            // to that block until the next comparison, even if the block has been resolved.
+            if mark.kind == .conflict, lineStarts.indices.contains(start), projectedConflictStarts.contains(lineStarts[start]) { continue }
+            if let marker = gutterMark(mark, firstLine: firstLine, lastLine: lastLine, in: editor),
                !gutterHitArea(around: marker.bounds).isEmpty {
                 positions.append(marker)
             }
-            index += 1
         }
         return positions
     }
