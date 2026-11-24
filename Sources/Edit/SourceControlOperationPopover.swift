@@ -12,7 +12,7 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
     private weak var anchor: NSView?
     private let prepare: (Direction) async throws -> Preview
     private let apply: (Preview) async throws -> Void
-    private let popover = NSPopover()
+    private let popover: SourceControlPopover
     private let layout = NSStackView()
     private let directionControl = NSSegmentedControl()
     private let scroll = NSScrollView()
@@ -30,8 +30,9 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
     private var diskList: NSStackView?
     private weak var filesToggle: NSButton?
 
-    init(anchor: NSView, prepare: @escaping (Direction) async throws -> Preview, apply: @escaping (Preview) async throws -> Void) {
+    init(anchor: NSView, agentCheck: Bool, prepare: @escaping (Direction) async throws -> Preview, apply: @escaping (Preview) async throws -> Void) {
         self.anchor = anchor
+        popover = SourceControlPopover(agentCheck: agentCheck)
         self.prepare = prepare
         self.apply = apply
         super.init()
@@ -181,7 +182,7 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
         scrollHeight.constant = min(360, max(52, documentHeight + 1))
         let size = NSSize(width: Self.contentWidth + 2 * Self.inset, height: ceil(layout.fittingSize.height) + 2 * Self.inset)
         popover.contentSize = size
-        if !popover.isShown { popover.contentViewController?.view.setFrameSize(size) }
+        if !popover.isShown { popover.native.contentViewController?.view.setFrameSize(size) }
     }
 
     private func updateButtons() {
@@ -313,9 +314,9 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
         ])
         let controller = NSViewController()
         controller.view = wrapper
-        popover.behavior = .transient
-        popover.delegate = self
-        popover.contentViewController = controller
+        popover.native.behavior = .transient
+        popover.native.delegate = self
+        popover.native.contentViewController = controller
         updateButtons()
         fitContent()
     }
@@ -338,7 +339,7 @@ final class SourceControlOperationPopover: NSObject, NSPopoverDelegate {
     @objc private func dismissPopover() { close() }
 
 #if EDIT_AGENT_CHECKS
-    var checkView: NSView { popover.contentViewController!.view }
+    var checkView: NSView { popover.native.contentViewController!.view }
 
     func viewForCheck(_ preview: Preview) -> NSView {
         direction = preview.direction

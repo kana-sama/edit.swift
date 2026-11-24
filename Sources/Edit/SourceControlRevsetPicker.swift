@@ -20,7 +20,7 @@ final class SourceControlRevsetPicker: NSObject, NSPopoverDelegate, NSTableViewD
     private let onDelete: (String) throws -> Void
     private let onMove: (String, String?) throws -> Void
     private let readDefault: () async throws -> String
-    private let popover = NSPopover()
+    private let popover: SourceControlPopover
     private let content = NSView()
     private let stack = NSStackView()
     private let table = RevsetTable()
@@ -45,12 +45,13 @@ final class SourceControlRevsetPicker: NSObject, NSPopoverDelegate, NSTableViewD
     private var closing = false
     private var reopen = false
 
-    init(anchor: NSView, onSelect: @escaping (String) throws -> Void,
+    init(anchor: NSView, agentCheck: Bool, onSelect: @escaping (String) throws -> Void,
          onSave: @escaping (String, String, String?) async throws -> Void,
          onDelete: @escaping (String) throws -> Void,
          onMove: @escaping (String, String?) throws -> Void,
          readDefault: @escaping () async throws -> String) {
         self.anchor = anchor
+        popover = SourceControlPopover(agentCheck: agentCheck)
         self.onSelect = onSelect
         self.onSave = onSave
         self.onDelete = onDelete
@@ -516,9 +517,9 @@ final class SourceControlRevsetPicker: NSObject, NSPopoverDelegate, NSTableViewD
         ])
         let controller = NSViewController()
         controller.view = content
-        popover.contentViewController = controller
-        popover.behavior = .transient
-        popover.delegate = self
+        popover.native.contentViewController = controller
+        popover.native.behavior = .transient
+        popover.native.delegate = self
         update(settings)
     }
 

@@ -10,7 +10,7 @@ final class SourceControlDescriptionPopover: NSObject, NSPopoverDelegate, @MainA
         .size(withAttributes: [.font: EditorTextView.defaultFont]).width
 
     private weak var anchor: NSView?
-    private let popover = NSPopover()
+    private let popover: SourceControlPopover
     private let scroll: NSScrollView
     private let text: EditorTextView
     private let layout = NSStackView()
@@ -24,8 +24,9 @@ final class SourceControlDescriptionPopover: NSObject, NSPopoverDelegate, @MainA
     private(set) var draft: JJSourceControlRevision?
     private var pendingOpen: JJSourceControlRevision?
 
-    init(anchor: NSView, onSave: @escaping (String) -> Void) {
+    init(anchor: NSView, agentCheck: Bool, onSave: @escaping (String) -> Void) {
         self.anchor = anchor
+        popover = SourceControlPopover(agentCheck: agentCheck)
         self.onSave = onSave
         (scroll, text) = EditorTextView.scrollingEditor(
             in: NSRect(x: 0, y: 0, width: ceil(Self.editorTextWidth), height: Self.editorHeight)
@@ -150,7 +151,7 @@ final class SourceControlDescriptionPopover: NSObject, NSPopoverDelegate, @MainA
         let fitted = layout.fittingSize
         let size = NSSize(width: ceil(fitted.width), height: ceil(fitted.height))
         popover.contentSize = size
-        if !popover.isShown { popover.contentViewController?.view.setFrameSize(size) }
+        if !popover.isShown { popover.native.contentViewController?.view.setFrameSize(size) }
     }
 
     private func configure() {
@@ -211,13 +212,13 @@ final class SourceControlDescriptionPopover: NSObject, NSPopoverDelegate, @MainA
         ])
         let controller = NSViewController()
         controller.view = root
-        popover.contentViewController = controller
-        popover.behavior = .transient
-        popover.delegate = self
+        popover.native.contentViewController = controller
+        popover.native.behavior = .transient
+        popover.native.delegate = self
         fitContent()
     }
 
 #if EDIT_AGENT_CHECKS
-    var checkView: NSView { popover.contentViewController!.view }
+    var checkView: NSView { popover.native.contentViewController!.view }
 #endif
 }

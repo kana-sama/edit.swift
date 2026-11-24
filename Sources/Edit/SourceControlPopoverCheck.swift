@@ -4,7 +4,7 @@ import AppKit
 enum SourceControlPopoverCheck {
     static func run(preview: JJSourceControlOperations.Preview) throws {
         let anchor = NSView()
-        let operations = SourceControlOperationPopover(anchor: anchor, prepare: { _ in preview }, apply: { _ in })
+        let operations = SourceControlOperationPopover(anchor: anchor, agentCheck: true, prepare: { _ in preview }, apply: { _ in })
         let operationView = operations.viewForCheck(preview)
         operationView.layoutSubtreeIfNeeded()
         let operationTitle = try label("Repository Operations", in: operationView)

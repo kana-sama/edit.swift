@@ -411,22 +411,25 @@ enum SourceControlCheck {
             throw Failure("find the revset and working-copy controls")
         }
         let window = document.window
-        let frame = window.frame
-        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
-        window.orderBack(nil)
-        defer {
-            picker.close()
-            window.orderOut(nil)
-            window.setFrame(frame, display: false)
-        }
-        try expect(window.alphaValue == 0 && window.ignoresMouseEvents && !NSApp.isActive, "keep the revset check in the background")
+        defer { picker.close() }
         func showPicker() async throws {
             try await waitFor("finish closing the revset picker") { !picker.isShownForCheck }
             open.performClick(nil)
-            try await waitFor("open the native revset picker") { content.window?.isVisible == true }
+            try expectQuietPopover(content, anchoredTo: window)
         }
         func press(_ title: String) throws {
-            guard let control = button(in: content, where: { $0.title == title || $0.accessibilityLabel() == title }),
+            let scope: NSView
+            if let row = picker.entriesForCheck.firstIndex(where: { "Edit \($0.name)" == title }) {
+                let list = try table()
+                // An unordered window does not automatically draw and instantiate visible table rows.
+                guard let cell = list.view(atColumn: 0, row: row, makeIfNecessary: true) else {
+                    throw Failure("lay out the revset row for \(title)")
+                }
+                scope = cell
+            } else {
+                scope = content
+            }
+            guard let control = button(in: scope, where: { $0.title == title || $0.accessibilityLabel() == title }),
                   !control.isHiddenOrHasHiddenAncestor, control.isEnabled else { throw Failure("find \(title) in the revset picker") }
             control.performClick(nil)
         }
@@ -637,14 +640,7 @@ enum SourceControlCheck {
     }
 
     private static func checkDescription(in window: NSWindow, panel: SourceControlSidebar) async throws {
-        let origin = window.frame.origin
-        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
-        window.orderBack(nil)
-        defer {
-            window.orderOut(nil)
-            window.setFrameOrigin(origin)
-        }
-        try expect(window.alphaValue == 0 && window.ignoresMouseEvents && !NSApp.isActive, "keep the description check in the background")
+        defer { panel.closeDescriptionForCheck() }
         let content = panel.descriptionViewForCheck
         guard let revision = panel.selection,
               let open = button(in: panel.view, where: { $0.toolTip == "Edit change description" }),
@@ -669,7 +665,7 @@ enum SourceControlCheck {
         }
 
         open.performClick(nil)
-        try await waitFor("show the description in the popover") { content.window?.isVisible == true }
+        try expectQuietPopover(content, anchoredTo: window)
         try checkViewport()
         try expect(editor.string == revision.description && editor.isEditable && content.window?.firstResponder === editor &&
                    editor.selectedRange() == NSRange(location: 0, length: revision.subject.utf16.count),
@@ -698,13 +694,14 @@ enum SourceControlCheck {
         save.performClick(nil)
         try await waitFor("save only the description text through Jujutsu") {
             panel.selection?.description == edited && panel.detail != nil &&
-                content.window?.isVisible != true && panel.graphView.table.isEnabled
+                content.window == nil && panel.graphView.table.isEnabled
         }
 
         open.performClick(nil)
         try await waitFor("reopen the saved description at the subject") {
-            content.window?.isVisible == true && editor.selectedRange() == NSRange(location: 0, length: subject.utf16.count)
+            content.window != nil && editor.selectedRange() == NSRange(location: 0, length: subject.utf16.count)
         }
+        try expectQuietPopover(content, anchoredTo: window)
         try checkViewport()
         try expect(scroll.visibleContentOrigin.y < 2, "start the long description at the top of its viewport")
 
@@ -718,7 +715,7 @@ enum SourceControlCheck {
             throw Failure("find the read-only description action")
         }
         view.performClick(nil)
-        try await waitFor("reopen the description for a read-only change") { content.window?.isVisible == true }
+        try expectQuietPopover(content, anchoredTo: window)
         try checkViewport()
         try expect(!editor.isEditable && editor.isSelectable && save.title == "Done" &&
                    editor.string == (immutable.description.isEmpty ? "No description" : immutable.description),
@@ -781,16 +778,9 @@ enum SourceControlCheck {
               let directions = descendant(of: operations, where: { (_: NSSegmentedControl) in true }) else {
             throw Failure("find the operation popover controls")
         }
-        let origin = window.frame.origin
-        window.setFrameOrigin(NSPoint(x: -10000, y: -10000))
-        window.orderBack(nil)
-        defer {
-            if operations.window?.isVisible == true { open.performClick(nil) }
-            window.orderOut(nil)
-            window.setFrameOrigin(origin)
-        }
-        try expect(window.alphaValue == 0 && window.ignoresMouseEvents && !NSApp.isActive, "keep the operation check in the background")
+        defer { panel.closeOperationsForCheck() }
         open.performClick(nil)
+        try expectQuietPopover(operations, anchoredTo: window)
         try await waitFor("preview Undo in the popover") { apply.isEnabled && directions.selectedSegment == 0 }
         apply.performClick(nil)
         try await waitFor("show the applied Undo") {
@@ -812,6 +802,12 @@ enum SourceControlCheck {
                 field.stringValue == "There is no operation to redo."
             }) != nil
         }
+    }
+
+    private static func expectQuietPopover(_ content: NSView, anchoredTo anchor: NSWindow) throws {
+        guard let window = content.window else { throw Failure("open the popover content in a check window") }
+        try expect(window !== anchor && !window.isVisible && window.alphaValue == 0 && window.ignoresMouseEvents &&
+                   !anchor.isVisible && !NSApp.isActive, "keep the popover and its anchor offscreen without activation")
     }
 
     private static func row(named name: String, in outline: NSOutlineView) -> Int? {

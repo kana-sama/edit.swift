@@ -33,9 +33,10 @@ final class SourceControlSidebar: NSObject {
     private let detailTitle = SourceControlDetailButton()
     private let detailMetadata = SourceControlRevisionIdentity()
     private let fileMessage = NSTextField(wrappingLabelWithString: "")
-    private lazy var descriptionPopover = SourceControlDescriptionPopover(anchor: detailTitle) { [weak self] in self?.saveDescription($0) }
+    private lazy var descriptionPopover = SourceControlDescriptionPopover(anchor: detailTitle, agentCheck: app.isAgentCheck) { [weak self] in self?.saveDescription($0) }
     private lazy var revsetPicker = SourceControlRevsetPicker(
         anchor: revsetButton,
+        agentCheck: app.isAgentCheck,
         onSelect: { [weak self] id in
             guard let self, revsets.selected.id != id else { return }
             try updateRevsets { try $0.select(id) }
@@ -51,6 +52,7 @@ final class SourceControlSidebar: NSObject {
     )
     private lazy var operations = SourceControlOperationPopover(
         anchor: operationsButton,
+        agentCheck: app.isAgentCheck,
         prepare: { [weak self] direction in
             guard let self else { throw PanelError.noWorkspace }
             return try await preview(direction)
@@ -99,6 +101,8 @@ final class SourceControlSidebar: NSObject {
     }
 
 #if EDIT_AGENT_CHECKS
+    func closeOperationsForCheck() { operations.close() }
+    func closeDescriptionForCheck() { descriptionPopover.close() }
     var operationsViewForCheck: NSView { operations.checkView }
     var descriptionViewForCheck: NSView { descriptionPopover.checkView }
     var revsetPickerForCheck: SourceControlRevsetPicker { revsetPicker }
