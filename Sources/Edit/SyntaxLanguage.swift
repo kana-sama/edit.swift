@@ -64,6 +64,17 @@ enum SyntaxLanguage: String, CaseIterable, Sendable {
         }
     }
 
+    var lineCommentPrefix: String? {
+        switch self {
+        case .c, .cpp, .go, .javascript, .javascriptJSX, .rust, .solidity, .swift, .typescript, .tsx, .zig: "//"
+        case .python, .ruby, .shell, .toml, .yaml: "#"
+        case .clojure: ";"
+        case .erlang: "%"
+        case .lua: "--"
+        case .plainText, .css, .html, .json, .markdown: nil
+        }
+    }
+
     static func detected(at url: URL?) -> Self {
         guard let name = url?.lastPathComponent.lowercased() else { return .plainText }
         if let exact = exactNames[name] { return exact }

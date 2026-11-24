@@ -81,6 +81,38 @@ enum MultiCaretEditing {
         return edits
     }
 
+    static func toggleLineComments(in text: NSString, for selections: [NSRange], prefix: String) -> [Replacement] {
+        let prefixLength = prefix.utf16.count
+        var lines: [(indentationEnd: Int, commentLength: Int)] = []
+        for selection in ordered(selections) {
+            guard let block = LineEditing.affectedLines(in: text, selection: selection) else { continue }
+            var start = block.start
+            repeat {
+                let line = LineEditing.line(at: start, in: text)
+                let indentationEnd = LineEditing.indentationEnd(in: line, text: text)
+                if indentationEnd > (lines.last?.indentationEnd ?? -1) {
+                    let prefixEnd = indentationEnd + prefixLength
+                    let prefixRange = NSRange(location: indentationEnd, length: prefixLength)
+                    var commentLength = 0
+                    if prefixEnd <= line.contentEnd, text.substring(with: prefixRange) == prefix {
+                        commentLength = prefixLength
+                        if prefixEnd < line.contentEnd, text.character(at: prefixEnd) == 0x20 {
+                            commentLength += 1
+                        }
+                    }
+                    lines.append((indentationEnd, commentLength))
+                }
+                start = line.end
+            } while start < block.end
+        }
+
+        let uncomment = lines.allSatisfy { $0.commentLength > 0 }
+        return lines.map { line in
+            Replacement(range: NSRange(location: line.indentationEnd, length: uncomment ? line.commentLength : 0),
+                        text: uncomment ? "" : prefix + " ")
+        }
+    }
+
     static func mapped(_ selections: [NSRange], after replacements: [Replacement]) -> [NSRange] {
         func offset(for location: Int) -> Int {
             var delta = 0

@@ -64,6 +64,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     lazy var bracketNavigation = BracketNavigation(editor: self)
     lazy var occurrenceHighlighting = OccurrenceHighlighting(editor: self)
     var preferredLineEnding = "\n"
+    var syntaxLanguage: SyntaxLanguage = .plainText
 
     var hasBufferFocus: Bool { window?.isKeyWindow == true && window?.firstResponder === self }
 
@@ -266,6 +267,15 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         if editMultipleLines(.indent(outdent: false)) { return }
         guard let text = textStorage?.mutableString else { return }
         apply(LineEditing.indent(text, selection: selectedRange(), outdent: false))
+    }
+
+    @objc func toggleLineComments(_ sender: Any?) {
+        guard isEditable, !hasMarkedText(), let prefix = syntaxLanguage.lineCommentPrefix,
+              prepareProjectedLineCommand(), let text = textStorage?.mutableString else { return }
+        let selections = caretSelections
+        let edits = MultiCaretEditing.toggleLineComments(in: text, for: selections, prefix: prefix)
+        applyMultiEdits(edits, selections: MultiCaretEditing.mapped(selections, after: edits),
+                        actionName: "Toggle Line Comments")
     }
 
     @objc func outdentLines(_ sender: Any?) {
@@ -734,6 +744,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             return isEditable && (jjInlineDiff?.projectedEditRange?.length ?? textStorage?.length ?? 0) > 0
         case #selector(uppercaseWord(_:)), #selector(lowercaseWord(_:)):
             return isEditable && !hasMarkedText() && (textStorage?.length ?? 0) > 0
+        case #selector(toggleLineComments(_:)):
+            return isEditable && !hasMarkedText() && syntaxLanguage.lineCommentPrefix != nil
         case #selector(increaseTextSize(_:)):
             return fontSize < 72
         case #selector(decreaseTextSize(_:)):

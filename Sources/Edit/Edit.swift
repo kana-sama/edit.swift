@@ -134,7 +134,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                         try await checkOnly(arguments.dropFirst(), in: initial)
                         exit(EXIT_SUCCESS)
                     }
-                    try EditorCheck.run(in: initial.window, editor: initial.editor, scrollView: initial.scrollView)
+                    try EditorCheck.run(in: initial)
                     // The text editor check uses its own undo grouping and sample text.
                     initial.window.close()
                     makeDocument()
@@ -1095,6 +1095,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         lines.addCommand("Insert Line Below", #selector(EditorTextView.insertLineBelow(_:)), "\r")
         lines.addCommand("Indent Lines", #selector(EditorTextView.indentLines(_:)), "]")
         lines.addCommand("Outdent Lines", #selector(EditorTextView.outdentLines(_:)), "[")
+        lines.addCommand("Toggle Line Comments", #selector(EditorTextView.toggleLineComments(_:)), "/")
         edit.addItem(withTitle: "Lines", action: nil, keyEquivalent: "").submenu = lines
 
         let transformations = NSMenu(title: "Transformations")
@@ -1152,7 +1153,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         let screenshot = arguments.dropFirst().first
         switch scope {
         case "editor":
-            try EditorCheck.run(in: document.window, editor: document.editor, scrollView: document.scrollView)
+            try EditorCheck.run(in: document)
             try checkWindow(document.window, screenshot: screenshot)
             try MultiCaretCheck.runComposition(in: document.editor)
             document.window.close()

@@ -1640,6 +1640,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func refreshSyntax(immediate: Bool, preparedSyntax: SyntaxSnapshot? = nil) {
         let language = resolvedSyntaxLanguage
+        editor.syntaxLanguage = language
         editor.bracketNavigation.setLanguage(language)
         editor.occurrenceHighlighting.update(language: language)
         if language == .plainText {

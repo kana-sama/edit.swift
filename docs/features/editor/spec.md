@@ -15,7 +15,7 @@ Use Menlo Regular at 12 points with an 18-point line height, matching the defaul
 - Command-Delete deletes the prefix of a line, and Command-Forward Delete deletes the suffix. At the relevant line boundary these commands join adjacent lines.
 - Command-= and Command-- change the text size by one point, from 6 to 72. Line height is 1.5 times the font size, rounded to a whole point. Command-0 and a fresh launch restore 12 points. Zoom keeps the same line at the top of the viewport. If the active line was visible and moves outside the viewport, scroll just enough to show it again. Keep the selection and leave offscreen carets in place.
 
-The Edit menu has a Lines submenu with the six line commands. The View menu offers text sizing and native full screen. The Window menu offers Minimize, Zoom, and Close Window. The Help menu uses macOS command search.
+The Edit menu groups line commands in the Lines submenu. The View menu offers text sizing and native full screen. The Window menu offers Minimize, Zoom, and Close Window. The Help menu uses macOS command search.
 
 ## Acceptance
 

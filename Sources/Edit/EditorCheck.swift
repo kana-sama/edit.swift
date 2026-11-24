@@ -2,7 +2,8 @@ import AppKit
 
 @MainActor
 enum EditorCheck {
-    static func run(in window: NSWindow, editor: EditorTextView, scrollView: NSScrollView) throws {
+    static func run(in document: DocumentWindow) throws {
+        let (window, editor, scrollView) = (document.window, document.editor, document.scrollView)
         // Check focus and editing without activating the sample window or using the owner's clipboard.
         try expect(!window.isVisible && !NSApplication.shared.isActive, "quiet test window")
         try expect(window.firstResponder === editor && editor.string.isEmpty, "focused, empty editor")
@@ -52,6 +53,47 @@ enum EditorCheck {
             !editor.validateUserInterfaceItem(lowercase.item)
         editor.isEditable = true
         try expect(disablesCaseWhenReadOnly, "disable case transformations in a read-only editor")
+
+        guard let lines = menu.items.compactMap(\.submenu).lazy.compactMap({ $0.item(withTitle: "Lines")?.submenu }).first,
+              let comment = lines.item(withTitle: "Toggle Line Comments"),
+              let shortcut = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+                                             timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                             characters: "/", charactersIgnoringModifiers: "/", isARepeat: false,
+                                             keyCode: 44) else {
+            throw Failure("find the line comment menu and shortcut")
+        }
+        try expect(!editor.validateUserInterfaceItem(comment), "disable line comments in plain text")
+        document.setSyntaxLanguage(.swift)
+        // Keep the fixture unordered while AppKit dispatches the menu key equivalent.
+        comment.target = window.firstResponder
+        defer { comment.target = nil }
+        setBuffer("  café", at: 4)
+        try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == "  // café" &&
+                   editor.selectedRange() == NSRange(location: 7, length: 0),
+                   "Command-/ comments an indented Swift line and moves the caret with the text")
+        undo.undo()
+        try expect(editor.string == "  café" && editor.selectedRange() == NSRange(location: 4, length: 0),
+                   "undo line comment and restore the caret")
+        undo.redo()
+        try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == "  café",
+                   "redo and toggle the Swift comment off")
+        document.setSyntaxLanguage(.python)
+        setBuffer("  one\r\n\t#two\r\nthree", length: 14)
+        try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == "  # one\r\n\t# #two\r\nthree",
+                   "toggle a mixed Python selection ending at the next line boundary")
+        try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == "  one\r\n\t#two\r\nthree",
+                   "round-trip mixed lines with CRLF separators")
+        undo.undo()
+        try expect(editor.string == "  # one\r\n\t# #two\r\nthree", "undo a multiline toggle in one step")
+        setBuffer("one\ntwo")
+        editor.setCaretSelections([0, 2, 6].map { NSRange(location: $0, length: 0) })
+        try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == "# one\n# two" &&
+                   editor.caretSelections.map(\.location) == [2, 4, 10],
+                   "comment each line once and preserve all carets")
+        editor.isEditable = false
+        try expect(!editor.validateUserInterfaceItem(comment), "disable line comments in a read-only editor")
+        editor.isEditable = true
+        document.setSyntaxLanguage(nil)
 
         setBuffer("  first\nsecond", at: 7)
         edit { editor.insertNewline(nil) }
