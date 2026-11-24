@@ -51,7 +51,7 @@ struct JJConflict: Equatable, Sendable {
             }
         }
 
-        let anchor: NSRange
+        var anchor: NSRange
         let kind: Kind
     }
 
@@ -170,16 +170,17 @@ struct JJConflict: Equatable, Sendable {
             if let marker = Marker(line.text), marker.width == open.width {
                 finishDiffRun()
                 let header = highlight(line, .marker)
+                let anchor = line.start == NSMaxRange(markerRanges[0]) ? NSUnionRange(highlights[0].range, header.range) : header.range
                 switch marker.delimiter {
                 case .snapshot where !git, .gitSeparator where git:
-                    segments.append(Segment(anchor: header.range, kind: .snapshot(side: sides.count)))
+                    segments.append(Segment(anchor: anchor, kind: .snapshot(side: sides.count)))
                     section = .side(sides.count)
                     sides.append(Term(label: git ? close.label : marker.label))
                 case .ancestor where !git, .gitAncestor where git:
                     section = .base(bases.count)
                     bases.append(Term(label: marker.label))
                 case .diff where !git:
-                    segments.append(Segment(anchor: header.range, kind: .diff(base: bases.count, side: sides.count)))
+                    segments.append(Segment(anchor: anchor, kind: .diff(base: bases.count, side: sides.count)))
                     section = .diff(base: bases.count, side: sides.count)
                     bases.append(Term(label: label(marker.label, removing: "diff from:")))
                     sides.append(Term(label: ""))
@@ -189,6 +190,8 @@ struct JJConflict: Equatable, Sendable {
                         return nil
                     }
                     sides[side].label = label(marker.label, removing: "to:")
+                    let index = segments.index(before: segments.endIndex)
+                    segments[index].anchor = NSUnionRange(segments[index].anchor, header.range)
                 default:
                     return nil
                 }
@@ -234,7 +237,7 @@ struct JJConflict: Equatable, Sendable {
         let resultRange: NSRange?
         let resultSeparator: String
         if let resultAnchor, case let .snapshot(side) = resultAnchor.kind,
-           let header = markerRanges.first(where: { $0.location == resultAnchor.anchor.location }) {
+           let header = markerRanges.first(where: { NSLocationInRange(NSMaxRange(resultAnchor.anchor) - 1, $0) }) {
             resultSide = side
             let materialized = sides[side].text
             // An unterminated block has exactly the marker line ending appended to each term,

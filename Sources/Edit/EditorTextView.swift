@@ -1279,6 +1279,7 @@ private final class EditorScrollView: NSScrollView {
     private func refreshScrollDecorations() {
         guard let editor = documentView as? EditorTextView else { return }
         editor.jjDecorations?.layout(in: self)
+        editor.jjConflictDecorations?.alignActionsHorizontally(in: self)
         let clip = contentView
         let viewport = clip.bounds
         // NSTextView's drawing stops at the document edges. Cover only the space exposed beyond them.

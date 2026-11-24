@@ -110,27 +110,26 @@ final class JJConflictDecorations {
     }
 
     private func layoutActions(in visible: NSRange, editor: EditorTextView, scroll: NSScrollView) {
-        let viewport = JJEditorActionBar.viewport(in: scroll)
+        let viewport = editor.convert(JJEditorActionBar.viewport(in: scroll), from: scroll)
         var visibleActions: [ActionKey: JJConflictActions] = [:]
-        func place(_ action: JJConflictActions.Action, at location: Int, in block: ActionBlock,
+        func place(_ action: JJConflictActions.Action, on header: NSRange, in block: ActionBlock,
                    applied: Bool = false, failed: Bool = false) {
             let key = ActionKey(blockID: block.id, action: action)
-            guard NSLocationInRange(location, visible) else { return }
-            guard let line = editor.laidOutLineBounds(at: location) else {
+            guard NSIntersectionRange(header, visible).length > 0 else { return }
+            guard let band = band(for: header, editor: editor) else {
                 // Keep the last position across transient TextKit invalidation.
                 actionRows[key]?.setAnchorAvailable(false)
                 visibleActions[key] = actionRows[key]
                 return
             }
-            let anchor = scroll.convert(line, from: editor)
-            guard anchor.midY >= viewport.minY, anchor.midY <= viewport.maxY else { return }
             let row = actionRows[key] ?? JJConflictActions(action) { [weak self] in self?.perform(key) }
             row.setAnchorAvailable(true)
             row.update(enabled: actionsEnabled, applied: applied, failed: failed, hasDraft: block.hasDraft)
-            var frame = row.frame(over: anchor, in: viewport, scroll: scroll)
-            frame.origin.y = floor(anchor.midY - frame.height / 2)
+            let size = row.fittingSize
+            let x = JJEditorActionBar.trailingOrigin(width: size.width, in: viewport, scroll: scroll)
+            let frame = NSRect(origin: NSPoint(x: x, y: band.midY - size.height / 2), size: size)
             if row.frame != frame { row.frame = frame }
-            if row.superview !== scroll { scroll.addSubview(row, positioned: .above, relativeTo: nil) }
+            if row.superview !== editor { editor.addSubview(row, positioned: .above, relativeTo: nil) }
             visibleActions[key] = row
         }
         if editor.isEditable {
@@ -138,11 +137,11 @@ final class JJConflictDecorations {
                 for segment in block.conflict.segments {
                     switch segment.kind {
                     case .snapshot(let side) where side == block.conflict.resultSide:
-                        place(.markResolved, at: segment.anchor.location, in: block)
+                        place(.markResolved, on: segment.anchor, in: block)
                     case .snapshot:
                         break
                     case .diff(_, let side):
-                        place(.applyDiff(side: side), at: segment.anchor.location, in: block,
+                        place(.applyDiff(side: side), on: segment.anchor, in: block,
                               applied: block.appliedSides.contains(side), failed: block.failedSides.contains(side))
                     }
                 }
@@ -150,6 +149,17 @@ final class JJConflictDecorations {
         }
         for (key, old) in actionRows where visibleActions[key] == nil { old.removeFromSuperview() }
         actionRows = visibleActions
+    }
+
+    func alignActionsHorizontally(in scroll: NSScrollView) {
+        guard let editor, !actionRows.isEmpty else { return }
+        // The text view scrolls the rows vertically. Only their trailing inset depends on the clip view.
+        let viewport = editor.convert(JJEditorActionBar.viewport(in: scroll), from: scroll)
+        for row in actionRows.values {
+            var origin = row.frame.origin
+            origin.x = JJEditorActionBar.trailingOrigin(width: row.frame.width, in: viewport, scroll: scroll)
+            if origin != row.frame.origin { row.setFrameOrigin(origin) }
+        }
     }
 
     private func perform(_ key: ActionKey) {

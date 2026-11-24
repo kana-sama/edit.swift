@@ -58,12 +58,16 @@ class JJEditorActionBar: NSView {
         return visible
     }
 
-    func frame(over block: NSRect, in visible: NSRect, scroll: NSScrollView) -> NSRect {
-        let size = fittingSize
+    static func trailingOrigin(width: CGFloat, in visible: NSRect, scroll: NSScrollView) -> CGFloat {
         let scrollWidth = scroll.scrollerStyle == .overlay
             ? NSScroller.scrollerWidth(for: scroll.verticalScroller?.controlSize ?? .regular, scrollerStyle: .overlay)
             : 0
-        let x = max(visible.minX + 4, visible.maxX - size.width - scrollWidth - 6)
+        return max(visible.minX + 4, visible.maxX - width - scrollWidth - 6)
+    }
+
+    func frame(over block: NSRect, in visible: NSRect, scroll: NSScrollView) -> NSRect {
+        let size = fittingSize
+        let x = Self.trailingOrigin(width: size.width, in: visible, scroll: scroll)
         let preferredY = scroll.isFlipped ? block.minY + 2 : block.maxY - size.height - 2
         let y = max(visible.minY + 2, min(preferredY, visible.maxY - size.height - 2))
         return NSRect(origin: NSPoint(x: x, y: y), size: size)

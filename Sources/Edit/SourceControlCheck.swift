@@ -343,10 +343,15 @@ enum SourceControlCheck {
             throw Failure("find the conflict navigation")
         }
         let scroll = document.scrollView
+        func actionBars() -> [JJConflictActions] { editor.subviews.compactMap { $0 as? JJConflictActions } }
+        func headerBounds(_ anchor: NSRange) -> NSRect? {
+            guard let first = editor.laidOutLineBounds(at: anchor.location),
+                  let last = editor.laidOutLineBounds(at: NSMaxRange(anchor) - 1) else { return nil }
+            return first.union(last)
+        }
         func actionBars(on anchor: NSRange) -> [NSView] {
-            guard let line = editor.laidOutLineBounds(at: anchor.location) else { return [] }
-            let midY = scroll.convert(line, from: editor).midY
-            return scroll.subviews.filter { $0 is JJConflictActions && abs($0.frame.midY - midY) <= 1 }
+            guard let band = headerBounds(anchor) else { return [] }
+            return actionBars().filter { abs($0.frame.midY - band.midY) < 0.5 }
         }
         func button(_ label: String, on anchor: NSRange) -> NSButton? {
             actionBars(on: anchor).lazy.compactMap { view in
@@ -362,19 +367,38 @@ enum SourceControlCheck {
         }
         func checkActions(_ conflict: JJConflict) throws {
             let primary = try snapshotAnchor(conflict)
-            var labels = [primary.location: "Mark Resolved"]
+            var expected = [(anchor: primary, title: "Mark Resolved")]
             for segment in conflict.segments {
-                if case .diff = segment.kind { labels[segment.anchor.location] = "Apply Diff" }
+                if case .diff = segment.kind { expected.append((segment.anchor, "Apply Diff")) }
             }
-            func buttons(in view: NSView) -> [NSButton] {
-                if let button = view as? NSButton { return [button] }
-                return view.subviews.flatMap(buttons(in:))
+            guard let block = headerBounds(conflict.range) else { throw Failure("lay out the entire conflict") }
+            let inBlock = actionBars().filter { $0.frame.midY >= block.minY && $0.frame.midY <= block.maxY }
+            try expect(inBlock.count == expected.count, "show only one action for the editable snapshot and each diff")
+            for (anchor, title) in expected {
+                try expect(actionBars(on: anchor).count == 1 && button(title, on: anchor) != nil,
+                           "center \(title) vertically across its entire marker band")
             }
-            for marker in conflict.highlights where marker.role == .marker {
-                let titles = actionBars(on: marker.range).flatMap(buttons(in:)).map(\.title)
-                try expect(titles == (labels[marker.range.location].map { [$0] } ?? []),
-                           "show only the expected conflict action on each marker row")
+        }
+        func markerCount(_ anchor: NSRange) -> Int {
+            (editor.string as NSString).substring(with: anchor).filter(\.isNewline).count + 1
+        }
+        func checkActionScrolling(on anchor: NSRange) throws {
+            guard let band = headerBounds(anchor), let action = actionBars(on: anchor).first,
+                  let control = button("Apply Diff", on: anchor) else { throw Failure("find the scrolling diff action") }
+            if let parent = scroll.superview {
+                let center = NSPoint(x: control.bounds.midX, y: control.bounds.midY)
+                try expect(scroll.hitTest(parent.convert(center, from: control)) === control,
+                           "route native pointer events to the button over the text view")
             }
+            let original = scroll.visibleContentOrigin
+            let before = scroll.convert(action.bounds, from: action)
+            let textBefore = scroll.convert(band, from: editor)
+            defer { scroll.scrollToVisibleContentOrigin(original) }
+            scroll.scrollToVisibleContentOrigin(NSPoint(x: original.x, y: original.y + 24))
+            let after = scroll.convert(action.bounds, from: action)
+            let textAfter = scroll.convert(band, from: editor)
+            try expect(abs(textAfter.midY - textBefore.midY) > 1 && abs(after.midY - textAfter.midY) < 0.5 && before.minX == after.minX,
+                       "move the action with its text in the same scroll update, without waiting for a layout pass")
         }
         func reveal(_ range: NSRange) {
             let caret = NSRange(location: range.location, length: 0)
@@ -400,7 +424,10 @@ enum SourceControlCheck {
         try await waitFor("show actions on the diff and editable snapshot markers") {
             button("Apply Diff", on: firstDiff.anchor) != nil && button("Mark Resolved", on: firstSnapshot) != nil
         }
+        try expect(markerCount(firstSnapshot) == 2 && markerCount(firstDiff.anchor) == 2,
+                   "cover both the opening and snapshot markers, and both lines of a diff header")
         try checkActions(originalBlocks[0])
+        try checkActionScrolling(on: firstDiff.anchor)
         let openingMarker = NSRange(location: originalBlocks[0].range.location, length: 1)
         editor.insertText("x", replacementRange: openingMarker)
         try expect(editor.string == original, "reject typing over a structural marker")
@@ -630,7 +657,7 @@ enum SourceControlCheck {
         let disk = try Data(contentsOf: file)
         document.conflictPanel?.onChangeStyle?(.snapshot)
         try await waitFor("show Snapshot in a read-only revision") {
-            !editor.isEditable && !scroll.subviews.contains { $0 is JJConflictActions } && blocks(editor.string).first?.style == .snapshot
+            !editor.isEditable && actionBars().isEmpty && blocks(editor.string).first?.style == .snapshot
         }
         try expect(try Data(contentsOf: file) == disk, "leave the working file untouched when switching a historical preview")
         guard let banner = document.sourceControlRevisionBanner, let conflictPanel = document.conflictPanel else {
@@ -638,6 +665,16 @@ enum SourceControlCheck {
         }
         try checkEditorPanelLayout([banner, conflictPanel], above: document.scrollView, in: document)
         try checkPanelsWithDetachedToolbar([banner, conflictPanel], in: document)
+
+        let oneLine = back.split(separator: "\n", omittingEmptySubsequences: false).filter { $0.first != "\\" }.joined(separator: "\n")
+        try oneLine.write(to: finalLine, atomically: true, encoding: .utf8)
+        try expect(try await app.openFile(finalLine, in: document) != nil && editor.string == oneLine,
+                   "open the fixture with legacy one-line diff markers")
+        guard let compact = blocks(editor.string).first,
+              let diff = compact.segments.first(where: { $0.kind.diffSide != nil }) else { throw Failure("open a one-line diff marker") }
+        try expect(markerCount(diff.anchor) == 1, "use one line for a legacy diff header")
+        try await waitFor("center Apply Diff on a single marker row") { button("Apply Diff", on: diff.anchor)?.isEnabled == true }
+        try checkActions(compact)
 
         // Once capitalization changes the token next to the insertion, replaying the same
         // insertion onto the merged text would insert a second "my" without the per-side guard.
