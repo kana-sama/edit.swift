@@ -200,9 +200,9 @@ final class SourceControlRevisionHover: NSObject {
         guard !anchor.isEmpty else { dismiss(); return }
 
         let card = SourceControlRevisionCard(revision: revision)
-        let size = card.fittingSize
+        let contentSize = card.fittingSize
         let target = owner.convertToScreen(table.convert(anchor, to: nil))
-        let frame = Self.frame(size: size, beside: target, on: screen.visibleFrame)
+        let frame = Self.frame(size: contentSize, beside: target, on: screen.visibleFrame)
         let panel = SourceControlRevisionHoverPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
                                                     backing: .buffered, defer: false)
         panel.isReleasedWhenClosed = false
@@ -215,7 +215,7 @@ final class SourceControlRevisionHover: NSObject {
         panel.ignoresMouseEvents = owner.ignoresMouseEvents
         panel.alphaValue = owner.alphaValue
         panel.appearance = table.effectiveAppearance
-        panel.contentView = SourceControlRevisionHoverSurface(card: card, size: size,
+        panel.contentView = SourceControlRevisionHoverSurface(card: card, contentSize: contentSize, visibleSize: frame.size,
             pointerEntered: { [weak self] point in self?.pointerMoved(to: point) },
             pointerLeft: { [weak self] point in self?.pointerLeft(at: point) })
         corridor = SourceControlRevisionCorridor(anchor: target, card: frame)
@@ -228,21 +228,22 @@ final class SourceControlRevisionHover: NSObject {
 
     private static func frame(size: NSSize, beside anchor: NSRect, on screen: NSRect) -> NSRect {
         let area = screen.insetBy(dx: 8, dy: 8)
+        let height = min(size.height, area.height)
         let gap: CGFloat = 8
         let right = anchor.maxX + gap
         let left = anchor.minX - size.width - gap
         var x = right
-        var y = anchor.midY - size.height / 2
+        var y = anchor.midY - height / 2
         if right + size.width > area.maxX {
             if left >= area.minX {
                 x = left
             } else {
                 let above = anchor.maxY + gap
-                y = above + size.height <= area.maxY ? above : anchor.minY - gap - size.height
+                y = above + height <= area.maxY ? above : anchor.minY - gap - height
             }
         }
         return NSRect(x: max(area.minX, min(x, area.maxX - size.width)),
-                      y: max(area.minY, min(y, area.maxY - size.height)), width: size.width, height: size.height)
+                      y: max(area.minY, min(y, area.maxY - height)), width: size.width, height: height)
     }
 }
 
@@ -258,10 +259,11 @@ private final class SourceControlRevisionHoverSurface: NSVisualEffectView {
     private let pointerLeft: (NSPoint) -> Void
     private var hoverTrackingArea: NSTrackingArea?
 
-    init(card: NSView, size: NSSize, pointerEntered: @escaping (NSPoint) -> Void, pointerLeft: @escaping (NSPoint) -> Void) {
+    init(card: NSView, contentSize: NSSize, visibleSize: NSSize,
+         pointerEntered: @escaping (NSPoint) -> Void, pointerLeft: @escaping (NSPoint) -> Void) {
         self.pointerEntered = pointerEntered
         self.pointerLeft = pointerLeft
-        super.init(frame: NSRect(origin: .zero, size: size))
+        super.init(frame: NSRect(origin: .zero, size: visibleSize))
         identifier = .init("JujutsuRevisionHoverCard")
         material = .popover
         blendingMode = .behindWindow
@@ -269,8 +271,22 @@ private final class SourceControlRevisionHoverSurface: NSVisualEffectView {
         wantsLayer = true
         layer?.cornerRadius = 12
         layer?.masksToBounds = true
-        card.frame = bounds
-        addSubview(card)
+        card.frame = NSRect(origin: .zero, size: contentSize)
+        if contentSize.height > visibleSize.height {
+            let scrollView = NSScrollView(frame: bounds)
+            scrollView.drawsBackground = false
+            scrollView.hasVerticalScroller = true
+            scrollView.scrollerStyle = .overlay
+            scrollView.autohidesScrollers = true
+            scrollView.documentView = card
+            addSubview(scrollView)
+            let clip = scrollView.contentView
+            let top = clip.isFlipped ? 0 : contentSize.height - clip.bounds.height
+            clip.scroll(to: NSPoint(x: 0, y: top))
+            scrollView.reflectScrolledClipView(clip)
+        } else {
+            addSubview(card)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("Revision hover surfaces are created in code.") }

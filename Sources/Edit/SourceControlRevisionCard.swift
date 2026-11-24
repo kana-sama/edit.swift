@@ -5,12 +5,6 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
     private static let cardWidth: CGFloat = 332
     private static let inset: CGFloat = 14
     private static let textWidth = cardWidth - 2 * inset
-    private static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-    private static let markdownLink = try? NSRegularExpression(pattern: #"\[([^\]\r\n]+)\]\((https?://(?:[^\s()]|\([^\s()]*\))+)\)"#,
-                                                               options: .caseInsensitive)
-    private static let trailer = try? NSRegularExpression(pattern: #"^[A-Za-z0-9-]+[ \t]*:(?!//)"#)
-    private static let coauthorTrailer = try? NSRegularExpression(pattern: #"^Co-authored-by[ \t]*:[ \t]*([^<>]+?)[ \t]*<([^<>\s@]+@[^<>\s@]+)>[ \t]*$"#,
-                                                                   options: .caseInsensitive)
     private static let descriptionColor = NSColor(name: nil) { appearance in
         var color = NSColor.secondaryLabelColor
         appearance.performAsCurrentDrawingAppearance {
@@ -27,9 +21,9 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
     init(revision: JJSourceControlRevision, onOpenURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {
         openURL = onOpenURL
         super.init(frame: .zero)
-        let subject = textView(revision.subject, id: "Subject", font: .systemFont(ofSize: 14, weight: .semibold), lines: 2)
-        let description = Self.descriptionParts(revision.description)
-        let metadata = Self.metadata(revision, coauthors: description.coauthors)
+        let subject = textView(RevisionCardMessage.subject(revision.subject), id: "Subject")
+        let description = RevisionCardMessage.parts(revision.description)
+        let metadata = makeMetadata(revision, trailers: description.trailers)
 
         let identity = SourceControlRevisionIdentity()
         identity.identifier = NSUserInterfaceItemIdentifier("JujutsuRevisionCardID")
@@ -58,8 +52,8 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
         content.setCustomSpacing(5, after: subject)
         content.addArrangedSubview(metadata)
         if let body = description.body {
-            content.addArrangedSubview(textView(body, id: "Description", font: .systemFont(ofSize: 12),
-                                              color: Self.descriptionColor, lines: 8))
+            let formatted = RevisionCardMessage.body(body, width: Self.textWidth, color: Self.descriptionColor)
+            content.addArrangedSubview(textView(formatted, id: "Description"))
         }
 
         let separator = NSBox()
@@ -108,7 +102,7 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
     }
 
     func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
-        if let url = link as? URL, Self.isWebURL(url) { openURL(url) }
+        if let url = link as? URL, RevisionCardMessage.canOpen(url) { openURL(url) }
         return true
     }
 
@@ -129,30 +123,38 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
         return [("Created", author), ("Modified", committer)]
     }
 
-    private static func metadata(_ revision: JJSourceControlRevision, coauthors: [String]) -> NSGridView {
+    private func makeMetadata(_ revision: JJSourceControlRevision, trailers: [RevisionCardMessage.Trailer]) -> NSGridView {
         var rows: [(label: String, value: String)] = []
-        if !revision.author.isEmpty {
-            let name = revision.author
-            let email = revision.authorEmail
-            let author = email.isEmpty ? name : formattedAuthor(name, email: email)
+        let name = revision.author
+        let email = revision.authorEmail
+        if !name.isEmpty || !email.isEmpty {
+            let author = Self.formattedAuthor(name, email: email)
             rows.append(("Author", author))
         }
-        rows += coauthors.map { ("Co-author", $0) }
-        rows += dateRows(for: revision)
+        rows += trailers.filter(\.isCoauthor).map { ("Co-author", $0.value) }
+        rows += Self.dateRows(for: revision)
+        rows += trailers.filter { !$0.isCoauthor }.map { ($0.label, $0.value) }
 
-        let font = NSFont.systemFont(ofSize: 11)
         let labels = rows.map { row in
             let label = NSTextField(labelWithString: row.label)
-            label.font = font
+            label.font = .systemFont(ofSize: 11)
             label.textColor = .secondaryLabelColor
+            label.lineBreakMode = .byTruncatingTail
+            label.allowsExpansionToolTips = true
             return label
         }
-        let labelWidth = ceil(labels.map { $0.intrinsicContentSize.width }.max() ?? 0)
+        let labelWidth = min(112, ceil(labels.map { $0.intrinsicContentSize.width }.max() ?? 0))
         let spacing: CGFloat = 12
-        let valueWidth = textWidth - labelWidth - spacing
+        let valueWidth = Self.textWidth - labelWidth - spacing
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .right
         let fields: [[NSView]] = zip(labels, rows).map { label, row in
-            let value = Self.label(row.value, id: row.label, font: .systemFont(ofSize: 11, weight: .medium),
-                                   lines: 2, width: valueWidth)
+            let formatted = NSMutableAttributedString(string: row.value, attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paragraph,
+            ])
+            RevisionCardMessage.addLinks(to: formatted)
+            let value = textView(formatted, id: row.label, width: valueWidth)
             value.setAccessibilityLabel("\(row.label), \(row.value)")
             return [label, value]
         }
@@ -160,7 +162,7 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
         grid.columnSpacing = spacing
         grid.rowSpacing = 3
         grid.rowAlignment = .firstBaseline
-        grid.column(at: 0).xPlacement = .leading
+        grid.column(at: 0).xPlacement = .fill
         grid.column(at: 0).width = labelWidth
         grid.column(at: 1).xPlacement = .fill
         grid.column(at: 1).width = valueWidth
@@ -168,35 +170,8 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
     }
 
     private static func formattedAuthor(_ name: String, email: String) -> String {
-        let address = "<\(email)>"
-        return name == email ? address : "\(name) \(address)"
-    }
-
-    private static func descriptionParts(_ description: String) -> (body: String?, coauthors: [String]) {
-        guard let subjectEnd = description.firstIndex(where: \.isNewline) else { return (nil, []) }
-        var body = description[description.index(after: subjectEnd)...]
-        if body.first?.isNewline == true { body = body.dropFirst() }
-        var lines = body.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
-        while lines.last?.allSatisfy(\.isWhitespace) == true { lines.removeLast() }
-
-        // Restrict attribution to the trailing metadata block, keeping other trailers and body text.
-        let start = lines.lastIndex(where: { line in
-            if line.allSatisfy(\.isWhitespace) { return true }
-            if line.first?.isWhitespace == true { return false }
-            return trailer?.firstMatch(in: String(line), range: NSRange(location: 0, length: line.utf16.count)) == nil
-        }).map { $0 + 1 } ?? 0
-        var coauthors: [String] = []
-        lines.replaceSubrange(start..., with: lines[start...].filter { line in
-            let source = String(line) as NSString
-            guard let match = coauthorTrailer?.firstMatch(in: String(line), range: NSRange(location: 0, length: source.length))
-            else { return true }
-            let name = source.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespaces)
-            guard !name.isEmpty else { return true }
-            coauthors.append(formattedAuthor(name, email: source.substring(with: match.range(at: 2))))
-            return false
-        })
-        while lines.last?.allSatisfy(\.isWhitespace) == true { lines.removeLast() }
-        return (lines.isEmpty ? nil : lines.joined(separator: "\n"), coauthors)
+        if name.isEmpty || name == email { return email }
+        return email.isEmpty ? name : "\(name) \(email)"
     }
 
     private static func stack() -> NSStackView {
@@ -224,39 +199,11 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
         return label
     }
 
-    private func textView(_ text: String, id: String, font: NSFont, color: NSColor = .labelColor, lines: Int) -> NSTextView {
-        let formatted = Self.linkedText(text, font: font, color: color)
-        let view = SourceControlRevisionCardText(formatted, width: Self.textWidth, lines: lines)
+    private func textView(_ text: NSAttributedString, id: String, width: CGFloat = textWidth) -> NSTextView {
+        let view = SourceControlRevisionCardText(text, width: width)
         view.identifier = NSUserInterfaceItemIdentifier("JujutsuRevisionCard\(id)")
         view.delegate = self
         return view
-    }
-
-    private static func linkedText(_ text: String, font: NSFont, color: NSColor) -> NSAttributedString {
-        let result = NSMutableAttributedString(string: text, attributes: [.font: font, .foregroundColor: color])
-        let source = text as NSString
-        let markdown = markdownLink?.matches(in: text, range: NSRange(location: 0, length: source.length)) ?? []
-        for match in markdown.reversed() {
-            guard let url = URL(string: source.substring(with: match.range(at: 2))), isWebURL(url) else { continue }
-            let title = source.substring(with: match.range(at: 1))
-            result.replaceCharacters(in: match.range, with: NSAttributedString(string: title, attributes: [
-                .font: font, .foregroundColor: color, .link: url,
-            ]))
-        }
-
-        let detectedLinks = linkDetector?.matches(in: result.string, range: NSRange(location: 0, length: result.length)) ?? []
-        for match in detectedLinks {
-            guard let url = match.url, isWebURL(url),
-                  result.attribute(.link, at: match.range.location, effectiveRange: nil) == nil else { continue }
-            result.addAttribute(.link, value: url, range: match.range)
-        }
-        return result
-    }
-
-    private static func isWebURL(_ url: URL) -> Bool {
-        guard let host = url.host, !host.isEmpty else { return false }
-        let scheme = url.scheme?.lowercased()
-        return scheme == "http" || scheme == "https"
     }
 
     private static func icon(_ name: String, color: NSColor) -> NSImageView {
@@ -272,17 +219,156 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
 }
 
 @MainActor
+private enum RevisionCardMessage {
+    struct Trailer {
+        let label: String
+        let value: String
+
+        var isCoauthor: Bool { label.caseInsensitiveCompare("Co-authored-by") == .orderedSame }
+    }
+
+    private static let conventionalSubject = try? NSRegularExpression(
+        pattern: #"^([A-Za-z][A-Za-z0-9-]*)(?:\([^()\r\n]+\))?(!)?:[ \t]+(?=\S)"#
+    )
+    private static let trailer = try? NSRegularExpression(
+        pattern: #"^([A-Za-z0-9-]+|BREAKING CHANGE)[ \t]*:[ \t]+(\S.*)$"#, options: .caseInsensitive
+    )
+    private static let listItem = try? NSRegularExpression(pattern: #"^([ \t]*)([-*]|[0-9]+\.)(?:[ \t]+)(\S.*)$"#)
+    private static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+    private static let markdownLink = try? NSRegularExpression(
+        pattern: #"\[([^\]\r\n]+)\]\(((?:https?://|mailto:)(?:[^\s()]|\([^\s()]*\))+)\)"#, options: .caseInsensitive
+    )
+
+    static func parts(_ description: String) -> (body: String?, trailers: [Trailer]) {
+        guard let subjectEnd = description.firstIndex(where: \.isNewline) else { return (nil, []) }
+        var body = description[description.index(after: subjectEnd)...]
+        if body.first?.isNewline == true { body = body.dropFirst() }
+        var lines = body.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+        while lines.last?.allSatisfy(\.isWhitespace) == true { lines.removeLast() }
+
+        var bodyEnd = lines.endIndex
+        var trailers: [Trailer] = []
+        for index in lines.indices.reversed() {
+            let line = String(lines[index])
+            if line.allSatisfy(\.isWhitespace) { break }
+            let source = line as NSString
+            let range = NSRange(location: 0, length: source.length)
+            // An indented continuation belongs to the preceding trailer, if there is one.
+            if line.first?.isWhitespace == true {
+                if listItem?.firstMatch(in: line, range: range) != nil { break }
+                continue
+            }
+            guard let match = trailer?.firstMatch(in: line, range: range) else { break }
+            let label = source.substring(with: match.range(at: 1))
+            let firstLine = source.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespaces)
+            let continued = lines[(index + 1)..<bodyEnd].map { $0.trimmingCharacters(in: .whitespaces) }
+            trailers.append(Trailer(label: label, value: ([firstLine] + continued).joined(separator: "\n")))
+            bodyEnd = index
+        }
+        while bodyEnd > 0 && lines[bodyEnd - 1].allSatisfy(\.isWhitespace) { bodyEnd -= 1 }
+        return (bodyEnd == 0 ? nil : lines[..<bodyEnd].joined(separator: "\n"), Array(trailers.reversed()))
+    }
+
+    static func subject(_ text: String) -> NSAttributedString {
+        let result = NSMutableAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 14, weight: .semibold), .foregroundColor: NSColor.labelColor,
+        ])
+        if let match = conventionalSubject?.firstMatch(in: text, range: NSRange(location: 0, length: result.length)) {
+            result.addAttribute(.font, value: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold), range: match.range)
+            result.addAttribute(.foregroundColor, value: NSColor.systemTeal, range: match.range(at: 1))
+            let breaking = match.range(at: 2)
+            if breaking.location != NSNotFound {
+                result.addAttribute(.foregroundColor, value: NSColor.systemOrange, range: breaking)
+            }
+        }
+        addLinks(to: result)
+        return result
+    }
+
+    static func body(_ text: String, width: CGFloat, color: NSColor) -> NSAttributedString {
+        let font = NSFont.systemFont(ofSize: 12)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+        let result = NSMutableAttributedString()
+        let lines = text.components(separatedBy: "\n")
+        for (index, line) in lines.enumerated() {
+            let ending = index == lines.count - 1 ? "" : "\n"
+            let source = line as NSString
+            guard let match = listItem?.firstMatch(in: line, range: NSRange(location: 0, length: source.length)) else {
+                result.append(NSAttributedString(string: line + ending, attributes: attributes))
+                continue
+            }
+            let spaces = source.substring(with: match.range(at: 1))
+            let indent = min(CGFloat(spaces.replacingOccurrences(of: "\t", with: "    ").count) * 6, width / 5)
+            let marker = source.substring(with: match.range(at: 2))
+            let bullet = marker == "-" || marker == "*"
+            let shownMarker = bullet ? (indent == 0 ? "•" : "◦") : marker
+            let markerWidth = ceil((shownMarker as NSString).size(withAttributes: [.font: font]).width)
+            guard indent + markerWidth + 6 < width / 2 else {
+                result.append(NSAttributedString(string: line + ending, attributes: attributes))
+                continue
+            }
+            let style = NSMutableParagraphStyle()
+            style.firstLineHeadIndent = indent
+            style.headIndent = indent + max(17, markerWidth + 6)
+            style.tabStops = [NSTextTab(textAlignment: .left, location: style.headIndent)]
+            var itemAttributes = attributes
+            itemAttributes[.paragraphStyle] = style
+            let content = source.substring(with: match.range(at: 3))
+            result.append(NSAttributedString(string: "\(shownMarker)\t\(content)" + ending, attributes: itemAttributes))
+        }
+        addLinks(to: result)
+        return result
+    }
+
+    static func addLinks(to text: NSMutableAttributedString) {
+        let source = text.string as NSString
+        let markdown = markdownLink?.matches(in: text.string, range: NSRange(location: 0, length: source.length)) ?? []
+        for match in markdown.reversed() {
+            guard let url = URL(string: source.substring(with: match.range(at: 2))), canOpen(url) else { continue }
+            var attributes = text.attributes(at: match.range.location, effectiveRange: nil)
+            attributes[.link] = url
+            let title = source.substring(with: match.range(at: 1))
+            text.replaceCharacters(in: match.range, with: NSAttributedString(string: title, attributes: attributes))
+        }
+        let rendered = text.string as NSString
+        let links = linkDetector?.matches(in: text.string, range: NSRange(location: 0, length: rendered.length)) ?? []
+        for match in links.reversed() {
+            guard let url = match.url, canOpen(url) else { continue }
+            var range = match.range
+            let end = NSMaxRange(range)
+            if url.scheme == "mailto", range.location > 0, end < rendered.length,
+               rendered.character(at: range.location - 1) == 0x3C, rendered.character(at: end) == 0x3E {
+                text.deleteCharacters(in: NSRange(location: end, length: 1))
+                text.deleteCharacters(in: NSRange(location: range.location - 1, length: 1))
+                range.location -= 1
+            }
+            if text.attribute(.link, at: range.location, effectiveRange: nil) == nil {
+                text.addAttribute(.link, value: url, range: range)
+            }
+        }
+    }
+
+    static func canOpen(_ url: URL) -> Bool {
+        switch url.scheme?.lowercased() {
+        case "http", "https": url.host?.isEmpty == false
+        case "mailto": URLComponents(url: url, resolvingAgainstBaseURL: false)?.path.contains("@") == true
+        default: false
+        }
+    }
+}
+
+@MainActor
 final class SourceControlRevisionCardText: NSTextView {
     private let storage: NSTextStorage
     private var measuredSize = NSSize.zero
+    private var firstBaseline: CGFloat = 0
 
-    init(_ text: NSAttributedString, width: CGFloat, lines: Int) {
+    init(_ text: NSAttributedString, width: CGFloat) {
         storage = NSTextStorage(attributedString: text)
         let manager = NSLayoutManager()
         let container = NSTextContainer(size: NSSize(width: width, height: CGFloat.greatestFiniteMagnitude))
         container.lineFragmentPadding = 0
-        container.maximumNumberOfLines = lines
-        container.lineBreakMode = .byTruncatingTail
+        container.lineBreakMode = .byWordWrapping
         storage.addLayoutManager(manager)
         manager.addTextContainer(container)
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: 0), textContainer: container)
@@ -296,12 +382,14 @@ final class SourceControlRevisionCardText: NSTextView {
         linkTextAttributes = [.foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue]
         manager.ensureLayout(for: container)
         measuredSize = NSSize(width: width, height: ceil(manager.usedRect(for: container).height))
+        if manager.numberOfGlyphs > 0 { firstBaseline = manager.location(forGlyphAt: 0).y }
         invalidateIntrinsicContentSize()
     }
 
     required init?(coder: NSCoder) { fatalError("Revision card text views are created in code.") }
 
     override var intrinsicContentSize: NSSize { measuredSize }
+    override var firstBaselineOffsetFromTop: CGFloat { firstBaseline }
     override var needsPanelToBecomeKey: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
@@ -311,7 +399,6 @@ final class SourceControlRevisionCardText: NSTextView {
         let location = NSPoint(x: point.x - origin.x, y: point.y - origin.y)
         let glyph = layoutManager.glyphIndex(for: location, in: textContainer)
         guard NSLocationInRange(glyph, layoutManager.glyphRange(for: textContainer)),
-              !NSLocationInRange(glyph, layoutManager.truncatedGlyphRange(inLineFragmentForGlyphAt: glyph)),
               layoutManager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: textContainer).contains(location)
         else { return false }
         let character = layoutManager.characterIndexForGlyph(at: glyph)

@@ -2,6 +2,8 @@ import AppKit
 
 @MainActor
 enum SourceControlCheck {
+    private static let workingSubject = "feat(editor)!: Working change"
+
     static func run(in app: Edit, render: (NSWindow) throws -> Void) async throws {
         guard let executable = JJRepository.executable else { return }
         let fixture = FileManager.default.temporaryDirectory.appending(path: "Edit Jujutsu \(UUID())")
@@ -26,10 +28,13 @@ enum SourceControlCheck {
         let historical = original.replacingOccurrences(of: "Line 8\n", with: "Historical line\n")
         try historical.write(to: file, atomically: true, encoding: .utf8)
         try Data([3, 2, 35, 7, 0, 255, 0, 0]).write(to: binary)
-        let description = "Working change\n\nA long description starts with [Guide](https://example.com/guide) and https://example.com/plain.\n"
+        let description = "\(workingSubject)\n\nA long description starts with [Guide](https://example.com/guide) and https://example.com/plain.\n"
+            + "\n- First item\n  * Nested item\n12. Numbered item\n\n"
             + "Co-authored-by: Example in the body <example@example.com>\nThis is a quoted example.\n"
-            + String(repeating: "A long description stays in the popover.\n", count: 11)
-            + "\nCo-authored-by: Ada Finch <ada@example.com>\nSigned-off-by: Reviewer <reviewer@example.com>\n"
+            + String(repeating: "A long description stays in the popover.\n", count: 150)
+            + "Remaining: one task\n  - The end of the working description.\n"
+            + "Co-authored-by: Ada Finch <ada@example.com>\nSigned-off-by: Reviewer <reviewer@example.com>\n"
+            + "Reviewed-on: https://example.com/review\n  Review continued.\n"
             + "co-authored-by: Casey Chen <casey@example.com>\n"
         try await command(executable, folder, ["new", "-m", description])
         try await command(executable, folder, ["bookmark", "create", "review/jj-sidebar-layout-with-a-long-bookmark", "-r", "@"])
@@ -117,14 +122,14 @@ enum SourceControlCheck {
         try expect(contextMenu?.item(withTitle: "Squash into Parent")?.isEnabled == true && contextMenu?.item(withTitle: "Abandon Change…")?.isEnabled == true,
                    "offer change actions when opening the context menu on an unselected row")
         document.window.layoutIfNeeded()
-        let previousTitle = button(in: panel.view, where: { $0.title == "Working change" })
+        let previousTitle = button(in: panel.view, where: { $0.title == workingSubject })
         try expect(previousTitle?.isAccessibilityEnabled() == false &&
                    !panel.fileTree.view.isHidden && row(named: "Removed.txt", in: tree) != nil && !tree.isEnabled,
                    "keep the complete previous Change pane visible while the next detail loads")
         try await waitFor("browse a historical change while keeping the working-copy pointer") {
             panel.selection?.subject == "Historical change" && panel.detail?.files.count == 2
         }
-        try expect(panel.graph?.workingCopy.subject == "Working change", "keep @ distinct from graph selection")
+        try expect(panel.graph?.workingCopy.subject == workingSubject, "keep @ distinct from graph selection")
         try open("Tracked.txt", in: panel.fileTree)
         try await waitFor("open historical text with a revision banner and expanded diff") {
             document.sourceControlRevisionBanner != nil && !document.editor.isEditable &&
@@ -677,7 +682,7 @@ enum SourceControlCheck {
         try await waitFor("preview Undo in the popover") { apply.isEnabled && directions.selectedSegment == 0 }
         apply.performClick(nil)
         try await waitFor("show the applied Undo") {
-            directions.isEnabled && panel.graph?.workingCopy.subject == "Working change"
+            directions.isEnabled && panel.graph?.workingCopy.subject == workingSubject
         }
         try expect(directions.selectedSegment == 0 && apply.title == "Undo Operation", "keep Undo selected after applying it")
         try await waitFor("preview the previous operation in the same Undo tab") { apply.isEnabled }
@@ -735,7 +740,7 @@ enum SourceControlCheck {
                        panel.view.convert(toggle.bounds, from: toggle).maxX >= 10,
                        "place the \(toggle.title) chevron after the title and separate it from the actions")
         }
-        guard let title = button(in: panel.view, where: { $0.title == "Working change" }) else {
+        guard let title = button(in: panel.view, where: { $0.title == workingSubject }) else {
             throw Failure("find the compact description action")
         }
         try expect(title.cell?.usesSingleLineMode == true && title.bounds.height <= 24 && title.image == nil,
@@ -840,7 +845,7 @@ enum SourceControlCheck {
         func card() -> NSWindow? {
             window.childWindows?.first { $0.contentView?.identifier?.rawValue == "JujutsuRevisionHoverCard" }
         }
-        func label(_ name: String, in root: NSView) -> NSTextField? {
+        func text(_ name: String, in root: NSView) -> NSTextView? {
             descendant(of: root) { $0.identifier?.rawValue == "JujutsuRevisionCard\(name)" }
         }
 
@@ -852,40 +857,60 @@ enum SourceControlCheck {
         try expect(preview.canBecomeKey && !preview.isKeyWindow && preview.ignoresMouseEvents && window.firstResponder === graph.table &&
                    graph.table.selectedRow == historical,
                    "preview a different row without moving selection or keyboard focus")
-        guard let subject = descendant(of: content, where: { (view: NSTextView) in
-            view.identifier?.rawValue == "JujutsuRevisionCardSubject"
-        }), let description = descendant(of: content, where: { (view: NSTextView) in
-            view.identifier?.rawValue == "JujutsuRevisionCardDescription"
-        }) else { throw Failure("find the selectable title and description") }
+        guard let subject = text("Subject", in: content), let description = text("Description", in: content),
+              let authorValue = text("Author", in: content) else { throw Failure("find the selectable revision text") }
+        let bookmarks: NSTextField? = descendant(of: content) { $0.identifier?.rawValue == "JujutsuRevisionCardBookmarks" }
         let author = revisions[working]
-        try expect(subject.string == "Working change" &&
-                   label("Author", in: content)?.stringValue == "\(author.author) <\(author.authorEmail)>" &&
-                   label("Bookmarks", in: content)?.stringValue.contains("review/jj-sidebar-layout-with-a-long-bookmark") == true &&
+        try expect(subject.string == workingSubject &&
+                   authorValue.string == "\(author.author) \(author.authorEmail)" &&
+                   bookmarks?.stringValue.contains("review/jj-sidebar-layout-with-a-long-bookmark") == true &&
                    description.string.hasPrefix("A long description"),
                    "show the subject, author, full bookmark name, and body as distinct parts of the card")
+        let warning = (workingSubject as NSString).range(of: "!").location
+        try expect(subject.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == .systemTeal &&
+                   subject.textStorage?.attribute(.foregroundColor, at: warning, effectiveRange: nil) as? NSColor == .systemOrange,
+                   "highlight the conventional commit type and breaking-change marker")
         guard let grid = descendant(of: content, where: { (_: NSGridView) in true }) else {
             throw Failure("show a grid for revision metadata")
         }
         let labels = (0..<grid.numberOfRows).compactMap { (grid.cell(atColumnIndex: 0, rowIndex: $0).contentView as? NSTextField)?.stringValue }
-        let values = (0..<grid.numberOfRows).compactMap { grid.cell(atColumnIndex: 1, rowIndex: $0).contentView as? NSTextField }
+        let values = (0..<grid.numberOfRows).compactMap { grid.cell(atColumnIndex: 1, rowIndex: $0).contentView as? NSTextView }
         try expect(Array(labels.prefix(4)) == ["Author", "Co-author", "Co-author", "Created"] &&
-                   values.map(\.stringValue).dropFirst().prefix(2).elementsEqual(["Ada Finch <ada@example.com>", "Casey Chen <casey@example.com>"]) &&
-                   Set(values.map { grid.convert($0.bounds, from: $0).minX }).count == 1,
-                   "align all metadata values and list multiple co-authors in their original order")
+                   Array(labels.suffix(2)) == ["Signed-off-by", "Reviewed-on"] &&
+                   values.map(\.string).dropFirst().prefix(2).elementsEqual(["Ada Finch ada@example.com", "Casey Chen casey@example.com"]) &&
+                   values.last?.string == "https://example.com/review\nReview continued." &&
+                   Set(values.map { grid.convert($0.bounds, from: $0).maxX }).count == 1 &&
+                   values.allSatisfy { ($0.textStorage?.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)?.alignment == .right },
+                   "preserve trailer order and continuation lines and right-align all metadata values")
         try expect(!description.string.contains("Ada Finch") && !description.string.contains("Casey Chen") &&
-                   description.string.contains("Co-authored-by: Example in the body") && description.string.contains("Signed-off-by: Reviewer"),
-                   "move only co-author trailers and preserve the rest of the description")
+                   description.string.contains("Co-authored-by: Example in the body example@example.com") &&
+                   description.string.contains("Remaining: one task") && !description.string.contains("Signed-off-by: Reviewer"),
+                   "move all trailing metadata and preserve header-like lines in the body")
+        let list = "\u{2022}\tFirst item\n\u{25E6}\tNested item\n12.\tNumbered item"
+        let nested = (description.string as NSString).range(of: "Nested item")
+        try expect(description.string.contains(list) && nested.location != NSNotFound &&
+                   (description.textStorage?.attribute(.paragraphStyle, at: nested.location, effectiveRange: nil) as? NSParagraphStyle)?.firstLineHeadIndent == 12,
+                   "render bullet and numbered lists with the requested nesting")
         try expect(description.isSelectable && !description.isEditable && description.needsPanelToBecomeKey,
                    "allow text selection and keyboard copy without editing the description")
         let guide = (description.string as NSString).range(of: "Guide")
         guard guide.location != NSNotFound,
-              let link = description.textStorage?.attribute(.link, at: guide.location, effectiveRange: nil) as? URL else {
+              let guideURL = description.textStorage?.attribute(.link, at: guide.location, effectiveRange: nil) as? URL else {
             throw Failure("give the rendered Markdown link its destination")
         }
         let plain = (description.string as NSString).range(of: "https://example.com/plain")
-        try expect(link.absoluteString == "https://example.com/guide" && plain.location != NSNotFound &&
+        try expect(guideURL.absoluteString == "https://example.com/guide" && plain.location != NSNotFound &&
                    (description.textStorage?.attribute(.link, at: plain.location, effectiveRange: nil) as? URL)?.absoluteString == "https://example.com/plain",
                    "detect both Markdown and plain web links")
+        func link(for address: String, in view: NSTextView) -> URL? {
+            let range = (view.string as NSString).range(of: address)
+            guard range.location != NSNotFound else { return nil }
+            return view.textStorage?.attribute(.link, at: range.location, effectiveRange: nil) as? URL
+        }
+        try expect(link(for: author.authorEmail, in: authorValue)?.scheme == "mailto" &&
+                   link(for: "ada@example.com", in: values[1])?.absoluteString == "mailto:ada@example.com" &&
+                   link(for: "example@example.com", in: description)?.absoluteString == "mailto:example@example.com",
+                   "make author, co-author, and description email addresses clickable")
 
         guard let layout = description.layoutManager, let container = description.textContainer else {
             throw Failure("lay out the card’s links for pointer hit testing")
@@ -939,14 +964,27 @@ enum SourceControlCheck {
                    "show both creation times only when they differ")
 
         let clip = graph.view.contentView
-        try expect(content.bounds.width >= 300 && content.bounds.height < 330, "bound the size of a long hover preview")
+        guard let scroll = descendant(of: content, where: { (_: NSScrollView) in true }),
+              let cardDocument = scroll.documentView, let screen = preview.screen ?? NSScreen.main else {
+            throw Failure("scroll long descriptions within the hover card")
+        }
+        try expect(screen.visibleFrame.contains(preview.frame) &&
+                   abs(scroll.documentVisibleRect.maxY - cardDocument.bounds.maxY) < 1,
+                   "keep the tall card on screen and start at its top")
+        scroll.contentView.scroll(to: .zero)
+        let end = (description.string as NSString).range(of: "The end of the working description.")
+        try expect(end.location != NSNotFound, "keep the full long description")
+        let endGlyphs = layout.glyphRange(forCharacterRange: end, actualCharacterRange: nil)
+        let endFrame = layout.boundingRect(forGlyphRange: endGlyphs, in: container)
+        try expect(!endFrame.isEmpty && scroll.documentVisibleRect.contains(description.convert(endFrame, to: cardDocument)),
+                   "scroll all the way to the final rendered line")
         clip.scroll(to: NSPoint(x: 0, y: graph.table.rowHeight))
         try expect(card() == nil, "dismiss the card when its graph scrolls")
         clip.scroll(to: .zero)
         graph.table.mouseMoved(with: try pointer(at: historical))
         try await waitFor("show both creation dates in the historical card") {
-            guard let content = card()?.contentView, let created = label("Created", in: content)?.stringValue,
-                  let modified = label("Modified", in: content)?.stringValue else { return false }
+            guard let content = card()?.contentView, let created = text("Created", in: content)?.string,
+                  let modified = text("Modified", in: content)?.string else { return false }
             return created != modified
         }
         graph.table.mouseExited(with: try pointer(at: working))
