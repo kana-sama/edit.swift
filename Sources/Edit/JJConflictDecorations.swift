@@ -2,16 +2,30 @@ import AppKit
 
 @MainActor
 final class JJConflictDecorations {
+    struct ActionBlock {
+        let conflict: JJConflict
+        let applied: [JJConflict.Segment.Kind]
+    }
+
+    private struct ActionRow {
+        let conflict: JJConflict
+        let buttons: [JJConflictActions.Action]
+        let view: JJConflictActions
+    }
+
     private struct Row: Equatable {
         let role: JJConflict.Role
         let band: NSRect
         let details: [NSRect]
     }
 
-    let actions = JJConflictActions()
+    var onAction: ((JJConflict, JJConflictActions.Action, NSView) -> Void)?
     private weak var editor: EditorTextView?
     private var highlights: [JJConflict.Highlight] = []
     private var rows: [Row] = []
+    private var blocks: [ActionBlock] = []
+    private var actionRows: [Int: ActionRow] = [:]
+    private var actionsEnabled = true
 
     init(editor: EditorTextView) {
         self.editor = editor
@@ -19,14 +33,48 @@ final class JJConflictDecorations {
 
     func update(_ highlights: [JJConflict.Highlight]) {
         guard self.highlights != highlights else { return }
+        if let editor, let manager = editor.textLayoutManager {
+            for highlight in self.highlights where highlight.role == .marker {
+                if let range = textRange(highlight.range, in: manager) {
+                    manager.removeRenderingAttribute(.foregroundColor, for: range)
+                }
+            }
+        }
         self.highlights = highlights
+        if let manager = editor?.textLayoutManager, let visible = manager.textViewportLayoutController.viewportRange {
+            manager.invalidateRenderingAttributes(for: visible)
+            paintMarkers(in: visible, using: manager)
+        }
         layout()
     }
 
-    func select(_ conflict: JJConflict?) {
-        actions.selected = conflict
-        if conflict == nil { actions.removeFromSuperview() }
+    func setActionBlocks(_ blocks: [ActionBlock]) {
+        self.blocks = blocks
+        if blocks.isEmpty { removeActionRows() }
         editor?.requestLineRefresh()
+    }
+
+    func setActionsEnabled(_ enabled: Bool) {
+        guard actionsEnabled != enabled else { return }
+        actionsEnabled = enabled
+        for row in actionRows.values { row.view.setEnabled(enabled) }
+    }
+
+    func paintMarkers(in range: NSTextRange, using manager: NSTextLayoutManager) {
+        guard let editor else { return }
+        let visible = editor.charRange(range, in: manager)
+        for highlight in highlightsInViewport(visible) where highlight.role == .marker {
+            if let marker = textRange(NSIntersectionRange(visible, highlight.range), in: manager) {
+                manager.addRenderingAttribute(.foregroundColor, value: NSColor.systemPurple, for: marker)
+            }
+        }
+    }
+
+    private func textRange(_ range: NSRange, in manager: NSTextLayoutManager) -> NSTextRange? {
+        guard range.length > 0,
+              let start = manager.location(manager.documentRange.location, offsetBy: range.location),
+              let end = manager.location(start, offsetBy: range.length) else { return nil }
+        return NSTextRange(location: start, end: end)
     }
 
     func layout() {
@@ -34,11 +82,12 @@ final class JJConflictDecorations {
               let manager = editor.textLayoutManager,
               let viewport = manager.textViewportLayoutController.viewportRange else {
             display([])
-            actions.removeFromSuperview()
+            removeActionRows()
             return
         }
         let visible = editor.charRange(viewport, in: manager)
         let visibleRows = highlightsInViewport(visible).compactMap { highlight -> Row? in
+            guard highlight.role != .marker else { return nil }
             let range = NSIntersectionRange(visible, highlight.range)
             guard let band = band(for: range, editor: editor) else { return nil }
             let details = JJInlineDiffLayout.detailRects(for: highlight.changes, in: range, editor: editor, manager: manager)
@@ -46,20 +95,58 @@ final class JJConflictDecorations {
         }
         display(visibleRows)
 
-        let viewportFrame = JJEditorActionBar.viewport(in: scroll)
-        guard editor.isEditable, let selected = actions.selected,
-              let block = band(for: NSIntersectionRange(selected.range, visible), editor: editor) else {
-            actions.removeFromSuperview()
-            return
+        layoutActions(in: visible, editor: editor, scroll: scroll)
+    }
+
+    private func layoutActions(in visible: NSRange, editor: EditorTextView, scroll: NSScrollView) {
+        let viewport = JJEditorActionBar.viewport(in: scroll)
+        var visibleActions: [Int: ActionRow] = [:]
+        func place(_ buttons: [JJConflictActions.Action], at location: Int, for conflict: JJConflict) {
+            guard NSLocationInRange(location, visible),
+                  let line = editor.laidOutLineBounds(at: location) else { return }
+            let anchor = scroll.convert(line, from: editor)
+            guard anchor.midY >= viewport.minY, anchor.midY <= viewport.maxY else { return }
+            let row: ActionRow
+            if let existing = actionRows[location], existing.conflict == conflict, existing.buttons == buttons {
+                row = existing
+            } else {
+                let bar = JJConflictActions(buttons) { [weak self] action, anchor in
+                    self?.onAction?(conflict, action, anchor)
+                }
+                bar.setEnabled(actionsEnabled)
+                row = ActionRow(conflict: conflict, buttons: buttons, view: bar)
+                actionRows[location]?.view.removeFromSuperview()
+            }
+            var frame = row.view.frame(over: anchor, in: viewport, scroll: scroll)
+            frame.origin.y = floor(anchor.midY - frame.height / 2)
+            if row.view.frame != frame { row.view.frame = frame }
+            if row.view.superview !== scroll { scroll.addSubview(row.view, positioned: .above, relativeTo: nil) }
+            visibleActions[location] = row
         }
-        let anchor = scroll.convert(block, from: editor).intersection(viewportFrame)
-        guard !anchor.isEmpty else {
-            actions.removeFromSuperview()
-            return
+        if editor.isEditable {
+            for block in blocks where NSIntersectionRange(block.conflict.range, visible).length > 0 {
+                let conflict = block.conflict
+                for segment in conflict.segments {
+                    let button: JJConflictActions.Action = switch segment.kind {
+                    case let .snapshot(side): .useSide(side)
+                    case .diff where block.applied.last == segment.kind: .undoDiff
+                    case .diff where block.applied.contains(segment.kind): .applied
+                    case .diff: .applyDiff(segment)
+                    }
+                    place([button], at: segment.anchor.location, for: conflict)
+                }
+                if let end = conflict.highlights.last?.range.location {
+                    place(block.applied.isEmpty ? [.editResult] : [.editResult, .useResult], at: end, for: conflict)
+                }
+            }
         }
-        let frame = actions.frame(over: anchor, in: viewportFrame, scroll: scroll)
-        if actions.frame != frame { actions.frame = frame }
-        if actions.superview !== scroll { scroll.addSubview(actions, positioned: .above, relativeTo: nil) }
+        for (location, old) in actionRows where visibleActions[location] == nil { old.view.removeFromSuperview() }
+        actionRows = visibleActions
+    }
+
+    private func removeActionRows() {
+        for row in actionRows.values { row.view.removeFromSuperview() }
+        actionRows.removeAll()
     }
 
     private func display(_ visibleRows: [Row]) {
@@ -73,11 +160,7 @@ final class JJConflictDecorations {
 
     func draw(in dirtyRect: NSRect, includesDetails: Bool = true) {
         for row in rows where row.band.minY < dirtyRect.maxY && row.band.maxY > dirtyRect.minY {
-            let background: NSColor = switch row.role {
-            case .marker: .systemPurple.withAlphaComponent(0.14)
-            case .addition: JJDiffColors.addedRow
-            case .removal: JJDiffColors.removedRow
-            }
+            let background = row.role == .addition ? JJDiffColors.addedRow : JJDiffColors.removedRow
             background.setFill()
             NSRect(x: dirtyRect.minX, y: row.band.minY, width: dirtyRect.width, height: row.band.height)
                 .intersection(dirtyRect).fill()

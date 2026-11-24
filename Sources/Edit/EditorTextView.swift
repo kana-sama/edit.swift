@@ -1043,6 +1043,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     ) {
         if let manager = controller.textLayoutManager {
             syntaxHighlighting?.prepareForDrawing(fragment, using: manager)
+            jjConflictDecorations?.paintMarkers(in: fragment.rangeInElement, using: manager)
         }
         super.textViewportLayoutController(controller, configureRenderingSurfaceFor: fragment)
     }

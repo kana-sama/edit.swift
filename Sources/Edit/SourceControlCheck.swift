@@ -240,7 +240,8 @@ enum SourceControlCheck {
         let file = folder.appending(path: "Conflict.swift")
         let finalLine = folder.appending(path: "End.txt")
         func source(_ value: String) -> String {
-            "let first = \"\(value)\"\n" + (1...9).map { "// Unchanged \($0)\n" }.joined() + "let last = \"\(value)\"\n"
+            "let first = \"\(value)\"\n" + (1...9).map { "// Unchanged \($0)\n" }.joined() +
+                "let last = (x: \(value == "Alpha" ? 1 : 0), y: \(value == "Beta" ? 2 : 0), z: \(value == "Gamma" ? 3 : 0))\n"
         }
         try source("Base").write(to: file, atomically: true, encoding: .utf8)
         try "Base".write(to: finalLine, atomically: true, encoding: .utf8)
@@ -278,7 +279,6 @@ enum SourceControlCheck {
         }
         guard let panel = document.conflictPanel,
               let format: NSSegmentedControl = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictFormat" }),
-              let actions = document.editor.jjConflictDecorations?.actions,
               let sidebar = document.sourceControlSidebar else { throw Failure("find the conflict controls") }
         try await waitFor("show the conflict cross next to the selected change ID") {
             guard let identity: NSView = descendant(of: sidebar.view, where: { $0.identifier?.rawValue == "JujutsuSelectedChangeID" }),
@@ -294,24 +294,97 @@ enum SourceControlCheck {
         let originalBlocks = blocks(original)
         try expect(originalBlocks.count == 2 && originalBlocks.allSatisfy { $0.sides.count == 3 && $0.style == .diff },
                    "read every block and every side from a jj diff conflict")
-        try expect(format.segmentCount == 2 && format.label(forSegment: 0) == "Diff" && format.label(forSegment: 1) == "Snapshot" &&
-                   descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictResolve" }) == nil,
-                   "keep two direct format choices in the top panel and move Resolve out of it")
-        try await waitFor("float Resolve over the first visible conflict") {
-            actions.superview === document.scrollView && actions.selected == originalBlocks[0]
+        guard let navigation: NSSegmentedControl = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictNavigation" }) else {
+            throw Failure("find the conflict navigation")
+        }
+        let scroll = document.scrollView
+        func button(_ label: String, on anchor: NSRange) -> NSButton? {
+            guard let line = editor.laidOutLineBounds(at: anchor.location) else { return nil }
+            let midY = scroll.convert(line, from: editor).midY
+            return scroll.subviews.lazy.filter { $0 is JJConflictActions && abs($0.frame.midY - midY) <= 1 }.compactMap { view in
+                let match: NSButton? = descendant(of: view, where: { $0.title == label })
+                return match
+            }.first
+        }
+        func reveal(_ range: NSRange) {
+            let caret = NSRange(location: range.location, length: 0)
+            editor.setCaretSelections([caret])
+            editor.scrollRangeToVisible(caret)
+        }
+        try expect(format.segmentCount == 2 && format.label(forSegment: 0) == "Diff" && format.label(forSegment: 1) == "Snapshot",
+                   "keep two direct format choices in the top panel")
+        guard let firstDiff = originalBlocks[0].segments.first(where: { if case .diff = $0.kind { true } else { false } }),
+              let firstEnd = originalBlocks[0].highlights.last?.range else { throw Failure("find the first diff and result rows") }
+        try await waitFor("show direct buttons on the visible diff and closing markers") {
+            button("Apply Diff", on: firstDiff.anchor) != nil &&
+                button("Edit Result…", on: firstEnd) != nil
         }
         let parts = Set(originalBlocks[0].highlights.flatMap(\.changes).map { (original as NSString).substring(with: $0) })
         try expect(parts == ["Base", "Beta", "Gamma"], "highlight only the changed words in the conflict diff lines")
-        document.window.appearance = NSAppearance(named: .darkAqua)
-        document.window.layoutIfNeeded()
-        try checkEditorPanelLayout([panel], above: document.scrollView, in: document)
-        try checkConflictBackgrounds(originalBlocks[0], in: editor)
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            document.window.appearance = NSAppearance(named: appearance)
+            document.window.layoutIfNeeded()
+            try checkEditorPanelLayout([panel], above: scroll, in: document)
+            try expect(panel.convert(format.bounds, from: format).maxX <= panel.bounds.maxX - 11 &&
+                       panel.convert(navigation.bounds, from: navigation).minX >= panel.bounds.minX + 11,
+                       "inset the top bar controls from both edges")
+            try checkConflictColors(originalBlocks[0], in: editor)
+        }
         try render(document.window)
         panel.onNavigate?(1)
         try expect(editor.selectedRange().location == originalBlocks[1].range.location, "navigate to the next conflict")
-        try await waitFor("move the floating action to the navigated conflict") {
-            actions.superview === document.scrollView && actions.selected == originalBlocks[1]
+        reveal(originalBlocks[0].range)
+        try await waitFor("bring the first diff action back into view") { button("Apply Diff", on: firstDiff.anchor) != nil }
+        button("Apply Diff", on: firstDiff.anchor)?.performClick(nil)
+        try await waitFor("offer manual editing when a diff overlaps the starting snapshot") {
+            document.conflictResultCheckView != nil
         }
+        guard let result = document.conflictResultCheckView,
+              let resultEditor: EditorTextView = descendant(of: result, where: { $0.identifier?.rawValue == "JujutsuConflictResultText" }),
+              let notice: NSTextField = descendant(of: result, where: { $0.identifier?.rawValue == "JujutsuConflictOverlap" }),
+              let use: NSButton = descendant(of: result, where: { $0.identifier?.rawValue == "JujutsuConflictUseEditedResult" }) else {
+            throw Failure("open a result editor with the overlap message and a direct Use Result button")
+        }
+        try expect(!notice.isHidden && resultEditor.string == originalBlocks[0].startingResult && editor.string == original,
+                   "leave conflicting source text intact while editing the result")
+        resultEditor.string = "let first = \"Manual merge\"\n"
+        use.performClick(nil)
+        try await waitFor("use the edited result to replace just that conflict") {
+            editor.string.hasPrefix("let first = \"Manual merge\"\n") && blocks(editor.string).count == 1
+        }
+        undo.undo()
+        try await waitFor("restore the conflict and its controls with Undo") { editor.string == original && format.isEnabled }
+        // The second jj block has independent word changes on one line.
+        let replayBlock = originalBlocks[1]
+        guard let replayEnd = replayBlock.highlights.last?.range else { throw Failure("locate the result actions") }
+        let patchAnchors = replayBlock.segments.compactMap { segment -> NSRange? in
+            if case .diff = segment.kind { return segment.anchor }
+            return nil
+        }
+        guard patchAnchors.count == 2 else { throw Failure("find both replayable diffs on the second conflict") }
+        let (firstPatch, lastPatch) = (patchAnchors[0], patchAnchors[1])
+        reveal(lastPatch)
+        try await waitFor("show the second direct Apply Diff action") { button("Apply Diff", on: lastPatch) != nil }
+        button("Apply Diff", on: lastPatch)?.performClick(nil)
+        try await waitFor("stage the second diff without changing the document") {
+            editor.string == original && button("Undo Diff", on: lastPatch) != nil
+        }
+        reveal(firstPatch)
+        try await waitFor("show the first direct Apply Diff action") { button("Apply Diff", on: firstPatch) != nil }
+        button("Apply Diff", on: firstPatch)?.performClick(nil)
+        try await waitFor("stage the first diff after the second") { button("Undo Diff", on: firstPatch) != nil }
+        button("Undo Diff", on: firstPatch)?.performClick(nil)
+        try await waitFor("undo only the last staged diff") { button("Apply Diff", on: firstPatch) != nil }
+        button("Apply Diff", on: firstPatch)?.performClick(nil)
+        reveal(replayEnd)
+        try await waitFor("offer a direct Use Result for the staged diff result") { button("Use Result", on: replayEnd) != nil }
+        try await waitFor("finish applying the requested diff") { button("Undo Diff", on: firstPatch) != nil }
+        button("Use Result", on: replayEnd)?.performClick(nil)
+        try await waitFor("resolve with both applied diffs and the original snapshot change") {
+            editor.string.hasSuffix("let last = (x: 1, y: 2, z: 3)\n") && blocks(editor.string) == [originalBlocks[0]]
+        }
+        undo.undo()
+        try await waitFor("undo the replay result before changing format") { editor.string == original && format.isEnabled }
         format.selectedSegment = 1
         if let action = format.action { format.sendAction(action, to: format.target) }
         try await waitFor("switch all open conflict blocks to Snapshot") {
@@ -323,10 +396,12 @@ enum SourceControlCheck {
                    "retain each side when changing the editable representation")
         editor.setCaretSelections([NSRange(location: snapshotBlocks[0].range.location, length: 0)])
         editor.scrollRangeToVisible(editor.selectedRange())
-        try await waitFor("anchor Resolve to the chosen Snapshot block") {
-            actions.superview === document.scrollView && actions.selected == snapshotBlocks[0]
+        let thirdSide = snapshotBlocks[0].segments[2].anchor
+        reveal(thirdSide)
+        try await waitFor("attach a direct Use Side button to the third snapshot") {
+            button("Use Side", on: thirdSide) != nil
         }
-        actions.onResolve?(snapshotBlocks[0], 2)
+        button("Use Side", on: thirdSide)?.performClick(nil)
         try await waitFor("resolve only the selected block with the third side") {
             editor.string.hasPrefix("let first = \"Gamma\"\n") && blocks(editor.string).count == 1
         }
@@ -348,7 +423,7 @@ enum SourceControlCheck {
         let disk = try Data(contentsOf: file)
         document.conflictPanel?.onChangeStyle?(.snapshot)
         try await waitFor("show Snapshot in a read-only revision") {
-            !editor.isEditable && actions.superview == nil && blocks(editor.string).first?.style == .snapshot
+            !editor.isEditable && !scroll.subviews.contains { $0 is JJConflictActions } && blocks(editor.string).first?.style == .snapshot
         }
         try expect(try Data(contentsOf: file) == disk, "leave the working file untouched when switching a historical preview")
         guard let banner = document.sourceControlRevisionBanner, let conflictPanel = document.conflictPanel else {
@@ -358,7 +433,7 @@ enum SourceControlCheck {
         try checkPanelsWithDetachedToolbar([banner, conflictPanel], in: document)
     }
 
-    private static func checkConflictBackgrounds(_ block: JJConflict, in editor: EditorTextView) throws {
+    private static func checkConflictColors(_ block: JJConflict, in editor: EditorTextView) throws {
         for role in [JJConflict.Role.marker, .removal, .addition] {
             guard let highlight = block.highlights.first(where: { $0.role == role }),
                   let line = editor.laidOutLineBounds(at: highlight.range.location) else {
@@ -375,11 +450,25 @@ enum SourceControlCheck {
             }
             let (red, green, blue) = (color.redComponent, color.greenComponent, color.blueComponent)
             let matches = switch role {
-            case .marker: blue > green + 0.02 && red > green + 0.02
+            case .marker: abs(blue - green) < 0.025 && abs(red - green) < 0.025
             case .removal: red > green + 0.03 && red > blue + 0.03
             case .addition: green > red + 0.03 && green > blue + 0.03
             }
-            try expect(matches, "paint a full-width \(role) background")
+            try expect(matches, role == .marker ? "leave the marker background neutral" : "paint a full-width \(role) background")
+            if role == .marker {
+                let glyphs = NSRect(x: editor.textContainerInset.width + 4, y: line.minY, width: 65, height: line.height)
+                guard let glyphBitmap = editor.bitmapImageRepForCachingDisplay(in: glyphs) else {
+                    throw Failure("capture the marker text")
+                }
+                editor.cacheDisplay(in: glyphs, to: glyphBitmap)
+                let purple = (0..<glyphBitmap.pixelsWide).contains { x in
+                    (0..<glyphBitmap.pixelsHigh).contains { y in
+                        guard let pixel = glyphBitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { return false }
+                        return pixel.blueComponent > pixel.greenComponent + 0.12 && pixel.redComponent > pixel.greenComponent + 0.08
+                    }
+                }
+                try expect(purple, "draw the marker glyphs purple")
+            }
         }
     }
 

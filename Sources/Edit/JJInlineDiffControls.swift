@@ -4,12 +4,12 @@ import AppKit
 class JJEditorActionBar: NSView {
     private let buttons = NSStackView()
 
-    func installControls(_ views: [NSView]) {
+    func installControls(_ views: [NSView], edgeInsets: NSEdgeInsets = NSEdgeInsets(top: 2, left: 4, bottom: 2, right: 4)) {
         for view in views { buttons.addArrangedSubview(view) }
         buttons.orientation = .horizontal
         buttons.alignment = .centerY
         buttons.spacing = 2
-        buttons.edgeInsets = NSEdgeInsets(top: 2, left: 4, bottom: 2, right: 4)
+        buttons.edgeInsets = edgeInsets
         buttons.translatesAutoresizingMaskIntoConstraints = false
         addSubview(buttons)
         NSLayoutConstraint.activate([

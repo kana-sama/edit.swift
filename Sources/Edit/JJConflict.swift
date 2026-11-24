@@ -29,11 +29,6 @@ struct JJConflict: Equatable, Sendable {
     struct Term: Equatable, Sendable {
         var label: String
         var text = ""
-
-        var subject: String {
-            guard let start = label.firstIndex(of: "\""), let end = label.lastIndex(of: "\""), start < end else { return "" }
-            return String(label[label.index(after: start)..<end])
-        }
     }
 
     enum Role: Equatable, Sendable {
@@ -46,11 +41,21 @@ struct JJConflict: Equatable, Sendable {
         var changes: [NSRange] = []
     }
 
+    struct Segment: Equatable, Sendable {
+        enum Kind: Equatable, Sendable {
+            case snapshot(side: Int), diff(base: Int, side: Int)
+        }
+
+        let anchor: NSRange
+        let kind: Kind
+    }
+
     let range: NSRange
     let source: String
     let style: Style
     let sides: [Term]
     private let bases: [Term]
+    let segments: [Segment]
     let highlights: [Highlight]
     private let width: Int
     private let opening: String
@@ -59,6 +64,18 @@ struct JJConflict: Equatable, Sendable {
     private let endsWithNewline: Bool
 
     var canChangeStyle: Bool { bases.count == sides.count - 1 }
+
+    var startingResult: String {
+        for segment in segments {
+            if case let .snapshot(side) = segment.kind { return sides[side].text }
+        }
+        return sides[0].text
+    }
+
+    func applyingDiff(for segment: Segment, onto text: String) -> String? {
+        guard case let .diff(base, side) = segment.kind else { return nil }
+        return JJLineDiff.applyConflictDelta(from: bases[base].text, to: sides[side].text, onto: text)
+    }
 
     private enum Section {
         case side(Int), base(Int), diff(base: Int, side: Int)
@@ -84,6 +101,7 @@ struct JJConflict: Equatable, Sendable {
         var bases: [Term] = []
         var section: Section? = git ? .side(0) : nil
         var highlights: [Highlight] = [highlight(first, .marker)]
+        var segments: [Segment] = git ? [Segment(anchor: highlights[0].range, kind: .snapshot(side: 0))] : []
         var style: Style = git ? .git : .snapshot
         var removed: [DiffLine] = []
         var added: [DiffLine] = []
@@ -103,14 +121,17 @@ struct JJConflict: Equatable, Sendable {
         for line in inner {
             if let marker = Marker(line.text), marker.width == open.width {
                 finishDiffRun()
+                let header = highlight(line, .marker)
                 switch marker.delimiter {
                 case .snapshot where !git, .gitSeparator where git:
+                    segments.append(Segment(anchor: header.range, kind: .snapshot(side: sides.count)))
                     section = .side(sides.count)
                     sides.append(Term(label: git ? close.label : marker.label))
                 case .ancestor where !git, .gitAncestor where git:
                     section = .base(bases.count)
                     bases.append(Term(label: marker.label))
                 case .diff where !git:
+                    segments.append(Segment(anchor: header.range, kind: .diff(base: bases.count, side: sides.count)))
                     section = .diff(base: bases.count, side: sides.count)
                     bases.append(Term(label: label(marker.label, removing: "diff from:")))
                     sides.append(Term(label: ""))
@@ -123,7 +144,7 @@ struct JJConflict: Equatable, Sendable {
                 default:
                     return nil
                 }
-                highlights.append(highlight(line, .marker))
+                highlights.append(header)
                 continue
             }
             switch section {
@@ -164,7 +185,7 @@ struct JJConflict: Equatable, Sendable {
         highlights.append(highlight(last, .marker))
         let range = NSRange(location: first.start, length: last.start + last.text.utf16.count - first.start)
         return Self(range: range, source: lines.map(\.text).joined(), style: style,
-                    sides: sides, bases: bases, highlights: highlights, width: open.width,
+                    sides: sides, bases: bases, segments: segments, highlights: highlights, width: open.width,
                     opening: git ? "conflict" : open.label, closing: git ? "conflict ends" : close.label,
                     lineEnding: lineEnding, endsWithNewline: terminated)
     }

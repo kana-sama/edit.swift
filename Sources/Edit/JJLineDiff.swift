@@ -177,6 +177,120 @@ enum JJLineDiff {
         return result
     }
 
+    static func applyConflictDelta(from base: String, to side: String, onto result: String) -> String? {
+        var budget = Budget()
+        do {
+            let original = try split(base, budget: &budget)
+            let incoming = try split(side, budget: &budget)
+            let draft = try split(result, budget: &budget)
+            return try replay(original, incoming: incoming, draft: draft, mergeLineEdits: true, budget: &budget)
+        } catch {
+            return nil
+        }
+    }
+
+    private static func replay(
+        _ original: [TextPart], incoming: [TextPart], draft: [TextPart], mergeLineEdits: Bool, budget: inout Budget
+    ) throws -> String? {
+        let patches = try replayChanges(from: original, to: incoming, budget: &budget)
+        let draftEdits = try replayChanges(from: original, to: draft, budget: &budget)
+        var patchIndex = 0
+        var draftIndex = 0
+        var previous = 0
+        var merged = ""
+
+        func append(_ change: Change, text: String) {
+            for part in original[previous..<change.before.lowerBound] { merged += part.text }
+            merged += text
+            previous = change.before.upperBound
+        }
+
+        while patchIndex < patches.count || draftIndex < draftEdits.count {
+            try budget.check()
+            let patch = patchIndex < patches.count ? patches[patchIndex] : nil
+            let draftEdit = draftIndex < draftEdits.count ? draftEdits[draftIndex] : nil
+            if let patch, let draftEdit, patch.change.before == draftEdit.change.before {
+                let patchText = incoming[patch.change.after].map(\.text).joined()
+                let draftText = draft[draftEdit.change.after].map(\.text).joined()
+                if patchText.utf8.elementsEqual(draftText.utf8) {
+                    append(patch.change, text: patchText)
+                } else if mergeLineEdits, patch.isSingleLineReplacement, draftEdit.isSingleLineReplacement {
+                    let baseText = original[patch.change.before.lowerBound].text
+                    guard baseText.utf16.count + patchText.utf16.count + draftText.utf16.count <= 8_192 else { return nil }
+                    // jj can materialize a conflict when two sides changed different words on the same line.
+                    let baseWords = try words(in: baseText, budget: &budget)
+                    let patchWords = try words(in: patchText, budget: &budget)
+                    let draftWords = try words(in: draftText, budget: &budget)
+                    guard let combined = try replay(baseWords, incoming: patchWords, draft: draftWords,
+                                                    mergeLineEdits: false, budget: &budget) else { return nil }
+                    append(patch.change, text: combined)
+                } else {
+                    return nil
+                }
+                patchIndex += 1
+                draftIndex += 1
+            } else if let patch, draftEdit.map(patch.precedes) ?? true {
+                append(patch.change, text: incoming[patch.change.after].map(\.text).joined())
+                patchIndex += 1
+            } else if let draftEdit, patch.map(draftEdit.precedes) ?? true {
+                append(draftEdit.change, text: draft[draftEdit.change.after].map(\.text).joined())
+                draftIndex += 1
+            } else {
+                return nil
+            }
+        }
+        for part in original[previous...] { merged += part.text }
+        try budget.check(immediately: true)
+        return merged
+    }
+
+    private struct ReplayChange {
+        let change: Change
+        let firstPossibleStart: Int
+        let lastPossibleEnd: Int
+
+        var isSingleLineReplacement: Bool {
+            change.before.count == 1 && change.after.count == 1 &&
+                firstPossibleStart == change.before.lowerBound && lastPossibleEnd == change.before.upperBound
+        }
+
+        func precedes(_ other: Self) -> Bool {
+            if change.before.isEmpty, other.change.before.isEmpty {
+                return lastPossibleEnd < other.firstPossibleStart
+            }
+            return lastPossibleEnd <= other.firstPossibleStart
+        }
+    }
+
+    private static func replayChanges(
+        from original: [TextPart], to edited: [TextPart], budget: inout Budget
+    ) throws -> [ReplayChange] {
+        let (old, new) = try textIDs(original, edited, normalizeCRLF: false, budget: &budget)
+        let changes = try differences(old, new, budget: &budget)
+        return try changes.indices.map { index in
+            try budget.check()
+            let change = changes[index]
+            let preceding = index > 0 ? changes[index - 1] : nil
+            let following = index + 1 < changes.count ? changes[index + 1] : nil
+            let leftLimit = change.before.lowerBound - (preceding?.before.upperBound ?? 0)
+            let rightLimit = (following?.before.lowerBound ?? old.count) - change.before.upperBound
+            var left = 0
+            var right = 0
+            // An equally valid alignment can move an edit across repeated text.
+            // A replay is safe only if those placements also avoid other edits.
+            while left < leftLimit, old[change.before.upperBound - left - 1] == new[change.after.upperBound - left - 1] {
+                try budget.check()
+                left += 1
+            }
+            while right < rightLimit, old[change.before.lowerBound + right] == new[change.after.lowerBound + right] {
+                try budget.check()
+                right += 1
+            }
+            return ReplayChange(change: change, firstPossibleStart: change.before.lowerBound - left,
+                                lastPossibleEnd: change.before.upperBound + right)
+        }
+    }
+
     private struct Change {
         let before: Range<Int>
         let after: Range<Int>
