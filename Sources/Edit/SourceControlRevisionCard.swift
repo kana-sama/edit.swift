@@ -227,13 +227,17 @@ private enum RevisionCardMessage {
         var isCoauthor: Bool { label.caseInsensitiveCompare("Co-authored-by") == .orderedSame }
     }
 
-    private static let conventionalSubject = try? NSRegularExpression(
-        pattern: #"^([A-Za-z][A-Za-z0-9-]*)(?:\([^()\r\n]+\))?(!)?:[ \t]+(?=\S)"#
-    )
+    private struct ListMarker {
+        let indent: Int
+        let label: String
+        let width: CGFloat
+        let numberColumn: Int?
+    }
+
     private static let trailer = try? NSRegularExpression(
         pattern: #"^([A-Za-z0-9-]+|BREAKING CHANGE)[ \t]*:[ \t]+(\S.*)$"#, options: .caseInsensitive
     )
-    private static let listItem = try? NSRegularExpression(pattern: #"^([ \t]*)([-*]|[0-9]+\.)(?:[ \t]+)(\S.*)$"#)
+    private static let listItem = try? NSRegularExpression(pattern: #"^[ \t]*([-*]|[0-9]+\.)[ \t]+(\S.*)$"#)
     private static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
     private static let markdownLink = try? NSRegularExpression(
         pattern: #"\[([^\]\r\n]+)\]\(((?:https?://|mailto:)(?:[^\s()]|\([^\s()]*\))+)\)"#, options: .caseInsensitive
@@ -273,14 +277,6 @@ private enum RevisionCardMessage {
         let result = NSMutableAttributedString(string: text, attributes: [
             .font: NSFont.systemFont(ofSize: 14, weight: .semibold), .foregroundColor: NSColor.labelColor,
         ])
-        if let match = conventionalSubject?.firstMatch(in: text, range: NSRange(location: 0, length: result.length)) {
-            result.addAttribute(.font, value: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold), range: match.range)
-            result.addAttribute(.foregroundColor, value: NSColor.systemTeal, range: match.range(at: 1))
-            let breaking = match.range(at: 2)
-            if breaking.location != NSNotFound {
-                result.addAttribute(.foregroundColor, value: NSColor.systemOrange, range: breaking)
-            }
-        }
         addLinks(to: result)
         return result
     }
@@ -288,36 +284,82 @@ private enum RevisionCardMessage {
     static func body(_ text: String, width: CGFloat, color: NSColor) -> NSAttributedString {
         let font = NSFont.systemFont(ofSize: 12)
         let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
-        let result = NSMutableAttributedString()
-        let lines = text.components(separatedBy: "\n")
-        for (index, line) in lines.enumerated() {
-            let ending = index == lines.count - 1 ? "" : "\n"
+        let markerGap: CGFloat = 4
+        var paragraphs: [(content: String, marker: ListMarker?)] = []
+        var numberWidths: [CGFloat] = []
+        var openNumberedLists: [(indent: Int, column: Int)] = []
+        for line in text.components(separatedBy: "\n") {
+            let indent = line.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $0 + ($1 == "\t" ? 4 : 1) }
             let source = line as NSString
             guard let match = listItem?.firstMatch(in: line, range: NSRange(location: 0, length: source.length)) else {
-                result.append(NSAttributedString(string: line + ending, attributes: attributes))
+                let content = line.trimmingCharacters(in: .whitespaces)
+                if content.isEmpty {
+                    paragraphs.append(("", nil))
+                } else if let marker = paragraphs.last?.marker, indent > marker.indent {
+                    paragraphs[paragraphs.count - 1].content += " " + content
+                } else {
+                    openNumberedLists.removeAll()
+                    paragraphs.append((line, nil))
+                }
                 continue
             }
-            let spaces = source.substring(with: match.range(at: 1))
-            let indent = min(CGFloat(spaces.replacingOccurrences(of: "\t", with: "    ").count) * 6, width / 5)
-            let marker = source.substring(with: match.range(at: 2))
-            let bullet = marker == "-" || marker == "*"
-            let shownMarker = bullet ? (indent == 0 ? "•" : "◦") : marker
-            let markerWidth = ceil((shownMarker as NSString).size(withAttributes: [.font: font]).width)
-            guard indent + markerWidth + 6 < width / 2 else {
-                result.append(NSAttributedString(string: line + ending, attributes: attributes))
+            let token = source.substring(with: match.range(at: 1))
+            let numbered = token.hasSuffix(".")
+            let label = numbered ? token : (indent == 0 ? "•" : "◦")
+            let markerWidth = ceil((label as NSString).size(withAttributes: [.font: font]).width)
+            guard listInset(indent, width: width) + markerWidth + markerGap < width / 2 else {
+                openNumberedLists.removeAll()
+                paragraphs.append((line, nil))
+                continue
+            }
+            while let last = openNumberedLists.last, last.indent > indent || (!numbered && last.indent == indent) {
+                openNumberedLists.removeLast()
+            }
+            var numberColumn: Int?
+            if numbered {
+                if let last = openNumberedLists.last, last.indent == indent {
+                    numberColumn = last.column
+                    numberWidths[last.column] = max(numberWidths[last.column], markerWidth)
+                } else {
+                    numberColumn = numberWidths.count
+                    openNumberedLists.append((indent, numberWidths.count))
+                    numberWidths.append(markerWidth)
+                }
+            }
+            paragraphs.append((source.substring(with: match.range(at: 2)),
+                               ListMarker(indent: indent, label: label, width: markerWidth, numberColumn: numberColumn)))
+        }
+
+        let result = NSMutableAttributedString()
+        for (index, paragraph) in paragraphs.enumerated() {
+            let ending = index == paragraphs.count - 1 ? "" : "\n"
+            guard let marker = paragraph.marker else {
+                result.append(NSAttributedString(string: paragraph.content + ending, attributes: attributes))
                 continue
             }
             let style = NSMutableParagraphStyle()
-            style.firstLineHeadIndent = indent
-            style.headIndent = indent + max(17, markerWidth + 6)
-            style.tabStops = [NSTextTab(textAlignment: .left, location: style.headIndent)]
+            style.firstLineHeadIndent = listInset(marker.indent, width: width)
+            let markerRight = style.firstLineHeadIndent + (marker.numberColumn.map { numberWidths[$0] } ?? marker.width)
+            style.headIndent = markerRight + markerGap
+            let textTab = NSTextTab(textAlignment: .left, location: style.headIndent)
+            let prefix: String
+            if marker.numberColumn != nil {
+                style.tabStops = [NSTextTab(textAlignment: .right, location: markerRight), textTab]
+                prefix = "\t\(marker.label)\t"
+            } else {
+                style.tabStops = [textTab]
+                prefix = "\(marker.label)\t"
+            }
             var itemAttributes = attributes
             itemAttributes[.paragraphStyle] = style
-            let content = source.substring(with: match.range(at: 3))
-            result.append(NSAttributedString(string: "\(shownMarker)\t\(content)" + ending, attributes: itemAttributes))
+            result.append(NSAttributedString(string: prefix + paragraph.content + ending, attributes: itemAttributes))
         }
         addLinks(to: result)
         return result
+    }
+
+    private static func listInset(_ indent: Int, width: CGFloat) -> CGFloat {
+        min(CGFloat(indent) * 3, width / 6)
     }
 
     static func addLinks(to text: NSMutableAttributedString) {

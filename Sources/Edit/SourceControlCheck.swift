@@ -29,7 +29,8 @@ enum SourceControlCheck {
         try historical.write(to: file, atomically: true, encoding: .utf8)
         try Data([3, 2, 35, 7, 0, 255, 0, 0]).write(to: binary)
         let description = "\(workingSubject)\n\nA long description starts with [Guide](https://example.com/guide) and https://example.com/plain.\n"
-            + "\n- First item\n  * Nested item\n12. Numbered item\n\n"
+            + "\n- First item\n  continues onto a second source line.\n  * Nested item\n\n"
+            + "1. First numbered item\n2. Second numbered item\n10. Tenth numbered item\n\n"
             + "Co-authored-by: Example in the body <example@example.com>\nThis is a quoted example.\n"
             + String(repeating: "A long description stays in the popover.\n", count: 150)
             + "Remaining: one task\n  - The end of the working description.\n"
@@ -866,10 +867,12 @@ enum SourceControlCheck {
                    bookmarks?.stringValue.contains("review/jj-sidebar-layout-with-a-long-bookmark") == true &&
                    description.string.hasPrefix("A long description"),
                    "show the subject, author, full bookmark name, and body as distinct parts of the card")
-        let warning = (workingSubject as NSString).range(of: "!").location
-        try expect(subject.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == .systemTeal &&
-                   subject.textStorage?.attribute(.foregroundColor, at: warning, effectiveRange: nil) as? NSColor == .systemOrange,
-                   "highlight the conventional commit type and breaking-change marker")
+        var subjectStyle = NSRange()
+        let subjectFont = subject.textStorage?.attribute(.font, at: 0, effectiveRange: &subjectStyle) as? NSFont
+        try expect(subjectFont == .systemFont(ofSize: 14, weight: .semibold) &&
+                   subjectStyle.length == subject.string.utf16.count &&
+                   subject.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == .labelColor,
+                   "use one ordinary title style for a conventional commit subject")
         guard let grid = descendant(of: content, where: { (_: NSGridView) in true }) else {
             throw Failure("show a grid for revision metadata")
         }
@@ -886,11 +889,27 @@ enum SourceControlCheck {
                    description.string.contains("Co-authored-by: Example in the body example@example.com") &&
                    description.string.contains("Remaining: one task") && !description.string.contains("Signed-off-by: Reviewer"),
                    "move all trailing metadata and preserve header-like lines in the body")
-        let list = "\u{2022}\tFirst item\n\u{25E6}\tNested item\n12.\tNumbered item"
-        let nested = (description.string as NSString).range(of: "Nested item")
-        try expect(description.string.contains(list) && nested.location != NSNotFound &&
-                   (description.textStorage?.attribute(.paragraphStyle, at: nested.location, effectiveRange: nil) as? NSParagraphStyle)?.firstLineHeadIndent == 12,
-                   "render bullet and numbered lists with the requested nesting")
+        let body = description.string as NSString
+        let list = "•\tFirst item continues onto a second source line.\n◦\tNested item"
+        let nested = body.range(of: "Nested item")
+        let bullet = body.range(of: "First item")
+        guard let layout = description.layoutManager, let container = description.textContainer else {
+            throw Failure("lay out the card’s lists and links")
+        }
+        try expect(description.string.contains(list) && nested.location != NSNotFound && bullet.location != NSNotFound &&
+                   (description.textStorage?.attribute(.paragraphStyle, at: nested.location, effectiveRange: nil) as? NSParagraphStyle)?.firstLineHeadIndent == 6 &&
+                   (description.textStorage?.attribute(.paragraphStyle, at: bullet.location, effectiveRange: nil) as? NSParagraphStyle)?.headIndent ?? 17 < 12,
+                   "keep bullets close to the text and wrap source continuations with their item")
+        let numbers = ["1.", "2.", "10."].compactMap { number -> NSRect? in
+            let range = body.range(of: "\t\(number)\t")
+            guard range.location != NSNotFound else { return nil }
+            let glyphs = layout.glyphRange(forCharacterRange: NSRange(location: range.location + 1, length: number.utf16.count),
+                                           actualCharacterRange: nil)
+            return layout.boundingRect(forGlyphRange: glyphs, in: container)
+        }
+        try expect(numbers.count == 3 && numbers[2].minX < numbers[0].minX &&
+                   numbers.allSatisfy { abs($0.maxX - numbers[0].maxX) < 0.75 },
+                   "right-align different-width list numbers to the same column")
         try expect(description.isSelectable && !description.isEditable && description.needsPanelToBecomeKey,
                    "allow text selection and keyboard copy without editing the description")
         let guide = (description.string as NSString).range(of: "Guide")
@@ -912,9 +931,6 @@ enum SourceControlCheck {
                    link(for: "example@example.com", in: description)?.absoluteString == "mailto:example@example.com",
                    "make author, co-author, and description email addresses clickable")
 
-        guard let layout = description.layoutManager, let container = description.textContainer else {
-            throw Failure("lay out the card’s links for pointer hit testing")
-        }
         func cursor(over range: NSRange) -> NSCursor? {
             let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
             let frame = layout.boundingRect(forGlyphRange: glyphs, in: container)
