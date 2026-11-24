@@ -1305,13 +1305,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 guard let screenshot else { return }
                 let suffix = toggle == .start ? "-servers-stopped.png" : "-servers.png"
                 let file = URL(fileURLWithPath: screenshot).deletingPathExtension().path + suffix
-                let popup = NSWindow(contentRect: view.frame, styleMask: .borderless, backing: .buffered, defer: false)
-                popup.isReleasedWhenClosed = false
-                popup.appearance = document.window.effectiveAppearance
-                popup.contentView = view
-                popup.layoutIfNeeded()
                 try self.captureCheckView(view, screenshot: file)
-                popup.contentView = nil
             })
         case "worktree" where screenshot == nil:
             try await WorktreeCheck.run(in: self)

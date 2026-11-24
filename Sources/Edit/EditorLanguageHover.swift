@@ -291,10 +291,20 @@ private final class HoverSurface: NSVisualEffectView, NSTextViewDelegate {
     }
 }
 
-private final class HoverTextView: NSTextView {
+final class HoverTextView: NSTextView {
     private(set) var selecting = false
 
     override var needsPanelToBecomeKey: Bool { true }
+
+    func pointerCursor(atWindowPoint point: NSPoint) -> NSCursor {
+        guard let window, let textStorage else { return .arrow }
+        let screenPoint = window.convertPoint(toScreen: point)
+        let character = characterIndex(for: screenPoint)
+        guard character < textStorage.length,
+              firstRect(forCharacterRange: NSRange(location: character, length: 1), actualRange: nil).contains(screenPoint)
+        else { return .arrow }
+        return textStorage.attribute(.link, at: character, effectiveRange: nil) == nil ? .iBeam : .pointingHand
+    }
 
     override func mouseDown(with event: NSEvent) {
         selecting = true

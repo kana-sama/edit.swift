@@ -190,6 +190,8 @@ final class EditApplication: NSApplication {
             case let text as SourceControlRevisionCardText:
                 if titlebar { return .arrow }
                 return text.hasLink(at: text.convert(location, from: nil)) ? .pointingHand : .iBeam
+            case let text as HoverTextView:
+                return text.pointerCursor(atWindowPoint: location)
             case let editor as EditorTextView:
                 if titlebar { return .arrow }
                 return editor.hasLanguageDefinitionLink(at: editor.convert(location, from: nil)) ? .pointingHand : nil

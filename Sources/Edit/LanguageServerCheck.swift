@@ -197,6 +197,18 @@ enum LanguageServerCheck {
     private static func checkPopoverControls(in lsp: DocumentLanguageFeatures, toggle: LanguageServerCommand,
                                              capture: (NSView, LanguageServerCommand) throws -> Void) throws -> [NSRect] {
         guard let view = lsp.statusPopoverForCheck else { throw Failure("prepare the native server popover") }
+        let window = NSWindow(contentRect: view.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        window.appearance = lsp.statusButton.effectiveAppearance
+        window.contentView = view
+        defer {
+            window.contentView = nil
+            window.close()
+        }
+        window.layoutIfNeeded()
+        try expect(window.acceptsMouseMovedEvents, "track the pointer in the server popover before the window becomes key")
         let frames = try [("toggle", toggle), ("restart", LanguageServerCommand.restart)].map { id, command in
             let identifier = "Edit.LanguageServer.\(id)"
             guard let button = descend(view, matching: { $0.identifier?.rawValue == identifier }) as? NSButton else {
@@ -204,6 +216,11 @@ enum LanguageServerCheck {
             }
             try expect(button.title.isEmpty && button.image != nil && button.isEnabled && button.accessibilityLabel() == command.title,
                        "show the current icon action for \(command.title) in the popover")
+            for x in [button.bounds.minX + 1, button.bounds.midX, button.bounds.maxX - 1] {
+                let point = button.convert(NSPoint(x: x, y: button.bounds.midY), to: nil)
+                try expect(EditApplication.clickCursor(in: window, at: point) === NSCursor.pointingHand,
+                           "show a pointing hand across the \(command.title) button")
+            }
             return button.convert(button.bounds, to: view)
         }
         let toggleFrame = frames[0]
@@ -307,6 +324,18 @@ enum LanguageServerCheck {
         let screen = text.firstRect(forCharacterRange: NSRange(location: link.location + 2, length: 1), actualRange: nil)
         try expect(!screen.isEmpty, "lay out the hover link target")
         let point = panel.convertPoint(fromScreen: NSPoint(x: screen.midX, y: screen.midY))
+        for character in [link.location, link.location + 2, NSMaxRange(link) - 1] {
+            let glyph = text.firstRect(forCharacterRange: NSRange(location: character, length: 1), actualRange: nil)
+            for x in [glyph.minX + glyph.width / 4, glyph.midX, glyph.maxX - glyph.width / 4] {
+                let target = panel.convertPoint(fromScreen: NSPoint(x: x, y: glyph.midY))
+                try expect(EditApplication.clickCursor(in: panel, at: target) === NSCursor.pointingHand,
+                           "show a pointing hand across the link glyph at \(character)")
+            }
+        }
+        let prose = text.firstRect(forCharacterRange: NSRange(location: link.location - 3, length: 1), actualRange: nil)
+        let prosePoint = panel.convertPoint(fromScreen: NSPoint(x: prose.midX, y: prose.midY))
+        try expect(EditApplication.clickCursor(in: panel, at: prosePoint) === NSCursor.iBeam,
+                   "keep the text cursor immediately beside the link")
         let press = try event(.leftMouseDown, at: point, in: panel)
         NSApp.postEvent(try event(.leftMouseUp, at: point, in: panel), atStart: true)
         NSApp.postEvent(press, atStart: true)

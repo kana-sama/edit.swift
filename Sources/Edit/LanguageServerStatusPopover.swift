@@ -95,7 +95,7 @@ final class LanguageServerStatusPopover: NSObject {
         icon.imageScaling = .scaleProportionallyDown
         icon.setAccessibilityElement(false)
 
-        let row = NSView()
+        let row = ServerPopoverRow()
         row.setAccessibilityLabel("Language Servers")
         let actionBackground = NSBox()
         actionBackground.boxType = .custom
@@ -162,6 +162,14 @@ final class LanguageServerStatusPopover: NSObject {
         return view
     }
 #endif
+}
+
+@MainActor
+private final class ServerPopoverRow: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.acceptsMouseMovedEvents = true
+    }
 }
 
 @MainActor
