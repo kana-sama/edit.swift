@@ -50,9 +50,12 @@ enum ControlNavigation: Sendable {
         let ranked = ControlMatching.rank(entries, query: query, alternateCharacters: alternateCharacters)
         guard workspace else { return ranked }
 
-        // ZLS owns the workspace search. Keep matches that its name normalization accepts,
-        // including any that the local matcher cannot highlight.
-        let highlights = Dictionary(uniqueKeysWithValues: ranked.map { ($0.entry.id, $0) })
-        return entries.map { highlights[$0.id] ?? ControlMatch(entry: $0, titleCharacters: [], detailCharacters: []) }
+        // Keep results accepted by the server's matching rules after the locally ranked rows.
+        let rankedIDs = Set(ranked.map(\.entry.id))
+        let unranked = entries.compactMap { entry -> ControlMatch? in
+            guard !rankedIDs.contains(entry.id) else { return nil }
+            return ControlMatch(entry: entry, titleCharacters: [], detailCharacters: [])
+        }
+        return ranked + unranked
     }
 }

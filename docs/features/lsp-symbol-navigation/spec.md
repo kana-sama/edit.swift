@@ -12,6 +12,8 @@ For an empty or non-numeric query, request **Document Symbols** (`textDocument/d
 
 Request **Workspace Symbols** (`workspace/symbol`) from the language server for the active project when the query contains a symbol name. Show each result's kind and file path. Display paths relative to the open folder when possible. If the active project has a language server, this mode also works while a non-Zig file is open in that project.
 
+Apply Control's relevance ranking, with exact names above partial matches. Keep the remaining server results below the ranked matches in their server order.
+
 With ZLS 0.17.0, refresh the workspace before the next search after leaving a Zig document. This keeps the file searchable when the server drops it from the index on close. Multiple closed documents share a single refresh. [ZLS document store](https://github.com/zigtools/zls/blob/0.17.0/src/DocumentStore.zig#L748-L770)
 
 ## Results and navigation

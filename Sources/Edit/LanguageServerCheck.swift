@@ -13,6 +13,7 @@ enum LanguageServerCheck {
         try checkHoverPlacement()
         try checkHoverLayout(in: document.window, capture: captureHover)
         try checkStructuredHover(in: document.window, capture: captureHover)
+        try checkSymbolRanking()
         let folder = FileManager.default.temporaryDirectory.appending(path: "ZLS fixture \(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer {
@@ -234,6 +235,23 @@ enum LanguageServerCheck {
         try expect(updatedHover?.range == moved && updatedHover?.text.contains("Returns a value.") == true,
                    "restart synchronizes unsaved text")
         try await LanguageServerRenameCheck.run(in: app, document: document, capture: captureHover)
+    }
+
+    private static func checkSymbolRanking() throws {
+        let names = ["x_domain_min", "server_only_1", "main", "server_only_2"]
+        let url = URL(fileURLWithPath: "/fixture/source.zig")
+        let symbols = names.enumerated().map { line, name in
+            let start = LSPPosition(line: line, character: 0)
+            let location = LSPLocation(url: url, range: LSPRange(start: start, end: start))
+            return LSPSymbol(name: name, detail: nil, kind: 12, location: location)
+        }
+        let workspace = ControlNavigation.symbolResults(symbols, query: "main", workspace: true, folder: nil,
+                                                        alternateCharacters: [:])
+        try expect(workspace.map(\.entry.title) == ["main", "x_domain_min", "server_only_1", "server_only_2"],
+                   "rank the exact workspace symbol first and retain the server-only matches")
+        let local = ControlNavigation.symbolResults(symbols, query: "main", workspace: false, folder: nil,
+                                                    alternateCharacters: [:])
+        try expect(local.map(\.entry.title) == ["main", "x_domain_min"], "rank the exact document symbol first")
     }
 
     private static func checkDocumentHighlights(in document: DocumentWindow, capture: (NSView, String) throws -> Void) async throws {
