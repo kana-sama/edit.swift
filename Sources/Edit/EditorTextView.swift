@@ -55,6 +55,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     private var applyingTextEdits: [EditorTextEdit]?
     lazy var layoutSpacing = EditorLayoutSpacing(editor: self)
     fileprivate var jjDecorations: JJEditorDecorations?
+    private(set) var jjConflictDecorations: JJConflictDecorations?
     private(set) var jjInlineDiff: JJInlineDiff?
     weak var syntaxHighlighting: SyntaxHighlighting?
     let syntaxAnalysis = EditorSyntaxAnalysis()
@@ -1060,6 +1061,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     var jjLineMarks: [JJLineMark] { jjDecorations?.marks ?? [] }
 
+    func setJJConflictHighlights(_ highlights: [JJConflict.Highlight]) {
+        if jjConflictDecorations == nil, !highlights.isEmpty { jjConflictDecorations = JJConflictDecorations(editor: self) }
+        jjConflictDecorations?.update(highlights)
+    }
+
     func suspendJJMarkerNavigation() {
         jjDecorations?.allowsNavigation = false
         jjInlineDiff?.suspend()
@@ -1075,6 +1081,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             self.bracketNavigation.refresh()
             self.occurrenceHighlighting.layout()
             self.jjInlineDiff?.layout()
+            self.jjConflictDecorations?.layout()
             if let scroll = self.enclosingScrollView { self.jjDecorations?.layout(in: scroll) }
             self.lineRefreshPending = false
             self.onFindViewportChange?()
@@ -1119,6 +1126,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     fileprivate func drawOverscrollBackground(in dirtyRect: NSRect) {
         jjInlineDiff?.drawBackground(in: dirtyRect, includesText: false)
+        jjConflictDecorations?.draw(in: dirtyRect, includesDetails: false)
         let line = currentLineHighlight.frame
         let band = NSRect(x: dirtyRect.minX, y: line.minY, width: dirtyRect.width, height: line.height)
         CurrentLineHighlight.color.setFill()
@@ -1152,6 +1160,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     override func drawBackground(in dirtyRect: NSRect) {
         super.drawBackground(in: dirtyRect)
         jjInlineDiff?.drawBackground(in: dirtyRect.intersection(bounds))
+        jjConflictDecorations?.draw(in: dirtyRect.intersection(bounds))
         occurrenceHighlighting.draw(in: dirtyRect)
         bracketNavigation.draw(in: dirtyRect)
         onDrawFindHighlights?(dirtyRect)

@@ -43,6 +43,7 @@ struct JJConflict: Equatable, Sendable {
     struct Highlight: Equatable, Sendable {
         let range: NSRange
         let role: Role
+        var changes: [NSRange] = []
     }
 
     let range: NSRange
@@ -63,7 +64,14 @@ struct JJConflict: Equatable, Sendable {
         case side(Int), base(Int), diff(base: Int, side: Int)
     }
 
-    static func parse(_ lines: ArraySlice<JJLineDiff.TextPart>) -> Self? {
+    private struct DiffLine {
+        let row: Int
+        let text: Substring
+    }
+
+    static func parse(
+        _ lines: ArraySlice<JJLineDiff.TextPart>, normalizeCRLF: Bool, budget: inout JJLineDiff.Budget
+    ) -> Self? {
         guard let first = lines.first, let last = lines.last,
               let open = Marker(first.text), let close = Marker(last.text),
               open.delimiter == .open, close.delimiter == .close, open.width == close.width else { return nil }
@@ -77,9 +85,24 @@ struct JJConflict: Equatable, Sendable {
         var section: Section? = git ? .side(0) : nil
         var highlights: [Highlight] = [highlight(first, .marker)]
         var style: Style = git ? .git : .snapshot
+        var removed: [DiffLine] = []
+        var added: [DiffLine] = []
+
+        func finishDiffRun() {
+            defer {
+                removed.removeAll(keepingCapacity: true)
+                added.removeAll(keepingCapacity: true)
+            }
+            guard !removed.isEmpty, !added.isEmpty,
+                  let ranges = try? JJLineDiff.wordHighlights(removed.map(\.text).joined(), added.map(\.text).joined(),
+                                                               normalizeCRLF: normalizeCRLF, budget: &budget) else { return }
+            placeChanges(ranges.removed, on: removed, in: &highlights)
+            placeChanges(ranges.inserted, on: added, in: &highlights)
+        }
 
         for line in inner {
             if let marker = Marker(line.text), marker.width == open.width {
+                finishDiffRun()
                 switch marker.delimiter {
                 case .snapshot where !git, .gitSeparator where git:
                     section = .side(sides.count)
@@ -112,13 +135,16 @@ struct JJConflict: Equatable, Sendable {
                 let payload = line.text.dropFirst()
                 switch line.text.first {
                 case " ":
+                    finishDiffRun()
                     bases[base].text += payload
                     sides[side].text += payload
                 case "-":
                     bases[base].text += payload
+                    removed.append(DiffLine(row: highlights.count, text: payload))
                     highlights.append(highlight(line, .removal))
                 case "+":
                     sides[side].text += payload
+                    added.append(DiffLine(row: highlights.count, text: payload))
                     highlights.append(highlight(line, .addition))
                 default: return nil
                 }
@@ -126,6 +152,7 @@ struct JJConflict: Equatable, Sendable {
                 return nil
             }
         }
+        finishDiffRun()
         guard sides.count >= 2, bases.count == sides.count - 1 || (git && sides.count == 2 && bases.isEmpty) else { return nil }
         let lineEnding = first.text.hasSuffix("\r\n") ? "\r\n" : "\n"
         let terminated = last.text.utf8.last == 10
@@ -182,5 +209,25 @@ struct JJConflict: Equatable, Sendable {
     private static func highlight(_ line: JJLineDiff.TextPart, _ role: Role) -> Highlight {
         let length = line.text.utf8.last == 10 ? line.text.dropLast().utf16.count : line.text.utf16.count
         return Highlight(range: NSRange(location: line.start, length: length), role: role)
+    }
+
+    private static func placeChanges(_ changes: [NSRange], on lines: [DiffLine], in highlights: inout [Highlight]) {
+        var offset = 0
+        var firstChange = 0
+        for line in lines {
+            let row = highlights[line.row].range
+            // The comparison joins the payloads without their diff prefixes.
+            let payload = NSRange(location: offset, length: row.length - 1)
+            while firstChange < changes.count, NSMaxRange(changes[firstChange]) <= offset { firstChange += 1 }
+            for change in changes[firstChange...] {
+                guard change.location < NSMaxRange(payload) else { break }
+                let overlap = NSIntersectionRange(payload, change)
+                if overlap.length > 0 {
+                    highlights[line.row].changes.append(NSRange(location: row.location + 1 + overlap.location - offset,
+                                                               length: overlap.length))
+                }
+            }
+            offset += line.text.utf16.count
+        }
     }
 }

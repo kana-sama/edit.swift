@@ -217,30 +217,18 @@ final class JJInlineDiff: NSResponder {
 
     private func refreshControls() {
         guard hasExpandedHunks, let editor, let scroll = editor.enclosingScrollView else { return }
-        var visible = scroll.contentView.frame
-        let insets = scroll.contentInsets
-        visible.origin.x += insets.left
-        visible.origin.y += scroll.isFlipped ? insets.top : insets.bottom
-        visible.size.width -= insets.left + insets.right
-        visible.size.height -= insets.top + insets.bottom
+        let visible = JJEditorActionBar.viewport(in: scroll)
         let targets = Set([selectedHunk(in: editor), hoveredHunk(in: editor, scroll: scroll, visible: visible)]
             .compactMap { $0?.baseRange })
-        let scrollWidth = scroll.scrollerStyle == .overlay
-            ? NSScroller.scrollerWidth(for: scroll.verticalScroller?.controlSize ?? .regular, scrollerStyle: .overlay)
-            : 0
         var placements: [(key: NSRange, panel: JJInlineDiffControls, frame: NSRect)] = []
         for target in visibleHunks where targets.contains(target.baseRange) {
             guard let region = display.rect(for: target) else { continue }
             let block = scroll.convert(region, from: editor)
             guard !visible.intersection(block).isEmpty else { continue }
             let panel = panel(for: target.baseRange)
-            let size = panel.fittingSize
-            let x = max(visible.minX + 4, visible.maxX - size.width - scrollWidth - 6)
-            let preferredY = scroll.isFlipped ? block.minY + 2 : block.maxY - size.height - 2
-            let y = max(visible.minY + 2, min(preferredY, visible.maxY - size.height - 2))
             panel.setAvailability(restore: current && canRestore(target, in: editor),
                                   previous: current && hunks.count > 1, next: current && hunks.count > 1)
-            placements.append((target.baseRange, panel, NSRect(origin: NSPoint(x: x, y: y), size: size)))
+            placements.append((target.baseRange, panel, panel.frame(over: block, in: visible, scroll: scroll)))
         }
         removePanels(except: Set(placements.map(\.key)))
         placements.sort { $0.frame.minY < $1.frame.minY }

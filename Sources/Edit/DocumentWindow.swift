@@ -1591,6 +1591,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             conflictStyleTask?.cancel()
             conflictPresentationCurrent = false
             conflictPanel?.suspend()
+            editor.jjConflictDecorations?.select(nil)
         }
         pendingSourceControlDiffFile = nil
         autosave.noteEdit()
@@ -1993,6 +1994,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 editor.suspendJJMarkerNavigation()
                 conflictPresentationCurrent = false
                 conflictPanel?.suspend()
+                editor.jjConflictDecorations?.select(nil)
             }, showWorktree: { [weak self] decorations in
                 self?.worktreeSidebar?.setJJDecorations(decorations)
             }, workingCopyStatusChanged: { [weak self] in
@@ -2006,11 +2008,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private func showEditorConflicts(_ conflicts: [JJConflict]) {
         conflictBlocks = conflicts
         conflictPresentationCurrent = !conflicts.isEmpty
-        if !conflicts.isEmpty, syntaxHighlighting == nil {
-            syntaxHighlighting = SyntaxHighlighting(editor: editor)
-        }
-        syntaxHighlighting?.setConflictHighlights(conflicts.flatMap(\.highlights))
+        editor.setJJConflictHighlights(conflicts.flatMap(\.highlights))
         guard !conflicts.isEmpty else {
+            editor.jjConflictDecorations?.select(nil)
             if let panel = conflictPanel {
                 conflictEditorTop?.isActive = false
                 conflictEditorTop = nil
@@ -2026,8 +2026,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             let panel = JJConflictPanel()
             conflictPanel = panel
             panel.onNavigate = { [weak self] offset in self?.revealConflict(offsetBy: offset) }
-            panel.onEdit = { [weak self] in self?.revealConflict(offsetBy: 0) }
-            panel.onResolve = { [weak self] block, side in self?.resolveConflict(block, using: side) }
+            editor.jjConflictDecorations?.actions.onEdit = { [weak self] in self?.revealConflict(offsetBy: 0) }
+            editor.jjConflictDecorations?.actions.onResolve = { [weak self] block, side in self?.resolveConflict(block, using: side) }
             panel.onChangeStyle = { [weak self] style in self?.changeConflictStyle(to: style) }
             editorContentView.addSubview(panel)
             let guide = editorContentView.safeAreaLayoutGuide
@@ -2053,7 +2053,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func updateConflictControls() {
         guard conflictPresentationCurrent, let index = selectedConflictIndex else { return }
-        conflictPanel?.update(conflictBlocks, selected: index, editable: editor.isEditable)
+        conflictPanel?.update(conflictBlocks, selected: index)
+        editor.jjConflictDecorations?.select(editor.isEditable ? conflictBlocks[index] : nil)
     }
 
     private func revealConflict(offsetBy offset: Int) {
@@ -2085,6 +2086,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         conflictStyleTask?.cancel()
         conflictPresentationCurrent = false
         conflictPanel?.suspend()
+        editor.jjConflictDecorations?.select(nil)
         conflictStyleTask = Task { [weak self] in
             let edits = await Self.conflictStyleEdits(blocks, style: style)
             guard let self, !Task.isCancelled, editor.string.utf8.elementsEqual(original.utf8) else { return }

@@ -277,7 +277,8 @@ enum SourceControlCheck {
             document.editor.isEditable && document.conflictPanel != nil
         }
         guard let panel = document.conflictPanel,
-              let format: NSPopUpButton = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictFormat" }),
+              let format: NSSegmentedControl = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictFormat" }),
+              let actions = document.editor.jjConflictDecorations?.actions,
               let sidebar = document.sourceControlSidebar else { throw Failure("find the conflict controls") }
         try await waitFor("show the conflict cross next to the selected change ID") {
             guard let identity: NSView = descendant(of: sidebar.view, where: { $0.identifier?.rawValue == "JujutsuSelectedChangeID" }),
@@ -293,21 +294,24 @@ enum SourceControlCheck {
         let originalBlocks = blocks(original)
         try expect(originalBlocks.count == 2 && originalBlocks.allSatisfy { $0.sides.count == 3 && $0.style == .diff },
                    "read every block and every side from a jj diff conflict")
-        try await waitFor("paint purple markers, red removals, and green additions over syntax colors") {
-            let roles: [(JJConflict.Role, SyntaxColor)] = [
-                (.marker, .conflictMarker), (.removal, .conflictRemoval), (.addition, .conflictAddition),
-            ]
-            return roles.allSatisfy { role, color in
-                guard let range = originalBlocks[0].highlights.first(where: { $0.role == role })?.range else { return false }
-                return editor.textStorage?.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? NSColor == color.nativeColor
-            }
+        try expect(format.segmentCount == 2 && format.label(forSegment: 0) == "Diff" && format.label(forSegment: 1) == "Snapshot" &&
+                   descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictResolve" }) == nil,
+                   "keep two direct format choices in the top panel and move Resolve out of it")
+        try await waitFor("float Resolve over the first visible conflict") {
+            actions.superview === document.scrollView && actions.selected == originalBlocks[0]
         }
+        let parts = Set(originalBlocks[0].highlights.flatMap(\.changes).map { (original as NSString).substring(with: $0) })
+        try expect(parts == ["Base", "Beta", "Gamma"], "highlight only the changed words in the conflict diff lines")
         document.window.appearance = NSAppearance(named: .darkAqua)
         document.window.layoutIfNeeded()
+        try checkConflictBackgrounds(originalBlocks[0], in: editor)
         try render(document.window)
         panel.onNavigate?(1)
         try expect(editor.selectedRange().location == originalBlocks[1].range.location, "navigate to the next conflict")
-        format.selectItem(withTitle: "Snapshot")
+        try await waitFor("move the floating action to the navigated conflict") {
+            actions.superview === document.scrollView && actions.selected == originalBlocks[1]
+        }
+        format.selectedSegment = 1
         if let action = format.action { format.sendAction(action, to: format.target) }
         try await waitFor("switch all open conflict blocks to Snapshot") {
             let current = blocks(editor.string)
@@ -316,7 +320,12 @@ enum SourceControlCheck {
         let snapshotBlocks = blocks(editor.string)
         try expect(zip(snapshotBlocks, originalBlocks).allSatisfy { $0.sides == $1.sides },
                    "retain each side when changing the editable representation")
-        panel.onResolve?(snapshotBlocks[0], 2)
+        editor.setCaretSelections([NSRange(location: snapshotBlocks[0].range.location, length: 0)])
+        editor.scrollRangeToVisible(editor.selectedRange())
+        try await waitFor("anchor Resolve to the chosen Snapshot block") {
+            actions.superview === document.scrollView && actions.selected == snapshotBlocks[0]
+        }
+        actions.onResolve?(snapshotBlocks[0], 2)
         try await waitFor("resolve only the selected block with the third side") {
             editor.string.hasPrefix("let first = \"Gamma\"\n") && blocks(editor.string).count == 1
         }
@@ -338,9 +347,34 @@ enum SourceControlCheck {
         let disk = try Data(contentsOf: file)
         document.conflictPanel?.onChangeStyle?(.snapshot)
         try await waitFor("show Snapshot in a read-only revision") {
-            !editor.isEditable && blocks(editor.string).first?.style == .snapshot
+            !editor.isEditable && actions.superview == nil && blocks(editor.string).first?.style == .snapshot
         }
         try expect(try Data(contentsOf: file) == disk, "leave the working file untouched when switching a historical preview")
+    }
+
+    private static func checkConflictBackgrounds(_ block: JJConflict, in editor: EditorTextView) throws {
+        for role in [JJConflict.Role.marker, .removal, .addition] {
+            guard let highlight = block.highlights.first(where: { $0.role == role }),
+                  let line = editor.laidOutLineBounds(at: highlight.range.location) else {
+                throw Failure("lay out each conflict color band")
+            }
+            // Sample away from text and from the floating action to verify the full row fill.
+            let sample = NSRect(x: editor.visibleRect.maxX - 108, y: line.midY - 1, width: 2, height: 2)
+            guard let bitmap = editor.bitmapImageRepForCachingDisplay(in: sample) else {
+                throw Failure("capture the conflict row background")
+            }
+            editor.cacheDisplay(in: sample, to: bitmap)
+            guard let color = bitmap.colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB) else {
+                throw Failure("read the conflict row background")
+            }
+            let (red, green, blue) = (color.redComponent, color.greenComponent, color.blueComponent)
+            let matches = switch role {
+            case .marker: blue > green + 0.02 && red > green + 0.02
+            case .removal: red > green + 0.03 && red > blue + 0.03
+            case .addition: green > red + 0.03 && green > blue + 0.03
+            }
+            try expect(matches, "paint a full-width \(role) background")
+        }
     }
 
     private static func checkPublishedLinks(executable: URL, folder: URL) async throws {

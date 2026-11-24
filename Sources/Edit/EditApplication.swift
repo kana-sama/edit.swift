@@ -182,7 +182,7 @@ final class EditApplication: NSApplication {
                 return divider.isMovable ? .rowResize : .arrow
             case is ClickTarget:
                 return .pointingHand
-            case is JJInlineDiffControls:
+            case is JJEditorActionBar:
                 // Disabled buttons can yield hit testing to the panel's background.
                 return .arrow
             case let field as NSTextField where field.isEditable || field.isSelectable:

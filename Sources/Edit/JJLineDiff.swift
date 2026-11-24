@@ -78,14 +78,17 @@ enum JJLineDiff {
             }
         }
         let marks = compose(ordinary, with: conflicts)
+        var conflictWordBudget = Budget(deadline: min(budget.deadline, ContinuousClock.now + .milliseconds(80)))
         return JJTextAnalysis(marks: marks, lineStarts: marks.isEmpty ? [] : newLines.map(\.start),
                               isChanged: changed, remainsConflicted: remainsConflicted, hunks: hunks,
-                              conflicts: conflicts.compactMap { JJConflict.parse(newLines[$0]) })
+                              conflicts: conflicts.compactMap {
+                                  JJConflict.parse(newLines[$0], normalizeCRLF: normalizeCRLF, budget: &conflictWordBudget)
+                              })
     }
 
     private enum Limit: Error { case exceeded }
 
-    private struct Budget {
+    struct Budget {
         let deadline: ContinuousClock.Instant
         private var work = 0
 
@@ -309,7 +312,7 @@ enum JJLineDiff {
         return NSRange(location: start, length: end - start)
     }
 
-    private static func wordHighlights(
+    static func wordHighlights(
         _ removed: String, _ inserted: String, normalizeCRLF: Bool, budget: inout Budget
     ) throws -> (removed: [NSRange], inserted: [NSRange]) {
         let removedLength = removed.utf16.count

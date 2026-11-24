@@ -1,6 +1,14 @@
 import AppKit
 
 @MainActor
+enum JJDiffColors {
+    static var addedRow: NSColor { .systemGreen.withAlphaComponent(0.13) }
+    static var removedRow: NSColor { NSColor.textBackgroundColor.blended(withFraction: 0.14, of: .systemRed) ?? .textBackgroundColor }
+    static var addedDetail: NSColor { .systemGreen.withAlphaComponent(0.33) }
+    static var removedDetail: NSColor { .systemRed.withAlphaComponent(0.36) }
+}
+
+@MainActor
 final class JJInlineDiffLayout {
     private struct Entry {
         let hunk: JJDiffHunk
@@ -92,9 +100,9 @@ final class JJInlineDiffLayout {
             NSRect(x: dirtyRect.minX, y: band.minY, width: dirtyRect.width, height: band.height)
                 .intersection(dirtyRect)
         }
-        let removedColor = NSColor.textBackgroundColor.blended(withFraction: 0.14, of: .systemRed) ?? .textBackgroundColor
-        let insertedColor = NSColor.systemGreen.withAlphaComponent(0.13)
-        let insertedDetail = NSColor.systemGreen.withAlphaComponent(0.33)
+        let removedColor = JJDiffColors.removedRow
+        let insertedColor = JJDiffColors.addedRow
+        let insertedDetail = JJDiffColors.addedDetail
         let context = NSGraphicsContext.current?.cgContext
         for entry in entries {
             if let band = entry.insertedRect {
@@ -120,7 +128,7 @@ final class JJInlineDiffLayout {
                 }
                 text.draw(rows, at: NSPoint(x: editor.textContainerOrigin.x, y: band.minY),
                           dirtyRect: clipped, in: context, highlights: highlights,
-                          highlightColor: NSColor.systemRed.withAlphaComponent(0.36),
+                          highlightColor: JJDiffColors.removedDetail,
                           selection: removedSelections[key], selectionIsActive: selectionIsActive)
             }
         }
@@ -270,12 +278,19 @@ final class JJInlineDiffLayout {
         guard visible.length > 0,
               let first = editor.laidOutLineBounds(at: visible.location),
               let last = editor.laidOutLineBounds(at: NSMaxRange(visible) - 1) else { return (nil, []) }
-        let origin = editor.textContainerOrigin
         let band = NSRect(x: editor.bounds.minX, y: first.minY, width: editor.bounds.width,
                           height: last.maxY - first.minY)
+        let changes = hunk.insertedHighlights.map {
+            NSRange(location: hunk.currentRange.location + $0.location, length: $0.length)
+        }
+        return (band, Self.detailRects(for: changes, in: visible, editor: editor, manager: manager))
+    }
+
+    static func detailRects(for changes: [NSRange], in visible: NSRange, editor: EditorTextView,
+                            manager: NSTextLayoutManager) -> [NSRect] {
+        let origin = editor.textContainerOrigin
         var highlights: [NSRect] = []
-        for changed in hunk.insertedHighlights {
-            let absolute = NSRange(location: hunk.currentRange.location + changed.location, length: changed.length)
+        for absolute in changes {
             let range = NSIntersectionRange(visible, absolute)
             guard range.length > 0, let textRange = editor.textRange(range, in: manager) else { continue }
             manager.enumerateTextSegments(in: textRange, type: .standard, options: .rangeNotRequired) { _, rect, _, _ in
@@ -283,7 +298,7 @@ final class JJInlineDiffLayout {
                 return true
             }
         }
-        return (band, highlights)
+        return highlights
     }
 
 }

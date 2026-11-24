@@ -4,7 +4,6 @@ import AppKit
 final class SyntaxHighlighting {
     private weak var editor: EditorTextView?
     private var spans: [SyntaxSpan] = []
-    private var conflictSpans: [SyntaxSpan] = []
     private var hasRenderingColors = false
     private var backedColorRange: NSRange?
     private var task: Task<Void, Never>?
@@ -68,7 +67,6 @@ final class SyntaxHighlighting {
         cancelPending()
         editor?.syntaxAnalysis.cancel()
         spans = []
-        conflictSpans = []
         clearColors()
         updateBackingColors(in: nil)
     }
@@ -89,20 +87,6 @@ final class SyntaxHighlighting {
         if clearingColors { display([]) }
     }
 
-    func setConflictHighlights(_ highlights: [JJConflict.Highlight]) {
-        let colors = highlights.map { highlight -> SyntaxSpan in
-            let color: SyntaxColor = switch highlight.role {
-            case .marker: .conflictMarker
-            case .addition: .conflictAddition
-            case .removal: .conflictRemoval
-            }
-            return SyntaxSpan(start: highlight.range.location, end: NSMaxRange(highlight.range), color: color)
-        }
-        guard conflictSpans != colors else { return }
-        conflictSpans = colors
-        display(spans)
-    }
-
     private func cancelPending() {
         generation &+= 1
         task?.cancel()
@@ -111,7 +95,7 @@ final class SyntaxHighlighting {
     }
 
     private func display(_ result: [SyntaxSpan]) {
-        let needsRedraw = hasRenderingColors || backedColorRange != nil || !result.isEmpty || !conflictSpans.isEmpty
+        let needsRedraw = hasRenderingColors || backedColorRange != nil || !result.isEmpty
         clearColors()
         spans = result
         guard needsRedraw, let editor, let manager = editor.textLayoutManager else { return }
@@ -158,7 +142,7 @@ final class SyntaxHighlighting {
         let document = NSRange(location: 0, length: storage.length)
         let previous = backedColorRange.map { NSIntersectionRange($0, document) }
         let visible = visible.map { NSIntersectionRange($0, document) }
-        let colors = visible.map { spans(overlapping: $0, in: spans) + spans(overlapping: $0, in: conflictSpans) } ?? []
+        let colors = visible.map { spans(overlapping: $0) } ?? []
         guard (previous?.length ?? 0) > 0 || (visible?.length ?? 0) > 0 else {
             backedColorRange = nil
             return
@@ -202,14 +186,14 @@ final class SyntaxHighlighting {
     }
 
     private func paint(_ range: NSTextRange, using manager: NSTextLayoutManager) {
-        guard !spans.isEmpty || !conflictSpans.isEmpty else { return }
+        guard !spans.isEmpty else { return }
         let origin = manager.documentRange.location
         let start = manager.offset(from: origin, to: range.location)
         let end = start + manager.offset(from: range.location, to: range.endLocation)
         guard start < end else { return }
 
         let visible = NSRange(location: start, length: end - start)
-        for span in spans(overlapping: visible, in: spans) + spans(overlapping: visible, in: conflictSpans) {
+        for span in spans(overlapping: visible) {
             guard let from = manager.location(range.location, offsetBy: max(0, span.start - start)),
                   let to = manager.location(from, offsetBy: min(end, span.end) - max(start, span.start)),
                   let target = NSTextRange(location: from, end: to) else { continue }
@@ -218,7 +202,7 @@ final class SyntaxHighlighting {
         }
     }
 
-    private func spans(overlapping range: NSRange, in spans: [SyntaxSpan]) -> ArraySlice<SyntaxSpan> {
+    private func spans(overlapping range: NSRange) -> ArraySlice<SyntaxSpan> {
         guard range.length > 0 else { return [] }
         var low = 0
         var high = spans.count
@@ -282,9 +266,6 @@ extension SyntaxColor {
         case .property: pair = (0x9CDCFE, 0x001080)
         case .markup: pair = (0x569CD6, 0x800000)
         case .attribute: pair = (0x9CDCFE, 0xC00000)
-        case .conflictMarker: pair = (0xD7A9FF, 0x7823A3)
-        case .conflictAddition: pair = (0x86D9A0, 0x176837)
-        case .conflictRemoval: pair = (0xFF9C9C, 0xA0232A)
         }
         return NSColor(name: nil) { appearance in
             let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
