@@ -943,13 +943,13 @@ enum TerminalCheck {
         let hiddenDirectory = fixture.appending(path: "hidden", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: hiddenDirectory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: fixture) }
-        let shell = fixture.appending(path: "shell")
+        let shell = fixture.appending(path: "zsh")
         let launches = fixture.appending(path: "launches")
         try """
         #!/bin/sh
         printf '%s\\n' "$PWD" >> "${0%/*}/launches"
-        printf 'RestoredShell\\n'
-        exec /bin/cat
+        printf '\\033[?2004hRestoredShell '
+        while IFS= read -r line; do printf '%s\\n' "$line"; done
         """.write(to: shell, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: shell.path)
 
@@ -966,10 +966,15 @@ enum TerminalCheck {
         scrolling.reflectScrolledClipView(scrolling.contentView)
         try expect(scrolling.contentView.bounds.minX == 90, "scroll before saving")
         pane.startProcess(executable: "/bin/sh", args: ["-c",
-            "printf '\\033]4;1;rgb:22/55/88\\007\\033[31mEditHistory\\033[38;2;17;34;51m色\\033[0m✓\\n'; exec /bin/sleep 15",
+            "printf '\\033]4;1;rgb:22/55/88\\007\\033[31mEditHistory\\033[38;2;17;34;51m色\\033[0m✓\\n\\033]133;A\\007RestoredShell \\033]133;B\\007'; exec /bin/sleep 15",
         ])
         defer { pane.terminate() }
-        try await waitFor("capture output from the live shell") { pane.process.running && containsText("EditHistory", in: pane) }
+        try await waitFor("save live shell output without the marked prompt") {
+            let terminal = visible.sessionDocument().terminal
+            let transcripts = terminal?.panel.spaces.flatMap { savedTranscripts(in: $0.layout) } ?? []
+            return pane.process.running && containsText("RestoredShell", in: pane) &&
+                transcripts.contains { $0.hasSuffix("EditHistory色✓") }
+        }
 
         let hidden = app.makeDocument()
         defer { hidden.window.close() }
@@ -1039,6 +1044,8 @@ enum TerminalCheck {
         let historyRow = try require(rows.firstIndex { $0.text.contains("EditHistory色✓") }, "restore colored text and the wide glyph together")
         let promptRow = try require(rows.firstIndex { $0.text.contains("RestoredShell") }, "record output from the new shell")
         try expect(historyRow < promptRow, "replay history before the new shell writes to the terminal")
+        try expect(rows.filter { $0.text.contains("RestoredShell") }.count == 1,
+                   "display a single prompt after restoring the marked shell")
         let styledRow = rows[historyRow]
         try expect(styledRow.cells.first { $0.text == "E" }?.attribute.fg == .trueColor(red: 34, green: 85, blue: 136) &&
                    styledRow.cells.first { $0.text == "色" }?.attribute.fg == .trueColor(red: 17, green: 34, blue: 51) &&
@@ -1053,6 +1060,13 @@ enum TerminalCheck {
         try await waitFor("reveal the running shell with its saved history") {
             reopened.process.running && containsText("HiddenHistory", in: reopened) && containsText("RestoredShell", in: reopened)
         }
+        try await waitFor("omit the recognized unmarked shell prompt on the next save") {
+            let terminal = inactive.sessionDocument().terminal
+            return terminal?.panel.spaces.flatMap { savedTranscripts(in: $0.layout) } == ["HiddenHistory"]
+        }
+        reopened.feed(text: "unfinished")
+        try expect(inactive.sessionDocument().terminal?.panel.spaces.flatMap { savedTranscripts(in: $0.layout) } ==
+                   ["HiddenHistory\nRestoredShell unfinished"], "save input beside a prompt as part of the transcript")
         try expect(view("Edit.Terminal.RestartShell", in: restoredPanel) == nil &&
                    view("Edit.Terminal.CloseShell", in: restoredPanel) == nil,
                    "present the restored terminal without stopped-shell controls")
@@ -1071,6 +1085,13 @@ enum TerminalCheck {
         switch layout {
         case .pane: 1
         case .split(_, _, let first, let second): paneCount(in: first) + paneCount(in: second)
+        }
+    }
+
+    private static func savedTranscripts(in layout: TerminalLayoutState) -> [String] {
+        switch layout {
+        case .pane(let state): [state.transcript]
+        case .split(_, _, let first, let second): savedTranscripts(in: first) + savedTranscripts(in: second)
         }
     }
 

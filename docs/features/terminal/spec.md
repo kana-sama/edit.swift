@@ -18,6 +18,8 @@ On Quit, save each open window’s terminal panel with its editor session. Resto
 
 Keep up to 2,000 recent scrollback rows and the last visible alternate screen in the private session file. Save up to 256 KiB of text per terminal with a bounded set of color and style changes for the newest output. Reopening preserves ANSI palette colors and true-color text. Unstyled text follows the current terminal appearance. Older sessions saved as plain text still reopen.
 
+Leave the trailing input prompt out of saved history when its single line is identified by OSC 133 or matches the prompt observed at shell startup while bracketed paste is enabled. Preserve output, lines with typed input, and history saved by older versions.
+
 Quitting ends the shell processes. Reopening Edit starts a fresh login shell in every saved pane, including hidden panels and unselected spaces. Replay the saved output before the shell starts. Use the saved directory when available and the home directory if it no longer exists. Closing an individual window closes its terminal spaces. If a file is missing at startup, keep its window available when it has terminal history to restore.
 
 ## Spaces and splits

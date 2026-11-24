@@ -1,6 +1,57 @@
 import Foundation
 import SwiftTerm
 
+struct TerminalPrompt {
+    struct Line: Equatable {
+        let cells: ArraySlice<TerminalCellSnapshot>
+        let cursorColumn: Int
+
+        init?(_ snapshot: TerminalContentSnapshot) {
+            guard !snapshot.inputState.isAlternateBuffer, snapshot.cursorColumn > 0,
+                  let row = snapshot.rows.last(where: { $0.cells.contains { !$0.isBlank } }),
+                  row.absoluteRow == snapshot.cursorRow, !row.isWrapped,
+                  row.cells.dropFirst(snapshot.cursorColumn).allSatisfy(\.isBlank) else { return nil }
+            guard !row.text.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+            cells = row.cells.prefix(snapshot.cursorColumn)
+            cursorColumn = snapshot.cursorColumn
+        }
+    }
+
+    private var start: Position?
+    private var end: Position?
+    private var shellMarksPrompts = false
+
+    mutating func observe(_ event: TerminalOscEvent) {
+        let fields = String(decoding: event.payload, as: UTF8.self).split(separator: ";")
+        switch fields.first {
+        case "A", "N", "P":
+            if let kind = fields.dropFirst().first(where: { $0.hasPrefix("k=") }), kind != "k=i" { return }
+            shellMarksPrompts = true
+            start = event.cursor.col == 0 ? event.cursor : nil
+            end = nil
+        case "B", "I":
+            end = event.cursor
+        case "C", "D":
+            start = nil
+            end = nil
+        default:
+            break
+        }
+    }
+
+    func trailingRow(in snapshot: TerminalContentSnapshot, startupLine: Line?) -> Int? {
+        guard let line = Line(snapshot) else { return nil }
+        if shellMarksPrompts {
+            // OSC reports live-screen coordinates. Limit detection to a complete single row.
+            guard let start, let end, start.row == end.row, end.col == line.cursorColumn,
+                  snapshot.liveTopRow + end.row == snapshot.cursorRow else { return nil }
+        } else {
+            guard snapshot.inputState.bracketedPasteMode, line == startupLine else { return nil }
+        }
+        return snapshot.cursorRow
+    }
+}
+
 struct TerminalTranscript {
     struct Style: Codable, Sendable, Equatable {
         let byteOffset: Int
@@ -47,7 +98,8 @@ struct TerminalTranscript {
         self.styles = retained
     }
 
-    init(snapshots: [TerminalContentSnapshot], useBrightColors: Bool, collapseBrightColorsToBase: Bool) {
+    init(snapshots: [TerminalContentSnapshot], omittingNormalRowsFrom promptRow: Int? = nil,
+         useBrightColors: Bool, collapseBrightColorsToBase: Bool) {
         var text = ""
         var styles: [Style] = []
         var byteOffset = 0
@@ -58,10 +110,15 @@ struct TerminalTranscript {
         }
 
         for snapshot in snapshots {
-            guard let last = snapshot.rows.lastIndex(where: { $0.cells.contains { !$0.isBlank } }) else { continue }
+            let rows = if let promptRow, snapshot.bufferKind == .normal {
+                snapshot.rows.prefix { $0.absoluteRow < promptRow }
+            } else {
+                snapshot.rows[...]
+            }
+            guard let last = rows.lastIndex(where: { $0.cells.contains { !$0.isBlank } }) else { continue }
             var attribute: Attribute?
             if !text.isEmpty { append("\n\n") }
-            for (index, row) in snapshot.rows[...last].enumerated() {
+            for (index, row) in rows[...last].enumerated() {
                 if index > 0 && !row.isWrapped { append("\n") }
                 guard let end = row.cells.lastIndex(where: { !$0.isBlank }) else { continue }
                 for column in 0...end {

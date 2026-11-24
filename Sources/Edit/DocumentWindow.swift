@@ -342,6 +342,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             return true
         }
         guard terminalHasFocus(window.firstResponder) else { return false }
+        terminalPanel?.stopLearningStartupPrompt()
         if TerminalShortcuts.isClear(event) {
             if !event.isARepeat { terminalPanel?.clear() }
             return true

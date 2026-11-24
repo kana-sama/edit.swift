@@ -165,6 +165,10 @@ final class TerminalPanel: NSObject {
         selectedSpace?.last.clear()
     }
 
+    func stopLearningStartupPrompt() {
+        selectedSpace?.last.stopLearningStartupPrompt()
+    }
+
     func setVisible(_ visible: Bool) {
         guard visible else {
             dockPopover.close(restoreFocus: false)
@@ -658,6 +662,11 @@ private final class TerminalSessionView: LocalProcessTerminalView {
         }
     }
 
+    override func paste(_ sender: Any) {
+        pane?.stopLearningStartupPrompt()
+        super.paste(sender)
+    }
+
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         super.mouseDown(with: event)
@@ -781,6 +790,10 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
     private var closed = false
     private var pendingTranscript: TerminalTranscript?
     private var pendingScrollbackOffset: Int?
+    private var promptObservation: TerminalOscObservation?
+    private var prompt = TerminalPrompt()
+    private var startupPrompt: TerminalPrompt.Line?
+    private var learningStartupPrompt = false
 
     init(directory: URL, shell: String?, restoredState: TerminalPaneState?) {
         id = restoredState?.id ?? UUID()
@@ -800,6 +813,10 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
         clipsToBounds = true
         terminal.pane = self
         terminal.processDelegate = self
+        promptObservation = terminal.observeOscEvents { [weak self] event in
+            guard event.code == 133 else { return }
+            DispatchQueue.main.async { [weak self] in self?.prompt.observe(event) }
+        }
         terminal.configureNativeColors()
         terminal.backgroundOpacity = 0
         terminal.scrollerStyle = .overlay
@@ -978,7 +995,10 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
             let viewedRow = max(normal.capturedRange.lowerBound, viewport?.capturedRange.lowerBound ?? normal.liveTopRow)
             scrollbackOffset = max(0, normal.liveTopRow - viewedRow)
         }
-        let transcript = TerminalTranscript(snapshots: snapshots, useBrightColors: terminal.useBrightColors,
+        let unmarkedPrompt = foregroundCommand == nil ? startupPrompt : nil
+        let promptRow = terminal.process.running ? prompt.trailingRow(in: normal, startupLine: unmarkedPrompt) : nil
+        let transcript = TerminalTranscript(snapshots: snapshots, omittingNormalRowsFrom: promptRow,
+                                            useBrightColors: terminal.useBrightColors,
                                             collapseBrightColorsToBase: terminal.collapseBrightColorsToBase)
         return (transcript, scrollbackOffset)
     }
@@ -1097,6 +1117,8 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
     func close() {
         guard !closed else { return }
         closed = true
+        stopLearningStartupPrompt()
+        promptObservation?.cancel()
         terminal.processDelegate = nil
         terminal.terminate()
         terminal.updateUiClosed()
@@ -1117,6 +1139,9 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
         restoreTranscript()
         let fileManager = FileManager.default
         shellName = URL(fileURLWithPath: shell).lastPathComponent
+        if shellName == "zsh" || shellName == "bash" || shellName == "fish" {
+            learnStartupPrompt()
+        }
         foregroundCommand = nil
         var isDirectory: ObjCBool = false
         if !fileManager.fileExists(atPath: workingDirectory.path, isDirectory: &isDirectory) || !isDirectory.boolValue {
@@ -1134,6 +1159,26 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
         terminal.startProcess(executable: shell, environment: environment.map { "\($0.key)=\($0.value)" },
                               execName: shellName.map { "-" + $0 },
                               currentDirectory: workingDirectory.path)
+    }
+
+    private func learnStartupPrompt() {
+        learningStartupPrompt = true
+        terminal.setProcessOutputHandler { [weak self, weak terminal] in
+            guard terminal?.terminalInputStateSnapshot()?.bracketedPasteMode == true else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, learningStartupPrompt,
+                      let snapshot = self.terminal.terminalContentSnapshot(region: .history(maximumScrollbackRows: -1)),
+                      snapshot.inputState.bracketedPasteMode, let line = TerminalPrompt.Line(snapshot) else { return }
+                startupPrompt = line
+                stopLearningStartupPrompt()
+            }
+        }
+    }
+
+    fileprivate func stopLearningStartupPrompt() {
+        guard learningStartupPrompt else { return }
+        learningStartupPrompt = false
+        terminal.setProcessOutputHandler(nil)
     }
 
     func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
