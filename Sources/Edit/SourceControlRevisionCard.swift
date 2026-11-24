@@ -8,6 +8,18 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
     private static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
     private static let markdownLink = try? NSRegularExpression(pattern: #"\[([^\]\r\n]+)\]\((https?://(?:[^\s()]|\([^\s()]*\))+)\)"#,
                                                                options: .caseInsensitive)
+    private static let trailer = try? NSRegularExpression(pattern: #"^[A-Za-z0-9-]+[ \t]*:(?!//)"#)
+    private static let coauthorTrailer = try? NSRegularExpression(pattern: #"^Co-authored-by[ \t]*:[ \t]*([^<>]+?)[ \t]*<([^<>\s@]+@[^<>\s@]+)>[ \t]*$"#,
+                                                                   options: .caseInsensitive)
+    private static let descriptionColor = NSColor(name: nil) { appearance in
+        var color = NSColor.secondaryLabelColor
+        appearance.performAsCurrentDrawingAppearance {
+            if let label = NSColor.labelColor.usingColorSpace(.sRGB) {
+                color = label.withAlphaComponent(label.alphaComponent * 0.82)
+            }
+        }
+        return color
+    }
     private let openURL: (URL) -> Void
     private let commitButton = NSButton()
     private var commitLink: JJSourceControlCommitLink?
@@ -16,25 +28,8 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
         openURL = onOpenURL
         super.init(frame: .zero)
         let subject = textView(revision.subject, id: "Subject", font: .systemFont(ofSize: 14, weight: .semibold), lines: 2)
-
-        let dates = Self.label(Self.creationDates(for: revision).joined(separator: "\n"), id: "Dates",
-                               font: .systemFont(ofSize: 11), lines: 3)
-        let metadata = Self.stack()
-        metadata.spacing = 3
-        if !revision.author.isEmpty {
-            var name = revision.author
-            if !revision.authorEmail.isEmpty {
-                let address = "<\(revision.authorEmail)>"
-                name = name == revision.authorEmail ? address : "\(name) \(address)"
-            }
-            let author = Self.label(name, id: "Author", font: .systemFont(ofSize: 11, weight: .medium),
-                                    lines: 2, width: Self.textWidth - 18)
-            let authorRow = NSStackView(views: [Self.icon("person.crop.circle", color: .secondaryLabelColor), author])
-            authorRow.spacing = 5
-            authorRow.alignment = .centerY
-            metadata.addArrangedSubview(authorRow)
-        }
-        metadata.addArrangedSubview(dates)
+        let description = Self.descriptionParts(revision.description)
+        let metadata = Self.metadata(revision, coauthors: description.coauthors)
 
         let identity = SourceControlRevisionIdentity()
         identity.identifier = NSUserInterfaceItemIdentifier("JujutsuRevisionCardID")
@@ -62,8 +57,9 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
         content.addArrangedSubview(subject)
         content.setCustomSpacing(5, after: subject)
         content.addArrangedSubview(metadata)
-        if let body = Self.body(of: revision.description) {
-            content.addArrangedSubview(textView(body, id: "Description", font: .systemFont(ofSize: 12), lines: 8))
+        if let body = description.body {
+            content.addArrangedSubview(textView(body, id: "Description", font: .systemFont(ofSize: 12),
+                                              color: Self.descriptionColor, lines: 8))
         }
 
         let separator = NSBox()
@@ -117,26 +113,90 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
     }
 
     static func creationDates(for revision: JJSourceControlRevision) -> [String] {
+        dateRows(for: revision).map { "\($0.label) · \($0.value)" }
+    }
+
+    private static func dateRows(for revision: JJSourceControlRevision) -> [(label: String, value: String)] {
         let style = Date.FormatStyle.dateTime.year().month(.abbreviated).day().hour().minute().second()
         let author = revision.authorDate.formatted(style)
-        if revision.authorDate == revision.committerDate { return ["Created · \(author)"] }
+        if revision.authorDate == revision.committerDate { return [("Created", author)] }
 
         let committer = revision.committerDate.formatted(style)
         if author == committer {
             let precise = style.secondFraction(.fractional(3))
-            return ["Change created · \(revision.authorDate.formatted(precise))",
-                    "Commit created · \(revision.committerDate.formatted(precise))"]
+            return [("Created", revision.authorDate.formatted(precise)), ("Modified", revision.committerDate.formatted(precise))]
         }
-        return ["Change created · \(author)", "Commit created · \(committer)"]
+        return [("Created", author), ("Modified", committer)]
     }
 
-    private static func body(of description: String) -> String? {
-        guard let subjectEnd = description.firstIndex(where: \.isNewline) else { return nil }
+    private static func metadata(_ revision: JJSourceControlRevision, coauthors: [String]) -> NSGridView {
+        var rows: [(label: String, value: String)] = []
+        if !revision.author.isEmpty {
+            let name = revision.author
+            let email = revision.authorEmail
+            let author = email.isEmpty ? name : formattedAuthor(name, email: email)
+            rows.append(("Author", author))
+        }
+        rows += coauthors.map { ("Co-author", $0) }
+        rows += dateRows(for: revision)
+
+        let font = NSFont.systemFont(ofSize: 11)
+        let labels = rows.map { row in
+            let label = NSTextField(labelWithString: row.label)
+            label.font = font
+            label.textColor = .secondaryLabelColor
+            return label
+        }
+        let labelWidth = ceil(labels.map { $0.intrinsicContentSize.width }.max() ?? 0)
+        let spacing: CGFloat = 12
+        let valueWidth = textWidth - labelWidth - spacing
+        let fields: [[NSView]] = zip(labels, rows).map { label, row in
+            let value = Self.label(row.value, id: row.label, font: .systemFont(ofSize: 11, weight: .medium),
+                                   lines: 2, width: valueWidth)
+            value.setAccessibilityLabel("\(row.label), \(row.value)")
+            return [label, value]
+        }
+        let grid = NSGridView(views: fields)
+        grid.columnSpacing = spacing
+        grid.rowSpacing = 3
+        grid.rowAlignment = .firstBaseline
+        grid.column(at: 0).xPlacement = .leading
+        grid.column(at: 0).width = labelWidth
+        grid.column(at: 1).xPlacement = .fill
+        grid.column(at: 1).width = valueWidth
+        return grid
+    }
+
+    private static func formattedAuthor(_ name: String, email: String) -> String {
+        let address = "<\(email)>"
+        return name == email ? address : "\(name) \(address)"
+    }
+
+    private static func descriptionParts(_ description: String) -> (body: String?, coauthors: [String]) {
+        guard let subjectEnd = description.firstIndex(where: \.isNewline) else { return (nil, []) }
         var body = description[description.index(after: subjectEnd)...]
         if body.first?.isNewline == true { body = body.dropFirst() }
-        while body.last?.isNewline == true { body = body.dropLast() }
-        guard body.contains(where: { !$0.isWhitespace }) else { return nil }
-        return String(body)
+        var lines = body.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+        while lines.last?.allSatisfy(\.isWhitespace) == true { lines.removeLast() }
+
+        // Restrict attribution to the trailing metadata block, keeping other trailers and body text.
+        let start = lines.lastIndex(where: { line in
+            if line.allSatisfy(\.isWhitespace) { return true }
+            if line.first?.isWhitespace == true { return false }
+            return trailer?.firstMatch(in: String(line), range: NSRange(location: 0, length: line.utf16.count)) == nil
+        }).map { $0 + 1 } ?? 0
+        var coauthors: [String] = []
+        lines.replaceSubrange(start..., with: lines[start...].filter { line in
+            let source = String(line) as NSString
+            guard let match = coauthorTrailer?.firstMatch(in: String(line), range: NSRange(location: 0, length: source.length))
+            else { return true }
+            let name = source.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else { return true }
+            coauthors.append(formattedAuthor(name, email: source.substring(with: match.range(at: 2))))
+            return false
+        })
+        while lines.last?.allSatisfy(\.isWhitespace) == true { lines.removeLast() }
+        return (lines.isEmpty ? nil : lines.joined(separator: "\n"), coauthors)
     }
 
     private static func stack() -> NSStackView {
@@ -164,23 +224,23 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
         return label
     }
 
-    private func textView(_ text: String, id: String, font: NSFont, lines: Int) -> NSTextView {
-        let formatted = Self.linkedText(text, font: font)
+    private func textView(_ text: String, id: String, font: NSFont, color: NSColor = .labelColor, lines: Int) -> NSTextView {
+        let formatted = Self.linkedText(text, font: font, color: color)
         let view = SourceControlRevisionCardText(formatted, width: Self.textWidth, lines: lines)
         view.identifier = NSUserInterfaceItemIdentifier("JujutsuRevisionCard\(id)")
         view.delegate = self
         return view
     }
 
-    private static func linkedText(_ text: String, font: NSFont) -> NSAttributedString {
-        let result = NSMutableAttributedString(string: text, attributes: [.font: font, .foregroundColor: NSColor.labelColor])
+    private static func linkedText(_ text: String, font: NSFont, color: NSColor) -> NSAttributedString {
+        let result = NSMutableAttributedString(string: text, attributes: [.font: font, .foregroundColor: color])
         let source = text as NSString
         let markdown = markdownLink?.matches(in: text, range: NSRange(location: 0, length: source.length)) ?? []
         for match in markdown.reversed() {
             guard let url = URL(string: source.substring(with: match.range(at: 2))), isWebURL(url) else { continue }
             let title = source.substring(with: match.range(at: 1))
             result.replaceCharacters(in: match.range, with: NSAttributedString(string: title, attributes: [
-                .font: font, .foregroundColor: NSColor.labelColor, .link: url,
+                .font: font, .foregroundColor: color, .link: url,
             ]))
         }
 

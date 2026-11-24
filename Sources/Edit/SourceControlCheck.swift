@@ -27,7 +27,10 @@ enum SourceControlCheck {
         try historical.write(to: file, atomically: true, encoding: .utf8)
         try Data([3, 2, 35, 7, 0, 255, 0, 0]).write(to: binary)
         let description = "Working change\n\nA long description starts with [Guide](https://example.com/guide) and https://example.com/plain.\n"
+            + "Co-authored-by: Example in the body <example@example.com>\nThis is a quoted example.\n"
             + String(repeating: "A long description stays in the popover.\n", count: 11)
+            + "\nCo-authored-by: Ada Finch <ada@example.com>\nSigned-off-by: Reviewer <reviewer@example.com>\n"
+            + "co-authored-by: Casey Chen <casey@example.com>\n"
         try await command(executable, folder, ["new", "-m", description])
         try await command(executable, folder, ["bookmark", "create", "review/jj-sidebar-layout-with-a-long-bookmark", "-r", "@"])
         try await command(executable, folder, ["new", "--no-edit", "-m", "Side branch", "@--"])
@@ -801,7 +804,7 @@ enum SourceControlCheck {
                    "show a readable single-line bookmark label after the author at minimum width")
         try expect(working.toolTip == nil && working.accessibilityLabel()?.contains(name) == true &&
                    branch.accessibilityHelp()?.contains("Created ·") == true &&
-                   historical.accessibilityHelp()?.contains("Commit created ·") == true,
+                   historical.accessibilityHelp()?.contains("Modified ·") == true,
                    "expose full bookmarks and dates to accessibility without the plain-text tooltip")
     }
 
@@ -860,6 +863,18 @@ enum SourceControlCheck {
                    label("Bookmarks", in: content)?.stringValue.contains("review/jj-sidebar-layout-with-a-long-bookmark") == true &&
                    description.string.hasPrefix("A long description"),
                    "show the subject, author, full bookmark name, and body as distinct parts of the card")
+        guard let grid = descendant(of: content, where: { (_: NSGridView) in true }) else {
+            throw Failure("show a grid for revision metadata")
+        }
+        let labels = (0..<grid.numberOfRows).compactMap { (grid.cell(atColumnIndex: 0, rowIndex: $0).contentView as? NSTextField)?.stringValue }
+        let values = (0..<grid.numberOfRows).compactMap { grid.cell(atColumnIndex: 1, rowIndex: $0).contentView as? NSTextField }
+        try expect(Array(labels.prefix(4)) == ["Author", "Co-author", "Co-author", "Created"] &&
+                   values.map(\.stringValue).dropFirst().prefix(2).elementsEqual(["Ada Finch <ada@example.com>", "Casey Chen <casey@example.com>"]) &&
+                   Set(values.map { grid.convert($0.bounds, from: $0).minX }).count == 1,
+                   "align all metadata values and list multiple co-authors in their original order")
+        try expect(!description.string.contains("Ada Finch") && !description.string.contains("Casey Chen") &&
+                   description.string.contains("Co-authored-by: Example in the body") && description.string.contains("Signed-off-by: Reviewer"),
+                   "move only co-author trailers and preserve the rest of the description")
         try expect(description.isSelectable && !description.isEditable && description.needsPanelToBecomeKey,
                    "allow text selection and keyboard copy without editing the description")
         let guide = (description.string as NSString).range(of: "Guide")
@@ -930,8 +945,9 @@ enum SourceControlCheck {
         clip.scroll(to: .zero)
         graph.table.mouseMoved(with: try pointer(at: historical))
         try await waitFor("show both creation dates in the historical card") {
-            guard let content = card()?.contentView, let dates = label("Dates", in: content)?.stringValue else { return false }
-            return dates.contains("Change created ·") && dates.contains("Commit created ·")
+            guard let content = card()?.contentView, let created = label("Created", in: content)?.stringValue,
+                  let modified = label("Modified", in: content)?.stringValue else { return false }
+            return created != modified
         }
         graph.table.mouseExited(with: try pointer(at: working))
         try await waitFor("dismiss the card after leaving the row and its corridor") { card() == nil }
