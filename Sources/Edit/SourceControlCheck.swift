@@ -3,6 +3,7 @@ import AppKit
 @MainActor
 enum SourceControlCheck {
     private static let workingSubject = "feat(editor)!: Working change"
+    private static let reviewURL = "https://example.com/review/very-long-thread-identifier-747f-bde0-fe7e80dc69da"
 
     static func run(in app: Edit, render: (NSWindow) throws -> Void) async throws {
         guard let executable = JJRepository.executable else { return }
@@ -35,7 +36,7 @@ enum SourceControlCheck {
             + String(repeating: "A long description stays in the popover.\n", count: 150)
             + "Remaining: one task\n  - The end of the working description.\n"
             + "Co-authored-by: Ada Finch <ada@example.com>\nSigned-off-by: Reviewer <reviewer@example.com>\n"
-            + "Reviewed-on: https://example.com/review\n  Review continued.\n"
+            + "Reviewed-on: \(reviewURL)\n  Review continued.\n"
             + "co-authored-by: Casey Chen <casey@example.com>\n"
         try await command(executable, folder, ["new", "-m", description])
         try await command(executable, folder, ["bookmark", "create", "review/jj-sidebar-layout-with-a-long-bookmark", "-r", "@"])
@@ -1682,10 +1683,20 @@ enum SourceControlCheck {
         try expect(Array(labels.prefix(4)) == ["Author", "Co-author", "Co-author", "Created"] &&
                    Array(labels.suffix(2)) == ["Signed-off-by", "Reviewed-on"] &&
                    values.map(\.string).dropFirst().prefix(2).elementsEqual(["Ada Finch ada@example.com", "Casey Chen casey@example.com"]) &&
-                   values.last?.string == "https://example.com/review\nReview continued." &&
+                   values.last?.string == "\(reviewURL) Review continued." &&
                    Set(values.map { grid.convert($0.bounds, from: $0).maxX }).count == 1 &&
                    values.allSatisfy { ($0.textStorage?.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)?.alignment == .right },
-                   "preserve trailer order and continuation lines and right-align all metadata values")
+                   "preserve trailer order, join continuations, and right-align all metadata values")
+        guard let review = values.last as? SourceControlRevisionCardText, let reviewLayout = review.layoutManager,
+              let reviewContainer = review.textContainer else { throw Failure("show the long metadata link") }
+        try expect(values.allSatisfy { abs($0.frame.height - values[3].frame.height) < 1 } &&
+                   reviewLayout.truncatedGlyphRange(inLineFragmentForGlyphAt: 0).length > 0,
+                   "keep metadata values on a single line and truncate the long review link")
+        let firstLinkGlyph = reviewLayout.boundingRect(forGlyphRange: NSRange(location: 0, length: 1), in: reviewContainer)
+        try expect(review.hasLink(at: NSPoint(x: firstLinkGlyph.midX + review.textContainerOrigin.x,
+                                             y: firstLinkGlyph.midY + review.textContainerOrigin.y)) &&
+                   (review.textStorage?.attribute(.link, at: 0, effectiveRange: nil) as? URL)?.absoluteString == reviewURL,
+                   "keep the visible part of a truncated link clickable with the full destination")
         try expect(!description.string.contains("Ada Finch") && !description.string.contains("Casey Chen") &&
                    description.string.contains("Co-authored-by: Example in the body example@example.com") &&
                    description.string.contains("Remaining: one task") && !description.string.contains("Signed-off-by: Reviewer"),

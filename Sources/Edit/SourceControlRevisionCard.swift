@@ -139,6 +139,7 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
             let label = NSTextField(labelWithString: row.label)
             label.font = .systemFont(ofSize: 11)
             label.textColor = .secondaryLabelColor
+            label.maximumNumberOfLines = 1
             label.lineBreakMode = .byTruncatingTail
             label.allowsExpansionToolTips = true
             return label
@@ -148,14 +149,16 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
         let valueWidth = Self.textWidth - labelWidth - spacing
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .right
+        paragraph.lineBreakMode = .byTruncatingTail
         let fields: [[NSView]] = zip(labels, rows).map { label, row in
-            let formatted = NSMutableAttributedString(string: row.value, attributes: [
+            let singleLine = row.value.split(whereSeparator: \.isNewline).joined(separator: " ")
+            let formatted = NSMutableAttributedString(string: singleLine, attributes: [
                 .font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: NSColor.labelColor,
                 .paragraphStyle: paragraph,
             ])
             RevisionCardMessage.addLinks(to: formatted)
-            let value = textView(formatted, id: row.label, width: valueWidth)
-            value.setAccessibilityLabel("\(row.label), \(row.value)")
+            let value = textView(formatted, id: row.label, width: valueWidth, singleLine: true)
+            value.setAccessibilityLabel("\(row.label), \(formatted.string)")
             return [label, value]
         }
         let grid = NSGridView(views: fields)
@@ -199,8 +202,8 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
         return label
     }
 
-    private func textView(_ text: NSAttributedString, id: String, width: CGFloat = textWidth) -> NSTextView {
-        let view = SourceControlRevisionCardText(text, width: width)
+    private func textView(_ text: NSAttributedString, id: String, width: CGFloat = textWidth, singleLine: Bool = false) -> NSTextView {
+        let view = SourceControlRevisionCardText(text, width: width, singleLine: singleLine)
         view.identifier = NSUserInterfaceItemIdentifier("JujutsuRevisionCard\(id)")
         view.delegate = self
         return view
@@ -405,12 +408,13 @@ final class SourceControlRevisionCardText: NSTextView {
     private var measuredSize = NSSize.zero
     private var firstBaseline: CGFloat = 0
 
-    init(_ text: NSAttributedString, width: CGFloat) {
+    init(_ text: NSAttributedString, width: CGFloat, singleLine: Bool) {
         storage = NSTextStorage(attributedString: text)
         let manager = NSLayoutManager()
         let container = NSTextContainer(size: NSSize(width: width, height: CGFloat.greatestFiniteMagnitude))
         container.lineFragmentPadding = 0
-        container.lineBreakMode = .byWordWrapping
+        container.maximumNumberOfLines = singleLine ? 1 : 0
+        container.lineBreakMode = singleLine ? .byTruncatingTail : .byWordWrapping
         storage.addLayoutManager(manager)
         manager.addTextContainer(container)
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: 0), textContainer: container)
