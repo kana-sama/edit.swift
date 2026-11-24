@@ -1301,9 +1301,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 guard let screenshot else { return }
                 let file = URL(fileURLWithPath: screenshot).deletingPathExtension().path + "-hover.png"
                 try self.captureCheckView(view, screenshot: file)
-            }, captureServers: { view in
+            }, captureServers: { view, toggle in
                 guard let screenshot else { return }
-                let file = URL(fileURLWithPath: screenshot).deletingPathExtension().path + "-servers.png"
+                let suffix = toggle == .start ? "-servers-stopped.png" : "-servers.png"
+                let file = URL(fileURLWithPath: screenshot).deletingPathExtension().path + suffix
                 let popup = NSWindow(contentRect: view.frame, styleMask: .borderless, backing: .buffered, defer: false)
                 popup.isReleasedWhenClosed = false
                 popup.appearance = document.window.effectiveAppearance

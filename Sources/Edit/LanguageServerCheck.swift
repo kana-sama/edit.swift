@@ -8,7 +8,8 @@ enum LanguageServerCheck {
     }
 
     static func run(in app: Edit, document: DocumentWindow, capture: (NSWindow) throws -> Void,
-                    captureHover: (NSView) throws -> Void, captureServers: (NSView) throws -> Void) async throws {
+                    captureHover: (NSView) throws -> Void,
+                    captureServers: (NSView, LanguageServerCommand) throws -> Void) async throws {
         let folder = FileManager.default.temporaryDirectory.appending(path: "ZLS fixture \(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer {
@@ -70,7 +71,7 @@ enum LanguageServerCheck {
         try expect(button.window === document.window && headerPoint.x > document.window.frame.width - 55,
                    "anchor the language server icon at the trailing edge of the header")
         try expect(lsp.canPerform(.stop) && lsp.canPerform(.restart) && !lsp.canPerform(.start), "ready server controls")
-        try checkPopoverControls(in: lsp, toggle: .stop, capture: captureServers)
+        let readyControls = try checkPopoverControls(in: lsp, toggle: .stop, capture: captureServers)
 
         let use = (mainText as NSString).range(of: "identify")
         try expect(await lsp.probe(at: use.location + 2, word: use) == use, "definition link over Unicode source")
@@ -135,7 +136,8 @@ enum LanguageServerCheck {
         try await wait("stop the server") { lsp.session.state.title == "Stopped" }
         try expect(lsp.canPerform(.start) && !document.editor.languageInteractionEnabled, "stop disables language gestures")
         try expect(lsp.statusIndicatorForCheck == .stopped, "show the stopped workspace in red")
-        try checkPopoverControls(in: lsp, toggle: .start)
+        let stoppedControls = try checkPopoverControls(in: lsp, toggle: .start, capture: captureServers)
+        try expect(readyControls == stoppedControls, "switching between Play and Stop keeps both controls in place")
         try expect(try await app.openFile(main, in: document) === document, "navigate after stopping ZLS")
         try await wait("resolve the stopped document's workspace") { lsp.canPerform(.start) }
         try expect(lsp.session.state.title == "Stopped", "stop holds while switching files in the same project")
@@ -172,17 +174,27 @@ enum LanguageServerCheck {
     }
 
     private static func checkPopoverControls(in lsp: DocumentLanguageFeatures, toggle: LanguageServerCommand,
-                                             capture: (NSView) throws -> Void = { _ in }) throws {
+                                             capture: (NSView, LanguageServerCommand) throws -> Void) throws -> [NSRect] {
         guard let view = lsp.statusPopoverForCheck else { throw Failure("prepare the native server popover") }
-        for (id, command) in [("toggle", toggle), ("restart", LanguageServerCommand.restart)] {
+        let frames = try [("toggle", toggle), ("restart", LanguageServerCommand.restart)].map { id, command in
             let identifier = "Edit.LanguageServer.\(id)"
             guard let button = descend(view, matching: { $0.identifier?.rawValue == identifier }) as? NSButton else {
                 throw Failure("find \(command.title) in the server popover")
             }
             try expect(button.title.isEmpty && button.image != nil && button.isEnabled && button.accessibilityLabel() == command.title,
                        "show the current icon action for \(command.title) in the popover")
+            return button.convert(button.bounds, to: view)
         }
-        try capture(view)
+        let toggleFrame = frames[0]
+        let restartFrame = frames[1]
+        let spacing = restartFrame.minX - toggleFrame.maxX
+        let rightInset = view.bounds.maxX - restartFrame.maxX
+        try expect(toggleFrame.size == restartFrame.size && toggleFrame.width >= 24 &&
+                   abs(toggleFrame.midY - restartFrame.midY) < 1 && abs(restartFrame.midY - view.bounds.midY) < 1 &&
+                   (0...4).contains(spacing) && (8...14).contains(rightInset),
+                   "align equal-sized controls in a compact group at the right edge (\(frames), \(view.bounds))")
+        try capture(view, toggle)
+        return frames
     }
 
     private static func clickRow(_ row: Int, in table: SidebarResultTable, window: NSWindow) throws {

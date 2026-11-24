@@ -14,7 +14,7 @@ Edit connects to ZLS to show symbol documentation and navigate Zig code. This sl
 
 Place an icon-only Language Servers button at the right edge of the document header. Show it when the folder has at least one recognized project. The glowing dot is green when all applicable servers are ready, red when all are stopped, unavailable, or failed, and yellow for partial readiness or a start or stop in progress. Use the tooltip and accessibility label to expose the server state.
 
-Open a native popover from the button. Each compatible server has one row with its language icon and name on the left, and two icon controls on the right. Play starts or retries the server. Stop replaces Play while the server is starting or ready. Restart resolves the executable again and starts a fresh session. The control labels and tooltips identify the actions. A failed server exposes its reason through the row tooltip.
+Open a native popover from the button. Each compatible server has one row with its language icon and name on the left. Group two equal-sized icon controls close together at the right edge, vertically centered with the server name. Play starts or retries the server. Stop replaces Play in the same position while the server is starting or ready. Restart resolves the executable again and starts a fresh session. The control labels and tooltips identify the actions. A failed server exposes its reason through the row tooltip.
 
 Expose **Start LSP**, **Stop LSP**, and **Restart LSP** in [Control](../control-commands/spec.md). Keep the folder button and controls available while viewing a non-Zig file in a recognized project. Escape dismisses the popover. [AppKit popover](https://developer.apple.com/documentation/appkit/nspopover)
 

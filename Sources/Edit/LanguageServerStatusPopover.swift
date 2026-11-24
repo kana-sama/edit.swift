@@ -27,8 +27,8 @@ final class LanguageServerStatusPopover: NSObject {
     private let popover = NSPopover()
     private let name = NSTextField(labelWithString: "ZLS")
     private let icon = NSImageView()
-    private let toggleControl = NSButton()
-    private let restartControl = NSButton()
+    private let toggleControl = ServerActionButton()
+    private let restartControl = ServerActionButton()
     private let perform: (LanguageServerCommand) -> Void
     private var toggleCommand = LanguageServerCommand.start
 
@@ -78,7 +78,7 @@ final class LanguageServerStatusPopover: NSObject {
         button.target = self
         button.action = action
         NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 30),
+            button.widthAnchor.constraint(equalToConstant: 26),
             button.heightAnchor.constraint(equalToConstant: 26),
         ])
     }
@@ -92,19 +92,41 @@ final class LanguageServerStatusPopover: NSObject {
 
     private func prepareContent() {
         name.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
-        name.setContentHuggingPriority(.defaultLow, for: .horizontal)
         icon.imageScaling = .scaleProportionallyDown
-        icon.widthAnchor.constraint(equalToConstant: 17).isActive = true
-        icon.heightAnchor.constraint(equalTo: icon.widthAnchor).isActive = true
         icon.setAccessibilityElement(false)
 
-        let row = NSStackView(views: [icon, name, toggleControl, restartControl])
-        row.alignment = .centerY
-        row.spacing = 6
-        row.setCustomSpacing(18, after: name)
-        row.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
-        row.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
+        let row = NSView()
         row.setAccessibilityLabel("Language Servers")
+        let actionBackground = NSBox()
+        actionBackground.boxType = .custom
+        actionBackground.titlePosition = .noTitle
+        actionBackground.borderWidth = 0
+        actionBackground.cornerRadius = 8
+        actionBackground.fillColor = .labelColor.withAlphaComponent(0.08)
+        actionBackground.setAccessibilityElement(false)
+        for view in [icon, name, actionBackground, toggleControl, restartControl] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            row.addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            row.widthAnchor.constraint(greaterThanOrEqualToConstant: 164),
+            icon.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 12),
+            icon.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 16),
+            icon.heightAnchor.constraint(equalTo: icon.widthAnchor),
+            name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
+            name.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            toggleControl.leadingAnchor.constraint(greaterThanOrEqualTo: name.trailingAnchor, constant: 20),
+            toggleControl.centerYAnchor.constraint(equalTo: restartControl.centerYAnchor),
+            restartControl.leadingAnchor.constraint(equalTo: toggleControl.trailingAnchor, constant: 2),
+            restartControl.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -12),
+            restartControl.topAnchor.constraint(equalTo: row.topAnchor, constant: 5),
+            restartControl.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -5),
+            actionBackground.leadingAnchor.constraint(equalTo: toggleControl.leadingAnchor),
+            actionBackground.trailingAnchor.constraint(equalTo: restartControl.trailingAnchor),
+            actionBackground.topAnchor.constraint(equalTo: restartControl.topAnchor),
+            actionBackground.bottomAnchor.constraint(equalTo: restartControl.bottomAnchor),
+        ])
 
         let controller = NSViewController()
         controller.view = row
@@ -136,9 +158,16 @@ final class LanguageServerStatusPopover: NSObject {
         if popover.contentViewController == nil { prepareContent() }
         guard let view = popover.contentViewController?.view else { return nil }
         view.setFrameSize(view.fittingSize)
+        view.layoutSubtreeIfNeeded()
         return view
     }
 #endif
+}
+
+@MainActor
+private final class ServerActionButton: NSButton {
+    // Keep the button frame independent of the current symbol's alignment insets.
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsets() }
 }
 
 @MainActor
