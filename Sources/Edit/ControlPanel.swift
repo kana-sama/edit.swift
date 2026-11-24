@@ -22,17 +22,29 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     }
 
     private struct NavigationContext: Equatable {
+        struct Session: Equatable {
+            let server: LanguageServer
+            let generation: Int
+            let revision: Int
+
+            @MainActor init(_ session: LanguageServerSession) {
+                server = session.server
+                generation = session.generation
+                revision = session.revision
+            }
+        }
+
         let folder: URL?
         let openGeneration: UInt64
-        let serverGeneration: Int
-        let revision: Int
+        let session: Session
+        let workspaceSessions: [Session]
 
         @MainActor init(_ document: DocumentWindow) {
-            let session = document.languageFeatures.session
+            let features = document.languageFeatures
             folder = document.folderURL
             openGeneration = document.openRequestGeneration
-            serverGeneration = session.generation
-            revision = session.revision
+            session = Session(features.session)
+            workspaceSessions = features.workspaceSessions.map(Session.init)
         }
     }
 
@@ -674,12 +686,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let query = input.trimmingCharacters(in: .whitespacesAndNewlines)
         let workspace = mode == .workspaceSymbols
         let isLine = !workspace && ControlNavigation.lineQuery(query)
-        let session = document.languageFeatures.session
+        let features = document.languageFeatures
+        let session = features.session
         if isLine, !document.hasTextDocument {
             apply([], selected: nil, error: "No text document is open")
             return
         }
-        if !isLine, workspace ? !session.supportsWorkspaceSymbols : !session.supportsDocumentSymbols {
+        if !isLine, workspace ? features.workspaceSessions.isEmpty : !session.supportsDocumentSymbols {
             let unavailable = workspace ? "Workspace symbols require an active language server"
                 : (query.isEmpty && document.hasTextDocument ? "Enter a line number" : "Document symbols require an active language server")
             apply([], selected: nil, error: message ?? unavailable)
@@ -702,10 +715,11 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
                     symbols = []
                 } else if workspace {
                     try await Task.sleep(for: .milliseconds(120))
-                    let primary = try await session.workspaceSymbols(query: query)
+                    guard let document else { return }
+                    let primary = try await document.languageFeatures.workspaceSymbols(query: query)
                     let translated = String(query.map { alternate[$0] ?? $0 })
                     if primary.isEmpty, translated != query {
-                        symbols = try await session.workspaceSymbols(query: translated)
+                        symbols = try await document.languageFeatures.workspaceSymbols(query: translated)
                     } else {
                         symbols = primary
                     }
@@ -1047,8 +1061,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     func checkSymbols(in document: DocumentWindow, documentSymbol: String, workspaceSymbol: String,
                       workspaceFile: URL, workspaceSource: URL? = nil,
                       capture: (NSView, String) throws -> Void) async throws {
-        guard app.isAgentCheck, let originalFile = document.fileURL else { throw CheckFailure.invalidSymbols("open a Zig file") }
+        guard app.isAgentCheck, let originalFile = document.fileURL else { throw CheckFailure.invalidSymbols("open a source file") }
         let originalCaret = document.editor.selectedRange()
+        let workspacePath = document.folderURL
+            .flatMap { FolderFileSearch.relativeDirectory(of: workspaceFile, in: $0) }
+            .map { $0.isEmpty ? workspaceFile.lastPathComponent : "\($0)/\(workspaceFile.lastPathComponent)" }
+            ?? workspaceFile.lastPathComponent
         defer { dismiss(restoreFocus: false) }
 
         func enter(_ query: String) async throws {
@@ -1097,7 +1115,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
               let row = entries.firstIndex(where: {
                   guard $0.entry.title == workspaceSymbol, case .symbol(let location, _) = $0.entry.navigation else { return false }
                   return location.url.standardizedFileURL == workspaceFile.standardizedFileURL &&
-                      $0.entry.detail == workspaceFile.lastPathComponent
+                      $0.entry.detail == workspacePath
               }), case .symbol(let projectLocation, _) = entries[row].entry.navigation else {
             throw CheckFailure.invalidSymbols("find a project symbol in another file and show its path")
         }
@@ -1116,7 +1134,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         if let workspaceSource {
             guard try await app.openFile(workspaceSource, in: document) === document,
                   !document.languageFeatures.session.supportsDocumentSymbols else {
-                throw CheckFailure.invalidSymbols("open a non-Zig file in the same project")
+                throw CheckFailure.invalidSymbols("open a plain text file in the same project")
             }
             let session = document.languageFeatures.session
             let deadline = ContinuousClock.now + .seconds(5)
@@ -1124,17 +1142,17 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
                 try await Task.sleep(for: .milliseconds(15))
             }
             guard session.supportsWorkspaceSymbols else {
-                throw CheckFailure.invalidSymbols("wait for workspace symbols on a non-Zig file (\(session.state.title))")
+                throw CheckFailure.invalidSymbols("wait for workspace symbols on a plain text file (\(session.state.title))")
             }
             try await enter("#\(workspaceSymbol)")
             guard mode == .workspaceSymbols, entries.contains(where: {
-                $0.entry.title == workspaceSymbol && $0.entry.detail == workspaceFile.lastPathComponent
+                $0.entry.title == workspaceSymbol && $0.entry.detail == workspacePath
             }) else {
-                throw CheckFailure.invalidSymbols("find the workspace symbol while a non-Zig file is open (\(feedback.stringValue), \(entries.map(\.entry.title)))")
+                throw CheckFailure.invalidSymbols("find the workspace symbol while a plain text file is open (\(feedback.stringValue), \(entries.map(\.entry.title)))")
             }
             dismiss(restoreFocus: false)
             guard try await app.openFile(originalFile, in: document) === document else {
-                throw CheckFailure.invalidSymbols("restore the original Zig fixture")
+                throw CheckFailure.invalidSymbols("restore the original source file")
             }
         }
         document.editor.setCaretSelections([originalCaret], record: false)

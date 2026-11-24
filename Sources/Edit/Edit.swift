@@ -1323,6 +1323,12 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 let file = URL(fileURLWithPath: screenshot).deletingPathExtension().path + "-" + suffix + ".png"
                 try self.captureCheckView(view, screenshot: file)
             }
+        case "lsp-swift":
+            try await SourceKitLSPCheck.run(in: self, document: document) { view, suffix in
+                guard let screenshot else { return }
+                let file = URL(fileURLWithPath: screenshot).deletingPathExtension().path + "-" + suffix + ".png"
+                try self.captureCheckView(view, screenshot: file)
+            }
         case "worktree" where screenshot == nil:
             try await WorktreeCheck.run(in: self)
         default:

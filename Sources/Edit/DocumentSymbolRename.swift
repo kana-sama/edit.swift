@@ -5,6 +5,7 @@ final class DocumentSymbolRename {
     private struct Source: Sendable {
         let url: URL
         let root: URL
+        let server: LanguageServer
         let text: String
         let generation: Int
         let revision: Int
@@ -25,10 +26,12 @@ final class DocumentSymbolRename {
         let caretOffset: Int
         let name: String
         private let namePrefixBytes: Int
+        private let server: LanguageServer
 
-        init(draft: String, caretOffset: Int, quoted: Bool) {
+        init(draft: String, caretOffset: Int, server: LanguageServer, quoted: Bool) {
             self.draft = draft
             self.caretOffset = caretOffset
+            self.server = server
             let caret = String.Index(utf16Offset: caretOffset, in: draft)
             let draftPrefixBytes = draft[..<caret].utf8.count
             var decodedPrefixBytes = 0
@@ -44,6 +47,10 @@ final class DocumentSymbolRename {
         }
 
         func offset(in spelling: String) -> Int {
+            if server == .swift {
+                let quoteDelta = (spelling.hasPrefix("`") ? 1 : 0) - (draft.hasPrefix("`") ? 1 : 0)
+                return min(max(0, caretOffset + quoteDelta), spelling.utf16.count)
+            }
             guard spelling.hasPrefix("@\"") else {
                 return min(namePrefixBytes, spelling.utf16.count)
             }
@@ -87,20 +94,19 @@ final class DocumentSymbolRename {
 
     private weak var document: DocumentWindow?
     private weak var app: Edit?
-    private let session: LanguageServerSession
     private var task: Task<Void, Never>?
     private var target: Target?
     private var operation: UUID?
     private var isCommitting = false
 
-    init(document: DocumentWindow, app: Edit, session: LanguageServerSession) {
+    init(document: DocumentWindow, app: Edit) {
         self.document = document
         self.app = app
-        self.session = session
     }
 
     var canStart: Bool {
-        guard operation == nil, let document, let app, !app.isQuitting, session.supportsRename else { return false }
+        guard operation == nil, let document, let app, !app.isQuitting,
+              document.languageFeatures.session.supportsRename else { return false }
         let editor = document.editor
         return document.hasEditableTextDocument && document.canReplaceBuffer && editor.isEditable &&
             !editor.hasMarkedText() && editor.conflictEdits.isEmpty && editor.jjInlineDiff?.projectedEditRange == nil
@@ -108,10 +114,12 @@ final class DocumentSymbolRename {
 
     func start(at hit: EditorLanguageInteraction.Hit? = nil) -> Bool {
         if operation != nil { return true }
-        guard canStart, let document, let root = session.workspaceRoot, let url = document.fileURL,
+        guard canStart, let document, let url = document.fileURL,
               let selection = document.editor.caretSelections.last else { return false }
+        let session = document.languageFeatures.session
+        guard let root = session.workspaceRoot else { return false }
         let editor = document.editor
-        let source = Source(url: url, root: root, text: editor.string, generation: session.generation,
+        let source = Source(url: url, root: root, server: session.server, text: editor.string, generation: session.generation,
                             revision: session.revision, openGeneration: document.openRequestGeneration,
                             selection: selection, offset: hit?.offset ?? editor.activeEnd(of: selection))
         let anchor = hit?.word ?? selection
@@ -138,11 +146,20 @@ final class DocumentSymbolRename {
                 }
                 let text = source.text as NSString
                 let sourceName = text.substring(with: range)
-                let quoted = range.location >= 2 && range.upperBound < text.length &&
+                let quoted = source.server == .zig && range.location >= 2 && range.upperBound < text.length &&
                     text.substring(with: NSRange(location: range.location - 2, length: 2)) == "@\"" &&
                     text.character(at: range.upperBound) == 34
                 let spelling = quoted ? "@\"\(sourceName)\"" : sourceName
-                let name = ZigRenameName.decoded(spelling) ?? prepared.placeholder ?? sourceName
+                let name = if source.server == .zig {
+                    ZigRenameName.decoded(spelling) ?? prepared.placeholder ?? sourceName
+                } else {
+                    sourceName
+                }
+                if source.server == .swift, !SwiftRenameName.isValid(sourceName) {
+                    finish()
+                    editor.showLanguageFeedback("Select a Swift symbol name to rename", at: anchor)
+                    return
+                }
                 guard editor.beginSymbolRename(in: range, source: source.text) else {
                     finish()
                     return
@@ -175,9 +192,10 @@ final class DocumentSymbolRename {
 
     private func isCurrent(_ id: UUID, source: Source) -> Bool {
         guard !Task.isCancelled, operation == id, let document, let app, !app.isQuitting else { return false }
+        let session = document.languageFeatures.session
         return document.fileURL == source.url && document.hasEditableTextDocument && document.window.attachedSheet == nil &&
             !document.editor.hasMarkedText() && document.editor.conflictEdits.isEmpty &&
-            session.revision == source.revision && session.generation == source.generation &&
+            session.server == source.server && session.revision == source.revision && session.generation == source.generation &&
             document.openRequestGeneration == source.openGeneration
     }
 
@@ -191,9 +209,11 @@ final class DocumentSymbolRename {
         let selection = editor.selectedRange()
         let caret = editor.selectionAffinity == .upstream ? selection.location : selection.upperBound
         let offset = min(max(caret, range.location), range.upperBound) - range.location
-        let submission = Submission(draft: draft, caretOffset: offset, quoted: target.spelling.hasPrefix("@\""))
+        let submission = Submission(draft: draft, caretOffset: offset, server: target.source.server,
+                                    quoted: target.spelling.hasPrefix("@\""))
         let name = submission.name
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              target.source.server != .swift || SwiftRenameName.isValid(name),
               !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             NSSound.beep()
             return
@@ -206,12 +226,13 @@ final class DocumentSymbolRename {
             return
         }
         guard editor.lockSymbolRename() else { return }
+        let session = document.languageFeatures.session
         task = Task { [weak self] in
             guard let self else { return }
             defer { if operation == id { finish() } }
             do {
                 guard let edit = try await session.rename(at: target.source.offset, to: name),
-                      !edit.documents.isEmpty else { throw RenameFailure("ZLS found no edits for this symbol.") }
+                      !edit.documents.isEmpty else { throw RenameFailure("\(session.server.name) found no edits for this symbol.") }
                 try await apply(edit, to: target, submission: submission, id: id)
             } catch {
                 if operation == id, !Task.isCancelled {
@@ -249,7 +270,7 @@ final class DocumentSymbolRename {
                     guard editor.textStorage != nil, !editor.hasMarkedText(), editor.conflictEdits.isEmpty,
                           editor.jjInlineDiff?.projectedEditRange == nil,
                           editor.sourceString.utf8.elementsEqual(file.original.utf8) else {
-                        throw RenameFailure("“\(file.url.lastPathComponent)” has edits that ZLS has not seen.")
+                        throw RenameFailure("“\(file.url.lastPathComponent)” has edits that \(source.server.name) has not seen.")
                     }
                     guard editor.focusAllowsSourceEdits(file.edits.map(\.range)) else {
                         throw RenameFailure("Exit Focus in “\(file.url.lastPathComponent)” to rename this symbol.")
@@ -284,18 +305,34 @@ final class DocumentSymbolRename {
                                          oldName: String, newName: String) throws -> [FileChange] {
         let origin = FileBuffer.canonicalURL(source.url)
         let root = FileBuffer.canonicalURL(source.root)
+        let serverName = source.server.name
         var files: [FileChange] = []
-        var seen: Set<URL> = []
-        var validatedSpellings: Set<Data> = []
+        var documents: [URL: LSPDocumentEdits] = [:]
         for document in edit.documents where !document.edits.isEmpty {
             try Task.checkCancellation()
             let url = FileBuffer.canonicalURL(document.url)
-            guard url.isFileURL, url.pathComponents.starts(with: root.pathComponents), seen.insert(url).inserted else {
-                throw RenameFailure("ZLS returned a rename target outside the project or listed it more than once.")
+            guard url.isFileURL, url.pathComponents.starts(with: root.pathComponents) else {
+                throw RenameFailure("\(serverName) returned “\(url.lastPathComponent)” outside the project.")
             }
+            if let previous = documents[url] {
+                // SourceKit-LSP can report both an open-document URI and an index path for the same file.
+                guard source.server == .swift,
+                      previous.version == nil || document.version == nil || previous.version == document.version else {
+                    throw RenameFailure("\(serverName) listed incompatible edits for “\(url.lastPathComponent)”.")
+                }
+                documents[url] = LSPDocumentEdits(url: url, version: previous.version ?? document.version,
+                                                 edits: previous.edits + document.edits)
+            } else {
+                documents[url] = document
+            }
+        }
+        var validatedSpellings: Set<Data> = []
+        for url in documents.keys.sorted(by: { $0.path < $1.path }) {
+            try Task.checkCancellation()
+            guard let document = documents[url] else { continue }
             let isOrigin = url == origin
             if let version = document.version, !isOrigin || version != source.revision {
-                throw RenameFailure("“\(url.lastPathComponent)” changed after ZLS prepared the rename.")
+                throw RenameFailure("“\(url.lastPathComponent)” changed after \(serverName) prepared the rename.")
             }
             let disk = isOrigin ? nil : try FileBuffer.read(url)
             let original = disk?.text ?? source.text
@@ -303,17 +340,25 @@ final class DocumentSymbolRename {
             let index = LSPTextIndex(original)
             var edits: [EditorTextEdit] = []
             for edit in document.edits {
-                guard let range = index.nsRange(edit.range, clampingColumns: false), range.length > 0 else {
-                    throw RenameFailure("ZLS returned an invalid symbol range in “\(url.lastPathComponent)”.")
+                guard let range = index.nsRange(edit.range, clampingColumns: false) else {
+                    throw RenameFailure("\(serverName) returned an invalid symbol range in “\(url.lastPathComponent)”.")
+                }
+                if source.server == .swift {
+                    guard SwiftRenameName.matchesEdit(in: text, range: range, replacement: edit.newText,
+                                                      oldName: oldName, newName: newName) else {
+                        throw RenameFailure("The rename no longer matches the Swift symbol in “\(url.lastPathComponent)”.")
+                    }
+                    edits.append(EditorTextEdit(range: range, text: edit.newText))
+                    continue
                 }
                 let old = text.substring(with: range)
-                guard ZigRenameName.isToken(old, at: range, in: text),
+                guard range.length > 0, ZigRenameName.isToken(old, at: range, in: text),
                       old.utf8.elementsEqual(spelling.utf8) || ZigRenameName.decoded(old)?.utf8.elementsEqual(oldName.utf8) == true else {
                     throw RenameFailure("The symbol in “\(url.lastPathComponent)” has changed.")
                 }
                 if validatedSpellings.insert(Data(edit.newText.utf8)).inserted {
                     guard ZigRenameName.decoded(edit.newText)?.utf8.elementsEqual(newName.utf8) == true else {
-                        throw RenameFailure("ZLS did not return a valid spelling for the new symbol name.")
+                        throw RenameFailure("\(serverName) did not return a valid spelling for the new symbol name.")
                     }
                 }
                 edits.append(EditorTextEdit(range: range, text: edit.newText))
@@ -324,7 +369,7 @@ final class DocumentSymbolRename {
                 if let previous = unique.last {
                     if previous.range == edit.range, previous.text.utf8.elementsEqual(edit.text.utf8) { continue }
                     guard previous.range.upperBound <= edit.range.location else {
-                        throw RenameFailure("ZLS returned overlapping edits in “\(url.lastPathComponent)”.")
+                        throw RenameFailure("\(serverName) returned overlapping edits in “\(url.lastPathComponent)”.")
                     }
                 }
                 unique.append(edit)
@@ -333,7 +378,7 @@ final class DocumentSymbolRename {
             for edit in unique.reversed() { updated.replaceCharacters(in: edit.range, with: edit.text) }
             files.append(FileChange(url: url, original: original, updated: updated as String, edits: unique, disk: disk))
         }
-        guard !files.isEmpty else { throw RenameFailure("ZLS found no edits for this symbol.") }
+        guard !files.isEmpty else { throw RenameFailure("\(serverName) found no edits for this symbol.") }
         return files
     }
 
@@ -360,6 +405,66 @@ final class DocumentSymbolRename {
             throw error
         }
         return written.map(\.result)
+    }
+}
+
+private enum SwiftRenameName {
+    private static let reserved = Set("""
+        associatedtype class deinit enum extension fileprivate func import init inout internal let open
+        operator precedencegroup private protocol public rethrows static struct subscript typealias var
+        break case catch continue default defer do else fallthrough for guard if in repeat return switch
+        throw where while as Any false is nil self Self super throws true try _
+        """.split(whereSeparator: \.isWhitespace).map(String.init))
+
+    static func isValid(_ spelling: String) -> Bool {
+        let name = unquoted(spelling)
+        guard let first = name.first else { return false }
+        if first.isLetter || first == "_" || isSymbolicIdentifier(first) {
+            return name.allSatisfy(isIdentifierCharacter) && (name != spelling || !reserved.contains(name))
+        }
+        return name == spelling && !name.contains("//") && !name.contains("/*") && !name.contains("*/")
+            && name.allSatisfy(isOperatorCharacter)
+    }
+
+    static func matchesEdit(in text: NSString, range: NSRange, replacement: String,
+                            oldName: String, newName: String) -> Bool {
+        var spelling = replacement
+        var token = range
+        if range.length == 0 {
+            // Renaming a local parameter can insert a second name after its external label.
+            guard replacement.hasPrefix(" "), range.location >= oldName.utf16.count else { return false }
+            spelling.removeFirst()
+            token = NSRange(location: range.location - oldName.utf16.count, length: oldName.utf16.count)
+        }
+        let oldSpelling = text.substring(with: token)
+        guard unquoted(oldSpelling).utf8.elementsEqual(unquoted(oldName).utf8),
+              unquoted(spelling).utf8.elementsEqual(unquoted(newName).utf8),
+              isValid(spelling) else { return false }
+        let continues = unquoted(oldName).first.map(isOperatorCharacter) == true
+            ? isOperatorCharacter : isIdentifierCharacter
+        for offset in [token.location - 1, token.upperBound] where offset >= 0 && offset < text.length {
+            let neighbor = text.substring(with: text.rangeOfComposedCharacterSequence(at: offset))
+            if let first = neighbor.first, continues(first) { return false }
+        }
+        return true
+    }
+
+    private static func unquoted(_ name: String) -> String {
+        if name.count > 1, name.hasPrefix("`"), name.hasSuffix("`") { return String(name.dropFirst().dropLast()) }
+        return name
+    }
+
+    private static func isIdentifierCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || character == "_" || isSymbolicIdentifier(character)
+    }
+
+    private static func isSymbolicIdentifier(_ character: Character) -> Bool {
+        character.unicodeScalars.first.map { $0.properties.generalCategory == .otherSymbol } == true
+    }
+
+    private static func isOperatorCharacter(_ character: Character) -> Bool {
+        "/=-+!*%<>&|^~?.".contains(character) ||
+            character.unicodeScalars.first.map { $0.properties.generalCategory == .mathSymbol } == true
     }
 }
 

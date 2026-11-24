@@ -4,7 +4,7 @@ import Foundation
 @MainActor
 final class LanguageServerSession {
     enum State: Equatable {
-        case starting, ready, stopping, stopped, notOnPATH, failed(String)
+        case starting, ready, stopping, stopped, notOnPATH, toolchainUnavailable, failed(String)
 
         var title: String {
             switch self {
@@ -13,6 +13,7 @@ final class LanguageServerSession {
             case .stopping: "Stopping"
             case .stopped: "Stopped"
             case .notOnPATH: "Not on PATH"
+            case .toolchainUnavailable: "Toolchain unavailable"
             case .failed: "Failed"
             }
         }
@@ -23,6 +24,7 @@ final class LanguageServerSession {
         }
     }
 
+    let server: LanguageServer
     var onStateChange: (() -> Void)?
     var onProgressChange: (() -> Void)?
     private(set) var progress: [LSPWorkDoneActivity] = []
@@ -34,7 +36,7 @@ final class LanguageServerSession {
     var canStart: Bool {
         guard canControl else { return false }
         switch phase {
-        case .stopped, .notOnPATH, .failed: return true
+        case .stopped, .notOnPATH, .toolchainUnavailable, .failed: return true
         default: return false
         }
     }
@@ -61,6 +63,7 @@ final class LanguageServerSession {
     private var scope: Scope?
     private var recognizedScope: Scope?
     private var monitor: FileSystemEvents?
+    private var indexMonitor: FileSystemEvents?
     private var root: URL?
     private var manuallyStopped: Set<URL> = []
     private var rootLookup: Task<Void, Never>?
@@ -70,7 +73,11 @@ final class LanguageServerSession {
     private var connection: LanguageServerConnection?
     private var capabilities: LSPCapabilities?
 
-    /// A non-nil URL denotes an eligible named Zig buffer. The caller owns language mode and editability.
+    init(server: LanguageServer = .zig) {
+        self.server = server
+    }
+
+    /// A non-nil URL denotes an eligible named buffer for this server.
     func setDocument(url: URL?, folder: URL?, searchesParentProjects: Bool, text: String) {
         let url = url?.standardizedFileURL
         let scope = folder.map { Scope(directory: $0.standardizedFileURL, searchesParentProjects: searchesParentProjects) }
@@ -87,7 +94,7 @@ final class LanguageServerSession {
             monitor = scope.map { scope in
                 FileSystemEvents(directory: scope.directory) { [weak self] events in
                     guard let self, self.scope == scope,
-                          events.contains(where: { ZigProjects.affectsDiscovery($0, in: scope.directory) }) else { return }
+                          events.contains(where: { server.affectsProjectDiscovery($0, in: scope.directory) }) else { return }
                     discoverProject()
                 }
             }
@@ -110,9 +117,10 @@ final class LanguageServerSession {
         }
         let file = document.url
         let previousRoot = recognizedScope == scope ? root : nil
+        let server = server
         let search = Task.detached(priority: .utility) {
-            ZigProjects.root(in: scope.directory, activeFile: file, previousRoot: previousRoot,
-                             searchesParents: scope.searchesParentProjects)
+            server.projectRoot(in: scope.directory, activeFile: file, previousRoot: previousRoot,
+                               searchesParents: scope.searchesParentProjects)
         }
         rootLookup = Task { [weak self] in
             let root = await withTaskCancellationHandler {
@@ -267,6 +275,7 @@ final class LanguageServerSession {
         sync?.cancel()
         sync = nil
         connection = nil
+        indexMonitor = nil
         capabilities = nil
         clearProgress()
         phase = previous != nil || previousTransition != nil ? .stopping : root == nil ? .stopped : .starting
@@ -286,17 +295,18 @@ final class LanguageServerSession {
     }
 
     private func launch(in root: URL, generation: Int) async {
-        let launch = await Self.resolveExecutable()
+        let launch = await Self.resolveExecutable(for: server, in: root)
         guard !Task.isCancelled, self.generation == generation else { return }
         guard let launch else {
-            setPhase(.notOnPATH)
+            setPhase(server == .zig ? .notOnPATH : .toolchainUnavailable)
             return
         }
-        let connection = LanguageServerConnection(executable: launch.executable, root: root,
+        let connection = LanguageServerConnection(server: server, executable: launch.executable, root: root,
                                                   environment: launch.environment) { [weak self] reason in
             Task { @MainActor [weak self] in
                 guard let self, self.generation == generation else { return }
                 self.connection = nil
+                self.indexMonitor = nil
                 self.capabilities = nil
                 self.clearProgress()
                 self.setPhase(.failed(reason))
@@ -314,6 +324,11 @@ final class LanguageServerSession {
             let capabilities = try await connection.start()
             guard !Task.isCancelled, self.generation == generation, self.connection === connection else { return }
             self.capabilities = capabilities
+            if server == .swift {
+                indexMonitor = FileSystemEvents(directory: root) { [weak connection] events in
+                    connection?.updateWatchedFiles(LanguageServer.swift.indexChanges(events, in: root))
+                }
+            }
             if rootLookup == nil { connection.updateDocument(document) }
             setPhase(.ready)
         } catch {
@@ -344,21 +359,35 @@ final class LanguageServerSession {
         let environment: [String: String]
     }
 
-    @concurrent private nonisolated static func resolveExecutable() async -> Launch? {
+    @concurrent private nonisolated static func resolveExecutable(for server: LanguageServer, in root: URL) async -> Launch? {
         var environment = ProcessInfo.processInfo.environment
         // Launch Services starts the app through launchd. Direct executable launches retain their caller's PATH.
         if getppid() == 1, let loginPath = await loginShellPATH() { environment["PATH"] = loginPath }
-        guard !Task.isCancelled, let path = environment["PATH"], let executable = executable(in: path) else { return nil }
-        return Launch(executable: executable, environment: environment)
+        guard !Task.isCancelled else { return nil }
+        if let path = environment["PATH"], let executable = executable(in: path, named: server.executable),
+           server != .swift || executable.path != "/usr/bin/sourcekit-lsp" {
+            return Launch(executable: executable, environment: environment)
+        }
+        if server == .swift,
+           let result = try? await JJCommand.run(URL(fileURLWithPath: "/usr/bin/xcrun"),
+                                                arguments: ["--find", server.executable], in: root,
+                                                limit: 8_192, timeout: 3),
+           result.status == 0, let output = String(data: result.stdout, encoding: .utf8) {
+            let path = output.trimmingCharacters(in: .newlines)
+            if path.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: path) {
+                return Launch(executable: URL(filePath: path), environment: environment)
+            }
+        }
+        return nil
     }
 
-    nonisolated static func executable(in path: String) -> URL? {
+    nonisolated static func executable(in path: String, named name: String = "zls") -> URL? {
         guard !path.isEmpty else { return nil }
         let files = FileManager.default
         let current = URL(filePath: files.currentDirectoryPath, directoryHint: .isDirectory)
         for entry in path.split(separator: ":", omittingEmptySubsequences: false) {
             let directory = entry.isEmpty ? current : URL(filePath: String(entry), directoryHint: .isDirectory, relativeTo: current)
-            let candidate = directory.appending(path: "zls").standardizedFileURL
+            let candidate = directory.appending(path: name).standardizedFileURL
             var isDirectory: ObjCBool = false
             if files.fileExists(atPath: candidate.path, isDirectory: &isDirectory), !isDirectory.boolValue,
                files.isExecutableFile(atPath: candidate.path) { return candidate }

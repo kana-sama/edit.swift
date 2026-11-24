@@ -17,6 +17,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     private struct Query {
         let url: URL
         let text: String
+        let server: LanguageServer
         let generation: Int
         let revision: Int
         let openGeneration: UInt64
@@ -40,15 +41,28 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
 
     private unowned let document: DocumentWindow
     private unowned let app: Edit
-    let session = LanguageServerSession()
-    private lazy var symbolRename = DocumentSymbolRename(document: document, app: app, session: session)
-    private lazy var status = LanguageServerStatusPopover { [weak self] command in self?.perform(command) }
+    private let zig = LanguageServerSession(server: .zig)
+    private let swift = LanguageServerSession(server: .swift)
+    private var sessions: [LanguageServerSession] { [zig, swift] }
+    var workspaceSessions: [LanguageServerSession] { sessions.filter(\.supportsWorkspaceSymbols) }
+    var session: LanguageServerSession {
+        switch sourceServer {
+        case .zig: zig
+        case .swift: swift
+        case nil: workspaceSessions.first ?? sessions.first(where: \.isEligible) ?? zig
+        }
+    }
+    private lazy var symbolRename = DocumentSymbolRename(document: document, app: app)
+    private lazy var status = LanguageServerStatusPopover { [weak self] server, command in
+        self?.perform(command, for: server)
+    }
     var statusButton: NSButton { status.button }
 #if EDIT_AGENT_CHECKS
     var statusPopoverForCheck: NSView? { status.contentForCheck }
     var statusIndicatorForCheck: LanguageServerStatusPopover.Indicator? { status.indicator }
 #endif
     private var sourceURL: URL?
+    private var sourceServer: LanguageServer?
     private var sourceFolder: URL?
     private var searchesParentProjects = false
     private var navigationTask: Task<Void, Never>?
@@ -64,8 +78,10 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     }
 
     func connectEditor() {
-        session.onStateChange = { [weak self] in self?.stateChanged() }
-        session.onProgressChange = { [weak self] in self?.updateServerStatus() }
+        for session in sessions {
+            session.onStateChange = { [weak self] in self?.stateChanged() }
+            session.onProgressChange = { [weak self] in self?.updateServerStatus() }
+        }
         document.editor.languageProbe = { [weak self] offset, word in await self?.probe(at: offset, word: word) }
         document.editor.languageHover = { [weak self] offset, word in await self?.hover(at: offset, word: word) }
         document.editor.languageFollowLink = { [weak self] offset, word in self?.followLink(at: offset, word: word) }
@@ -81,21 +97,27 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
 
     func updateDocument() {
         guard !isClosed, !app.isQuitting else { return }
-        let url = document.hasEditableTextDocument && document.resolvedSyntaxLanguage == .zig ? document.fileURL : nil
+        let server = document.hasEditableTextDocument && document.fileURL != nil
+            ? LanguageServer(language: document.resolvedSyntaxLanguage) : nil
+        let url = server == nil ? nil : document.fileURL
         let folder = document.folderURL ?? document.displayedFileURL?.deletingLastPathComponent()
         let inferRoot = document.folderURL == nil
-        guard sourceURL != url || sourceFolder != folder || searchesParentProjects != inferRoot else {
+        guard sourceURL != url || sourceServer != server || sourceFolder != folder || searchesParentProjects != inferRoot else {
             documentTextChanged()
             return
         }
+        symbolRename.cancel()
         sourceURL = url
+        sourceServer = server
         sourceFolder = folder
         searchesParentProjects = inferRoot
-        symbolRename.cancel()
         cancelLookup()
         document.editor.invalidateLanguageInteraction()
-        session.setDocument(url: url, folder: folder, searchesParentProjects: inferRoot,
-                            text: url == nil ? "" : document.textWithConflictPrefixes)
+        let text = url == nil ? "" : document.textWithConflictPrefixes
+        for session in sessions {
+            session.setDocument(url: session.server == sourceServer ? url : nil,
+                                folder: folder, searchesParentProjects: inferRoot, text: text)
+        }
         stateChanged()
     }
 
@@ -110,6 +132,29 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         }
     }
 
+    func workspaceSymbols(query: String) async throws -> [LSPSymbol] {
+        async let zigResult = workspaceSymbolResult(in: zig, query: query)
+        async let swiftResult = workspaceSymbolResult(in: swift, query: query)
+        let results = await [zigResult, swiftResult].compactMap { $0 }
+        try Task.checkCancellation()
+        var matches: [[LSPSymbol]] = []
+        var firstError: Error?
+        for result in results {
+            switch result {
+            case .success(let symbols): matches.append(symbols)
+            case .failure(let error): if firstError == nil { firstError = error }
+            }
+        }
+        if matches.isEmpty, let firstError { throw firstError }
+        return matches.flatMap { $0 }
+    }
+
+    private func workspaceSymbolResult(in session: LanguageServerSession, query: String) async -> Result<[LSPSymbol], Error>? {
+        guard session.supportsWorkspaceSymbols else { return nil }
+        do { return .success(try await session.workspaceSymbols(query: query)) }
+        catch { return .failure(error) }
+    }
+
     func close() {
         isClosed = true
         symbolRename.cancel()
@@ -118,15 +163,17 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         referenceTask?.cancel()
         status.close()
         document.editor.languageInteractionEnabled = false
-        session.onStateChange = nil
-        session.onProgressChange = nil
-        session.close()
+        for session in sessions {
+            session.onStateChange = nil
+            session.onProgressChange = nil
+            session.close()
+        }
     }
 
     private func stateChanged() {
-        if session.state != .ready { symbolRename.cancel() }
-        let canInteract = session.supportsDefinition || session.supportsHover
-            || session.supportsReferences || session.supportsRename
+        if sourceURL == nil || session.state != .ready { symbolRename.cancel() }
+        let canInteract = sourceURL != nil && (session.supportsDefinition || session.supportsHover
+            || session.supportsReferences || session.supportsRename)
         document.editor.languageInteractionEnabled = canInteract
         if !canInteract { cancelLookup() }
         document.editor.occurrenceHighlighting.setSemanticWordHighlightsEnabled(session.supportsDocumentHighlight)
@@ -135,12 +182,18 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     }
 
     private func updateServerStatus() {
-        status.update(visible: session.isEligible, state: session.state, progress: session.progress,
-                      enabled: Set(LanguageServerCommand.allCases.filter(canPerform)))
+        status.update(sessions.filter(\.isEligible).map { session in
+            .init(server: session.server, state: session.state, progress: session.progress,
+                  enabled: Set(LanguageServerCommand.allCases.filter { canPerform($0, in: session) }))
+        })
         document.titleBar.languageServerStatusChanged()
     }
 
     func canPerform(_ command: LanguageServerCommand) -> Bool {
+        canPerform(command, in: session)
+    }
+
+    private func canPerform(_ command: LanguageServerCommand, in session: LanguageServerSession) -> Bool {
         guard !isClosed, !app.isQuitting, document.window.attachedSheet == nil else { return false }
         switch command {
         case .start: return session.canStart
@@ -150,16 +203,21 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     }
 
     func perform(_ command: LanguageServerCommand) {
-        guard canPerform(command) else { return }
-        if command != .start {
+        perform(command, for: session.server)
+    }
+
+    private func perform(_ command: LanguageServerCommand, for server: LanguageServer) {
+        let target = server == .zig ? zig : swift
+        guard canPerform(command, in: target) else { return }
+        if command != .start, target === session {
             navigationID &+= 1
             cancelLookup()
             document.editor.invalidateLanguageInteraction()
         }
         switch command {
-        case .start: session.start()
-        case .stop: session.stop()
-        case .restart: session.restart()
+        case .start: target.start()
+        case .stop: target.stop()
+        case .restart: target.restart()
         }
     }
 
@@ -226,26 +284,27 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         guard let url = sourceURL, !isClosed, !app.isQuitting, document.window.attachedSheet == nil,
               document.hasEditableTextDocument, document.editor.conflictEdits.isEmpty,
               !document.editor.hasMarkedText(), document.editor.renameRange == nil else { return nil }
-        return Query(url: url, text: document.editor.string, generation: session.generation, revision: session.revision,
+        return Query(url: url, text: document.editor.string, server: session.server,
+                     generation: session.generation, revision: session.revision,
                      openGeneration: document.openRequestGeneration)
     }
 
     private func isCurrent(_ query: Query) -> Bool {
-        !Task.isCancelled && !isClosed && !app.isQuitting && sourceURL == query.url &&
+        !Task.isCancelled && !isClosed && !app.isQuitting && sourceURL == query.url && session.server == query.server &&
             session.generation == query.generation && session.revision == query.revision &&
             document.openRequestGeneration == query.openGeneration
     }
 
-    private func isCurrentLocation(_ location: LSPLocation, at offset: Int, in query: Query) -> Bool {
+    private func isCurrentLocation(_ location: LSPLocation, at offset: Int, word: NSRange, in query: Query) -> Bool {
         guard location.url.standardizedFileURL == query.url.standardizedFileURL,
               let range = location.range.nsRange(in: query.text) else { return false }
-        return range.length == 0 ? range.location == offset : NSLocationInRange(offset, range)
+        return range.length == 0 ? NSLocationInRange(range.location, word) : NSLocationInRange(offset, range)
     }
 
     func probe(at offset: Int, word: NSRange) async -> NSRange? {
         guard session.supportsDefinition, let query = query(),
               let matches = try? await session.definition(at: offset), isCurrent(query), let first = matches.first,
-              matches.count > 1 || !isCurrentLocation(first, at: offset, in: query) || session.supportsReferences else { return nil }
+              matches.count > 1 || !isCurrentLocation(first, at: offset, word: word, in: query) || session.supportsReferences else { return nil }
         return first.originRange?.nsRange(in: query.text) ?? word
     }
 
@@ -292,7 +351,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
                 case 0:
                     document.editor.invalidateLanguageInteraction()
                     if command == .definition { document.editor.showLanguageFeedback("No definition found", at: word) }
-                case 1 where command == .definitionLink && isCurrentLocation(locations[0], at: offset, in: query):
+                case 1 where command == .definitionLink && isCurrentLocation(locations[0], at: offset, word: word, in: query):
                     if session.supportsReferences {
                         try await findReferences(at: offset, word: word, query: query, id: id, navigationOrigin: origin)
                     }
@@ -326,8 +385,9 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         default:
             guard let origin = LSPPosition.at(utf16Offset: offset, in: query.text),
                   let wordInText = Range(word, in: query.text) else { return }
+            let symbol = String(query.text[wordInText])
             let preparation = Task.detached(priority: .userInitiated) {
-                Self.referenceRows(matches, sourceURL: query.url, sourceText: query.text)
+                Self.referenceRows(matches, symbol: symbol, sourceURL: query.url, sourceText: query.text)
             }
             let results = await withTaskCancellationHandler {
                 await preparation.value
@@ -345,19 +405,19 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
                 return
             }
             if let navigationOrigin { app.recordNavigation(navigationOrigin, reason: .selection) }
-            document.sidebar.showReferences(symbol: String(query.text[wordInText]), originURL: query.url,
+            document.sidebar.showReferences(symbol: symbol, originURL: query.url,
                                             originLine: origin.line, originColumn: origin.character,
                                             results: results, preview: { [weak self] row in
-                self?.selectReference(matches[row.index], in: matches, activate: false)
+                self?.selectReference(matches[row.index], in: matches, symbol: symbol, activate: false)
             }, activate: { [weak self] row in
-                self?.selectReference(matches[row.index], in: matches, activate: true)
+                self?.selectReference(matches[row.index], in: matches, symbol: symbol, activate: true)
             }, didHide: { [weak self] in
                 self?.clearReferencePreview()
             })
         }
     }
 
-    private func selectReference(_ location: LSPLocation, in matches: [LSPLocation], activate: Bool) {
+    private func selectReference(_ location: LSPLocation, in matches: [LSPLocation], symbol: String, activate: Bool) {
         referenceTask?.cancel()
         referenceID &+= 1
         let id = referenceID
@@ -376,13 +436,15 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
             guard isCurrent(), document.hasEditableTextDocument, document.editor.conflictEdits.isEmpty else { return }
             let snapshot = document.editor.string
             let index = LSPTextIndex(snapshot)
-            guard let range = index.nsRange(location.range) else { return }
+            let text = snapshot as NSString
+            guard let range = Self.referenceMatch(location.range, symbol: symbol, index: index, text: text) else { return }
             if activate {
                 commitNavigation(to: range, origin: nil)
             } else {
                 document.editor.scrollRangeToVisible(range)
             }
-            let ranges = matches.filter { $0.url.standardizedFileURL == target }.compactMap { index.nsRange($0.range) }
+            let ranges = matches.filter { $0.url.standardizedFileURL == target }
+                .compactMap { Self.referenceMatch($0.range, symbol: symbol, index: index, text: text) }
                 .sorted { $0.location < $1.location }
             document.resultDecorations.update(snapshot: snapshot, ranges: ranges, selected: range, preview: nil)
         }
@@ -395,7 +457,20 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         document.resultDecorations.update(snapshot: "", ranges: [], selected: nil, preview: nil)
     }
 
-    private nonisolated static func referenceRows(_ locations: [LSPLocation], sourceURL: URL, sourceText: String) -> [ReferenceResult] {
+    private nonisolated static func referenceMatch(_ range: LSPRange, symbol: String,
+                                                   index: LSPTextIndex, text: NSString) -> NSRange? {
+        guard let match = index.nsRange(range) else { return nil }
+        // SourceKit-LSP can return point locations from its index.
+        guard match.length == 0 else { return match }
+        let candidate = NSRange(location: match.location, length: symbol.utf16.count)
+        if candidate.upperBound <= text.length, text.substring(with: candidate).utf8.elementsEqual(symbol.utf8) {
+            return candidate
+        }
+        return match
+    }
+
+    private nonisolated static func referenceRows(_ locations: [LSPLocation], symbol: String,
+                                                  sourceURL: URL, sourceText: String) -> [ReferenceResult] {
         struct Source {
             let text: NSString
             let index: LSPTextIndex
@@ -418,7 +493,8 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
                 }
                 sources[url] = Source(file.text)
             }
-            guard let source = sources[url], let match = source.index.nsRange(location.range) else { return nil }
+            guard let source = sources[url],
+                  let match = referenceMatch(location.range, symbol: symbol, index: source.index, text: source.text) else { return nil }
             var start = 0
             var end = 0
             source.text.getLineStart(&start, end: nil, contentsEnd: &end, for: NSRange(location: match.location, length: 0))

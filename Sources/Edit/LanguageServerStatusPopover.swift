@@ -27,15 +27,19 @@ final class LanguageServerStatusPopover: NSObject {
     var button: NSButton { statusButton }
     var indicator: Indicator? { statusButton.indicator }
     private let popover = NSPopover()
-    private let name = NSTextField(labelWithString: "ZLS")
-    private let detail = NSTextField(labelWithString: "")
-    private let icon = NSImageView()
-    private let toggleControl = ServerActionButton()
-    private let restartControl = ServerActionButton()
-    private let perform: (LanguageServerCommand) -> Void
-    private var toggleCommand = LanguageServerCommand.start
+    private let stack = NSStackView()
+    private let perform: (LanguageServer, LanguageServerCommand) -> Void
+    private var rows: [LanguageServer: ServerPopoverRow] = [:]
+    private var visibleServers: [LanguageServer] = []
 
-    init(perform: @escaping (LanguageServerCommand) -> Void) {
+    struct ServerStatus {
+        let server: LanguageServer
+        let state: LanguageServerSession.State
+        let progress: [LSPWorkDoneActivity]
+        let enabled: Set<LanguageServerCommand>
+    }
+
+    init(perform: @escaping (LanguageServer, LanguageServerCommand) -> Void) {
         self.perform = perform
         super.init()
 
@@ -49,17 +53,98 @@ final class LanguageServerStatusPopover: NSObject {
         button.action = #selector(toggle(_:))
         button.isHidden = true
 
+        stack.orientation = .vertical
+        stack.alignment = .width
+        stack.spacing = 0
+        let controller = NSViewController()
+        controller.view = stack
+        popover.contentViewController = controller
+        popover.behavior = .transient
+    }
+
+    func update(_ statuses: [ServerStatus]) {
+        if statuses.isEmpty { close() }
+        button.isHidden = statuses.isEmpty
+        statusButton.indicator = Indicator(states: statuses.map(\.state), hasProgress: statuses.contains { !$0.progress.isEmpty })
+        let descriptions = statuses.map { status in
+            let row: ServerPopoverRow
+            if let existing = rows[status.server] {
+                row = existing
+            } else {
+                let server = status.server
+                row = ServerPopoverRow(server: server) { [perform] in perform(server, $0) }
+                rows[server] = row
+            }
+            return row.update(status, appearance: button.effectiveAppearance)
+        }
+        let summary = (["Language Servers"] + descriptions).joined(separator: ", ")
+        button.setAccessibilityLabel(summary)
+        button.toolTip = summary
+
+        let servers = statuses.map(\.server)
+        guard servers != visibleServers else { return }
+        visibleServers = servers
+        for view in stack.arrangedSubviews {
+            stack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        for server in servers {
+            if let row = rows[server] { stack.addArrangedSubview(row) }
+        }
+        if popover.isShown { popover.contentSize = stack.fittingSize }
+    }
+
+    @objc private func toggle(_ sender: NSButton) {
+        if popover.isShown {
+            close()
+            return
+        }
+        guard sender.window != nil, !sender.isHiddenOrHasHiddenAncestor else { return }
+        popover.contentSize = stack.fittingSize
+        popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+    }
+
+    func close() {
+        if popover.isShown { popover.close() }
+    }
+
+#if EDIT_AGENT_CHECKS
+    var contentForCheck: NSView {
+        stack.setFrameSize(stack.fittingSize)
+        stack.layoutSubtreeIfNeeded()
+        return stack
+    }
+#endif
+}
+
+@MainActor
+private final class ServerPopoverRow: NSView {
+    private let server: LanguageServer
+    private let name: NSTextField
+    private let detail = NSTextField(labelWithString: "")
+    private let icon = NSImageView()
+    private let toggleControl = ServerActionButton()
+    private let restartControl = ServerActionButton()
+    private let perform: (LanguageServerCommand) -> Void
+    private var toggleCommand = LanguageServerCommand.start
+
+    init(server: LanguageServer, perform: @escaping (LanguageServerCommand) -> Void) {
+        self.server = server
+        self.perform = perform
+        name = NSTextField(labelWithString: server.name)
+        super.init(frame: .zero)
         configure(toggleControl, identifier: "Edit.LanguageServer.toggle", action: #selector(performToggle(_:)))
         configure(restartControl, identifier: "Edit.LanguageServer.restart", action: #selector(performRestart(_:)))
         setActionImage("play.fill", for: toggleControl, command: .start)
         setActionImage("arrow.clockwise", for: restartControl, command: .restart)
+        prepareContent()
     }
 
-    func update(visible: Bool, state: LanguageServerSession.State, progress: [LSPWorkDoneActivity],
-                enabled: Set<LanguageServerCommand>) {
-        if !visible { close() }
-        button.isHidden = !visible
-        statusButton.indicator = Indicator(states: visible ? [state] : [], hasProgress: !progress.isEmpty)
+    required init?(coder: NSCoder) { nil }
+
+    func update(_ status: LanguageServerStatusPopover.ServerStatus, appearance: NSAppearance) -> String {
+        let state = status.state
+        let progress = status.progress
         let work = progress.map { activity in
             var title = activity.title
             if let percentage = activity.percentage { title += " (\(percentage)%)" }
@@ -74,21 +159,19 @@ final class LanguageServerStatusPopover: NSObject {
         let statusDescription = descriptions.isEmpty
             ? state.failureReason ?? state.title
             : ([state.title] + descriptions).joined(separator: ", ")
-        let summary = "Language Servers, ZLS \(statusDescription)"
-        button.setAccessibilityLabel(summary)
-        button.toolTip = summary
         name.toolTip = statusDescription
         detail.toolTip = statusDescription
         detail.setAccessibilityLabel(statusDescription)
-        icon.image = FileIcons.image(for: nil, appearance: button.effectiveAppearance, language: "zig")
+        icon.image = FileIcons.image(for: nil, appearance: appearance, language: server.languageID)
 
         let command: LanguageServerCommand = [.starting, .ready, .stopping].contains(state) ? .stop : .start
         if command != toggleCommand {
             toggleCommand = command
             setActionImage(command == .stop ? "stop.fill" : "play.fill", for: toggleControl, command: command)
         }
-        toggleControl.isEnabled = enabled.contains(toggleCommand)
-        restartControl.isEnabled = enabled.contains(.restart)
+        toggleControl.isEnabled = status.enabled.contains(toggleCommand)
+        restartControl.isEnabled = status.enabled.contains(.restart)
+        return "\(server.name) \(statusDescription)"
     }
 
     private func configure(_ button: NSButton, identifier: String, action: Selector) {
@@ -127,8 +210,7 @@ final class LanguageServerStatusPopover: NSObject {
         icon.imageScaling = .scaleProportionallyDown
         icon.setAccessibilityElement(false)
 
-        let row = ServerPopoverRow()
-        row.setAccessibilityLabel("Language Servers")
+        setAccessibilityLabel(server.name)
         let actionBackground = NSBox()
         actionBackground.boxType = .custom
         actionBackground.titlePosition = .noTitle
@@ -138,66 +220,33 @@ final class LanguageServerStatusPopover: NSObject {
         actionBackground.setAccessibilityElement(false)
         for view in [icon, identity, actionBackground, toggleControl, restartControl] {
             view.translatesAutoresizingMaskIntoConstraints = false
-            row.addSubview(view)
+            addSubview(view)
         }
         NSLayoutConstraint.activate([
-            row.widthAnchor.constraint(equalToConstant: 265),
-            icon.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 12),
-            icon.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            widthAnchor.constraint(equalToConstant: 265),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 16),
             icon.heightAnchor.constraint(equalTo: icon.widthAnchor),
             identity.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
-            identity.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            identity.centerYAnchor.constraint(equalTo: centerYAnchor),
             identity.trailingAnchor.constraint(lessThanOrEqualTo: toggleControl.leadingAnchor, constant: -12),
             toggleControl.centerYAnchor.constraint(equalTo: restartControl.centerYAnchor),
             restartControl.leadingAnchor.constraint(equalTo: toggleControl.trailingAnchor, constant: 2),
-            restartControl.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -12),
-            restartControl.topAnchor.constraint(equalTo: row.topAnchor, constant: 7),
-            restartControl.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -7),
+            restartControl.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            restartControl.topAnchor.constraint(equalTo: topAnchor, constant: 7),
+            restartControl.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -7),
             actionBackground.leadingAnchor.constraint(equalTo: toggleControl.leadingAnchor),
             actionBackground.trailingAnchor.constraint(equalTo: restartControl.trailingAnchor),
             actionBackground.topAnchor.constraint(equalTo: restartControl.topAnchor),
             actionBackground.bottomAnchor.constraint(equalTo: restartControl.bottomAnchor),
         ])
-
-        let controller = NSViewController()
-        controller.view = row
-        popover.contentViewController = controller
-        popover.behavior = .transient
-    }
-
-    @objc private func toggle(_ sender: NSButton) {
-        if popover.isShown {
-            close()
-            return
-        }
-        guard sender.window != nil, !sender.isHiddenOrHasHiddenAncestor else { return }
-        if popover.contentViewController == nil { prepareContent() }
-        if let content = popover.contentViewController?.view { popover.contentSize = content.fittingSize }
-        popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
     }
 
     @objc private func performToggle(_ sender: NSButton) { perform(toggleCommand) }
 
     @objc private func performRestart(_ sender: NSButton) { perform(.restart) }
 
-    func close() {
-        if popover.isShown { popover.close() }
-    }
-
-#if EDIT_AGENT_CHECKS
-    var contentForCheck: NSView? {
-        if popover.contentViewController == nil { prepareContent() }
-        guard let view = popover.contentViewController?.view else { return nil }
-        view.setFrameSize(view.fittingSize)
-        view.layoutSubtreeIfNeeded()
-        return view
-    }
-#endif
-}
-
-@MainActor
-private final class ServerPopoverRow: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.acceptsMouseMovedEvents = true

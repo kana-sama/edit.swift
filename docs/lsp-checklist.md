@@ -1,10 +1,25 @@
 # LSP Features in Edit
 
-Status as of November 24, 2026. Check off a feature once it works in Edit through a language server and link to its feature spec.
+Status as of November 25, 2026. Check off a feature once it works in Edit through a language server and link to its feature spec.
 
 The checklist covers user-facing features from LSP 3.18 and extensions implemented by popular language servers. Availability varies by language, server, and project. [LSP 3.18 Specification][lsp]
 
 The identifiers after each title are request or notification methods. Command IDs and code action kinds appear alongside the methods where they identify a specific action.
+
+## Support by Language Server
+
+✓ means the user-facing feature works in Edit with that server. See the [ZLS](features/lsp/spec.md) and [SourceKit-LSP](features/sourcekit-lsp/spec.md) specifications for project setup and availability.
+
+| LSP feature | ZLS (Zig) | SourceKit-LSP (Swift) |
+| --- | :---: | :---: |
+| Go to Definition (`textDocument/definition`) | ✓ | ✓ |
+| Find All References (`textDocument/references`) | ✓ | ✓ |
+| Document Highlights (`textDocument/documentHighlight`) | ✓ | ✓ |
+| Document Symbols (`textDocument/documentSymbol`) | ✓ | ✓ |
+| Workspace Symbols (`workspace/symbol`) | ✓ | ✓ |
+| Hover (`textDocument/hover`) | ✓ | ✓ |
+| Rename Symbol (`textDocument/prepareRename`, `textDocument/rename`) | ✓ | ✓ |
+| Language Server Progress (`window/workDoneProgress/create`, `$/progress`) | ✓ | ✓ |
 
 ## Code Navigation
 

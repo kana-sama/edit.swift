@@ -52,8 +52,9 @@ enum LanguageServerProgressCheck {
 
     private static func captureActivity(_ expected: String, in lsp: DocumentLanguageFeatures, suffix: String,
                                         capture: (NSView, String) throws -> Void) throws {
-        guard let content = lsp.statusPopoverForCheck,
-              let identity = content.subviews.first(where: { $0 is NSStackView }) as? NSStackView,
+        guard let content = lsp.statusPopoverForCheck as? NSStackView,
+              let row = content.arrangedSubviews.first,
+              let identity = row.subviews.first(where: { $0 is NSStackView }) as? NSStackView,
               let detail = identity.views.first(where: { $0.identifier?.rawValue == "Edit.LanguageServer.detail" }) as? NSTextField
         else { throw Failure(detail: "find the visible status line") }
         let button = lsp.statusButton

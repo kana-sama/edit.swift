@@ -163,7 +163,10 @@ enum HeaderCheck {
                    rect.maxX <= document.window.frame.width,
                    "the file icon stays visible with long names in a narrow window (\(rect), window width \(document.window.frame.width), attached \(compactIcon.window === document.window))")
 
-        try await checkFileTitleWidth(in: app, folder: folder)
+        // Keep the folder title the same while measuring without a language server button.
+        let widthFolder = root.appending(path: "Title width/Project")
+        try FileManager.default.createDirectory(at: widthFolder, withIntermediateDirectories: true)
+        try await checkFileTitleWidth(in: app, folder: widthFolder)
     }
 
     private static func checkFileTitleWidth(in app: Edit, folder: URL) async throws {

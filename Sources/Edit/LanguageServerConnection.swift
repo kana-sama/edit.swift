@@ -15,6 +15,12 @@ struct LSPWorkDoneActivity: Equatable, Sendable {
     var percentage: Int?
 }
 
+struct LSPWatchedFileChange: Sendable {
+    let url: URL
+    let structural: Bool
+    let removed: Bool
+}
+
 struct LSPCapabilities: Decodable, Sendable {
     enum Change: Int, Decodable { case none, full, incremental }
 
@@ -73,10 +79,10 @@ enum LSPFailure: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unavailable: "ZLS is not ready."
+        case .unavailable: "The language server is not ready."
         case .invalidPosition: "The position is no longer in the document."
-        case .invalidMessage: "ZLS sent an invalid response."
-        case .timedOut(let method): "ZLS did not respond to \(method)."
+        case .invalidMessage: "The language server sent an invalid response."
+        case .timedOut(let method): "The language server did not respond to \(method)."
         case .server(let reason): reason
         }
     }
@@ -189,7 +195,8 @@ final class LanguageServerConnection: @unchecked Sendable {
         let timeout: DispatchWorkItem
     }
 
-    private let queue = DispatchQueue(label: "Edit.ZLS.Connection", qos: .utility)
+    private let queue = DispatchQueue(label: "Edit.LanguageServer.Connection", qos: .utility)
+    private let server: LanguageServer
     private let executable: URL
     private let root: URL
     private let environment: [String: String]
@@ -216,7 +223,9 @@ final class LanguageServerConnection: @unchecked Sendable {
     private var document: LSPDocument?
     private var index: LSPTextIndex?
 
-    init(executable: URL, root: URL, environment: [String: String], onFailure: @escaping @Sendable (String) -> Void) {
+    init(server: LanguageServer, executable: URL, root: URL, environment: [String: String],
+         onFailure: @escaping @Sendable (String) -> Void) {
+        self.server = server
         self.executable = executable
         self.root = root
         self.environment = environment
@@ -232,7 +241,7 @@ final class LanguageServerConnection: @unchecked Sendable {
         }
         let capabilities = result.capabilities
         guard capabilities.positionEncoding == "utf-16" else {
-            throw LSPFailure.server("ZLS selected an unsupported position encoding.")
+            throw LSPFailure.server("\(server.name) selected an unsupported position encoding.")
         }
         try await onQueue {
             guard !self.stopping else { throw CancellationError() }
@@ -252,16 +261,35 @@ final class LanguageServerConnection: @unchecked Sendable {
         }
     }
 
+    func updateWatchedFiles(_ changes: [LSPWatchedFileChange]) {
+        guard !changes.isEmpty else { return }
+        queue.async {
+            guard !self.stopping, !self.closed, self.capabilities != nil else { return }
+            let events: [[String: Any]] = changes.map { change in
+                let type: Int
+                if change.structural {
+                    let exists = FileManager.default.fileExists(atPath: change.url.path)
+                    type = exists ? (change.removed ? 2 : 1) : 3
+                } else {
+                    type = 2
+                }
+                return ["uri": change.url.absoluteString, "type": type]
+            }
+            do { try self.notify("workspace/didChangeWatchedFiles", ["changes": events]) }
+            catch { self.fail(error.localizedDescription) }
+        }
+    }
+
     func definition(at offset: Int, in snapshot: LSPDocument) async throws -> [LSPLocation] {
         let response = try await request(.definition(offset), document: snapshot)
         let locations = try JSONDecoder().decode(Reply<Definitions>.self, from: response).result?.locations ?? []
-        return Self.fileLocations(locations)
+        return fileLocations(locations)
     }
 
     func references(at offset: Int, includeDeclaration: Bool, in snapshot: LSPDocument) async throws -> [LSPLocation] {
         let response = try await request(.references(offset, includeDeclaration), document: snapshot)
         let locations = try JSONDecoder().decode(Reply<[LSPLocation]>.self, from: response).result ?? []
-        return Self.fileLocations(locations)
+        return fileLocations(locations)
     }
 
     func hover(at offset: Int, in snapshot: LSPDocument) async throws -> LSPHover? {
@@ -302,12 +330,25 @@ final class LanguageServerConnection: @unchecked Sendable {
         return try JSONDecoder().decode(Reply<LSPWorkspaceEdit>.self, from: response).result
     }
 
-    private static func fileLocations(_ locations: [LSPLocation]) -> [LSPLocation] {
+    private func fileLocations(_ locations: [LSPLocation]) -> [LSPLocation] {
         var seen = Set<LSPLocation>()
-        return locations.filter { location in
+        var canonicalURLs: [URL: URL] = [:]
+        return locations.compactMap { location in
             guard location.url.isFileURL, location.range.start.line >= 0, location.range.start.character >= 0,
-                  location.range.start <= location.range.end else { return false }
-            return seen.insert(LSPLocation(url: location.url.standardizedFileURL, range: location.range)).inserted
+                  location.range.start <= location.range.end else { return nil }
+            let url: URL
+            if server == .swift {
+                if let cached = canonicalURLs[location.url] {
+                    url = cached
+                } else {
+                    url = FileBuffer.canonicalURL(location.url)
+                    canonicalURLs[location.url] = url
+                }
+            } else {
+                url = location.url.standardizedFileURL
+            }
+            guard seen.insert(LSPLocation(url: url, range: location.range)).inserted else { return nil }
+            return LSPLocation(url: url, range: location.range, originRange: location.originRange)
         }
     }
 
@@ -407,7 +448,7 @@ final class LanguageServerConnection: @unchecked Sendable {
                 if dropsClosedFilesFromWorkspace { workspaceSymbolsNeedRefresh = true }
             }
             if let url = snapshot.url {
-                try notify("textDocument/didOpen", ["textDocument": ["uri": url.absoluteString, "languageId": "zig",
+                try notify("textDocument/didOpen", ["textDocument": ["uri": url.absoluteString, "languageId": server.languageID,
                                                                    "version": snapshot.revision, "text": snapshot.text]])
             }
         } else if let url = snapshot.url, let previous, capabilities.change != .none,
@@ -478,7 +519,7 @@ final class LanguageServerConnection: @unchecked Sendable {
         let bytes = wire.withUnsafeBytes { DispatchData(bytes: $0) }
         input.write(offset: 0, data: bytes, queue: queue) { [weak self] _, _, error in
             guard let self, error != 0, !self.stopping, !self.closed else { return }
-            self.fail("Could not send a message to ZLS.")
+            self.fail("Could not send a message to \(self.server.name).")
         }
     }
 
@@ -502,7 +543,7 @@ final class LanguageServerConnection: @unchecked Sendable {
         if done || error != 0 {
             queue.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                 guard let self, !self.closed, !self.stopping else { return }
-                self.fail("ZLS closed its communication stream.")
+                self.fail("\(self.server.name) closed its communication stream.")
             }
         }
     }
@@ -649,7 +690,7 @@ final class LanguageServerConnection: @unchecked Sendable {
             finish(error: CancellationError())
         } else {
             let lastLine = String(decoding: errorOutput, as: UTF8.self).split(whereSeparator: \.isNewline).last
-            fail(lastLine.map { String($0.prefix(240)) } ?? "ZLS exited (\(status)).")
+            fail(lastLine.map { String($0.prefix(240)) } ?? "\(server.name) exited (\(status)).")
         }
     }
 
