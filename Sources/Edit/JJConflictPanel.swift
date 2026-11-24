@@ -6,6 +6,7 @@ final class JJConflictPanel: NSView {
 
     var onNavigate: ((Int) -> Void)?
     var onChangeStyle: ((JJConflict.Style) -> Void)?
+    var onShowPendingChanges: ((Bool) -> Void)?
 
     private let status = NSTextField(labelWithString: "")
     private let navigation = NSSegmentedControl(
@@ -13,6 +14,7 @@ final class JJConflictPanel: NSView {
         trackingMode: .momentary, target: nil, action: nil
     )
     private let format = NSSegmentedControl(labels: ["Diff", "Snapshot"], trackingMode: .selectOne, target: nil, action: nil)
+    private let pending = NSButton(checkboxWithTitle: "Pending Changes", target: nil, action: nil)
     private let spacer = NSView()
     private var current = false
 
@@ -36,8 +38,15 @@ final class JJConflictPanel: NSView {
         format.setAccessibilityLabel("Conflict format")
         format.target = self
         format.action = #selector(changeStyle)
+        pending.identifier = .init("JujutsuPendingChanges")
+        pending.controlSize = .small
+        pending.font = .systemFont(ofSize: 11)
+        pending.toolTip = "Emphasize diff fragments still pending in the snapshot"
+        pending.setAccessibilityLabel("Pending Changes")
+        pending.target = self
+        pending.action = #selector(changePending)
 
-        let controls = NSStackView(views: [status, navigation, spacer, format])
+        let controls = NSStackView(views: [status, navigation, spacer, pending, format])
         controls.spacing = 4
         controls.alignment = .centerY
         controls.translatesAutoresizingMaskIntoConstraints = false
@@ -60,10 +69,12 @@ final class JJConflictPanel: NSView {
     required init?(coder: NSCoder) { fatalError("Conflict panels are created in code.") }
 
     override func layout() {
+        let narrow = bounds.width < 360
+        if status.isHidden != narrow { status.isHidden = narrow }
+        let title = bounds.width < 240 ? "" : "Pending Changes"
+        if pending.title != title { pending.title = title }
         let compact = bounds.width < 205
-        if status.isHidden != compact {
-            status.isHidden = compact
-            spacer.isHidden = compact
+        if (format.controlSize == .mini) != compact {
             navigation.controlSize = compact ? .mini : .small
             format.controlSize = compact ? .mini : .small
             for segment in 0..<navigation.segmentCount {
@@ -80,7 +91,7 @@ final class JJConflictPanel: NSView {
         bounds.fill()
     }
 
-    func update(_ conflicts: [JJConflict], selected index: Int, hasDraft: Bool = false) {
+    func update(_ conflicts: [JJConflict], selected index: Int, hasDraft: Bool, pendingChanges: Bool, canShowPending: Bool) {
         guard conflicts.indices.contains(index) else { return }
         status.stringValue = "Conflict \(index + 1) of \(conflicts.count)"
         let style = conflicts[index].style
@@ -90,6 +101,8 @@ final class JJConflictPanel: NSView {
         format.toolTip = formatHelp
         format.setAccessibilityHelp(formatHelp)
         navigation.isEnabled = conflicts.count > 1
+        pending.state = pendingChanges ? .on : .off
+        pending.isEnabled = canShowPending
         current = true
     }
 
@@ -97,6 +110,7 @@ final class JJConflictPanel: NSView {
         current = false
         format.isEnabled = false
         navigation.isEnabled = false
+        pending.isEnabled = false
     }
 
     @objc private func navigate() {
@@ -107,6 +121,11 @@ final class JJConflictPanel: NSView {
     @objc private func changeStyle() {
         guard current, format.isEnabled, let selected = JJConflict.Style(rawValue: format.selectedSegment) else { return }
         onChangeStyle?(selected)
+    }
+
+    @objc private func changePending() {
+        guard current, pending.isEnabled else { return }
+        onShowPendingChanges?(pending.state == .on)
     }
 }
 

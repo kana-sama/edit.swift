@@ -241,6 +241,7 @@ enum SourceControlCheck {
     }
 
     private static func checkConflicts(in app: Edit, executable: URL, folder: URL, render: (NSWindow) throws -> Void) async throws {
+        try checkPendingConflictFragments()
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
         try await command(executable, folder, ["git", "init", "--colocate"])
         let file = folder.appending(path: "Conflict.swift")
@@ -342,6 +343,10 @@ enum SourceControlCheck {
         guard let navigation: NSSegmentedControl = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictNavigation" }) else {
             throw Failure("find the conflict navigation")
         }
+        guard let pending: NSButton = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuPendingChanges" }) else {
+            throw Failure("find Pending Changes beside the format control")
+        }
+        try expect(pending.state == .off && pending.isEnabled, "offer Pending Changes as an optional diff view")
         let scroll = document.scrollView
         func actionBars() -> [JJConflictActions] { editor.subviews.compactMap { $0 as? JJConflictActions } }
         func headerBounds(_ anchor: NSRange) -> NSRect? {
@@ -544,6 +549,34 @@ enum SourceControlCheck {
             guard diffs.count == 2 else { throw Failure("locate both diffs in the edited conflict") }
             return diffs
         }
+        func opacity(ofDiff index: Int) -> CGFloat? {
+            guard let block = blocks(editor.string).last else { return nil }
+            let diffs = block.segments.filter { $0.kind.diffSide != nil }
+            guard diffs.indices.contains(index),
+                  let row = diffs[index].runs.first?.addedRows.first,
+                  let change = block.highlights[row].changes.first else { return nil }
+            return editor.jjConflictDecorations?.foregrounds(in: NSRange(location: change.location, length: 1))
+                .first?.color.usingColorSpace(.sRGB)?.alphaComponent
+        }
+        guard let result = replayBlock.resultRange else { throw Failure("find the editable snapshot for Pending Changes") }
+        pending.performClick(nil)
+        try expect(pending.state == .on && opacity(ofDiff: 1) == 1, "keep unapplied edits bright when enabling Pending Changes")
+        try edit(result, with: replayBlock.displayedResult(partial), actionName: "Manually Apply Diff")
+        try await waitFor("dim only the edit incorporated by hand") {
+            opacity(ofDiff: 1).map { $0 < 0.6 } == true && opacity(ofDiff: 0) == 1
+        }
+        try expect(pending.isEnabled && !format.isEnabled, "allow Pending Changes to toggle while editing a snapshot")
+        pending.performClick(nil)
+        try expect(opacity(ofDiff: 1) == 1, "restore ordinary diff colors when turning Pending Changes off")
+        pending.performClick(nil)
+        undo.undo()
+        try await waitFor("bring back the bright fragment after undoing the manual edit") {
+            editor.string == original && opacity(ofDiff: 1) == 1
+        }
+        undo.redo()
+        try await waitFor("dim the manually incorporated fragment again after redo") { opacity(ofDiff: 1).map { $0 < 0.6 } == true }
+        undo.undo()
+        try await waitFor("restore the original snapshot before applying the patch") { editor.string == original && opacity(ofDiff: 1) == 1 }
         reveal(patches[1].anchor)
         try await waitFor("show the second diff action before applying it") {
             button("Apply Diff", on: patches[1].anchor)?.isEnabled == true
@@ -554,7 +587,7 @@ enum SourceControlCheck {
         let originalButtonFrame = scroll.convert(secondApply.bounds, from: secondApply)
         secondApply.performClick(nil)
         try await waitFor("apply the second diff to the existing editor text") {
-            blocks(editor.string).last?.startingResult == partial && !secondApply.isEnabled
+            blocks(editor.string).last?.startingResult == partial && !secondApply.isEnabled && opacity(ofDiff: 1).map { $0 < 0.6 } == true
         }
         try expect(button("Apply Diff", on: try currentPatches()[1].anchor) === secondApply &&
                    scroll.convert(secondApply.bounds, from: secondApply) == originalButtonFrame,
@@ -562,6 +595,9 @@ enum SourceControlCheck {
         try await click("Apply Diff", on: try currentPatches()[0].anchor)
         let combined = "let last = (x: 1, y: 2, z: 3)\n"
         try await waitFor("combine both diffs in the visible snapshot") { blocks(editor.string).last?.startingResult == combined }
+        try await waitFor("dim both patches together once both are in the snapshot") {
+            opacity(ofDiff: 0).map { $0 < 0.6 } == true && opacity(ofDiff: 1).map { $0 < 0.6 } == true
+        }
         let combinedPatches = try currentPatches()
         guard let firstApply = button("Apply Diff", on: combinedPatches[0].anchor), !firstApply.isEnabled,
               button("Apply Diff", on: combinedPatches[1].anchor)?.isEnabled == false else {
@@ -621,6 +657,7 @@ enum SourceControlCheck {
         let snapshotBlocks = blocks(editor.string)
         document.window.layoutIfNeeded()
         try expect(format.isEnabled, "install the new conflict presentation in the same update as the Snapshot text")
+        try expect(!pending.isEnabled, "limit Pending Changes to diffs")
         try checkConflictColors(snapshotBlocks[0], in: editor)
         try expect(zip(snapshotBlocks, originalBlocks).allSatisfy { $0.sides == $1.sides },
                    "retain each side when changing the editable representation")
@@ -641,6 +678,8 @@ enum SourceControlCheck {
         try await waitFor("undo a resolution and recover all three sides") { blocks(editor.string) == snapshotBlocks }
         undo.undo()
         try await waitFor("undo a format switch") { editor.string == original && format.isEnabled }
+        try expect(pending.isEnabled && pending.state == .on, "restore the toggle when returning to Diff")
+        pending.performClick(nil)
         reveal(originalBlocks[0].range)
         try checkConflictColors(originalBlocks[0], in: editor)
         try expect(await document.save(), "save the restored conflict before opening its history")
@@ -710,6 +749,55 @@ enum SourceControlCheck {
         try expect(blocks(editor.string).first?.startingResult == "my LINE 22\n", "reject repeated attempts to insert the same prefix")
     }
 
+    private static func checkPendingConflictFragments() throws {
+        let source = """
+        <<<<<<< conflict 1 of 1
+        +++++++ snapshot
+        let config = (batch: 8, timeout: 30)
+        separate()
+        obsolete()
+        let boundary = 1
+        let suffix = 1
+        announce()
+        %%%%%%% diff from: base
+        -let config = (batch: 8, timeout: 30)
+        +let config = (batch: 13, timeout: 19)
+         separate()
+        -obsolete()
+         let boundary = 1
+        +newRecord()
+         let suffix = 1
+        >>>>>>> conflict 1 of 1 ends
+
+        """
+        let analysis = JJLineDiff.analyze(base: nil, current: source, isConflicted: true, recordedConflict: source)
+        guard let block = analysis.conflicts.first else { throw Failure("read the Pending Changes fixture") }
+        let text = source as NSString
+        func pending(_ result: String, on row: String) throws -> [String] {
+            var budget = JJLineDiff.Budget()
+            let confirmed = try block.confirmedChanges(in: result, budget: &budget)
+            let highlights = block.highlightingPendingChanges(confirmed: confirmed)
+            guard let highlight = highlights.first(where: { text.substring(with: $0.range) == row }),
+                  let ranges = highlight.pending else { throw Failure("find the highlighted diff row \(row)") }
+            return ranges.map { text.substring(with: $0) }
+        }
+        let partial = block.startingResult.replacingOccurrences(of: "batch: 8", with: "batch: 13")
+        try expect(try pending(partial, on: "+let config = (batch: 13, timeout: 19)") == ["19"] &&
+                   pending(partial, on: "-let config = (batch: 8, timeout: 30)") == ["30"],
+                   "dim just one verified replacement on both sides of a diff row")
+        try expect(try pending(partial, on: " separate()").isEmpty, "dim an unchanged diff context row")
+        try expect(try pending(partial + "newRecord()\n", on: "+newRecord()") == ["+newRecord()"],
+                   "keep an insertion pending when its text only appears at a different site")
+        let finished = partial.replacingOccurrences(of: "obsolete()\n", with: "")
+            .replacingOccurrences(of: "let boundary = 1\n", with: "let boundary = 1\nnewRecord()\n")
+        try expect(try pending(finished, on: "-obsolete()").isEmpty && pending(finished, on: "+newRecord()").isEmpty,
+                   "dim complete deletions and insertions at their aligned locations")
+        let editedNeighbors = finished.replacingOccurrences(of: "let boundary = 1", with: "let boundary = 2")
+            .replacingOccurrences(of: "let suffix = 1", with: "let suffix = 3")
+        try expect(try pending(editedNeighbors, on: "+newRecord()").isEmpty,
+                   "keep an insertion dim when other diffs change the lines on either side")
+    }
+
     private static func checkConflictColors(_ block: JJConflict, in editor: EditorTextView) throws {
         func capture(_ rect: NSRect) throws -> NSBitmapImageRep {
             guard let bitmap = editor.bitmapImageRepForCachingDisplay(in: rect) else {
@@ -736,7 +824,7 @@ enum SourceControlCheck {
                                           : abs(blue - green) < 0.025 && abs(red - green) < 0.025
             try expect(backgroundMatches, "keep full-width violet backgrounds on marker rows only at \(source.substring(with: range).trimmingCharacters(in: .newlines)) (\(red), \(green), \(blue); marker: \(marker))")
 
-            if let highlight, !marker {
+            if let highlight, highlight.role == .addition || highlight.role == .removal {
                 let glyphs = NSRect(x: editor.textContainerInset.width + 4, y: line.minY, width: 65, height: line.height)
                 let bitmap = try capture(glyphs)
                 let hasDiffColor = (0..<bitmap.pixelsWide).contains { x in

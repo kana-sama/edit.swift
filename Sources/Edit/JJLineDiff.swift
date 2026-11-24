@@ -189,6 +189,217 @@ enum JJLineDiff {
         }
     }
 
+    static func confirmConflictEdits(
+        from base: String, to side: String, in result: String, runs: [JJConflict.DiffRun],
+        confirmed: inout [Int: [NSRange]], budget: inout Budget
+    ) throws {
+        let original = try split(base, budget: &budget)
+        let incoming = try split(side, budget: &budget)
+        let draft = try split(result, budget: &budget)
+        let edits = try replayChanges(from: original, to: draft, budget: &budget)
+
+        for run in runs {
+            try budget.check()
+            // At EOF a physical marker line can represent an empty term with no newline.
+            guard run.baseLines.upperBound <= original.count, run.sideLines.upperBound <= incoming.count else { continue }
+            let window = try conflictWindow(for: run.baseLines, in: edits, budget: &budget)
+            let removed = original[run.baseLines]
+            let added = incoming[run.sideLines]
+            let edited = draft[window.draft]
+
+            if try matchesConflictRun(run.baseLines, removed: removed, added: added, window: window.base,
+                                      original: original[window.base], edited: edited, edits: window.edits, budget: &budget) {
+                confirmRows(run.removedRows, in: removed, confirmed: &confirmed)
+                confirmRows(run.addedRows, in: added, confirmed: &confirmed)
+            } else if removed.isEmpty {
+                let inserted: [TextPart]
+                if window.base.isEmpty {
+                    guard let edit = window.edits.first, edit.firstPossibleStart == run.baseLines.lowerBound,
+                          edit.lastPossibleEnd == run.baseLines.upperBound else { continue }
+                    inserted = Array(edited)
+                } else {
+                    inserted = try insertedConflictLines(at: run.baseLines.lowerBound, in: original[window.base],
+                                                         edited: edited, budget: &budget)
+                }
+                guard !inserted.isEmpty else { continue }
+                let (wanted, actual) = try textIDs(Array(added), inserted, normalizeCRLF: false, budget: &budget)
+                let pending = Set(try differences(wanted, actual, budget: &budget).flatMap(\.before))
+                for (offset, pair) in zip(run.addedRows, added).enumerated() where !pending.contains(offset) {
+                    let (row, line) = pair
+                    confirmed[row] = [NSRange(location: 0, length: line.text.utf16.count + 1)]
+                }
+            } else if added.isEmpty {
+                for edit in window.edits where edit.change.after.isEmpty &&
+                    edit.firstPossibleStart == edit.change.before.lowerBound && edit.lastPossibleEnd == edit.change.before.upperBound {
+                    let start = max(run.baseLines.lowerBound, edit.change.before.lowerBound)
+                    let end = min(run.baseLines.upperBound, edit.change.before.upperBound)
+                    guard start < end else { continue }
+                    let offset = start - run.baseLines.lowerBound
+                    confirmRows(run.removedRows[offset..<(offset + end - start)], in: original[start..<end], confirmed: &confirmed)
+                }
+            } else if let first = removed.first, !window.edits.isEmpty {
+                let before = removed.map(\.text).joined()
+                let after = added.map(\.text).joined()
+                let baseWindow = original[window.base].map(\.text).joined()
+                let draftWindow = edited.map(\.text).joined()
+                guard before.utf16.count + after.utf16.count + baseWindow.utf16.count + draftWindow.utf16.count <= 16_384 else { continue }
+                let beforeOffset = first.start - original[window.base.lowerBound].start
+                let wanted = try wordChangeRanges(before, after, normalizeCRLF: false, budget: &budget)
+                let actual = try wordChangeRanges(baseWindow, draftWindow, normalizeCRLF: false, budget: &budget)
+                let actualText = draftWindow as NSString
+                let wantedText = after as NSString
+                for change in wanted {
+                    try budget.check()
+                    let range = NSRange(location: beforeOffset + change.removed.location, length: change.removed.length)
+                    let replacement = wantedText.substring(with: change.inserted)
+                    let matches = try actual.contains { applied in
+                        try budget.check()
+                        if range == applied.removed && replacement.utf8.elementsEqual(actualText.substring(with: applied.inserted).utf8) {
+                            return true
+                        }
+                        return replacement.isEmpty && range.length > 0 && applied.inserted.length == 0 &&
+                            NSIntersectionRange(range, applied.removed).length == range.length
+                    }
+                    if matches {
+                        confirmWords(change.removed, rows: run.removedRows, in: removed, confirmed: &confirmed)
+                        confirmWords(change.inserted, rows: run.addedRows, in: added, confirmed: &confirmed)
+                    }
+                }
+            }
+        }
+    }
+
+    private static func insertedConflictLines(
+        at boundary: Int, in original: ArraySlice<TextPart>, edited: ArraySlice<TextPart>, budget: inout Budget
+    ) throws -> [TextPart] {
+        func uniqueIndex(in lines: ArraySlice<TextPart>, matching: (TextPart) throws -> Bool) throws -> Int? {
+            var match: Int?
+            for index in lines.indices {
+                try budget.check()
+                if try matching(lines[index]) {
+                    guard match == nil else { return nil }
+                    match = index
+                }
+            }
+            return match
+        }
+
+        func anchor(_ index: Int) throws -> Int? {
+            let line = original[index].text
+            let exact: (TextPart) -> Bool = { $0.text.utf8.elementsEqual(line.utf8) }
+            if try uniqueIndex(in: original, matching: exact) != nil,
+               let match = try uniqueIndex(in: edited, matching: exact) { return match }
+
+            // Neighboring lines may have other edits. A unique token prefix such as
+            // `let departures =` can still anchor the gap without matching the whole line.
+            func prefix(_ text: String, budget: inout Budget) throws -> [ExactText] {
+                try words(in: text, budget: &budget).lazy.filter { !$0.text.allSatisfy(\.isWhitespace) }
+                    .prefix(3).map { ExactText(text: $0.text) }
+            }
+            let key = try prefix(line, budget: &budget)
+            guard key.count == 3 else { return nil }
+            let originals = try original.map { try prefix($0.text, budget: &budget) }
+            guard originals.filter({ $0 == key }).count == 1 else { return nil }
+            let matches = try edited.indices.filter { try prefix(edited[$0].text, budget: &budget) == key }
+            return matches.count == 1 ? matches.first : nil
+        }
+
+        let start = try boundary == original.startIndex ? edited.startIndex : anchor(boundary - 1).map { $0 + 1 }
+        let end = try boundary == original.endIndex ? edited.endIndex : anchor(boundary)
+        guard let start, let end, start < end else { return [] }
+        return Array(edited[start..<end])
+    }
+
+    private static func matchesConflictRun(
+        _ range: Range<Int>, removed: ArraySlice<TextPart>, added: ArraySlice<TextPart>, window: Range<Int>,
+        original: ArraySlice<TextPart>, edited: ArraySlice<TextPart>, edits: ArraySlice<ReplayChange>, budget: inout Budget
+    ) throws -> Bool {
+        // Ignore equivalent alignments that can move a repeated line outside the selected region.
+        guard edits.allSatisfy({ $0.firstPossibleStart >= window.lowerBound && $0.lastPossibleEnd <= window.upperBound }) else {
+            return false
+        }
+        func equalLines(_ left: ArraySlice<TextPart>, _ right: ArraySlice<TextPart>) throws -> Bool {
+            try left.elementsEqual(right) { a, b in
+                try budget.check()
+                return a.text.utf8.elementsEqual(b.text.utf8)
+            }
+        }
+        if window == range, try equalLines(edited, added) { return true }
+        guard !added.isEmpty, edited.count >= added.count else { return false }
+        let startMatches = try range.lowerBound == window.lowerBound && equalLines(edited.prefix(added.count), added)
+        let endMatches = try range.upperBound == window.upperBound && equalLines(edited.suffix(added.count), added)
+
+        func occurrences(_ wanted: ArraySlice<TextPart>, in lines: ArraySlice<TextPart>, limit: Int = 1) throws -> Int {
+            guard !wanted.isEmpty, lines.count >= wanted.count else { return 0 }
+            var count = 0
+            for start in lines.startIndex...(lines.endIndex - wanted.count) {
+                if try equalLines(lines[start..<(start + wanted.count)], wanted) {
+                    count += 1
+                    if count == limit { break }
+                }
+            }
+            return count
+        }
+        // Another side can insert lines inside the same aligned edit. A complete, unique
+        // multiline replacement can still be recognized at the edge of that base region.
+        let sharesBoundary = range.lowerBound == window.lowerBound || range.upperBound == window.upperBound
+        let embedded = try sharesBoundary && !removed.isEmpty && added.count > 1 && occurrences(added, in: edited, limit: 2) == 1
+        guard startMatches || endMatches || embedded else { return false }
+        return try occurrences(added, in: original) == 0 && occurrences(removed, in: edited) == 0
+    }
+
+    private static func conflictWindow(
+        for range: Range<Int>, in edits: [ReplayChange], budget: inout Budget
+    ) throws -> (base: Range<Int>, draft: Range<Int>, edits: ArraySlice<ReplayChange>) {
+        var first = 0
+        var upper = edits.count
+        while first < upper {
+            let middle = first + (upper - first) / 2
+            let before = edits[middle].change.before
+            if before.upperBound < range.lowerBound || (before.upperBound == range.lowerBound && !before.isEmpty && !range.isEmpty) {
+                first = middle + 1
+            } else { upper = middle }
+        }
+        var last = first
+        while last < edits.count {
+            try budget.check()
+            let before = edits[last].change.before
+            if before.lowerBound > range.upperBound || (before.lowerBound == range.upperBound && !before.isEmpty && !range.isEmpty) { break }
+            last += 1
+        }
+        let overlapping = edits[first..<last]
+        let start = min(range.lowerBound, overlapping.first?.change.before.lowerBound ?? range.lowerBound)
+        let end = max(range.upperBound, overlapping.last?.change.before.upperBound ?? range.upperBound)
+        func displacement(at index: Int) -> Int {
+            guard index > 0 else { return 0 }
+            let change = edits[index - 1].change
+            return change.after.upperBound - change.before.upperBound
+        }
+        return (start..<end, (start + displacement(at: first))..<(end + displacement(at: last)), overlapping)
+    }
+
+    private static func confirmRows(
+        _ rows: some Sequence<Int>, in lines: ArraySlice<TextPart>, confirmed: inout [Int: [NSRange]]
+    ) {
+        for (row, line) in zip(rows, lines) {
+            confirmed[row] = [NSRange(location: 0, length: line.text.utf16.count + 1)]
+        }
+    }
+
+    private static func confirmWords(
+        _ change: NSRange, rows: [Int], in lines: ArraySlice<TextPart>, confirmed: inout [Int: [NSRange]]
+    ) {
+        guard change.length > 0, let start = lines.first?.start else { return }
+        for (row, line) in zip(rows, lines) {
+            let range = NSRange(location: line.start - start, length: line.text.utf16.count)
+            if range.location >= NSMaxRange(change) { break }
+            let overlap = NSIntersectionRange(range, change)
+            if overlap.length > 0 {
+                confirmed[row, default: []].append(NSRange(location: overlap.location - range.location + 1, length: overlap.length))
+            }
+        }
+    }
+
     private static func replay(
         _ original: [TextPart], incoming: [TextPart], draft: [TextPart], mergeLineEdits: Bool, budget: inout Budget
     ) throws -> String? {
@@ -432,17 +643,21 @@ enum JJLineDiff {
         let removedLength = removed.utf16.count
         let insertedLength = inserted.utf16.count
         guard removedLength > 0, insertedLength > 0, removedLength + insertedLength <= 8_192 else { return ([], []) }
+        let changes = try wordChangeRanges(removed, inserted, normalizeCRLF: normalizeCRLF, budget: &budget)
+        return (changes.map(\.removed).filter { $0.length > 0 }, changes.map(\.inserted).filter { $0.length > 0 })
+    }
+
+    private static func wordChangeRanges(
+        _ removed: String, _ inserted: String, normalizeCRLF: Bool, budget: inout Budget
+    ) throws -> [(removed: NSRange, inserted: NSRange)] {
         let oldWords = try words(in: removed, budget: &budget)
         let newWords = try words(in: inserted, budget: &budget)
         let (oldIDs, newIDs) = try textIDs(oldWords, newWords, normalizeCRLF: normalizeCRLF, budget: &budget)
-        let changes = try differences(oldIDs, newIDs, budget: &budget)
-        let oldHighlights = changes.compactMap { change in
-            change.before.isEmpty ? nil : textRange(change.before, in: oldWords, length: removedLength)
+        let oldLength = removed.utf16.count
+        let newLength = inserted.utf16.count
+        return try differences(oldIDs, newIDs, budget: &budget).map { change in
+            (textRange(change.before, in: oldWords, length: oldLength), textRange(change.after, in: newWords, length: newLength))
         }
-        let newHighlights = changes.compactMap { change in
-            change.after.isEmpty ? nil : textRange(change.after, in: newWords, length: insertedLength)
-        }
-        return (oldHighlights, newHighlights)
     }
 
     private enum WordGroup {

@@ -39,7 +39,7 @@ final class JJConflictDecorations {
     func update(_ highlights: [JJConflict.Highlight]) {
         guard self.highlights != highlights else { return }
         let foregroundChanged = !self.highlights.elementsEqual(highlights) { first, second in
-            first.range == second.range && first.role == second.role
+            first.range == second.range && first.role == second.role && first.pending == second.pending
         }
         self.highlights = highlights
         if foregroundChanged { editor?.syntaxHighlighting?.refreshColors() }
@@ -61,13 +61,28 @@ final class JJConflictDecorations {
 
     func foregrounds(in visible: NSRange) -> [(range: NSRange, color: NSColor)] {
         guard visible.length > 0 else { return [] }
-        return highlightsInViewport(visible).map { highlight in
+        return highlightsInViewport(visible).flatMap { highlight -> [(NSRange, NSColor)] in
             let color = switch highlight.role {
-            case .marker: NSColor.textColor
+            case .marker, .context: NSColor.textColor
             case .addition: Self.addedText
             case .removal: Self.removedText
             }
-            return (NSIntersectionRange(visible, highlight.range), color)
+            let range = NSIntersectionRange(visible, highlight.range)
+            guard let pending = highlight.pending else { return [(range, color)] }
+            let muted = color.withAlphaComponent(0.43)
+            var fragments: [(NSRange, NSColor)] = []
+            var start = range.location
+            for bright in pending {
+                let span = NSIntersectionRange(range, bright)
+                guard span.length > 0 else { continue }
+                if span.location > start { fragments.append((NSRange(location: start, length: span.location - start), muted)) }
+                fragments.append((span, color))
+                start = NSMaxRange(span)
+            }
+            if start < NSMaxRange(range) {
+                fragments.append((NSRange(location: start, length: NSMaxRange(range) - start), muted))
+            }
+            return fragments
         }
     }
 

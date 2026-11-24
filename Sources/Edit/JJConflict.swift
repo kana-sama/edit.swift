@@ -32,13 +32,15 @@ struct JJConflict: Equatable, Sendable {
     }
 
     enum Role: Equatable, Sendable {
-        case marker, addition, removal
+        case marker, context, addition, removal
     }
 
     struct Highlight: Equatable, Sendable {
         let range: NSRange
         let role: Role
         var changes: [NSRange] = []
+        // A nil value uses the regular conflict palette. An empty list dims the entire row.
+        var pending: [NSRange]?
     }
 
     struct Segment: Equatable, Sendable {
@@ -53,6 +55,14 @@ struct JJConflict: Equatable, Sendable {
 
         var anchor: NSRange
         let kind: Kind
+        var runs: [DiffRun] = []
+    }
+
+    struct DiffRun: Equatable, Sendable {
+        let baseLines: Range<Int>
+        let sideLines: Range<Int>
+        let removedRows: [Int]
+        let addedRows: [Int]
     }
 
     let range: NSRange
@@ -110,7 +120,7 @@ struct JJConflict: Equatable, Sendable {
         sides[resultSide].text = resolvedResult(editable)
         return Self(
             range: blockRange, source: projectedSource, style: style, sides: sides, bases: bases,
-            segments: segments.map { Segment(anchor: shifted($0.anchor), kind: $0.kind) },
+            segments: segments.map { Segment(anchor: shifted($0.anchor), kind: $0.kind, runs: $0.runs) },
             highlights: highlights.map { Highlight(range: shifted($0.range), role: $0.role, changes: $0.changes.map(shifted)) },
             resultRange: resultRange, resultSide: resultSide,
             width: width, opening: opening, closing: closing,
@@ -122,6 +132,44 @@ struct JJConflict: Equatable, Sendable {
     func applyingDiff(for segment: Segment, onto text: String) -> String? {
         guard case let .diff(base, side) = segment.kind else { return nil }
         return JJLineDiff.applyConflictDelta(from: bases[base].text, to: sides[side].text, onto: text)
+    }
+
+    func confirmedChanges(in result: String, budget: inout JJLineDiff.Budget) throws -> [Int: [NSRange]] {
+        var confirmed: [Int: [NSRange]] = [:]
+        for segment in segments where !segment.runs.isEmpty {
+            guard case let .diff(base, side) = segment.kind else { continue }
+            try JJLineDiff.confirmConflictEdits(from: bases[base].text, to: sides[side].text, in: result,
+                                                runs: segment.runs, confirmed: &confirmed, budget: &budget)
+        }
+        return confirmed
+    }
+
+    func highlightingPendingChanges(confirmed: [Int: [NSRange]]) -> [Highlight] {
+        highlights.enumerated().map { index, row in
+            guard row.role != .marker else { return row }
+            var decorated = row
+            let changes = row.role == .context ? [] : (row.changes.isEmpty ? [row.range] : row.changes)
+            let applied = confirmed[index] ?? []
+            var appliedIndex = 0
+            var pending: [NSRange] = []
+            for change in changes {
+                var start = change.location - row.range.location
+                let end = start + change.length
+                while appliedIndex < applied.count, applied[appliedIndex].location < end {
+                    let span = applied[appliedIndex]
+                    if span.location > start {
+                        pending.append(NSRange(location: row.range.location + start, length: span.location - start))
+                    }
+                    start = max(start, NSMaxRange(span))
+                    if start > end { break }
+                    appliedIndex += 1
+                }
+                if start < end { pending.append(NSRange(location: row.range.location + start, length: end - start)) }
+            }
+            decorated.pending = pending
+            if !row.changes.isEmpty { decorated.changes = pending }
+            return decorated
+        }
     }
 
     private enum Section {
@@ -153,12 +201,19 @@ struct JJConflict: Equatable, Sendable {
         var style: Style = git ? .git : .snapshot
         var removed: [DiffLine] = []
         var added: [DiffLine] = []
+        var baseLine = 0
+        var sideLine = 0
 
         func finishDiffRun() {
             defer {
                 removed.removeAll(keepingCapacity: true)
                 added.removeAll(keepingCapacity: true)
             }
+            guard !removed.isEmpty || !added.isEmpty else { return }
+            let segment = segments.index(before: segments.endIndex)
+            segments[segment].runs.append(DiffRun(baseLines: (baseLine - removed.count)..<baseLine,
+                                                 sideLines: (sideLine - added.count)..<sideLine,
+                                                 removedRows: removed.map(\.row), addedRows: added.map(\.row)))
             guard !removed.isEmpty, !added.isEmpty,
                   let ranges = try? JJLineDiff.wordHighlights(removed.map(\.text).joined(), added.map(\.text).joined(),
                                                                normalizeCRLF: normalizeCRLF, budget: &budget) else { return }
@@ -185,6 +240,8 @@ struct JJConflict: Equatable, Sendable {
                     bases.append(Term(label: label(marker.label, removing: "diff from:")))
                     sides.append(Term(label: ""))
                     style = .diff
+                    baseLine = 0
+                    sideLine = 0
                 case .diffTo:
                     guard case let .diff(base, side) = section, bases[base].text.isEmpty, sides[side].text.isEmpty else {
                         return nil
@@ -211,14 +268,19 @@ struct JJConflict: Equatable, Sendable {
                     finishDiffRun()
                     bases[base].text += payload
                     sides[side].text += payload
+                    baseLine += 1
+                    sideLine += 1
+                    highlights.append(highlight(line, .context))
                 case "-":
                     bases[base].text += payload
                     removed.append(DiffLine(row: highlights.count, text: payload))
                     highlights.append(highlight(line, .removal))
+                    baseLine += 1
                 case "+":
                     sides[side].text += payload
                     added.append(DiffLine(row: highlights.count, text: payload))
                     highlights.append(highlight(line, .addition))
+                    sideLine += 1
                 default: return nil
                 }
             case nil:

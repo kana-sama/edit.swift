@@ -166,6 +166,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var conflictStyleTask: Task<Void, Never>?
     private var conflictApplyTask: Task<Void, Never>?
     private var failedConflictDiffs: [UUID: Set<Int>] = [:]
+    private let pendingConflictChanges = JJConflictPendingChanges()
+    private var showsPendingConflictChanges = false
 
     var isShowingFilePreview: Bool { filePreview != nil }
     var showsEmptyFolder: Bool { emptyFolderView != nil }
@@ -2062,7 +2064,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         conflictBlocks = conflicts
         conflictPresentationCurrent = !conflicts.isEmpty
         if !conflicts.isEmpty && syntaxHighlighting == nil { syntaxHighlighting = SyntaxHighlighting(editor: editor) }
-        editor.setJJConflictHighlights(conflicts.flatMap(\.highlights))
+        updateConflictHighlights()
         guard !conflicts.isEmpty else {
             suspendConflictControls()
             if let panel = conflictPanel {
@@ -2082,6 +2084,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 self?.performConflictAction(action, in: block)
             }
             panel.onChangeStyle = { [weak self] style in self?.changeConflictStyle(to: style) }
+            panel.onShowPendingChanges = { [weak self] enabled in
+                guard let self else { return }
+                showsPendingConflictChanges = enabled
+                updateConflictHighlights()
+            }
             layoutEditorPanels()
         }
         updateConflictControls()
@@ -2102,7 +2109,35 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func updateConflictControls() {
         guard conflictPresentationCurrent, let index = selectedConflictIndex else { return }
-        conflictPanel?.update(conflictBlocks, selected: index, hasDraft: hasInlineConflictResult)
+        conflictPanel?.update(conflictBlocks, selected: index, hasDraft: hasInlineConflictResult,
+                              pendingChanges: showsPendingConflictChanges && canShowPendingConflictChanges,
+                              canShowPending: canShowPendingConflictChanges)
+    }
+
+    private var canShowPendingConflictChanges: Bool {
+        sourceControlRevision == nil && conflictBlocks.contains { $0.style == .diff && $0.resultRange != nil }
+    }
+
+    private func updateConflictHighlights() {
+        let showPending = showsPendingConflictChanges && canShowPendingConflictChanges
+        let tracked = showPending ? Dictionary(uniqueKeysWithValues: editor.conflictEdits.map { ($0.block, $0) }) : [:]
+        let inputs: [JJConflictPendingChanges.Input] = conflictBlocks.compactMap { conflict in
+            guard conflict.style == .diff, let edit = tracked[conflict.range] else { return nil }
+            return .init(id: edit.id, original: edit.original, result: conflict.startingResult)
+        }
+        pendingConflictChanges.update(inputs) { [weak self] in self?.renderConflictHighlights() }
+        renderConflictHighlights()
+    }
+
+    private func renderConflictHighlights() {
+        let showPending = showsPendingConflictChanges && canShowPendingConflictChanges
+        let ids = showPending ? Dictionary(uniqueKeysWithValues: editor.conflictEdits.map { ($0.block, $0.id) }) : [:]
+        editor.setJJConflictHighlights(conflictBlocks.flatMap { conflict in
+            guard conflict.style == .diff, let id = ids[conflict.range] else {
+                return conflict.highlights.filter { $0.role != .context }
+            }
+            return conflict.highlightingPendingChanges(confirmed: pendingConflictChanges.confirmedRows(for: id))
+        })
     }
 
     private var inlineConflictDrafts: [JJConflictEdit.SavedDraft] {
