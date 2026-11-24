@@ -247,6 +247,7 @@ enum SourceControlCheck {
         let file = folder.appending(path: "Conflict.swift")
         let finalLine = folder.appending(path: "End.txt")
         let literal = folder.appending(path: "Marker Example.txt")
+        let prefixes = folder.appending(path: "Diff Prefixes.txt")
         let repeatedInsertion = folder.appending(path: "Repeated Insertion.txt")
         func source(_ value: String) -> String {
             "let first = \"\(value)\"\n" + (1...9).map { "// Unchanged \($0)\n" }.joined() +
@@ -255,7 +256,12 @@ enum SourceControlCheck {
         try source("Base").write(to: file, atomically: true, encoding: .utf8)
         try "Base".write(to: finalLine, atomically: true, encoding: .utf8)
         try "line 2\n".write(to: repeatedInsertion, atomically: true, encoding: .utf8)
-        let example = "<<<<<<< example\n+++++++ First\na\n------- Base\nb\n+++++++ Second\nc\n>>>>>>> example ends\n"
+        func contextDiff(_ side: String) -> String {
+            side == "Alpha" ? "    replacement version\n    and another row\n    ends differently\n" :
+                "    first := \(side)\n    context stays 🧭\n\n    last := \(side)\n"
+        }
+        try contextDiff("base").write(to: prefixes, atomically: true, encoding: .utf8)
+        let example = "<<<<<<< example\n+++++++ First\na\n%%%%%%% diff from: Base\n-b\n+c\n context\n>>>>>>> example ends\n"
         try example.write(to: literal, atomically: true, encoding: .utf8)
         try await command(executable, folder, ["bookmark", "create", "base"])
         for (side, line) in [("Alpha", "line 22"), ("Beta", "LINE 2"), ("Gamma", "my line 2")] {
@@ -263,6 +269,7 @@ enum SourceControlCheck {
             try source(side).write(to: file, atomically: true, encoding: .utf8)
             try (side == "Alpha" ? side + "\n" : side).write(to: finalLine, atomically: true, encoding: .utf8)
             try (line + "\n").write(to: repeatedInsertion, atomically: true, encoding: .utf8)
+            try contextDiff(side).write(to: prefixes, atomically: true, encoding: .utf8)
             try await command(executable, folder, ["bookmark", "create", side])
         }
         try await command(executable, folder, ["new", "Alpha", "Beta", "Gamma", "-m", "Conflicting merge"])
@@ -337,7 +344,9 @@ enum SourceControlCheck {
         let editor = document.editor
         guard let undo = editor.undoManager else { throw Failure("find the conflict editor's undo manager") }
         let original = editor.string
-        let originalBlocks = blocks(original)
+        let originalBlocks = document.displayedConflicts
+        try expect(document.textWithConflictPrefixes == buffer.text && !document.window.isDocumentEdited,
+                   "keep the newly projected conflict clean and reconstruct its original materialized text")
         try expect(originalBlocks.count == 2 && originalBlocks.allSatisfy { $0.sides.count == 3 && $0.style == .diff },
                    "read every block and every side from a jj diff conflict")
         guard let navigation: NSSegmentedControl = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictNavigation" }) else {
@@ -477,9 +486,9 @@ enum SourceControlCheck {
         let manual = "let first = \"Manual merge\""
         editor.insertText(manual, replacementRange: firstResult)
         editor.breakUndoCoalescing()
-        try expect(blocks(editor.string).first?.startingResult == manual + "\n" && blocks(editor.string).count == 2,
+        try expect(document.displayedConflicts.first?.startingResult == manual + "\n" && document.displayedConflicts.count == 2,
                    "edit the snapshot directly in the buffer without resolving the conflict")
-        guard let updatedAnchor = blocks(editor.string).first?.segments.first(where: { $0.kind == firstDiff.kind })?.anchor else {
+        guard let updatedAnchor = document.displayedConflicts.first?.segments.first(where: { $0.kind == firstDiff.kind })?.anchor else {
             throw Failure("find the diff after editing the snapshot")
         }
         try await waitFor("clear the button failure after editing the snapshot") {
@@ -489,21 +498,24 @@ enum SourceControlCheck {
         let outsideDraft = (editor.string as NSString).range(of: "// Unchanged 1")
         let savedComment = "// Saved outside the draft"
         try edit(outsideDraft, with: savedComment, actionName: "Edit Outside Conflict")
-        let expectedDisk = original.replacingOccurrences(of: "// Unchanged 1", with: savedComment)
+        let expectedDisk = buffer.text.replacingOccurrences(of: "// Unchanged 1", with: savedComment)
         try expect(await document.save(), "save ordinary edits while the conflict has an inline draft")
         try expect(try String(contentsOf: file, encoding: .utf8) == expectedDisk &&
-                   blocks(editor.string).first?.startingResult == manual + "\n",
+                   document.displayedConflicts.first?.startingResult == manual + "\n",
                    "save the ordinary edit and preserve the original conflict on disk")
         let record = try JSONDecoder().decode(SessionDocument.self, from: JSONEncoder().encode(document.sessionDocument()))
         guard let draft = record.draft, let conflictDrafts = record.conflictDrafts else {
             throw Failure("record the unfinished inline result in the saved session")
         }
-        let restored = await JJConflictEdit.restore(conflictDrafts, in: draft)
-        try expect(restored.first?.displayed(in: draft as NSString)?.startingResult == manual + "\n" &&
-                   JJConflictEdit.textForSaving(draft, edits: restored) == expectedDisk,
+        guard let restored = await JJConflictEdit.restore(conflictDrafts, in: draft) else {
+            throw Failure("restore the saved conflict draft")
+        }
+        try expect(restored.text == editor.string && document.textWithConflictPrefixes == draft &&
+                   restored.edits.first?.displayed(in: restored.text as NSString)?.startingResult == manual + "\n" &&
+                   JJConflictEdit.textForSaving(restored.text, edits: restored.edits) == expectedDisk,
                    "restore the visible inline result and keep the original conflict in the disk projection")
 
-        guard let editedConflict = blocks(editor.string).first else {
+        guard let editedConflict = document.displayedConflicts.first else {
             throw Failure("find the edited conflict")
         }
         let editedSnapshot = try snapshotAnchor(editedConflict)
@@ -514,7 +526,7 @@ enum SourceControlCheck {
         try expect(!format.isEnabled, "keep the draft in its current format until it is resolved or undone")
         try await click("Mark Resolved", on: editedSnapshot)
         try await waitFor("use the manual snapshot to replace just its conflict") {
-            editor.string.hasPrefix(manual + "\n") && blocks(editor.string).count == 1
+            editor.string.hasPrefix(manual + "\n") && document.displayedConflicts.count == 1
         }
         try expect(await document.save(), "save the accepted result")
         let resolved = try String(contentsOf: file, encoding: .utf8)
@@ -522,7 +534,7 @@ enum SourceControlCheck {
                    "persist the accepted result alongside the surviving conflict")
         undo.undo()
         try await waitFor("restore the manual snapshot and its protected block with Undo") {
-            blocks(editor.string).count == 2 && blocks(editor.string).first?.startingResult == manual + "\n"
+            document.displayedConflicts.count == 2 && document.displayedConflicts.first?.startingResult == manual + "\n"
         }
         let restoredDraft = editor.string
         editor.insertText("x", replacementRange: openingMarker)
@@ -539,7 +551,7 @@ enum SourceControlCheck {
             throw Failure("find both replayable diffs on the second conflict")
         }
         func currentSecondBlock() throws -> JJConflict {
-            let current = blocks(editor.string)
+            let current = document.displayedConflicts
             guard current.count == 2 else { throw Failure("keep the unresolved second conflict visible") }
             return current[1]
         }
@@ -550,7 +562,7 @@ enum SourceControlCheck {
             return diffs
         }
         func opacity(ofDiff index: Int) -> CGFloat? {
-            guard let block = blocks(editor.string).last else { return nil }
+            guard let block = document.displayedConflicts.last else { return nil }
             let diffs = block.segments.filter { $0.kind.diffSide != nil }
             guard diffs.indices.contains(index),
                   let row = diffs[index].runs.first?.addedRows.first,
@@ -587,14 +599,14 @@ enum SourceControlCheck {
         let originalButtonFrame = scroll.convert(secondApply.bounds, from: secondApply)
         secondApply.performClick(nil)
         try await waitFor("apply the second diff to the existing editor text") {
-            blocks(editor.string).last?.startingResult == partial && !secondApply.isEnabled && opacity(ofDiff: 1).map { $0 < 0.6 } == true
+            document.displayedConflicts.last?.startingResult == partial && !secondApply.isEnabled && opacity(ofDiff: 1).map { $0 < 0.6 } == true
         }
         try expect(button("Apply Diff", on: try currentPatches()[1].anchor) === secondApply &&
                    scroll.convert(secondApply.bounds, from: secondApply) == originalButtonFrame,
                    "keep the same button in the same place when applying a same-width diff")
         try await click("Apply Diff", on: try currentPatches()[0].anchor)
         let combined = "let last = (x: 1, y: 2, z: 3)\n"
-        try await waitFor("combine both diffs in the visible snapshot") { blocks(editor.string).last?.startingResult == combined }
+        try await waitFor("combine both diffs in the visible snapshot") { document.displayedConflicts.last?.startingResult == combined }
         try await waitFor("dim both patches together once both are in the snapshot") {
             opacity(ofDiff: 0).map { $0 < 0.6 } == true && opacity(ofDiff: 1).map { $0 < 0.6 } == true
         }
@@ -605,16 +617,16 @@ enum SourceControlCheck {
         }
         firstApply.performClick(nil)
         secondApply.performClick(nil)
-        try expect(blocks(editor.string).last?.startingResult == combined, "leave the snapshot unchanged when pressing applied diffs again")
+        try expect(document.displayedConflicts.last?.startingResult == combined, "leave the snapshot unchanged when pressing applied diffs again")
         let replayRecord = try JSONDecoder().decode(SessionDocument.self, from: JSONEncoder().encode(document.sessionDocument()))
         guard let replayDraft = replayRecord.draft, let replayDrafts = replayRecord.conflictDrafts else {
             throw Failure("record which diffs have been applied to the inline result")
         }
         let restoredReplay = await JJConflictEdit.restore(replayDrafts, in: replayDraft)
-        try expect(restoredReplay.last?.appliedSides.count == 2, "retain applied sides across session restoration")
+        try expect(restoredReplay?.edits.last?.appliedSides.count == 2, "retain applied sides across session restoration")
         undo.undo()
         try await waitFor("undo just the last applied diff with ordinary editor Undo") {
-            blocks(editor.string).last?.startingResult == partial
+            document.displayedConflicts.last?.startingResult == partial
         }
         let undoPatches = try currentPatches()
         try await waitFor("enable only the diff undone most recently") {
@@ -622,24 +634,24 @@ enum SourceControlCheck {
                 button("Apply Diff", on: undoPatches[1].anchor)?.isEnabled == false
         }
         try await click("Apply Diff", on: undoPatches[0].anchor)
-        try await waitFor("reapply the first diff to the snapshot") { blocks(editor.string).last?.startingResult == combined }
+        try await waitFor("reapply the first diff to the snapshot") { document.displayedConflicts.last?.startingResult == combined }
         let autosavedComment = "// Autosaved outside the draft"
         let beforeReplay = (editor.string as NSString).range(of: "// Unchanged 2")
         try edit(beforeReplay, with: autosavedComment, actionName: "Edit Before Replay")
         document.requestAutosave()
-        let autosaved = original.replacingOccurrences(of: "// Unchanged 2", with: autosavedComment)
+        let autosaved = buffer.text.replacingOccurrences(of: "// Unchanged 2", with: autosavedComment)
         try await waitFor("autosave ordinary text while keeping the unfinished snapshot off disk") {
             (try? String(contentsOf: file, encoding: .utf8)) == autosaved
         }
-        try expect(blocks(editor.string).last?.startingResult == combined, "keep the inline result visible after autosaving its surroundings")
+        try expect(document.displayedConflicts.last?.startingResult == combined, "keep the inline result visible after autosaving its surroundings")
         let replaySnapshot = try snapshotAnchor(currentSecondBlock())
         try await click("Mark Resolved", on: replaySnapshot)
         try await waitFor("resolve with both applied diffs and the original snapshot change") {
-            editor.string.hasSuffix(combined) && editor.string.contains(autosavedComment) && blocks(editor.string) == [originalBlocks[0]]
+            editor.string.hasSuffix(combined) && editor.string.contains(autosavedComment) && document.displayedConflicts == [originalBlocks[0]]
         }
         undo.undo()
         try await waitFor("undo resolution and restore the combined inline draft") {
-            blocks(editor.string).count == 2 && blocks(editor.string).last?.startingResult == combined
+            document.displayedConflicts.count == 2 && document.displayedConflicts.last?.startingResult == combined
         }
         undo.undo()
         undo.undo()
@@ -651,10 +663,10 @@ enum SourceControlCheck {
         format.selectedSegment = 1
         if let action = format.action { format.sendAction(action, to: format.target) }
         try await waitFor("switch all open conflict blocks to Snapshot") {
-            let current = blocks(editor.string)
+            let current = document.displayedConflicts
             return current.count == 2 && current.allSatisfy { $0.style == .snapshot }
         }
-        let snapshotBlocks = blocks(editor.string)
+        let snapshotBlocks = document.displayedConflicts
         document.window.layoutIfNeeded()
         try expect(format.isEnabled, "install the new conflict presentation in the same update as the Snapshot text")
         try expect(!pending.isEnabled, "limit Pending Changes to diffs")
@@ -672,10 +684,10 @@ enum SourceControlCheck {
         try checkActions(snapshotBlocks[0])
         try await click("Mark Resolved", on: primarySnapshot)
         try await waitFor("resolve only the selected block with the editable snapshot") {
-            editor.string.hasPrefix(primaryResult) && blocks(editor.string).count == 1
+            editor.string.hasPrefix(primaryResult) && document.displayedConflicts.count == 1
         }
         undo.undo()
-        try await waitFor("undo a resolution and recover all three sides") { blocks(editor.string) == snapshotBlocks }
+        try await waitFor("undo a resolution and recover all three sides") { document.displayedConflicts == snapshotBlocks }
         undo.undo()
         try await waitFor("undo a format switch") { editor.string == original && format.isEnabled }
         try expect(pending.isEnabled && pending.state == .on, "restore the toggle when returning to Diff")
@@ -690,13 +702,25 @@ enum SourceControlCheck {
             throw Failure("find the historical conflict")
         }
         let details = try await JJSourceControlRepository.detail(for: historical, in: workspace, at: history.operationID)
+        guard let prefixPath = details.files.first(where: { $0.path == "Diff Prefixes.txt" }) else {
+            throw Failure("list the prefix fixture in the historical conflict")
+        }
+        try expect(await document.openSourceControlFile(prefixPath, in: historical, workspace: workspace,
+                                                        operationID: history.operationID) { true },
+                   "open the historical diff prefix fixture")
+        let historicalText = document.textWithConflictPrefixes
+        guard let rawHistorical = blocks(historicalText).first, let visibleHistorical = document.displayedConflicts.first else {
+            throw Failure("find both representations of the historical conflict")
+        }
+        try expect(!editor.isEditable && actionBars().isEmpty, "keep the projected historical conflict read-only")
+        try checkDiffPrefixSelection(rawHistorical, in: historicalText, displayed: visibleHistorical, editor: editor)
         guard let path = details.files.first(where: { $0.path == "Conflict.swift" }) else { throw Failure("list the conflicted file") }
         try expect(await document.openSourceControlFile(path, in: historical, workspace: workspace, operationID: history.operationID) { true },
                    "open the historical conflict as a read-only file")
         let disk = try Data(contentsOf: file)
         document.conflictPanel?.onChangeStyle?(.snapshot)
         try await waitFor("show Snapshot in a read-only revision") {
-            !editor.isEditable && actionBars().isEmpty && blocks(editor.string).first?.style == .snapshot
+            !editor.isEditable && actionBars().isEmpty && document.displayedConflicts.first?.style == .snapshot
         }
         try expect(try Data(contentsOf: file) == disk, "leave the working file untouched when switching a historical preview")
         guard let banner = document.sourceControlRevisionBanner, let conflictPanel = document.conflictPanel else {
@@ -707,46 +731,97 @@ enum SourceControlCheck {
 
         let oneLine = back.split(separator: "\n", omittingEmptySubsequences: false).filter { $0.first != "\\" }.joined(separator: "\n")
         try oneLine.write(to: finalLine, atomically: true, encoding: .utf8)
-        try expect(try await app.openFile(finalLine, in: document) != nil && editor.string == oneLine,
+        try expect(try await app.openFile(finalLine, in: document) != nil && document.textWithConflictPrefixes == oneLine,
                    "open the fixture with legacy one-line diff markers")
-        guard let compact = blocks(editor.string).first,
+        guard let compact = document.displayedConflicts.first,
               let diff = compact.segments.first(where: { $0.kind.diffSide != nil }) else { throw Failure("open a one-line diff marker") }
         try expect(markerCount(diff.anchor) == 1, "use one line for a legacy diff header")
         try await waitFor("center Apply Diff on a single marker row") { button("Apply Diff", on: diff.anchor)?.isEnabled == true }
         try checkActions(compact)
 
+        let rawPrefixes = try String(contentsOf: prefixes, encoding: .utf8)
+        try expect(try await app.openFile(prefixes, in: document) != nil, "open the fixture with all three diff row prefixes")
+        guard let sourceBlock = blocks(rawPrefixes).first, let visibleBlock = document.displayedConflicts.first else {
+            throw Failure("find the raw and displayed forms of the prefix fixture")
+        }
+        try checkDiffPrefixSelection(sourceBlock, in: rawPrefixes, displayed: visibleBlock, editor: editor)
+        try expect(document.textWithConflictPrefixes == rawPrefixes && document.textForSaving == rawPrefixes,
+                   "retain diff prefixes, indentation, and blank rows when serializing the file")
+
         // Once capitalization changes the token next to the insertion, replaying the same
         // insertion onto the merged text would insert a second "my" without the per-side guard.
         _ = try await app.openFile(repeatedInsertion, in: document)
-        guard let repeated = blocks(editor.string).first, repeated.startingResult == "line 22\n",
+        guard let repeated = document.displayedConflicts.first, repeated.startingResult == "line 22\n",
               let uppercase = repeated.segments.first(where: { segment in
                   if case let .diff(_, side) = segment.kind { return repeated.sides[side].text == "LINE 2\n" }
                   return false
               }) else { throw Failure("open the repeatable prefix insertion fixture") }
         try await click("Apply Diff", on: uppercase.anchor)
         try await waitFor("apply capitalization before the prefix insertion") {
-            blocks(editor.string).first?.startingResult == "LINE 22\n"
+            document.displayedConflicts.first?.startingResult == "LINE 22\n"
         }
-        guard let capitalized = blocks(editor.string).first,
+        guard let capitalized = document.displayedConflicts.first,
               let prepend = capitalized.segments.first(where: { segment in
                   if case let .diff(_, side) = segment.kind { return capitalized.sides[side].text == "my line 2\n" }
                   return false
               }) else { throw Failure("find the prefix insertion after capitalization") }
         try await click("Apply Diff", on: prepend.anchor)
         func prefixButton() -> NSButton? {
-            guard let anchor = blocks(editor.string).first?.segments.first(where: { $0.kind == prepend.kind })?.anchor else {
+            guard let anchor = document.displayedConflicts.first?.segments.first(where: { $0.kind == prepend.kind })?.anchor else {
                 return nil
             }
             return button("Apply Diff", on: anchor)
         }
         try await waitFor("insert the prefix exactly once and disable its action") {
-            blocks(editor.string).first?.startingResult == "my LINE 22\n" && prefixButton()?.isEnabled == false
+            document.displayedConflicts.first?.startingResult == "my LINE 22\n" && prefixButton()?.isEnabled == false
         }
         guard let disabled = prefixButton() else {
             throw Failure("find the disabled prefix insertion")
         }
         for _ in 0..<3 { disabled.performClick(nil) }
-        try expect(blocks(editor.string).first?.startingResult == "my LINE 22\n", "reject repeated attempts to insert the same prefix")
+        try expect(document.displayedConflicts.first?.startingResult == "my LINE 22\n", "reject repeated attempts to insert the same prefix")
+    }
+
+    private static func checkDiffPrefixSelection(
+        _ raw: JJConflict, in materialized: String, displayed: JJConflict, editor: EditorTextView
+    ) throws {
+        guard let context = raw.highlights.firstIndex(where: { $0.role == .context }),
+              let headerIndex = raw.highlights[..<context].lastIndex(where: { $0.role == .marker }) else {
+            throw Failure("find a diff with context")
+        }
+        let firstIndex = headerIndex + 1
+        let diffRows = raw.highlights[firstIndex...].prefix { $0.role != .marker }
+        try expect(diffRows.contains { $0.role == .addition } && diffRows.contains { $0.role == .removal },
+                   "exercise addition, removal, and context prefixes together")
+        let expected = diffRows.map { row in
+            let range = NSRange(location: row.range.location + 1, length: row.range.length - 1)
+            return (materialized as NSString).substring(with: range)
+        }.joined(separator: "\n")
+        let lastIndex = firstIndex + diffRows.count - 1
+        guard displayed.highlights.indices.contains(lastIndex) else { throw Failure("find the displayed diff rows") }
+        let start = displayed.highlights[firstIndex].range.location
+        let end = NSMaxRange(displayed.highlights[lastIndex].range)
+        let selected = NSRange(location: start, length: end - start)
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        editor.setCaretSelections([selected])
+        try expect(editor.selectedRange() == selected,
+                   "select consecutive diff rows (editable: \(editor.isEditable), selected: \(editor.selectedRange()), expected: \(selected))")
+        let visible = (editor.string as NSString).substring(with: selected)
+        try expect(visible == expected,
+                   "project the original text with indentation and blank rows (visible: \(visible.debugDescription), expected: \(expected.debugDescription))")
+        let supported = editor.writablePasteboardTypes
+        let legacyString = NSPasteboard.PasteboardType("NSStringPboardType")
+        guard let stringType = [.string, legacyString].first(where: supported.contains) else {
+            throw Failure("find a native plain text copy type in \(supported)")
+        }
+        pasteboard.declareTypes([stringType], owner: nil)
+        let wrote = editor.writeSelection(to: pasteboard, type: stringType)
+        let copied = pasteboard.string(forType: stringType)
+        try expect(wrote && copied == expected,
+                   "copy the selected diff rows (editable: \(editor.isEditable), type: \(stringType), wrote: \(wrote), copied: \(copied?.debugDescription ?? "nil"), expected: \(expected.debugDescription))")
+        try expect(expected.hasPrefix("    first :=") && expected.contains("    context stays 🧭\n\n"),
+                   "retain the original indentation, Unicode, and blank context lines")
     }
 
     private static func checkPendingConflictFragments() throws {

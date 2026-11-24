@@ -30,6 +30,13 @@ struct JJDiffHunk: Equatable, Sendable {
 }
 
 enum JJLineDiff {
+    static func parseConflict(_ text: String, at offset: Int) -> JJConflict? {
+        var budget = Budget()
+        guard let lines = try? split(text, budget: &budget) else { return nil }
+        let positioned = lines.map { TextPart(start: offset + $0.start, text: $0.text) }
+        return JJConflict.parse(positioned[...], normalizeCRLF: text.utf8.contains(13), budget: &budget)
+    }
+
     static func analyze(
         base: String?, current: String, isConflicted: Bool, recordedConflict: String?,
         normalizeCRLF: Bool = false

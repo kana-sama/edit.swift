@@ -774,28 +774,28 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             let identity: FileIdentity?
             let syntax: SyntaxSnapshot?
             let openingConflicts: JJOpeningConflicts?
-            let restoredConflicts: [JJConflictEdit]
+            let restoredConflicts: (text: String, edits: [JJConflictEdit])?
             if let draft = record.draft {
                 if let drafts = record.conflictDrafts, !drafts.isEmpty {
                     restoredConflicts = await JJConflictEdit.restore(drafts, in: draft)
-                    if restoredConflicts.isEmpty {
+                    if restoredConflicts == nil {
                         let name = url?.lastPathComponent ?? "Untitled"
                         warnings.append("“\(name)” opened as untitled because its conflict draft could not be restored.")
                         record.path = nil
                         record.revision = nil
                     }
                 } else {
-                    restoredConflicts = []
+                    restoredConflicts = nil
                 }
                 let draftURL = record.path == nil ? nil : url
-                let conflictURL = isScratch || !restoredConflicts.isEmpty ? nil : draftURL
+                let conflictURL = isScratch || restoredConflicts != nil ? nil : draftURL
                 async let conflicts = JJOpeningConflicts.prepare(draft, at: conflictURL)
                 identity = await Task.detached { draftURL.flatMap { FileIdentity.at($0) } }.value
                 syntax = nil
                 openingConflicts = await conflicts
             } else {
                 identity = nil
-                restoredConflicts = []
+                restoredConflicts = nil
                 if case .text(let file) = opened, folder == nil || file.identity != nil {
                     async let conflicts = JJOpeningConflicts.prepare(file.text, at: isScratch ? nil : file.url)
                     syntax = await placeholder.prepareOpeningSyntax(file, position: record.editorPosition,
@@ -813,8 +813,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             document.restorePlacement(record.placement)
             if let folder { document.setFolder(folder) }
             if let draft = record.draft {
-                document.restoreDraft(record, text: draft, identity: identity, scratch: scratch,
-                                      openingConflicts: openingConflicts, restoredConflicts: restoredConflicts)
+                document.restoreDraft(record, text: restoredConflicts?.text ?? draft, identity: identity, scratch: scratch,
+                                      openingConflicts: openingConflicts, restoredConflicts: restoredConflicts?.edits ?? [])
             } else if let opened, document.folderURL == nil || opened.identity != nil {
                 switch opened {
                 case .text(let file):

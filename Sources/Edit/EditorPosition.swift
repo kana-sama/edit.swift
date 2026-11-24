@@ -32,4 +32,14 @@ struct EditorPosition: Codable, Equatable, Sendable {
     let verticalOffset: CGFloat
     let topLine: TopLine?
     var focus: Focus? = nil
+
+    func mappingOffsets(_ map: (Int) -> Int) -> Self {
+        let selections = selections.map { selection in
+            let start = map(selection.location)
+            return NSRange(location: start, length: map(NSMaxRange(selection)) - start)
+        }
+        let topLine = topLine.map { TopLine(textOffset: map($0.textOffset), offsetIntoLine: $0.offsetIntoLine) }
+        return Self(selections: selections, horizontalOffset: horizontalOffset, verticalOffset: verticalOffset,
+                    topLine: topLine, focus: focus)
+    }
 }

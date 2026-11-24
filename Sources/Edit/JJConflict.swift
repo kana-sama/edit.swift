@@ -65,14 +65,14 @@ struct JJConflict: Equatable, Sendable {
         let addedRows: [Int]
     }
 
-    let range: NSRange
-    let source: String
+    private(set) var range: NSRange
+    private(set) var source: String
     let style: Style
     let sides: [Term]
     private let bases: [Term]
-    let segments: [Segment]
-    let highlights: [Highlight]
-    let resultRange: NSRange?
+    private(set) var segments: [Segment]
+    private(set) var highlights: [Highlight]
+    private(set) var resultRange: NSRange?
     let resultSide: Int
     private let width: Int
     private let opening: String
@@ -82,6 +82,7 @@ struct JJConflict: Equatable, Sendable {
     private let emptyResult: String
     private let endsWithNewline: Bool
     let hasEditedResult: Bool
+    private var hasProjectedPrefixes = false
 
     var canChangeStyle: Bool { !hasEditedResult && bases.count == sides.count - 1 }
 
@@ -98,6 +99,23 @@ struct JJConflict: Equatable, Sendable {
     func displayedResult(_ resolved: String) -> String {
         guard endsWithNewline else { return resolved }
         return Self.removingPadding(from: resolved, lineEnding: Self.trailingLineEnding(in: resolved))
+    }
+
+    func projectingDiffRows() -> Self {
+        guard style == .diff, !hasProjectedPrefixes else { return self }
+        let offsets = highlights.compactMap { $0.role == .marker ? nil : $0.range.location }
+        guard !offsets.isEmpty else { return self }
+        let projection = JJConflictEdit.Projection(rawOffsets: offsets)
+        var projected = self
+        projected.hasProjectedPrefixes = true
+        projected.range = projection.visibleRange(range)
+        projected.source = projection.removingPrefixes(from: source, startingAt: range.location)
+        projected.resultRange = resultRange.map(projection.visibleRange)
+        projected.segments = segments.map { Segment(anchor: projection.visibleRange($0.anchor), kind: $0.kind, runs: $0.runs) }
+        projected.highlights = highlights.map {
+            Highlight(range: projection.visibleRange($0.range), role: $0.role, changes: $0.changes.map(projection.visibleRange))
+        }
+        return projected
     }
 
     func displayingResult(in text: NSString, blockRange: NSRange, resultRange: NSRange, hasSeparator: Bool) -> Self {
@@ -125,7 +143,8 @@ struct JJConflict: Equatable, Sendable {
             resultRange: resultRange, resultSide: resultSide,
             width: width, opening: opening, closing: closing,
             lineEnding: lineEnding, resultSeparator: separator, emptyResult: emptyResult, endsWithNewline: endsWithNewline,
-            hasEditedResult: hasEditedResult || !projectedSource.utf8.elementsEqual(source.utf8)
+            hasEditedResult: hasEditedResult || !projectedSource.utf8.elementsEqual(source.utf8),
+            hasProjectedPrefixes: hasProjectedPrefixes
         )
     }
 
@@ -149,7 +168,11 @@ struct JJConflict: Equatable, Sendable {
             guard row.role != .marker else { return row }
             var decorated = row
             let changes = row.role == .context ? [] : (row.changes.isEmpty ? [row.range] : row.changes)
-            let applied = confirmed[index] ?? []
+            let confirmedSpans = confirmed[index] ?? []
+            let applied = hasProjectedPrefixes ? confirmedSpans.map { span in
+                let start = max(0, span.location - 1)
+                return NSRange(location: start, length: max(0, NSMaxRange(span) - 1 - start))
+            } : confirmedSpans
             var appliedIndex = 0
             var pending: [NSRange] = []
             for change in changes {
@@ -178,7 +201,7 @@ struct JJConflict: Equatable, Sendable {
 
     private struct DiffLine {
         let row: Int
-        let text: Substring
+        let text: String
     }
 
     static func parse(
@@ -262,8 +285,10 @@ struct JJConflict: Equatable, Sendable {
             case let .base(index):
                 bases[index].text += line.text
             case let .diff(base, side):
-                let payload = line.text.dropFirst()
-                switch line.text.first {
+                // The ASCII prefix occupies one scalar even when the payload starts
+                // with a combining mark that would otherwise join its grapheme.
+                let payload = String(line.text.unicodeScalars.dropFirst())
+                switch line.text.unicodeScalars.first {
                 case " ":
                     finishDiffRun()
                     bases[base].text += payload

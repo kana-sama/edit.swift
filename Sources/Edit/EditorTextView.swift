@@ -1112,6 +1112,24 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         jjConflictDecorations?.update(highlights)
     }
 
+    func installConflictProjection(_ removals: [EditorTextEdit], tracked: [JJConflictEdit]) {
+        guard let storage = textStorage, !removals.isEmpty else { return }
+        let selections = MultiCaretEditing.mapped(caretSelections, after: removals)
+        replacingConflictStructure = true
+        conflictEdits = tracked
+        withTextEdits(removals) {
+            storage.beginEditing()
+            for removal in removals.reversed() { storage.deleteCharacters(in: removal.range) }
+            _ = updateFocus(after: removals, restoring: nil)
+            storage.endEditing()
+        }
+        replacingConflictStructure = false
+        setCaretSelections(selections, record: false)
+        bracketNavigation.reset()
+        occurrenceHighlighting.contentChanged()
+        requestLineRefresh()
+    }
+
     func suspendJJMarkerNavigation() {
         jjDecorations?.allowsNavigation = false
         jjInlineDiff?.suspend()

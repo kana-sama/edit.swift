@@ -68,6 +68,7 @@ final class JJConflictDecorations {
             case .removal: Self.removedText
             }
             let range = NSIntersectionRange(visible, highlight.range)
+            guard range.length > 0 else { return [] }
             guard let pending = highlight.pending else { return [(range, color)] }
             let muted = color.withAlphaComponent(0.43)
             var fragments: [(NSRange, NSColor)] = []

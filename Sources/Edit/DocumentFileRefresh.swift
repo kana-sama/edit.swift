@@ -4,7 +4,7 @@ import Foundation
 final class DocumentFileRefresh {
     private let canRefresh: () -> Bool
     private let validateDiskOwner: () async -> Bool
-    private let apply: (FileBuffer) -> Void
+    private let apply: (FileBuffer, JJOpeningConflicts?) -> Void
     private var url: URL?
     private var stamp: FileBuffer.DiskStamp?
     private var monitor: FileSystemEvents?
@@ -12,7 +12,7 @@ final class DocumentFileRefresh {
     private var pending = false
 
     init(canRefresh: @escaping () -> Bool, validateDiskOwner: @escaping () async -> Bool,
-         apply: @escaping (FileBuffer) -> Void) {
+         apply: @escaping (FileBuffer, JJOpeningConflicts?) -> Void) {
         self.canRefresh = canRefresh
         self.validateDiskOwner = validateDiskOwner
         self.apply = apply
@@ -64,6 +64,8 @@ final class DocumentFileRefresh {
                 // A write or a newer notification during the read invalidates its result.
                 if self.stamp != stamp { pending = true }
                 if !pending, let file, file.url == url {
+                    let conflicts = await JJOpeningConflicts.prepare(file.text, at: file.url)
+                    guard !Task.isCancelled else { return }
                     let sameOwner = await validateDiskOwner()
                     guard !Task.isCancelled else { return }
                     guard sameOwner, canRefresh() else {
@@ -71,7 +73,7 @@ final class DocumentFileRefresh {
                         break
                     }
                     if self.stamp != stamp { pending = true }
-                    if !pending { apply(file) }
+                    if !pending { apply(file, conflicts) }
                 }
             }
             if !Task.isCancelled { worker = nil }

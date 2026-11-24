@@ -162,6 +162,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private(set) var conflictPanel: JJConflictPanel?
     private var editorPanelConstraints: [NSLayoutConstraint] = []
     private var conflictBlocks: [JJConflict] = []
+    var displayedConflicts: [JJConflict] { conflictBlocks }
     private var conflictPresentationCurrent = false
     private var conflictStyleTask: Task<Void, Never>?
     private var conflictApplyTask: Task<Void, Never>?
@@ -219,7 +220,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private lazy var fileRefresh = DocumentFileRefresh(
         canRefresh: { [weak self] in self?.canRefreshFile == true },
         validateDiskOwner: { [weak self] in await self?.validateSourceControlDiskOwner() == true },
-        apply: { [weak self] in self?.applyExternalFile($0) }
+        apply: { [weak self] in self?.applyExternalFile($0, openingConflicts: $1) }
     )
     private var draftRecoveryRevision: DraftRecoveryRevision?
     var draftRecoveryID: UUID? { draftRecoveryRevision?.id }
@@ -731,15 +732,15 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             !(NSApp.isActive && window.isKeyWindow && contentHasFocus)
     }
 
-    private func applyExternalFile(_ file: FileBuffer) {
+    private func applyExternalFile(_ file: FileBuffer, openingConflicts: JJOpeningConflicts?) {
         let changedText = savedText?.isEqual(to: file.text) != true
-        let position = changedText ? editor.capturePosition() : nil
+        let position = changedText ? captureFileEditorPosition() : nil
         let changedRevision = revision != file.revision
         // The clean buffer may have a queued snapshot from before an undo.
         autosave.reset()
         updateIdentity(from: file)
         if changedText {
-            installText(file.text, revealInWorktree: false)
+            installText(file.text, openingConflicts: openingConflicts, revealInWorktree: false)
             restoreEditorPosition(position)
         } else if changedRevision {
             updateJJContext()
@@ -969,7 +970,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             }
             guard isCurrent(), try await JJRepository.operation(in: selection.workspace) == state.operationID,
                   isCurrent() else { return }
-            let position = hasTextDocument ? editor.capturePosition() : nil
+            let position = hasTextDocument ? captureFileEditorPosition() : nil
             let wasFocused = contentHasFocus
             PanelLayout.withoutAnimation {
                 autosave.reset()
@@ -1013,8 +1014,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             savedText = text as NSString
             self.format = format
             editor.isEditable = false
-            installText(text)
-            editor.setJJLineMarks(analysis.marks, lineStarts: analysis.lineStarts, hunks: analysis.hunks)
+            installText(text, confirmedConflicts: analysis.conflicts)
+            setConflictAnalysisMarks(analysis)
             editor.jjInlineDiff?.expandAll()
         case .media(let media):
             installFilePreview(media, revealInWorktree: false)
@@ -1022,7 +1023,6 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
         sourceControlRevisionBanner = SourceControlRevisionBanner(preview)
         layoutEditorPanels()
-        if case .text(_, _, let analysis, _) = preview.content { showEditorConflicts(analysis.conflicts) }
     }
 
     private func removeSourceControlRevision() {
@@ -1031,6 +1031,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.setJJLineMarks([])
         sourceControlRevisionBanner?.removeFromSuperview()
         sourceControlRevisionBanner = nil
+        editor.conflictEdits.removeAll()
         if conflictPanel == nil { layoutEditorPanels() }
         showEditorConflicts([])
     }
@@ -1129,11 +1130,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         revision = record.revision
         manualSyntaxLanguage = record.syntaxLanguage.flatMap(SyntaxLanguage.init(rawValue:))
             ?? app.syntaxOverrides.language(for: fileURL)
-        installText(text, openingConflicts: openingConflicts)
-        if !restoredConflicts.isEmpty {
-            editor.conflictEdits = restoredConflicts
-            showEditorConflicts([])
-        }
+        installText(text, openingConflicts: openingConflicts, restoredConflicts: restoredConflicts)
         if fileURL == nil {
             draftRecoveryRevision = record.draftRecovery
             scheduleDraftCheckpoint()
@@ -1145,14 +1142,14 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         let conflictDrafts = inlineConflictDrafts
         return SessionDocument(
             path: displayedFileURL?.path,
-            draft: window.isDocumentEdited ? editor.string : nil,
+            draft: window.isDocumentEdited ? textWithConflictPrefixes : nil,
             format: fileURL == nil ? nil : format,
             revision: revision,
             placement: placement,
             syntaxLanguage: manualSyntaxLanguage?.rawValue,
             folderPath: folderURL?.path,
             findSettings: savedFind == .empty ? nil : savedFind,
-            editorPosition: hasEditableTextDocument ? editor.capturePosition() : nil,
+            editorPosition: hasEditableTextDocument ? captureFileEditorPosition() : nil,
             sidebarMode: sidebar.rememberedMode,
             worktreeShowsHidden: sidebar.worktreeShowsHidden ? true : nil,
             isFilePreview: displayedFileURL != nil && isShowingFilePreview ? true : nil,
@@ -1167,12 +1164,18 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         guard hasTextDocument, let position else { return }
         // AppKit calculates the titlebar inset during layout, including in a window not presented yet.
         window.layoutIfNeeded()
-        editor.restorePosition(position)
+        let projection = JJConflictEdit.projection(for: editor.conflictEdits)
+        editor.restorePosition(position.mappingOffsets(projection.visibleOffset))
+    }
+
+    private func captureFileEditorPosition() -> EditorPosition {
+        let projection = JJConflictEdit.projection(for: editor.conflictEdits)
+        return editor.capturePosition().mappingOffsets(projection.rawOffset)
     }
 
     func rememberFilePosition(_ position: EditorPosition? = nil) {
         guard let fileURL, let fileIdentity else { return }
-        app.recentFiles.rememberPosition(position ?? editor.capturePosition(), for: fileURL, identity: fileIdentity)
+        app.recentFiles.rememberPosition(position ?? captureFileEditorPosition(), for: fileURL, identity: fileIdentity)
     }
 
     private func rememberFileUndoHistory() {
@@ -1496,15 +1499,17 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             if wasFocused { focusContent() }
             return
         }
-        let position = editor.capturePosition()
+        let position = captureFileEditorPosition()
         switch try? await Edit.readForOpening(url) {
         case .text(let file):
+            let conflicts = await JJOpeningConflicts.prepare(file.text, at: file.url)
+            guard !Task.isCancelled, fileURL == url else { return }
             if discard {
                 autosave.reset()
                 updateIdentity(from: file)
-                installText(file.text, revealInWorktree: false)
+                installText(file.text, openingConflicts: conflicts, revealInWorktree: false)
             } else {
-                applyExternalFile(file)
+                applyExternalFile(file, openingConflicts: conflicts)
             }
             restoreEditorPosition(position)
         case .preview(let preview):
@@ -1965,8 +1970,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func installText(
-        _ text: String, preparedSyntax: SyntaxSnapshot? = nil, openingConflicts: JJOpeningConflicts? = nil, revealInWorktree: Bool = true
+        _ text: String, preparedSyntax: SyntaxSnapshot? = nil, openingConflicts: JJOpeningConflicts? = nil,
+        confirmedConflicts: [JJConflict] = [], restoredConflicts: [JJConflictEdit] = [], revealInWorktree: Bool = true
     ) {
+        let projection = restoredConflicts.isEmpty
+            ? JJConflictEdit.project(openingConflicts?.blocks ?? confirmedConflicts, in: text)
+            : (text: text, edits: restoredConflicts)
         conflictStyleTask?.cancel()
         editor.conflictEdits.removeAll()
         failedConflictDiffs.removeAll()
@@ -1979,16 +1988,17 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         syntaxHighlighting?.prepareForBufferReplacement()
         editor.bracketNavigation.reset()
         editor.occurrenceHighlighting.reset()
-        editor.string = text
-        refreshSyntax(immediate: true, preparedSyntax: preparedSyntax)
+        editor.string = projection.text
+        editor.conflictEdits = projection.edits
+        refreshSyntax(immediate: true, preparedSyntax: projection.text.utf8.elementsEqual(text.utf8) ? preparedSyntax : nil)
         editor.setSelectedRange(NSRange(location: 0, length: 0))
         editor.requestLineRefresh()
         editor.undoManager?.removeAllActions()
+        if !projection.edits.isEmpty { showEditorConflicts([]) }
         updateTitle(revealInWorktree: revealInWorktree)
         updateEditedState()
         sidebar.editorBufferReplaced()
         jjDocumentChanges?.bufferReplaced(openingConflictOperation: openingConflicts?.operation)
-        if let openingConflicts { showEditorConflicts(openingConflicts.blocks) }
         editor.scrollRangeToVisible(editor.selectedRange())
     }
 
@@ -2022,13 +2032,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if jjDocumentChanges == nil {
             guard file != nil || folder != nil else { return }
             jjDocumentChanges = JJDocumentChanges(monitor: app.jjChanges, text: { [weak self] in
-                guard let editor = self?.editor, !editor.hasMarkedText() else { return nil }
-                return editor.string
+                guard let self, !editor.hasMarkedText() else { return nil }
+                return textWithConflictPrefixes
             }, showMarks: { [weak self] result, normalizeCRLF in
                 guard let self, sourceControlRevision == nil else { return }
-                editor.setJJLineMarks(result?.marks ?? [], lineStarts: result?.lineStarts ?? [],
-                                      hunks: result?.hunks ?? [], normalizeCRLF: normalizeCRLF)
                 showEditorConflicts(result?.conflicts ?? [])
+                setConflictAnalysisMarks(result, normalizeCRLF: normalizeCRLF)
                 if result != nil, pendingSourceControlDiffFile != nil, pendingSourceControlDiffFile == fileURL {
                     pendingSourceControlDiffFile = nil
                     editor.jjInlineDiff?.expandAll()
@@ -2050,17 +2059,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func showEditorConflicts(_ confirmed: [JJConflict]) {
+        installNewConflictProjections(confirmed)
         let source = editor.string as NSString
-        if sourceControlRevision == nil {
-            // Background analysis can omit a result containing literal marker-like text.
-            // The protected markers and tracked snapshot remain authoritative for this buffer.
-            for conflict in confirmed where Self.conflictMatches(conflict, in: source) &&
-                !editor.conflictEdits.contains(where: { NSIntersectionRange($0.block, conflict.range).length > 0 }) {
-                editor.conflictEdits.append(JJConflictEdit(conflict))
-            }
-            editor.conflictEdits.sort { $0.block.location < $1.block.location }
-        }
-        let conflicts = sourceControlRevision == nil ? editor.conflictEdits.compactMap { $0.displayed(in: source) } : confirmed
+        let conflicts = editor.conflictEdits.compactMap { $0.displayed(in: source) }
         conflictBlocks = conflicts
         conflictPresentationCurrent = !conflicts.isEmpty
         if !conflicts.isEmpty && syntaxHighlighting == nil { syntaxHighlighting = SyntaxHighlighting(editor: editor) }
@@ -2093,6 +2094,59 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
         updateConflictControls()
         updateConflictActions()
+    }
+
+    private func installNewConflictProjections(_ confirmed: [JJConflict]) {
+        guard !confirmed.isEmpty, !editor.hasMarkedText() else { return }
+        let existing = editor.conflictEdits
+        let projection = JJConflictEdit.projection(for: existing)
+        let source = editor.string as NSString
+        var removals: [EditorTextEdit] = []
+        var additions: [JJConflictEdit] = []
+        for block in confirmed {
+            let range = projection.visibleRange(block.range)
+            guard !existing.contains(where: { NSIntersectionRange($0.block, range).length > 0 }),
+                  range.length == block.range.length, NSMaxRange(range) <= source.length,
+                  source.substring(with: range).utf8.elementsEqual(block.source.utf8) else { continue }
+            let rows = block.highlights.filter { $0.role != .marker }
+            // Edits in an existing undo stack use the old buffer's coordinates. The normal
+            // opening and reload paths prepare their projection before an undo stack is installed.
+            guard rows.isEmpty || (editor.editorUndoManager.undoCount == 0 && editor.editorUndoManager.redoCount == 0) else { continue }
+            additions.append(JJConflictEdit(block).relocated(to: range.location - removals.count))
+            removals += rows.map {
+                EditorTextEdit(range: NSRange(location: projection.visibleOffset($0.range.location), length: 1), text: "")
+            }
+        }
+        guard !additions.isEmpty else { return }
+        let tracked = (existing.compactMap { $0.remapped(after: removals) } + additions).sorted { $0.block.location < $1.block.location }
+        if removals.isEmpty { editor.conflictEdits = tracked }
+        else { preserveEditorViewport { editor.installConflictProjection(removals, tracked: tracked) } }
+    }
+
+    private func setConflictAnalysisMarks(_ analysis: JJTextAnalysis?, normalizeCRLF: Bool = false) {
+        guard let analysis else {
+            editor.setJJLineMarks([])
+            return
+        }
+        let tracked = editor.conflictEdits
+        guard !tracked.isEmpty else {
+            editor.setJJLineMarks(analysis.marks, lineStarts: analysis.lineStarts, hunks: analysis.hunks, normalizeCRLF: normalizeCRLF)
+            return
+        }
+        let projection = JJConflictEdit.projection(for: tracked)
+        let hunks = analysis.hunks.compactMap { hunk -> JJDiffHunk? in
+            let range = projection.visibleRange(hunk.currentRange)
+            guard range.length == hunk.currentRange.length else { return nil }
+            let touchesConflict = tracked.contains { edit in
+                range.length == 0 ? NSLocationInRange(range.location, edit.block) : NSIntersectionRange(edit.block, range).length > 0
+            }
+            guard !touchesConflict else { return nil }
+            return JJDiffHunk(mark: hunk.mark, baseRange: hunk.baseRange, currentRange: range,
+                              removedText: hunk.removedText, insertedText: hunk.insertedText,
+                              removedHighlights: hunk.removedHighlights, insertedHighlights: hunk.insertedHighlights)
+        }
+        editor.setJJLineMarks(analysis.marks, lineStarts: analysis.lineStarts.map(projection.visibleOffset),
+                              hunks: hunks, normalizeCRLF: normalizeCRLF)
     }
 
     private var selectedConflictIndex: Int? {
@@ -2141,12 +2195,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private var inlineConflictDrafts: [JJConflictEdit.SavedDraft] {
-        guard !editor.conflictEdits.isEmpty else { return [] }
-        let source = editor.string as NSString
-        return editor.conflictEdits.compactMap { $0.draft(in: source) }
+        JJConflictEdit.drafts(in: editor.string, edits: editor.conflictEdits)
     }
 
     var textForSaving: String { JJConflictEdit.textForSaving(editor.string, edits: editor.conflictEdits) }
+    var textWithConflictPrefixes: String { JJConflictEdit.textWithDrafts(editor.string, edits: editor.conflictEdits) }
 
     private func updateConflictActions() {
         let tracked = Dictionary(uniqueKeysWithValues: editor.conflictEdits.map { ($0.block, $0) })
@@ -2262,7 +2315,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
               editor.isEditable || sourceControlRevision != nil else { return }
         let original = editor.string
         guard conflictBlocks.allSatisfy({ Self.conflictMatches($0, in: original as NSString) }) else { return }
-        let blocks = conflictBlocks
+        let tracked = editor.conflictEdits
+        let raw = textWithConflictPrefixes
         let preview = sourceControlRevision
         let baseline: String?
         if let preview, case .text(_, _, _, let text) = preview.content { baseline = text }
@@ -2270,7 +2324,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         conflictStyleTask?.cancel()
         suspendConflictControls(keepingPresentation: true)
         conflictStyleTask = Task { [weak self] in
-            let conversion = await Self.convertConflictStyle(blocks, in: original, to: style, baseline: baseline)
+            let conversion = await Self.convertConflictStyle(tracked, in: raw, to: style, baseline: baseline)
             guard let self, !Task.isCancelled, editor.string.utf8.elementsEqual(original.utf8) else { return }
             conflictStyleTask = nil
             guard let conversion else {
@@ -2279,22 +2333,20 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 updateConflictActions()
                 return
             }
-            let (edits, text, analysis) = conversion
+            let (edits, rawText, projected, analysis) = conversion
             if preview != nil {
                 let position = editor.capturePosition()
                 PanelLayout.withoutAnimation {
-                    savedText = text as NSString
-                    installText(text, revealInWorktree: false)
-                    editor.setJJLineMarks(analysis.marks, lineStarts: analysis.lineStarts, hunks: analysis.hunks)
-                    showEditorConflicts(analysis.conflicts)
+                    savedText = rawText as NSString
+                    installText(projected.text, restoredConflicts: projected.edits, revealInWorktree: false)
+                    setConflictAnalysisMarks(analysis)
                     editor.jjInlineDiff?.expandAll()
-                    restoreEditorPosition(position)
+                    editor.restorePosition(position)
                 }
             } else {
                 let mapped = MultiCaretEditing.mapped(editor.caretSelections, after: edits)
-                let tracked = analysis.conflicts.map { JJConflictEdit($0) }
-                if editor.applyMultiEdits(edits, selections: mapped, actionName: "Change Conflict Format", conflictEditsAfter: tracked) {
-                    showEditorConflicts(analysis.conflicts)
+                if editor.applyMultiEdits(edits, selections: mapped, actionName: "Change Conflict Format", conflictEditsAfter: projected.edits) {
+                    showEditorConflicts([])
                     focusContent()
                 } else {
                     conflictPresentationCurrent = true
@@ -2312,23 +2364,42 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     @concurrent
     private static func convertConflictStyle(
-        _ blocks: [JJConflict], in original: String, to style: JJConflict.Style, baseline: String?
-    ) async -> (edits: [EditorTextEdit], text: String, analysis: JJTextAnalysis)? {
-        var edits: [EditorTextEdit] = []
-        for block in blocks where block.style != style {
-            guard !Task.isCancelled, let text = block.rendered(as: style) else { return nil }
-            edits.append(EditorTextEdit(range: block.range, text: text))
+        _ blocks: [JJConflictEdit], in original: String, to style: JJConflict.Style, baseline: String?
+    ) async -> (edits: [EditorTextEdit], materialized: String, projected: (text: String, edits: [JJConflictEdit]), analysis: JJTextAnalysis)? {
+        guard blocks.contains(where: { $0.original.style != style }) else { return nil }
+        let projection = JJConflictEdit.projection(for: blocks)
+        var rawEdits: [EditorTextEdit] = []
+        var converted: [JJConflict] = []
+        var delta = 0
+        for block in blocks {
+            let rawRange = NSRange(location: projection.rawOffset(block.block.location), length: block.original.range.length)
+            guard !Task.isCancelled, let text = block.original.rendered(as: style),
+                  let conflict = JJLineDiff.parseConflict(text, at: rawRange.location + delta) else { return nil }
+            converted.append(conflict)
+            if block.original.style != style {
+                rawEdits.append(EditorTextEdit(range: rawRange, text: text))
+                delta += text.utf16.count - rawRange.length
+            }
         }
-        guard !edits.isEmpty else { return nil }
         let updated = NSMutableString(string: original)
-        for edit in edits.reversed() { updated.replaceCharacters(in: edit.range, with: edit.text) }
+        for edit in rawEdits.reversed() { updated.replaceCharacters(in: edit.range, with: edit.text) }
         let text = updated as String
+        let projected = JJConflictEdit.project(converted, in: text)
+        guard projected.edits.count == blocks.count else { return nil }
+        let edits = zip(blocks, projected.edits).compactMap { old, new -> EditorTextEdit? in
+            guard old.original.style != style else { return nil }
+            return EditorTextEdit(range: old.block, text: new.projected.source)
+        }
         let analysis = JJLineDiff.analyze(base: baseline, current: text, isConflicted: true, recordedConflict: text)
-        return (edits, text, analysis)
+        return (edits, text, projected, analysis)
     }
 
     private func updateEditedState() {
-        let isEdited = hasAppliedConflictDiff || (savedText.map { !(editor.textStorage?.mutableString.isEqual($0) ?? false) } ?? true)
+        let matchesSaved = savedText.map { saved in
+            if editor.conflictEdits.isEmpty { return editor.textStorage?.mutableString.isEqual(saved) ?? false }
+            return saved.isEqual(to: textWithConflictPrefixes)
+        } ?? false
+        let isEdited = hasAppliedConflictDiff || !matchesSaved
         if isEdited != window.isDocumentEdited {
             window.isDocumentEdited = isEdited
             if !isEdited {
