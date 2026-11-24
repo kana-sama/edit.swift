@@ -150,35 +150,57 @@ final class SourceControlGraphView: NSObject, NSTableViewDataSource, NSTableView
     }
 
     private static func connections(_ revisions: [JJSourceControlRevision]) -> ([SourceControlGraphRow], Int) {
-        var lanes: [String?] = []
+        var lanes: [(target: String, color: Int)?] = []
         var remaining = Set(revisions.map(\.id))
         var width = 1
+        var nextColor = 0
+        let colorCount = SourceControlGraphGutter.branchColors.count
+        func nextLane() -> Int {
+            if let free = lanes.firstIndex(where: { $0 == nil }) { return free }
+            lanes.append(nil)
+            return lanes.count - 1
+        }
+        func takeColor(avoiding used: Set<Int>) -> Int {
+            let start = nextColor
+            let color = (0..<colorCount).lazy.map { (start + $0) % colorCount }.first { !used.contains($0) } ?? start
+            nextColor = (color + 1) % colorCount
+            return color
+        }
         let rows = revisions.map { revision in
             remaining.remove(revision.id)
-            let incoming = lanes.indices.filter { lanes[$0] != nil }
-            let own = lanes.firstIndex(of: revision.id) ?? nextLane(in: &lanes)
+            let incoming = lanes.enumerated().compactMap { index, lane in
+                lane.map { SourceControlGraphRow.Stroke(lane: index, color: $0.color) }
+            }
+            var used = Set(incoming.map(\.color))
+            let own = lanes.firstIndex { $0?.target == revision.id } ?? nextLane()
+            let color = lanes[own]?.color ?? takeColor(avoiding: used)
+            used.insert(color)
             lanes[own] = nil
             var outgoing: [SourceControlGraphRow.Edge] = []
-            for edge in revision.edges {
+            for (index, edge) in revision.edges.enumerated() {
                 guard let id = edge.target, remaining.contains(id) else {
-                    outgoing.append(.init(lane: own, indirect: true, elided: true))
+                    outgoing.append(.init(lane: own, color: color, indirect: true, elided: true))
                     continue
                 }
-                let lane = lanes.firstIndex(of: id) ?? nextLane(in: &lanes)
-                lanes[lane] = id
-                outgoing.append(.init(lane: lane, indirect: edge.indirect, elided: false))
+                // Carry the first parent's color through bends, giving each new merge arm its own color.
+                let lane: Int
+                let branchColor: Int
+                if let existing = lanes.firstIndex(where: { $0?.target == id }), let target = lanes[existing] {
+                    lane = existing
+                    branchColor = index == 0 ? color : target.color
+                } else {
+                    lane = nextLane()
+                    branchColor = index == 0 ? color : takeColor(avoiding: used)
+                    used.insert(branchColor)
+                    lanes[lane] = (id, branchColor)
+                }
+                outgoing.append(.init(lane: lane, color: branchColor, indirect: edge.indirect, elided: false))
             }
             width = max(width, lanes.count)
-            while lanes.last == .some(nil) { lanes.removeLast() }
+            while !lanes.isEmpty, lanes[lanes.count - 1] == nil { lanes.removeLast() }
             return SourceControlGraphRow(lane: own, incoming: incoming, outgoing: outgoing)
         }
         return (rows, width)
-    }
-
-    private static func nextLane(in lanes: inout [String?]) -> Int {
-        if let free = lanes.firstIndex(of: nil) { return free }
-        lanes.append(nil)
-        return lanes.count - 1
     }
 }
 
@@ -251,17 +273,23 @@ private final class SourceControlGraphSelectionRow: NSTableRowView {
 }
 
 private struct SourceControlGraphRow {
+    struct Stroke {
+        let lane: Int
+        let color: Int
+    }
+
     struct Edge {
         let lane: Int
+        let color: Int
         let indirect: Bool
         let elided: Bool
     }
 
     let lane: Int
-    let incoming: [Int]
+    let incoming: [Stroke]
     let outgoing: [Edge]
 
-    var rightmostLane: Int { max(lane, incoming.max() ?? 0, outgoing.map(\.lane).max() ?? 0) }
+    var rightmostLane: Int { max(lane, incoming.map(\.lane).max() ?? 0, outgoing.map(\.lane).max() ?? 0) }
 }
 
 @MainActor
@@ -332,6 +360,10 @@ private final class SourceControlGraphCell: NSTableCellView {
 
 @MainActor
 private final class SourceControlGraphGutter: NSView {
+    static let branchColors: [NSColor] = [
+        .systemOrange, .systemPink, .systemTeal, .systemPurple, .systemGreen, .systemIndigo, .systemRed,
+    ]
+
     var row: SourceControlGraphRow?
     var laneSpacing: CGFloat = 9
     var isWorkingCopy = false
@@ -346,14 +378,18 @@ private final class SourceControlGraphGutter: NSView {
         let center = bounds.midY
         func x(_ lane: Int) -> CGFloat { 10 + CGFloat(lane) * laneSpacing }
         let color: NSColor = emphasized ? .alternateSelectedControlTextColor : .secondaryLabelColor
-        color.withAlphaComponent(0.6).setStroke()
-        let through = NSBezierPath()
-        through.lineWidth = 1
-        for lane in row.incoming {
-            through.move(to: NSPoint(x: x(lane), y: bounds.maxY))
-            through.line(to: NSPoint(x: x(lane), y: lane == row.lane ? center : bounds.minY))
+        func stroke(_ index: Int) {
+            let branch = Self.branchColors[index]
+            (emphasized ? (branch.blended(withFraction: 0.35, of: color) ?? branch) : branch).setStroke()
         }
-        through.stroke()
+        for incoming in row.incoming {
+            let path = NSBezierPath()
+            path.lineWidth = 1
+            path.move(to: NSPoint(x: x(incoming.lane), y: bounds.maxY))
+            path.line(to: NSPoint(x: x(incoming.lane), y: incoming.lane == row.lane ? center : bounds.minY))
+            stroke(incoming.color)
+            path.stroke()
+        }
         for edge in row.outgoing {
             let path = NSBezierPath()
             path.lineWidth = 1
@@ -362,6 +398,7 @@ private final class SourceControlGraphGutter: NSView {
             path.curve(to: NSPoint(x: x(edge.lane), y: edge.elided ? 3 : bounds.minY),
                        controlPoint1: NSPoint(x: x(row.lane), y: center - 8),
                        controlPoint2: NSPoint(x: x(edge.lane), y: center - 8))
+            stroke(edge.color)
             path.stroke()
         }
         let nodeX = x(row.lane)
