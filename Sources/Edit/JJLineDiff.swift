@@ -267,11 +267,19 @@ enum JJLineDiff {
                             // Two sides can add terms at the same offset. A complete term at
                             // the start of the insertion still counts when another follows it.
                             if range.length == 0, isFollowedByAdditiveTerm(replacement, in: appliedText) { return true }
+                            if range.length > 0, try containsSeparateConflictWords(replacement, in: appliedText, budget: &budget) {
+                                return true
+                            }
                         }
                         return replacement.isEmpty && range.length > 0 && applied.inserted.length == 0 &&
                             NSIntersectionRange(range, applied.removed).length == range.length
                     }
-                    if matches {
+                    let grouped = try !matches && actual.contains { applied in
+                        if range.length > 0 { return applied.removed == range }
+                        return applied.removed.length > 0 &&
+                            (range.location == applied.removed.location || range.location == NSMaxRange(applied.removed))
+                    } && confirmsGroupedConflictReplacement(replacement, at: range, in: original[window.base], edited: edited, budget: &budget)
+                    if matches || grouped {
                         confirmWords(change.removed, rows: run.removedRows, in: removed, confirmed: &confirmed)
                         confirmWords(change.inserted, rows: run.addedRows, in: added, confirmed: &confirmed)
                     }
@@ -287,6 +295,68 @@ enum JJLineDiff {
         guard let sign = rest.first, sign == 43 || sign == 45,
               let next = rest.dropFirst().first, next != sign, next != 61 else { return false }
         return rest.dropFirst().contains { $0 != 32 && $0 != 9 && $0 != 10 && $0 != 13 }
+    }
+
+    private static func containsSeparateConflictWords(_ expected: String, in replacement: String, budget: inout Budget) throws -> Bool {
+        guard !expected.isEmpty else { return false }
+        let wanted = try words(in: expected, budget: &budget)
+        let actual = try words(in: replacement, budget: &budget)
+        guard actual.count > wanted.count, wanted.contains(where: { $0.text.first.flatMap(WordGroup.init) == .identifier }) else { return false }
+
+        // A neighboring word can be retained in the same replacement (for example `line`
+        // to `my LINE`). Require whitespace and a separate word at the join. A partial
+        // identifier, an operator joined to the edit, or a repeated match is inconclusive.
+        func separated(at index: Int, direction: Int, includesSpace: Bool) -> Bool {
+            guard actual.indices.contains(index) else { return true }
+            if includesSpace { return actual[index].text.first.flatMap(WordGroup.init) == .identifier }
+            guard actual[index].text.first.flatMap(WordGroup.init) == .whitespace else { return false }
+            let neighbor = index + direction
+            return !actual.indices.contains(neighbor) || actual[neighbor].text.first.flatMap(WordGroup.init) == .identifier
+        }
+
+        let startsWithSpace = wanted.first?.text.first.flatMap(WordGroup.init) == .whitespace
+        let endsWithSpace = wanted.last?.text.first.flatMap(WordGroup.init) == .whitespace
+        var matched = false
+        for start in 0...(actual.count - wanted.count) {
+            try budget.check()
+            let end = start + wanted.count
+            guard separated(at: start - 1, direction: -1, includesSpace: startsWithSpace),
+                  separated(at: end, direction: 1, includesSpace: endsWithSpace),
+                  try actual[start..<end].elementsEqual(wanted, by: { left, right in
+                      try budget.check()
+                      return left.text.utf8.elementsEqual(right.text.utf8)
+                  }) else { continue }
+            if matched { return false }
+            matched = true
+        }
+        return matched
+    }
+
+    private static func confirmsGroupedConflictReplacement(
+        _ replacement: String, at range: NSRange, in original: ArraySlice<TextPart>,
+        edited: ArraySlice<TextPart>, budget: inout Budget
+    ) throws -> Bool {
+        guard !replacement.isEmpty, original.count == edited.count, let start = original.first?.start,
+              let line = original.lastIndex(where: { $0.start <= start + range.location }) else { return false }
+        let originalLine = original[line]
+        let result = edited[edited.startIndex + line - original.startIndex].text
+        let local = NSRange(location: start + range.location - originalLine.start, length: range.length)
+        let base = originalLine.text as NSString
+        guard NSMaxRange(local) <= base.length,
+              try containsSeparateConflictWords(replacement, in: result, budget: &budget) else { return false }
+        let expected = base.replacingCharacters(in: local, with: replacement)
+
+        // Matching whitespace can assign a changed word to the neighboring replacement.
+        // Align from the patched line as well. Removing and restoring this one change
+        // must preserve the rest of the current line.
+        let baseWords = try words(in: originalLine.text, budget: &budget)
+        let expectedWords = try words(in: expected, budget: &budget)
+        let resultWords = try words(in: result, budget: &budget)
+        guard let reverted = try replay(expectedWords, incoming: baseWords, draft: resultWords, mergeLineEdits: false, budget: &budget),
+              !reverted.utf8.elementsEqual(result.utf8) else { return false }
+        let revertedWords = try words(in: reverted, budget: &budget)
+        let restored = try replay(baseWords, incoming: expectedWords, draft: revertedWords, mergeLineEdits: false, budget: &budget)
+        return restored?.utf8.elementsEqual(result.utf8) == true
     }
 
     private static func insertedConflictLines(

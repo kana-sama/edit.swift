@@ -756,6 +756,21 @@ enum SourceControlCheck {
                   if case let .diff(_, side) = segment.kind { return repeated.sides[side].text == "LINE 2\n" }
                   return false
               }) else { throw Failure("open the repeatable prefix insertion fixture") }
+        guard let repeatedPanel = document.conflictPanel,
+              let repeatedPending: NSButton = descendant(of: repeatedPanel, where: { $0.identifier?.rawValue == "JujutsuPendingChanges" }) else {
+            throw Failure("find Pending Changes for the capitalization conflict")
+        }
+        if repeatedPending.state == .off { repeatedPending.performClick(nil) }
+        func capitalizationOpacity() -> [CGFloat] {
+            guard let block = document.displayedConflicts.first,
+                  let run = block.segments.first(where: { $0.kind == uppercase.kind })?.runs.first else { return [] }
+            return (run.removedRows + run.addedRows).compactMap { index in
+                guard let span = block.highlights[index].changes.first else { return nil }
+                let glyph = NSRange(location: span.location, length: 1)
+                return editor.jjConflictDecorations?.foregrounds(in: glyph).first?.color.usingColorSpace(.sRGB)?.alphaComponent
+            }
+        }
+        try expect(capitalizationOpacity() == [1, 1], "keep both sides of an unapplied replacement bright")
         try await click("Apply Diff", on: uppercase.anchor)
         try await waitFor("apply capitalization before the prefix insertion") {
             document.displayedConflicts.first?.startingResult == "LINE 22\n"
@@ -775,6 +790,19 @@ enum SourceControlCheck {
         try await waitFor("insert the prefix exactly once and disable its action") {
             document.displayedConflicts.first?.startingResult == "my LINE 22\n" && prefixButton()?.isEnabled == false
         }
+        try await waitFor("keep both sides of the capitalization dim after a neighboring word is added") {
+            let colors = capitalizationOpacity()
+            return colors.count == 2 && colors.allSatisfy { $0 < 0.6 }
+        }
+        try await waitFor("keep the inserted word dim alongside capitalization") {
+            guard let block = document.displayedConflicts.first,
+                  let row = block.segments.first(where: { $0.kind == prepend.kind })?.runs.first?.addedRows.first,
+                  let span = block.highlights[row].changes.first else { return false }
+            let glyph = NSRange(location: span.location, length: 1)
+            return editor.jjConflictDecorations?.foregrounds(in: glyph).first?.color.usingColorSpace(.sRGB)
+                .map { $0.alphaComponent < 0.6 } == true
+        }
+        try render(document.window)
         guard let disabled = prefixButton() else {
             throw Failure("find the disabled prefix insertion")
         }
@@ -895,6 +923,37 @@ enum SourceControlCheck {
         for weight in ["60", "6.5", "6 * adjustment"] {
             try expect(try pendingTerm(weight: weight) == [" + uncoveredTransfers * 6"],
                        "keep an insertion pending when the requested term changed to \(weight)")
+        }
+
+        let prefixed = """
+        <<<<<<< conflict 1 of 1
+        +++++++ destination
+        my line 2
+        %%%%%%% diff from: base
+        -line 2
+        +LINE 2
+        >>>>>>> conflict 1 of 1 ends
+
+        """
+        let words = JJLineDiff.analyze(base: nil, current: prefixed, isConflicted: true, recordedConflict: prefixed)
+        guard let wordBlock = words.conflicts.first, let patch = wordBlock.segments.first(where: { $0.kind.diffSide != nil }),
+              let applied = wordBlock.applyingDiff(for: patch, onto: wordBlock.startingResult) else {
+            throw Failure("apply the capitalization on top of a separate prefix word")
+        }
+        try expect(applied == "my LINE 2\n", "reproduce the merged snapshot with the prefix word")
+        func pendingWords(in result: String) throws -> [String] {
+            var budget = JJLineDiff.Budget()
+            let confirmed = try wordBlock.confirmedChanges(in: result, budget: &budget)
+            return wordBlock.highlightingPendingChanges(confirmed: confirmed).flatMap { row in
+                (row.pending ?? []).map((prefixed as NSString).substring(with:))
+            }
+        }
+        for result in [applied, "LINE ready 2\n", "my LINE ready 2\n", "my LINE 22\n"] {
+            try expect(try pendingWords(in: result).isEmpty, "dim a replacement surrounded by additional whole words")
+        }
+        for result in ["my LINEAR 2\n", "my line LINE 2\n", "my LINE LINE 2\n", "LINE * factor 2\n", "line 2\nLINE 2\n"] {
+            try expect(try pendingWords(in: result) == ["line", "LINE"],
+                       "keep a replacement pending for a partial, ambiguous, operator-adjacent, or displaced match")
         }
     }
 
