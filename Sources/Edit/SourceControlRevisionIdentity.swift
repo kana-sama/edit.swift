@@ -1,21 +1,42 @@
 import AppKit
 
 @MainActor
-final class SourceControlRevisionIdentity: NSView {
-    private struct Status {
-        let symbol: String
-        let name: String
-        let color: NSColor
+struct SourceControlRevisionStatus {
+    static let iconWidth: CGFloat = 12
+    let symbol: String
+    let name: String
+    let color: NSColor
+
+    static func statuses(for revision: JJSourceControlRevision,
+                         conflictSymbol: String = "exclamationmark.diamond.fill") -> [Self] {
+        var statuses: [Self] = []
+        if revision.isWorkingCopy { statuses.append(.init(symbol: "at", name: "Working copy", color: .controlAccentColor)) }
+        if revision.isImmutable { statuses.append(.init(symbol: "lock.fill", name: "Immutable", color: .systemTeal)) }
+        if revision.isConflicted { statuses.append(.init(symbol: conflictSymbol, name: "Conflict", color: .systemPurple)) }
+        if revision.isDivergent { statuses.append(.init(symbol: "arrow.triangle.branch", name: "Divergent", color: .systemOrange)) }
+        return statuses
     }
 
-    private static let iconWidth: CGFloat = 12
+    func makeIcon() -> NSImageView {
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold)) ?? NSImage()
+        let icon = NSImageView(image: image)
+        icon.imageScaling = .scaleProportionallyDown
+        icon.widthAnchor.constraint(equalToConstant: Self.iconWidth).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 13).isActive = true
+        return icon
+    }
+}
+
+@MainActor
+final class SourceControlRevisionIdentity: NSView {
     private static let textSpacing: CGFloat = 7
     private let symbols = NSStackView()
     private let changeID = NSTextField(labelWithString: "")
     private let author = NSTextField(labelWithString: "")
     private let bookmarks = NSTextField(labelWithString: "")
     private var icons: [(NSImageView, NSColor)] = []
-    private var shownStatuses: [Status] = []
+    private var shownStatuses: [SourceControlRevisionStatus] = []
     private var statusGap: NSLayoutConstraint!
     private var authorGap: NSLayoutConstraint!
     private var bookmarkGap: NSLayoutConstraint!
@@ -72,7 +93,7 @@ final class SourceControlRevisionIdentity: NSView {
     }
 
     override var intrinsicContentSize: NSSize {
-        let statusWidth = CGFloat(icons.count) * Self.iconWidth + CGFloat(max(0, icons.count - 1)) * symbols.spacing
+        let statusWidth = CGFloat(icons.count) * SourceControlRevisionStatus.iconWidth + CGFloat(max(0, icons.count - 1)) * symbols.spacing
         let authorWidth = author.isHidden ? 0 : Self.textSpacing + author.intrinsicContentSize.width
         let bookmarkWidth = bookmarks.isHidden ? 0 : Self.textSpacing + bookmarks.intrinsicContentSize.width
         let width = statusWidth + statusGap.constant + changeID.intrinsicContentSize.width + authorWidth + bookmarkWidth
@@ -80,11 +101,7 @@ final class SourceControlRevisionIdentity: NSView {
     }
 
     func update(_ revision: JJSourceControlRevision, showsAuthor: Bool = true, showsAllStatuses: Bool = false) {
-        var statuses: [Status] = []
-        if revision.isWorkingCopy { statuses.append(.init(symbol: "at", name: "Working copy", color: .controlAccentColor)) }
-        if revision.isImmutable { statuses.append(.init(symbol: "lock.fill", name: "Immutable", color: .systemTeal)) }
-        if revision.isConflicted { statuses.append(.init(symbol: "exclamationmark.diamond.fill", name: "Conflict", color: .systemPurple)) }
-        if revision.isDivergent { statuses.append(.init(symbol: "arrow.triangle.branch", name: "Divergent", color: .systemOrange)) }
+        let statuses = SourceControlRevisionStatus.statuses(for: revision)
         let visibleStatuses = showsAuthor || showsAllStatuses ? statuses : Array(statuses.prefix(2))
         if shownStatuses.map(\.symbol) != visibleStatuses.map(\.symbol) {
             for (icon, _) in icons {
@@ -92,12 +109,7 @@ final class SourceControlRevisionIdentity: NSView {
                 icon.removeFromSuperview()
             }
             icons = visibleStatuses.map { status in
-                let image = NSImage(systemSymbolName: status.symbol, accessibilityDescription: nil)?
-                    .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold)) ?? NSImage()
-                let icon = NSImageView(image: image)
-                icon.imageScaling = .scaleProportionallyDown
-                icon.widthAnchor.constraint(equalToConstant: Self.iconWidth).isActive = true
-                icon.heightAnchor.constraint(equalToConstant: 13).isActive = true
+                let icon = status.makeIcon()
                 symbols.addArrangedSubview(icon)
                 return (icon, status.color)
             }

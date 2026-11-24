@@ -26,7 +26,7 @@ final class SourceControlGraphView: NSObject, NSTableViewDataSource, NSTableView
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.style = .fullWidth
         table.headerView = nil
-        table.rowHeight = 38
+        table.rowHeight = 24
         table.usesAutomaticRowHeights = false
         table.intercellSpacing = .zero
         table.backgroundColor = .clear
@@ -198,7 +198,7 @@ final class SourceControlGraphView: NSObject, NSTableViewDataSource, NSTableView
             }
             width = max(width, lanes.count)
             while !lanes.isEmpty, lanes[lanes.count - 1] == nil { lanes.removeLast() }
-            return SourceControlGraphRow(lane: own, incoming: incoming, outgoing: outgoing)
+            return SourceControlGraphRow(lane: own, color: color, incoming: incoming, outgoing: outgoing)
         }
         return (rows, width)
     }
@@ -268,7 +268,7 @@ private final class SourceControlGraphSelectionRow: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         let color: NSColor = isEmphasized ? .selectedContentBackgroundColor : .unemphasizedSelectedContentBackgroundColor
         color.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 1), xRadius: 7, yRadius: 7).fill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 1), xRadius: 5, yRadius: 5).fill()
     }
 }
 
@@ -286,6 +286,7 @@ private struct SourceControlGraphRow {
     }
 
     let lane: Int
+    let color: Int
     let incoming: [Stroke]
     let outgoing: [Edge]
 
@@ -296,52 +297,100 @@ private struct SourceControlGraphRow {
 private final class SourceControlGraphCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("SourceControlRevision")
     private let subject = NSTextField(labelWithString: "")
-    private let metadata = SourceControlRevisionIdentity()
+    private let statusIcons = NSStackView()
+    private let bookmarkName = NSTextField(labelWithString: "")
+    private let bookmarkCount = NSTextField(labelWithString: "")
     private let graph = SourceControlGraphGutter()
     private var graphWidth: NSLayoutConstraint!
+    private var statusWidth: NSLayoutConstraint!
+    private var statusGap: NSLayoutConstraint!
+    private var bookmarkGap: NSLayoutConstraint!
+    private var countWidth: NSLayoutConstraint!
+    private var countGap: NSLayoutConstraint!
+    private var revision: JJSourceControlRevision?
+    private var statuses: [SourceControlRevisionStatus] = []
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         identifier = Self.identifier
         subject.identifier = NSUserInterfaceItemIdentifier("JujutsuRevisionSubject")
-        subject.allowsExpansionToolTips = false
-        subject.font = .systemFont(ofSize: 12, weight: .medium)
+        bookmarkName.identifier = NSUserInterfaceItemIdentifier("JujutsuRevisionBookmarks")
+        bookmarkCount.identifier = NSUserInterfaceItemIdentifier("JujutsuRevisionBookmarkCount")
+        for label in [subject, bookmarkName, bookmarkCount] {
+            label.allowsExpansionToolTips = false
+            label.maximumNumberOfLines = 1
+            label.cell?.usesSingleLineMode = true
+            label.lineBreakMode = .byTruncatingTail
+        }
         subject.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        subject.maximumNumberOfLines = 1
-        subject.cell?.usesSingleLineMode = true
-        subject.lineBreakMode = .byTruncatingTail
-        for view in [graph, subject, metadata] {
+        subject.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let subjectMinimum = subject.widthAnchor.constraint(greaterThanOrEqualToConstant: 14)
+        subjectMinimum.priority = .init(rawValue: 760)
+        bookmarkName.font = .systemFont(ofSize: 11, weight: .medium)
+        bookmarkName.alignment = .right
+        bookmarkName.lineBreakMode = .byTruncatingMiddle
+        bookmarkName.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        bookmarkName.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        bookmarkCount.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+
+        statusIcons.spacing = 3
+        statusIcons.alignment = .centerY
+        for view in [graph, statusIcons, subject, bookmarkName, bookmarkCount] {
             addSubview(view)
             view.translatesAutoresizingMaskIntoConstraints = false
         }
         graphWidth = graph.widthAnchor.constraint(equalToConstant: 18)
+        statusWidth = statusIcons.widthAnchor.constraint(equalToConstant: 0)
+        statusGap = subject.leadingAnchor.constraint(equalTo: statusIcons.trailingAnchor)
+        bookmarkGap = bookmarkName.leadingAnchor.constraint(equalTo: subject.trailingAnchor)
+        countWidth = bookmarkCount.widthAnchor.constraint(equalToConstant: 0)
+        countGap = bookmarkCount.leadingAnchor.constraint(equalTo: bookmarkName.trailingAnchor)
         NSLayoutConstraint.activate([
             graph.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6), graph.topAnchor.constraint(equalTo: topAnchor),
             graph.bottomAnchor.constraint(equalTo: bottomAnchor), graphWidth,
-            subject.leadingAnchor.constraint(equalTo: graph.trailingAnchor, constant: 4),
-            subject.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            subject.bottomAnchor.constraint(equalTo: centerYAnchor, constant: -1), subject.heightAnchor.constraint(equalToConstant: 15),
-            metadata.leadingAnchor.constraint(equalTo: subject.leadingAnchor), metadata.trailingAnchor.constraint(equalTo: subject.trailingAnchor),
-            metadata.topAnchor.constraint(equalTo: centerYAnchor, constant: 1), metadata.heightAnchor.constraint(equalToConstant: 14)
+            statusIcons.leadingAnchor.constraint(equalTo: graph.trailingAnchor, constant: 4),
+            statusIcons.centerYAnchor.constraint(equalTo: centerYAnchor),
+            subject.centerYAnchor.constraint(equalTo: centerYAnchor),
+            bookmarkName.centerYAnchor.constraint(equalTo: centerYAnchor),
+            bookmarkCount.firstBaselineAnchor.constraint(equalTo: bookmarkName.firstBaselineAnchor),
+            bookmarkCount.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            subjectMinimum, statusWidth, statusGap, bookmarkGap, countWidth, countGap,
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("Change graph cells are created in code.") }
 
     func setRevision(_ revision: JJSourceControlRevision, path: SourceControlGraphRow, laneCount: Int) {
-        subject.stringValue = revision.subject
+        self.revision = revision
         let bookmarkNames = revision.bookmarks.isEmpty ? nil : "Bookmarks: \(revision.bookmarks.joined(separator: ", "))"
         // Keep lanes connected across rows while reserving text space only for the lanes this row uses.
         graph.laneSpacing = min(9, 54 / CGFloat(max(1, laneCount - 1)))
         graphWidth.constant = 18 + CGFloat(path.rightmostLane) * graph.laneSpacing
         graph.row = path
         graph.isWorkingCopy = revision.isWorkingCopy
-        graph.isImmutable = revision.isImmutable
-        graph.isConflicted = revision.isConflicted
-        metadata.update(revision)
+        let newStatuses = SourceControlRevisionStatus.statuses(for: revision, conflictSymbol: "xmark")
+        if statuses.map(\.symbol) != newStatuses.map(\.symbol) {
+            for icon in statusIcons.arrangedSubviews {
+                statusIcons.removeArrangedSubview(icon)
+                icon.removeFromSuperview()
+            }
+            for status in newStatuses { statusIcons.addArrangedSubview(status.makeIcon()) }
+        }
+        statuses = newStatuses
+        statusWidth.constant = CGFloat(statuses.count) * SourceControlRevisionStatus.iconWidth
+            + CGFloat(max(0, statuses.count - 1)) * statusIcons.spacing
+        statusGap.constant = statuses.isEmpty ? 0 : 5
+        statusIcons.isHidden = statuses.isEmpty
+        bookmarkName.stringValue = revision.bookmarks.first ?? ""
+        bookmarkName.isHidden = revision.bookmarks.isEmpty
+        bookmarkGap.constant = revision.bookmarks.isEmpty ? 0 : 6
+        bookmarkCount.stringValue = revision.bookmarks.count > 1 ? "+\(revision.bookmarks.count - 1)" : ""
+        bookmarkCount.isHidden = bookmarkCount.stringValue.isEmpty
+        countWidth.constant = bookmarkCount.isHidden ? 0 : ceil(bookmarkCount.intrinsicContentSize.width)
+        countGap.constant = bookmarkCount.isHidden ? 0 : 4
         updateColors()
-        let identity = metadata.accessibilityLabel()
-        setAccessibilityLabel([revision.subject, identity, bookmarkNames].compactMap { $0 }.joined(separator: ", "))
+        let labels = statuses.map(\.name) + [revision.subject, revision.author] + (bookmarkNames.map { [$0] } ?? [])
+        setAccessibilityLabel(labels.filter { !$0.isEmpty }.joined(separator: ", "))
         setAccessibilityHelp(SourceControlRevisionCard.creationDates(for: revision).joined(separator: "\n"))
     }
 
@@ -350,9 +399,27 @@ private final class SourceControlGraphCell: NSTableCellView {
     }
 
     private func updateColors() {
+        guard let revision else { return }
         let emphasized = backgroundStyle == .emphasized
-        subject.textColor = emphasized ? .alternateSelectedControlTextColor : .labelColor
-        metadata.setEmphasized(emphasized)
+        let foreground: NSColor = emphasized ? .alternateSelectedControlTextColor : .labelColor
+        let muted: NSColor = emphasized ? foreground.withAlphaComponent(0.78) : .secondaryLabelColor
+        let text = NSMutableAttributedString(string: revision.subject, attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: foreground,
+        ])
+        if !revision.author.isEmpty {
+            text.append(NSAttributedString(string: "\u{2002}" + revision.author, attributes: [
+                .font: NSFont.systemFont(ofSize: 11), .foregroundColor: muted,
+            ]))
+        }
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        text.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: text.length))
+        subject.attributedStringValue = text
+        bookmarkName.textColor = emphasized ? foreground : .controlAccentColor
+        bookmarkCount.textColor = muted
+        for (view, status) in zip(statusIcons.arrangedSubviews, statuses) {
+            (view as? NSImageView)?.contentTintColor = emphasized ? foreground : status.color
+        }
         graph.emphasized = emphasized
         graph.needsDisplay = true
     }
@@ -367,8 +434,6 @@ private final class SourceControlGraphGutter: NSView {
     var row: SourceControlGraphRow?
     var laneSpacing: CGFloat = 9
     var isWorkingCopy = false
-    var isImmutable = false
-    var isConflicted = false
     var emphasized = false
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -377,17 +442,16 @@ private final class SourceControlGraphGutter: NSView {
         guard let row else { return }
         let center = bounds.midY
         func x(_ lane: Int) -> CGFloat { 10 + CGFloat(lane) * laneSpacing }
-        let color: NSColor = emphasized ? .alternateSelectedControlTextColor : .secondaryLabelColor
-        func stroke(_ index: Int) {
+        func branchColor(_ index: Int) -> NSColor {
             let branch = Self.branchColors[index]
-            (emphasized ? (branch.blended(withFraction: 0.35, of: color) ?? branch) : branch).setStroke()
+            return emphasized ? (branch.blended(withFraction: 0.35, of: .alternateSelectedControlTextColor) ?? branch) : branch
         }
         for incoming in row.incoming {
             let path = NSBezierPath()
             path.lineWidth = 1
             path.move(to: NSPoint(x: x(incoming.lane), y: bounds.maxY))
             path.line(to: NSPoint(x: x(incoming.lane), y: incoming.lane == row.lane ? center : bounds.minY))
-            stroke(incoming.color)
+            branchColor(incoming.color).setStroke()
             path.stroke()
         }
         for edge in row.outgoing {
@@ -396,36 +460,32 @@ private final class SourceControlGraphGutter: NSView {
             if edge.indirect { path.setLineDash([2, 2], count: 2, phase: 0) }
             path.move(to: NSPoint(x: x(row.lane), y: center))
             path.curve(to: NSPoint(x: x(edge.lane), y: edge.elided ? 3 : bounds.minY),
-                       controlPoint1: NSPoint(x: x(row.lane), y: center - 8),
-                       controlPoint2: NSPoint(x: x(edge.lane), y: center - 8))
-            stroke(edge.color)
+                       controlPoint1: NSPoint(x: x(row.lane), y: center - 5),
+                       controlPoint2: NSPoint(x: x(edge.lane), y: center - 5))
+            branchColor(edge.color).setStroke()
             path.stroke()
         }
         let nodeX = x(row.lane)
+        let fill = branchColor(row.color)
+        let radius: CGFloat = isWorkingCopy ? 8 : 3.5
+        fill.setFill()
+        NSBezierPath(ovalIn: NSRect(x: nodeX - radius, y: center - radius, width: radius * 2, height: radius * 2)).fill()
         if isWorkingCopy {
-            (emphasized ? color : NSColor.controlAccentColor).setFill()
-            NSBezierPath(ovalIn: NSRect(x: nodeX - 7, y: center - 7, width: 14, height: 14)).fill()
             let glyph = NSAttributedString(string: "@", attributes: [
-                .font: NSFont.systemFont(ofSize: 9, weight: .semibold),
-                .foregroundColor: emphasized ? NSColor.selectedContentBackgroundColor : NSColor.alternateSelectedControlTextColor
+                .font: NSFont.systemFont(ofSize: 10, weight: .bold),
+                .foregroundColor: Self.workingCopyGlyphColor(over: fill),
             ])
             let size = glyph.size()
             glyph.draw(at: NSPoint(x: nodeX - size.width / 2, y: center - size.height / 2))
-        } else if isConflicted {
-            (emphasized ? color : NSColor.systemPurple).setFill()
-            let diamond = NSBezierPath()
-            diamond.move(to: NSPoint(x: nodeX, y: center + 5))
-            diamond.line(to: NSPoint(x: nodeX + 5, y: center))
-            diamond.line(to: NSPoint(x: nodeX, y: center - 5))
-            diamond.line(to: NSPoint(x: nodeX - 5, y: center))
-            diamond.close()
-            diamond.fill()
-        } else {
-            let circle = NSBezierPath(ovalIn: NSRect(x: nodeX - 4, y: center - 4, width: 8, height: 8))
-            color.setStroke()
-            (isImmutable ? (emphasized ? color : NSColor.systemTeal) : NSColor.controlBackgroundColor).setFill()
-            circle.fill()
-            if !isImmutable { circle.stroke() }
         }
+    }
+
+    private static func workingCopyGlyphColor(over fill: NSColor) -> NSColor {
+        guard let rgb = fill.usingColorSpace(.sRGB) else { return .white }
+        func linear(_ channel: CGFloat) -> CGFloat {
+            channel <= 0.04045 ? channel / 12.92 : pow((channel + 0.055) / 1.055, 2.4)
+        }
+        let luminance = 0.2126 * linear(rgb.redComponent) + 0.7152 * linear(rgb.greenComponent) + 0.0722 * linear(rgb.blueComponent)
+        return luminance > 0.18 ? .black : .white
     }
 }

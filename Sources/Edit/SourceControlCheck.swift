@@ -39,6 +39,7 @@ enum SourceControlCheck {
             + "co-authored-by: Casey Chen <casey@example.com>\n"
         try await command(executable, folder, ["new", "-m", description])
         try await command(executable, folder, ["bookmark", "create", "review/jj-sidebar-layout-with-a-long-bookmark", "-r", "@"])
+        try await command(executable, folder, ["bookmark", "create", "zz-review", "-r", "@"])
         try await command(executable, folder, ["new", "--no-edit", "-m", "Side branch", "@--"])
         let working = historical.replacingOccurrences(of: "Line 3\n", with: "Working line 3\n")
             .replacingOccurrences(of: "Line 14\n", with: "Working line 14\n")
@@ -797,18 +798,30 @@ enum SourceControlCheck {
         let branchSubject = try subject(in: branch)
         try expect(workingSubject.frame.minX != branchSubject.frame.minX,
                    "reclaim graph width when a row has fewer occupied lanes")
-        guard let author = descendant(of: working, where: { (label: NSTextField) in label.stringValue == panel.selection?.author }),
-              let bookmarks = descendant(of: working, where: { (label: NSTextField) in
-                  label.identifier?.rawValue == "JujutsuRevisionBookmarks"
-              }) else { throw Failure("show graph author and bookmark labels") }
-        let authorFrame = working.convert(author.bounds, from: author)
+        guard let active = panel.graphView.revisions.first(where: \.isWorkingCopy),
+              let bookmarks: NSTextField = descendant(of: working, where: { $0.identifier?.rawValue == "JujutsuRevisionBookmarks" }),
+              let count: NSTextField = descendant(of: working, where: { $0.identifier?.rawValue == "JujutsuRevisionBookmarkCount" })
+        else { throw Failure("show the graph bookmark and overflow count") }
+        let subjectFrame = working.convert(workingSubject.bounds, from: workingSubject)
         let bookmarkFrame = working.convert(bookmarks.bounds, from: bookmarks)
+        let countFrame = working.convert(count.bounds, from: count)
+        let countAlignment = working.convert(count.alignmentRect(forFrame: count.frame), from: count.superview)
         let name = "review/jj-sidebar-layout-with-a-long-bookmark"
-        try expect(!bookmarks.isHidden && bookmarks.stringValue.contains(name) && bookmarkFrame.width > 20 &&
-                   bookmarkFrame.minX >= authorFrame.maxX && abs(bookmarkFrame.midY - authorFrame.midY) < 1 &&
-                   [workingSubject, author, bookmarks].allSatisfy { $0.maximumNumberOfLines == 1 },
-                   "show a readable single-line bookmark label after the author at minimum width")
+        let authorStart = (active.subject as NSString).length + 1
+        try expect(workingSubject.stringValue == "\(active.subject)\u{2002}\(active.author)" &&
+                   workingSubject.attributedStringValue.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor !=
+                   workingSubject.attributedStringValue.attribute(.foregroundColor, at: authorStart, effectiveRange: nil) as? NSColor,
+                   "combine the subject and muted author into one truncating line without the change ID")
+        try expect(panel.graphView.table.rowHeight == 24 && bookmarks.stringValue == name &&
+                   count.stringValue == "+1" && !count.isHiddenOrHasHiddenAncestor &&
+                   bookmarkFrame.width > subjectFrame.width && subjectFrame.maxX <= bookmarkFrame.minX &&
+                   bookmarkFrame.maxX <= countFrame.minX && abs(bookmarkFrame.midY - subjectFrame.midY) < 2 &&
+                   abs(working.bounds.maxX - countAlignment.maxX - 12) < 1,
+                   "give the bookmark and overflow count priority at the right of the compact row (row \(working.bounds), "
+                   + "subject \(subjectFrame), bookmark \(bookmarks.stringValue) \(bookmarkFrame), "
+                   + "count \(count.stringValue) \(countFrame), hidden \(count.isHiddenOrHasHiddenAncestor))")
         try expect(working.toolTip == nil && working.accessibilityLabel()?.contains(name) == true &&
+                   working.accessibilityLabel()?.contains("zz-review") == true &&
                    branch.accessibilityHelp()?.contains("Created ·") == true &&
                    historical.accessibilityHelp()?.contains("Modified ·") == true,
                    "expose full bookmarks and dates to accessibility without the plain-text tooltip")
