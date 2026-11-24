@@ -871,6 +871,31 @@ enum SourceControlCheck {
             .replacingOccurrences(of: "let suffix = 1", with: "let suffix = 3")
         try expect(try pending(editedNeighbors, on: "+newRecord()").isEmpty,
                    "keep an insertion dim when other diffs change the lines on either side")
+
+        let combinedTerms = """
+        <<<<<<< conflict 1 of 1
+        +++++++ snapshot
+        let transferPenalty = count * 5 + elevatorPenalty
+        %%%%%%% diff from: base
+        -let transferPenalty = count * 5
+        +let transferPenalty = count * 5 + uncoveredTransfers * 6
+        >>>>>>> conflict 1 of 1 ends
+
+        """
+        let terms = JJLineDiff.analyze(base: nil, current: combinedTerms, isConflicted: true, recordedConflict: combinedTerms)
+        guard let termBlock = terms.conflicts.first else { throw Failure("read the combined-term conflict") }
+        func pendingTerm(weight: String) throws -> [String] {
+            var budget = JJLineDiff.Budget()
+            let result = "let transferPenalty = count * 5 + uncoveredTransfers * \(weight) + elevatorPenalty\n"
+            let confirmed = try termBlock.confirmedChanges(in: result, budget: &budget)
+            let insertion = termBlock.highlightingPendingChanges(confirmed: confirmed).first { $0.role == .addition }
+            return (insertion?.pending ?? []).map((combinedTerms as NSString).substring(with:))
+        }
+        try expect(try pendingTerm(weight: "6").isEmpty, "dim an applied term when another additive term shares its insertion")
+        for weight in ["60", "6.5", "6 * adjustment"] {
+            try expect(try pendingTerm(weight: weight) == [" + uncoveredTransfers * 6"],
+                       "keep an insertion pending when the requested term changed to \(weight)")
+        }
     }
 
     private static func checkConflictColors(_ block: JJConflict, in editor: EditorTextView) throws {

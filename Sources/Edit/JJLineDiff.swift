@@ -261,8 +261,12 @@ enum JJLineDiff {
                     let replacement = wantedText.substring(with: change.inserted)
                     let matches = try actual.contains { applied in
                         try budget.check()
-                        if range == applied.removed && replacement.utf8.elementsEqual(actualText.substring(with: applied.inserted).utf8) {
-                            return true
+                        if range == applied.removed {
+                            let appliedText = actualText.substring(with: applied.inserted)
+                            if replacement.utf8.elementsEqual(appliedText.utf8) { return true }
+                            // Two sides can add terms at the same offset. A complete term at
+                            // the start of the insertion still counts when another follows it.
+                            if range.length == 0, isFollowedByAdditiveTerm(replacement, in: appliedText) { return true }
                         }
                         return replacement.isEmpty && range.length > 0 && applied.inserted.length == 0 &&
                             NSIntersectionRange(range, applied.removed).length == range.length
@@ -274,6 +278,15 @@ enum JJLineDiff {
                 }
             }
         }
+    }
+
+    private static func isFollowedByAdditiveTerm(_ expected: String, in insertion: String) -> Bool {
+        let prefix = expected.utf8
+        guard !prefix.isEmpty, insertion.utf8.starts(with: prefix) else { return false }
+        let rest = insertion.utf8.dropFirst(prefix.count).drop(while: { $0 == 32 || $0 == 9 })
+        guard let sign = rest.first, sign == 43 || sign == 45,
+              let next = rest.dropFirst().first, next != sign, next != 61 else { return false }
+        return rest.dropFirst().contains { $0 != 32 && $0 != 9 && $0 != 10 && $0 != 13 }
     }
 
     private static func insertedConflictLines(
