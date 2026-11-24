@@ -11,6 +11,7 @@ enum LanguageServerCheck {
                     captureHover: (NSView, String) throws -> Void,
                     captureServers: (NSView, LanguageServerCommand) throws -> Void) async throws {
         try checkHoverLayout(in: document.window, capture: captureHover)
+        try checkStructuredHover(in: document.window, capture: captureHover)
         let folder = FileManager.default.temporaryDirectory.appending(path: "ZLS fixture \(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer {
@@ -57,9 +58,11 @@ enum LanguageServerCheck {
         }
         let fontText = "/// Display variant.\r\n\r\npub const FontVariant = struct { bold: bool };\r\n"
         let typedText = """
+            const std = @import("std");
             const text_mod = @import("Font Types #é.zig");
             pub fn select() void {
                 const variant = text_mod.FontVariant{ .bold = true };
+                std.log.debug("Ready", .{});
                 _ = variant;
             }
             """
@@ -147,6 +150,12 @@ enum LanguageServerCheck {
 
         try expect(try await app.openFile(typed, in: document) === document, "open the referenced-type fixture")
         try await wait("synchronize the referenced-type fixture") { lsp.session.supportsHover }
+        let debug = (typedText as NSString).range(of: "debug")
+        let debugHover = await lsp.hover(at: debug.location + 1, word: debug)
+        let debugSections = debugHover.flatMap { ZLSHover(markdown: $0.text) }
+        try expect(debugHover?.isMarkdown == true && debugSections?.declaration.hasPrefix("fn debug(") == true &&
+                   debugSections?.types.first?.hasPrefix("fn (") == true && debugSections?.documentation?.contains("debug message") == true,
+                   "parse the standard library's debug function from live ZLS output")
         let variant = (typedText as NSString).range(of: "variant")
         let typeLine = (fontText as NSString).range(of: "pub const FontVariant").location
         try await checkHoverDefinitionLink(in: document, word: variant, file: font, lineOffset: typeLine) { view in
@@ -283,9 +292,10 @@ enum LanguageServerCheck {
         try expect(editor.languageDefinitionLinkRange == nil, "clear the definition link without Command")
         try await wait("show the documentation hover") { editor.languageHoverWindowForCheck != nil }
         guard let view = editor.languageHoverWindowForCheck?.contentView,
-              let text = descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHoverText" }) as? NSTextView
-        else { throw Failure("find the rich hover text view") }
-        try expect(text.isSelectable && !text.isEditable && text.string.contains("Returns a value.") && text.string.contains("fn identify()"),
+              let declaration = hoverBody(.declaration, in: view), let docs = hoverBody(.documentation, in: view)
+        else { throw Failure("find the declaration and documentation for a live ZLS function") }
+        try expect(docs.isSelectable && !docs.isEditable && docs.string.contains("Returns a value.") &&
+                   declaration.isSelectable && declaration.string.contains("fn identify()"),
                    "show selectable documentation and its signature")
         editor.cancelOperation(nil)
         try expect(editor.languageHoverWindowForCheck == nil, "Escape dismisses language documentation")
@@ -314,9 +324,10 @@ enum LanguageServerCheck {
         var codeLineGap: CGFloat?
         for (id, code) in [("hover-short", "const std_scoped = std.log.scoped(scope)"), ("hover-code", structure)] {
             let markdown = "```zig\n\(code)\n```\n```zig\n(type)\n```"
-            let attributed = EditorHoverContent(text: markdown, isMarkdown: true).attributedText()
+            let content = EditorHoverContent(text: markdown, isMarkdown: true)
+            let attributed = content.attributedText()
             guard let panel = EditorHoverPopover(owner: owner, appearance: owner.effectiveAppearance, anchor: anchor,
-                                                  text: attributed, onNavigate: { _ in }, onEnter: {}, onExit: {}),
+                                                  presentation: .markdown(content), onNavigate: { _ in }, onEnter: {}, onExit: {}),
                   let view = panel.window.contentView,
                   let text = descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHoverText" }) as? NSTextView
             else { throw Failure("lay out a fenced code hover") }
@@ -339,6 +350,76 @@ enum LanguageServerCheck {
         try expect(codeLineGap.map { abs($0) < 1 } == true, "keep consecutive code lines at the normal line height")
     }
 
+    private static func checkStructuredHover(in owner: NSWindow, capture: (NSView, String) throws -> Void) throws {
+        let declaration = "fn debug(\n            comptime format: []const u8,\n            args: anytype,\n        ) void"
+        let wrappedType = "(fn (comptime []const u8, anytype) void)"
+        let raw = """
+            ```zig
+            \(declaration)
+            ```
+            ```zig
+            \(wrappedType)
+            ```
+
+            Go to [A](file:///tmp/A.zig#L1) | [B](file:///tmp/B.zig#L2) | [C](file:///tmp/C.zig#L3)
+
+            Log a debug message. This log level is intended to be used for messages which are only useful for debugging.
+            """
+        let presentation = EditorHoverPresentation(text: raw, isMarkdown: true)
+        guard let screen = owner.screen ?? NSScreen.main else { throw Failure("find a screen for the sections") }
+        let area = screen.visibleFrame
+        let anchor = NSRect(x: area.midX, y: area.midY, width: 20, height: 14)
+        guard let panel = EditorHoverPopover(owner: owner, appearance: owner.effectiveAppearance, anchor: anchor,
+                                              presentation: presentation, onNavigate: { _ in }, onEnter: {}, onExit: {}),
+              let view = panel.window.contentView else { throw Failure("show the structured hover") }
+        defer { panel.close(restoreFocus: false) }
+        let kinds: [EditorHoverPresentation.Section.Kind] = [.declaration, .type, .documentation, .goTo]
+        let headingPositions = try kinds.map { kind in
+            guard let label = descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHover.\(kind.rawValue).label" }) as? NSTextField,
+                  label.stringValue == kind.rawValue && label.accessibilityRole()?.rawValue == "AXHeading"
+            else { throw Failure("show the native \(kind.rawValue) heading") }
+            return label.convert(label.bounds, to: nil).midY
+        }
+        try expect(zip(headingPositions, headingPositions.dropFirst()).allSatisfy { earlier, later in earlier > later },
+                   "order the declaration, type, documentation and links")
+        try expect(hoverBody(.declaration, in: view)?.string == "fn debug(\n    comptime format: []const u8,\n    args: anytype,\n) void" &&
+                   hoverBody(.type, in: view)?.string == "fn (comptime []const u8, anytype) void",
+                   "dedent the signature and remove only the outer type parentheses")
+        try expect(hoverBody(.documentation, in: view)?.string.hasPrefix("Log a debug message.") == true,
+                   "render the documentation in its own text view")
+        guard let links = hoverBody(.goTo, in: view), links.string == "A, B, C" else { throw Failure("show comma-separated links") }
+        for offset in [0, 3, 6] {
+            try expect(links.textStorage?.attribute(.link, at: offset, effectiveRange: nil) is URL, "preserve each target URL")
+        }
+        try capture(view, "hover-sections")
+
+        let longDocumentation = raw + String(repeating: "\n\nA documentation paragraph in a long hover.", count: 20)
+        let longPresentation = EditorHoverPresentation(text: longDocumentation, isMarkdown: true)
+        guard let longPanel = EditorHoverPopover(owner: owner, appearance: owner.effectiveAppearance, anchor: anchor,
+                                                  presentation: longPresentation, onNavigate: { _ in }, onEnter: {}, onExit: {}),
+              let longView = longPanel.window.contentView, let lastSection = hoverBody(.goTo, in: longView),
+              let scroll = lastSection.enclosingScrollView, let document = scroll.documentView
+        else { throw Failure("lay out the long structured hover") }
+        defer { longPanel.close(restoreFocus: false) }
+        let lastFrame = lastSection.convert(lastSection.bounds, to: document)
+        try expect(scroll.hasVerticalScroller && !scroll.documentVisibleRect.intersects(lastFrame),
+                   "cap long documentation and start at the declaration")
+        lastSection.scrollToVisible(lastSection.bounds)
+        try expect(scroll.documentVisibleRect.contains(lastFrame), "scroll to the links after long documentation")
+
+        let alternatives = "```zig\nvalue\n```\n```zig\n(A)\n```\n```zig\n(B)\n```\n```txt\n(...)\n```"
+        let parsed = ZLSHover(markdown: alternatives)
+        try expect(parsed?.types == ["A", "B"] && parsed?.hasMoreTypes == true, "retain alternative types and the truncation marker")
+        let builtin = ZLSHover(markdown: "```zig\n@as(comptime T: type, expression: anytype) T\n```\nSee **coercion**.")
+        try expect(builtin?.types.isEmpty == true && builtin?.documentation == "See **coercion**.", "preserve builtin documentation")
+        for unfamiliar in ["| Decimal | Hex |\n|---|---|\n| 8 | 0x8 |", alternatives + "\n\n" + alternatives,
+                           "```zig\nx\n```\n```zig\nmissing wrapper\n```"] {
+            let fallback = EditorHoverPresentation(text: unfamiliar, isMarkdown: true)
+            guard case .markdown(let content) = fallback else { throw Failure("keep unsupported ZLS Markdown in the generic hover") }
+            try expect(content.attributedText().length > 0, "keep fallback content visible")
+        }
+    }
+
     private static func checkHoverDefinitionLink(in document: DocumentWindow, word: NSRange, file: URL, lineOffset: Int,
                                                  capture: (NSView) throws -> Void) async throws {
         let editor = document.editor
@@ -357,7 +438,7 @@ enum LanguageServerCheck {
         editor.mouseMoved(with: try event(.mouseMoved, at: location, in: document.window))
         try await wait("show the inferred-type hover from ZLS") { editor.languageHoverWindowForCheck != nil }
         guard let panel = editor.languageHoverWindowForCheck, let view = panel.contentView,
-              let text = descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHoverText" }) as? NSTextView
+              let text = hoverBody(.goTo, in: view), let declaration = hoverBody(.declaration, in: view)
         else { throw Failure("find the inferred-type hover content") }
         let link = (text.string as NSString).range(of: "FontVariant", options: .backwards)
         guard link.location != NSNotFound,
@@ -378,10 +459,10 @@ enum LanguageServerCheck {
                            "show a pointing hand across the link glyph at \(character)")
             }
         }
-        let prose = text.firstRect(forCharacterRange: NSRange(location: link.location - 3, length: 1), actualRange: nil)
+        let prose = declaration.firstRect(forCharacterRange: NSRange(location: 0, length: 1), actualRange: nil)
         let prosePoint = panel.convertPoint(fromScreen: NSPoint(x: prose.midX, y: prose.midY))
         try expect(EditApplication.clickCursor(in: panel, at: prosePoint) === NSCursor.iBeam,
-                   "keep the text cursor immediately beside the link")
+                   "keep the text cursor over the declaration")
         let press = try event(.leftMouseDown, at: point, in: panel)
         NSApp.postEvent(try event(.leftMouseUp, at: point, in: panel), atStart: true)
         NSApp.postEvent(press, atStart: true)
@@ -395,6 +476,10 @@ enum LanguageServerCheck {
             document.fileURL == file && editor.selectedRange().location == lineOffset &&
                 document.window.firstResponder === editor && editor.languageHoverWindowForCheck == nil
         }
+    }
+
+    private static func hoverBody(_ kind: EditorHoverPresentation.Section.Kind, in view: NSView) -> NSTextView? {
+        descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHover.\(kind.rawValue).body" }) as? NSTextView
     }
 
     private static func descend(_ view: NSView?, matching predicate: (NSView) -> Bool) -> NSView? {

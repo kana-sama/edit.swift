@@ -6,7 +6,7 @@ struct EditorLanguageHover: Sendable {
     let range: NSRange?
 }
 
-private enum HoverLink {
+enum HoverLink {
     case external(URL)
     case definition(LSPLocation)
 
@@ -54,6 +54,22 @@ struct EditorHoverContent: Sendable {
     }
 
     private let blocks: [Block]
+
+    init(zigCode snippets: [String]) {
+        blocks = snippets.map { snippet in
+            let spans = Task.isCancelled ? [] : SyntaxEngine.analysis(in: snippet, language: .zig, includesBrackets: false)?.spans ?? []
+            return Block(isCode: true, codeSpans: spans, runs: [Run(text: snippet)])
+        }
+    }
+
+    init(references: [ZLSHover.Reference]) {
+        var runs: [Run] = []
+        for reference in references {
+            if !runs.isEmpty { runs.append(Run(text: ", ")) }
+            runs.append(Run(text: reference.title, link: reference.url))
+        }
+        blocks = [Block(runs: runs)]
+    }
 
     init(text: String, isMarkdown: Bool) {
         guard isMarkdown, let value = try? AttributedString(markdown: text), !value.characters.isEmpty else {
@@ -176,21 +192,13 @@ final class EditorHoverPopover {
     var frame: NSRect { panel.frame }
     var isSelecting: Bool { content.selecting }
 
-    init?(owner: NSWindow, appearance: NSAppearance, anchor: NSRect, text: NSAttributedString,
+    init?(owner: NSWindow, appearance: NSAppearance, anchor: NSRect, presentation: EditorHoverPresentation,
           onNavigate: @escaping (LSPLocation) -> Void, onEnter: @escaping () -> Void, onExit: @escaping () -> Void) {
-        guard !anchor.isEmpty, text.length > 0, let screen = owner.screen ?? NSScreen.main else { return nil }
+        guard !anchor.isEmpty, let screen = owner.screen ?? NSScreen.main else { return nil }
         let area = screen.visibleFrame.insetBy(dx: 8, dy: 8)
-        let inset = NSSize(width: 12, height: 10)
-        let maximumWidth = min(460, area.width)
-        let richText = HoverTextView(width: maximumWidth, text: text, inset: inset)
-        guard let layout = richText.textLayoutManager else { return nil }
-        layout.ensureLayout(for: layout.documentRange)
-        let panelWidth = min(maximumWidth, max(84, ceil(layout.usageBoundsForTextContainer.maxX) + inset.width * 2))
-        if panelWidth < maximumWidth {
-            richText.setFrameSize(NSSize(width: panelWidth, height: 0))
-            layout.ensureLayout(for: layout.documentRange)
-        }
-        let contentHeight = ceil(layout.usageBoundsForTextContainer.maxY) + inset.height * 2
+        guard let layout = EditorHoverLayout(presentation, maximumWidth: min(460, area.width)) else { return nil }
+        let panelWidth = layout.view.frame.width
+        let contentHeight = layout.view.frame.height
         let gap: CGFloat = 4
         let spaceAbove = max(0, area.maxY - anchor.maxY - gap)
         let spaceBelow = max(0, anchor.minY - area.minY - gap)
@@ -203,7 +211,7 @@ final class EditorHoverPopover {
 
         self.anchor = anchor
         panel = HoverPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        content = HoverSurface(size: frame.size, contentHeight: contentHeight, richText: richText,
+        content = HoverSurface(size: frame.size, layout: layout,
                                onNavigate: onNavigate, onEnter: onEnter, onExit: onExit)
         panel.contentView = content
         panel.setFrame(frame, display: false)
@@ -239,16 +247,16 @@ private final class HoverSurface: NSVisualEffectView, NSTextViewDelegate {
     private let onEnter: () -> Void
     private let onExit: () -> Void
     private var area: NSTrackingArea?
-    private let richText: HoverTextView
+    private let textViews: [HoverTextView]
 
-    var selecting: Bool { richText.selecting }
+    var selecting: Bool { textViews.contains(where: \.selecting) }
 
-    init(size: NSSize, contentHeight: CGFloat, richText: HoverTextView,
+    init(size: NSSize, layout: EditorHoverLayout,
          onNavigate: @escaping (LSPLocation) -> Void, onEnter: @escaping () -> Void, onExit: @escaping () -> Void) {
         self.onNavigate = onNavigate
         self.onEnter = onEnter
         self.onExit = onExit
-        self.richText = richText
+        textViews = layout.textViews
         super.init(frame: NSRect(origin: .zero, size: size))
         identifier = .init("EditorLanguageHover")
         material = .popover
@@ -259,15 +267,14 @@ private final class HoverSurface: NSVisualEffectView, NSTextViewDelegate {
         layer?.cornerCurve = .continuous
         layer?.masksToBounds = true
 
-        richText.setFrameSize(NSSize(width: size.width, height: max(size.height, contentHeight)))
-        richText.delegate = self
+        for text in textViews { text.delegate = self }
 
         let scroll = NSScrollView(frame: bounds)
         scroll.drawsBackground = false
-        scroll.hasVerticalScroller = contentHeight > size.height
+        scroll.hasVerticalScroller = layout.view.frame.height > size.height
         scroll.scrollerStyle = .overlay
         scroll.autohidesScrollers = true
-        scroll.documentView = richText
+        scroll.documentView = layout.view
         addSubview(scroll)
     }
 
@@ -315,6 +322,15 @@ final class HoverTextView: NSTextView {
     }
 
     override var needsPanelToBecomeKey: Bool { true }
+
+    func measure(at width: CGFloat) -> NSSize? {
+        if frame.width != width { setFrameSize(NSSize(width: width, height: frame.height)) }
+        guard let layout = textLayoutManager else { return nil }
+        layout.ensureLayout(for: layout.documentRange)
+        let used = layout.usageBoundsForTextContainer
+        return NSSize(width: ceil(used.maxX) + textContainerInset.width * 2,
+                      height: ceil(used.maxY) + textContainerInset.height * 2)
+    }
 
     func pointerCursor(atWindowPoint point: NSPoint) -> NSCursor {
         guard let window, let textStorage else { return .arrow }

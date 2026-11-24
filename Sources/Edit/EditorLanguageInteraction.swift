@@ -134,8 +134,8 @@ final class EditorLanguageInteraction: NSObject {
     func showFeedback(_ message: String, at range: NSRange) {
         cancelHoverRequest()
         closePopover(restoreFocus: true)
-        let text = EditorHoverContent(text: message, isMarkdown: false).attributedText()
-        show(text, at: range, fallback: range)
+        let presentation = EditorHoverPresentation(text: message, isMarkdown: false)
+        show(presentation, at: range, fallback: range)
         feedbackTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(1400)) } catch { return }
             self?.closePopover(restoreFocus: true)
@@ -272,13 +272,13 @@ final class EditorLanguageInteraction: NSObject {
                 return
             }
             let parse = Task.detached(priority: .userInitiated) {
-                EditorHoverContent(text: response.text, isMarkdown: response.isMarkdown)
+                EditorHoverPresentation(text: response.text, isMarkdown: response.isMarkdown)
             }
             let content = await withTaskCancellationHandler { await parse.value } onCancel: { parse.cancel() }
             guard !Task.isCancelled, let self, hoverWord == target.word else { return }
             hoverTask = nil
             closePopover(restoreFocus: true)
-            show(content.attributedText(), at: response.range ?? target.word, fallback: target.word)
+            show(content, at: response.range ?? target.word, fallback: target.word)
             if popover != nil { popoverWord = target.word }
         }
     }
@@ -323,7 +323,7 @@ final class EditorLanguageInteraction: NSObject {
         }
     }
 
-    private func show(_ text: NSAttributedString, at range: NSRange, fallback: NSRange) {
+    private func show(_ presentation: EditorHoverPresentation, at range: NSRange, fallback: NSRange) {
         guard let editor, let window = editor.window else { return }
         let original = editor.highlightRects(for: [fallback]).first
         let preferred = editor.highlightRects(for: [range]).first { rect in
@@ -333,7 +333,7 @@ final class EditorLanguageInteraction: NSObject {
         let windowRect = editor.convert(rect.intersection(editor.visibleRect), to: nil)
         let anchor = window.convertToScreen(windowRect.intersection(window.contentLayoutRect))
         popover = EditorHoverPopover(
-            owner: window, appearance: editor.effectiveAppearance, anchor: anchor, text: text,
+            owner: window, appearance: editor.effectiveAppearance, anchor: anchor, presentation: presentation,
             onNavigate: { [weak self] location in
                 guard let self, popoverWord == fallback, let follow = self.editor?.languageFollowHoverLink else { return }
                 _ = dismissHover()
