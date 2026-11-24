@@ -190,6 +190,9 @@ final class EditApplication: NSApplication {
             case let text as SourceControlRevisionCardText:
                 if titlebar { return .arrow }
                 return text.hasLink(at: text.convert(location, from: nil)) ? .pointingHand : .iBeam
+            case let editor as EditorTextView:
+                if titlebar { return .arrow }
+                return editor.hasLanguageDefinitionLink(at: editor.convert(location, from: nil)) ? .pointingHand : nil
             case is NSTextView:
                 return background
             case let table as NSTableView:

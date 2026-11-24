@@ -22,13 +22,11 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private let replaceInput = FindInput(name: "Replace")
     private let replaceToggle = NSButton(title: "", target: nil, action: nil)
     private let replaceButton = NSButton(title: "", target: nil, action: nil)
-    private let resultFile = NSTextField(labelWithString: "Untitled")
-    private let resultIcon = NSImageView()
-    private let resultStatus = NSTextField(labelWithString: "No results")
+    private let resultHeader = SidebarResultFileHeader(name: "Untitled", detail: "No results")
     private let results = FindResultsTable()
     private let resultScroll = FindResultsScrollView()
     private let replaceRow = NSStackView()
-    private let surface = FindSidebarSurface()
+    private let surface = NSView()
     var view: NSView { surface }
     private let searchContent = NSStackView()
     private lazy var decorations = FindDecorations(editor: document.editor)
@@ -127,9 +125,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func updateName() {
-        resultFile.stringValue = document.showsEmptyFolder ? "No File Open" : document.displayName
-        resultIcon.image = FileIcons.image(for: document.displayedFileURL, appearance: view.effectiveAppearance,
-                                           language: document.manualSyntaxLanguage?.iconIdentifier)
+        resultHeader.updateFile(document.showsEmptyFolder ? "No File Open" : document.displayName,
+                                url: document.displayedFileURL, language: document.manualSyntaxLanguage?.iconIdentifier)
     }
 
     func bufferReplaced() {
@@ -229,34 +226,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         replaceRow.addArrangedSubview(replaceButton)
         updateReplacementVisibility()
 
-        resultFile.maximumNumberOfLines = 1
-        resultFile.lineBreakMode = .byTruncatingMiddle
-        resultFile.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        resultFile.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        resultFile.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        resultStatus.lineBreakMode = .byTruncatingTail
-        resultStatus.textColor = .secondaryLabelColor
-        resultStatus.setContentHuggingPriority(.required, for: .horizontal)
-        resultStatus.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-        resultStatus.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        resultIcon.setAccessibilityElement(false)
-        resultIcon.widthAnchor.constraint(equalToConstant: 16).isActive = true
-        resultIcon.heightAnchor.constraint(equalToConstant: 16).isActive = true
-        let resultHeader = NSView()
-        for label in [resultIcon, resultFile, resultStatus] {
-            label.translatesAutoresizingMaskIntoConstraints = false
-            resultHeader.addSubview(label)
-        }
-        NSLayoutConstraint.activate([
-            resultHeader.heightAnchor.constraint(equalToConstant: 24),
-            resultIcon.leadingAnchor.constraint(equalTo: resultHeader.leadingAnchor, constant: 4),
-            resultIcon.centerYAnchor.constraint(equalTo: resultHeader.centerYAnchor),
-            resultFile.leadingAnchor.constraint(equalTo: resultIcon.trailingAnchor, constant: 5),
-            resultFile.centerYAnchor.constraint(equalTo: resultHeader.centerYAnchor),
-            resultFile.trailingAnchor.constraint(lessThanOrEqualTo: resultStatus.leadingAnchor, constant: -5),
-            resultStatus.trailingAnchor.constraint(equalTo: resultHeader.trailingAnchor, constant: -4),
-            resultStatus.centerYAnchor.constraint(equalTo: resultHeader.centerYAnchor),
-        ])
+        resultHeader.heightAnchor.constraint(equalToConstant: SidebarResults.rowHeight).isActive = true
         setupResults()
 
         let content = searchContent
@@ -268,7 +238,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         content.spacing = 5
         content.setCustomSpacing(10, after: replaceRow)
         content.translatesAutoresizingMaskIntoConstraints = false
-        surface.appearanceChanged = { [weak self] in self?.updateName() }
         surface.addSubview(content)
         updateName()
         NSLayoutConstraint.activate([
@@ -326,15 +295,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         column.resizingMask = .autoresizingMask
         column.minWidth = 0
         results.addTableColumn(column)
-        results.headerView = nil
-        results.style = .fullWidth
-        results.rowSizeStyle = .custom
-        results.rowHeight = 24
-        results.usesAutomaticRowHeights = false
-        results.intercellSpacing = .zero
-        results.backgroundColor = .clear
-        results.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
-        results.allowsEmptySelection = true
+        SidebarResults.configure(results, in: resultScroll)
         results.setAccessibilityLabel("Search Results")
         results.dataSource = self
         results.delegate = self
@@ -350,13 +311,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             openResult(at: selected)
         }
         results.onEscape = { [weak self] in self?.clearResultFocus() }
-        resultScroll.drawsBackground = false
-        resultScroll.automaticallyAdjustsContentInsets = false
-        resultScroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 10, right: 0)
-        resultScroll.contentView.clipsToBounds = true
-        resultScroll.hasVerticalScroller = true
-        resultScroll.autohidesScrollers = true
-        resultScroll.documentView = results
     }
 
     func focusSearch(reveal: (NSView, Bool) -> Void) {
@@ -514,7 +468,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         activity = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
             guard let self, generation == searchGeneration, pending else { return }
-            resultStatus.stringValue = "Searching…"
+            resultHeader.detailText = "Searching…"
         }
         Task { [weak self] in
             let outcome = await worker.value
@@ -546,7 +500,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         results.reloadData()
         results.deselectAll(nil)
         editingResults = false
-        resultStatus.stringValue = invalid ? "Invalid regex" : matches.isEmpty ? "No results"
+        resultHeader.detailText = invalid ? "Invalid regex" : matches.isEmpty ? "No results"
             : matches.count == 1 ? "1 match" : "\(matches.count) matches"
         updateReplaceAvailability()
         if let advanceFrom {
@@ -579,7 +533,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         guard validResults else {
             if pending {
                 queuedDirection = direction
-            } else if resultStatus.stringValue != "Invalid regex" {
+            } else if resultHeader.detailText != "Invalid regex" {
                 queuedDirection = direction
                 requestSearch()
             }
@@ -730,8 +684,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         let identifier = NSUserInterfaceItemIdentifier("FindResultRow")
-        if let row = tableView.makeView(withIdentifier: identifier, owner: nil) as? FindResultRow { return row }
-        let view = FindResultRow()
+        if let row = tableView.makeView(withIdentifier: identifier, owner: nil) as? SidebarResultRow { return row }
+        let view = SidebarResultRow()
         view.identifier = identifier
         return view
     }
@@ -747,7 +701,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
     private func configure(_ cell: FindResultCell, row: Int) {
         let range = matches[row].range
-        cell.configure(text: excerpt(of: matches[row]), replacementAvailable: settings.showsReplacement,
+        let text = SidebarResults.excerpt(of: resultSnapshot as NSString, match: range, scope: matches[row].scope)
+        cell.configure(text: text, replacementAvailable: settings.showsReplacement,
                        acceptsActions: validResults, selected: selected == row,
                        apply: { [weak self] in
                            guard let self, let match = matches.first(where: { $0.range == range }) else { return }
@@ -770,53 +725,5 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
                 configure(cell, row: row)
             }
         }
-    }
-
-    private func excerpt(of hit: FindHit) -> NSAttributedString {
-        let range = hit.range
-        let source = resultSnapshot as NSString
-        var start = 0
-        var end = 0
-        var contentEnd = 0
-        source.getLineStart(&start, end: &end, contentsEnd: &contentEnd,
-                            for: NSRange(location: range.location, length: 0))
-        if let scope = hit.scope {
-            start = max(start, scope.location)
-            contentEnd = min(contentEnd, NSMaxRange(scope))
-        }
-        // Keep enough room for the match itself before the trailing row actions.
-        let from = max(start, range.location - 9)
-        let to = max(from, min(contentEnd, max(NSMaxRange(range), from + 100)))
-        let composed = source.rangeOfComposedCharacterSequences(for: NSRange(location: from, length: to - from))
-        let excerptRange = hit.scope.map { NSIntersectionRange(composed, $0) } ?? composed
-        let prefix = excerptRange.location > start ? "…" : ""
-        let suffix = NSMaxRange(excerptRange) < contentEnd ? "…" : ""
-        let text = source.substring(with: excerptRange).replacingOccurrences(of: "\t", with: " ")
-        let style = NSMutableParagraphStyle()
-        style.lineBreakMode = .byTruncatingTail
-        style.tighteningFactorForTruncation = 0
-        let label = NSMutableAttributedString(string: text.isEmpty ? "↵" : prefix + text + suffix, attributes: [
-            .font: EditorTextView.defaultFont,
-            .foregroundColor: NSColor.labelColor,
-            .paragraphStyle: style,
-        ])
-        let intersection = NSIntersectionRange(range, excerptRange)
-        if intersection.length > 0 {
-            label.addAttribute(.foregroundColor, value: NSColor.systemOrange,
-                               range: NSRange(location: intersection.location - excerptRange.location + prefix.utf16.count,
-                                              length: intersection.length))
-        }
-        return label
-    }
-}
-
-
-@MainActor
-private final class FindSidebarSurface: NSView {
-    var appearanceChanged: (() -> Void)?
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        appearanceChanged?()
     }
 }

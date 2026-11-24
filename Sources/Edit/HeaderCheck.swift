@@ -167,9 +167,9 @@ enum HeaderCheck {
     }
 
     private static func checkFileTitleWidth(in app: Edit, folder: URL) async throws {
-        let short = folder.appending(path: "build.zig")
-        let longer = folder.appending(path: "windows_tests.zig")
-        let wide = folder.appending(path: "project-configuration-for-a-wide-editor.zig.zon")
+        let short = folder.appending(path: "build.txt")
+        let longer = folder.appending(path: "windows_tests.txt")
+        let wide = folder.appending(path: "project-configuration-for-a-wide-editor.txt.txt")
         for url in [short, longer, wide] { try Data("Sample\n".utf8).write(to: url) }
 
         let document = app.makeDocument()

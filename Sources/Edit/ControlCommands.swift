@@ -154,6 +154,15 @@ struct ControlCommand {
         }
     }
 
+    static func languageServerCommands(for document: DocumentWindow) -> [ControlCommand] {
+        LanguageServerCommand.allCases.map { command in
+            let item = NSMenuItem(title: command.title, action: #selector(DocumentLanguageFeatures.performControlCommand(_:)), keyEquivalent: "")
+            item.target = document.languageFeatures
+            item.representedObject = command.rawValue
+            return ControlCommand(id: "lsp.\(command.rawValue)", title: command.title, item: item)
+        }
+    }
+
     private static func commands(in menu: NSMenu, prefix: String) -> [ControlCommand] {
         menu.items.flatMap { item -> [ControlCommand] in
             if item.title == "Open Recent" { return [] }

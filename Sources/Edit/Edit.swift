@@ -628,6 +628,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                                                     "\n\nYour edits are available as drafts the next time you open Edit.")
                     }
                 }
+                for document in documents { document.languageFeatures.close() }
                 sender.reply(toApplicationShouldTerminate: true)
             } catch {
                 isQuitting = false
@@ -1174,6 +1175,14 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             try await checkJJ(screenshot: screenshot)
         case "source-control":
             try await checkSourceControl(screenshot: screenshot)
+        case "lsp":
+            try await LanguageServerCheck.run(in: self, document: document, capture: { window in
+                try self.checkWindow(window, screenshot: screenshot)
+            }, captureHover: { view in
+                guard let screenshot else { return }
+                let file = URL(fileURLWithPath: screenshot).deletingPathExtension().path + "-hover.png"
+                try self.captureCheckView(view, screenshot: file)
+            })
         case "worktree" where screenshot == nil:
             try await WorktreeCheck.run(in: self)
         default:

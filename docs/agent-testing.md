@@ -24,6 +24,7 @@ Use separate fresh directories via `EDIT_BUILD_DIR` and `EDIT_SDK_CACHE_DIR` to 
 - `./script/check --only files` checks file and folder opening, saves, autosave, session restoration, and previews.
 - `./script/check --only jj [screenshot-path]` checks recorded and live Jujutsu indicators, inline diff, and command completion. The optional PNG captures the editor and Worktree with recorded changes.
 - `./script/check --only source-control [screenshot-path]` checks the Jujutsu shortcut, graph, changed-file outline, revision preview, and repository Undo and Redo. The optional PNG captures the Jujutsu sidebar beside a changed file.
+- `./script/check --only lsp [screenshot-path]` uses compatible `zig` and `zls` executables from `PATH` to check server controls, definition navigation, hover, and single and grouped references. The optional PNG captures the References sidebar and writes a second capture with a `-hover.png` suffix.
 - `./script/check --only worktree` checks the outline and its file operations, including Undo and Redo.
 
 These commands use the same hidden agent app and disposable profile as the full check. Reuse the build directory so repeated checks of the same code launch the existing bundle. On a timing-sensitive regression, capture the failing state during the focused run. Run the full suite on the final patch.

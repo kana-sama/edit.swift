@@ -164,6 +164,8 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             let title = FileTitleView()
             title.addArrangedSubview(icon)
             title.addArrangedSubview(label)
+            title.addArrangedSubview(document.languageFeatures.statusButton)
+            title.setCustomSpacing(8, after: label)
             title.alignment = .centerY
             title.spacing = 2
             title.setVisibilityPriority(.detachOnlyIfNecessary, for: label)
@@ -258,13 +260,17 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         let zoom = window.standardWindowButton(.zoomButton)
         let controls = zoom.map { $0.convert($0.bounds, to: nil).maxX + 8 } ?? 84
         // Keep the icon and a compact file name inside the editor pane as the divider moves.
-        let width = max(0, floor(exposed.maxX - max(exposed.minX, controls) - 40))
+        let button = document.languageFeatures.statusButton
+        let serverWidth = button.isHidden ? 0 : ceil(button.intrinsicContentSize.width) + 8
+        let width = max(0, floor(exposed.maxX - max(exposed.minX, controls) - 40 - serverWidth))
         // Explicit widths let the toolbar grow the labels again after compressing them.
         let folder = document.folderURL == nil ? 0 : min(folderLabel?.intrinsicContentSize.width ?? 0, 160, width * 0.4)
         let file = min(fileLabel?.intrinsicContentSize.width ?? 0, width - folder)
         if folderWidth?.constant != folder { folderWidth?.constant = folder }
         if fileWidth?.constant != file { fileWidth?.constant = file }
     }
+
+    func languageServerStatusChanged() { fitLabels() }
 
     func update() {
         if let folder = document.folderURL {

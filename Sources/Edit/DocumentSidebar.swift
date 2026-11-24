@@ -1,7 +1,7 @@
 import AppKit
 
 enum SidebarMode: String, Codable, Sendable {
-    case search, worktree, scratches, sourceControl
+    case search, worktree, scratches, sourceControl, references
 
     var title: String {
         switch self {
@@ -9,6 +9,7 @@ enum SidebarMode: String, Codable, Sendable {
         case .worktree: "Worktree"
         case .scratches: "Scratches"
         case .sourceControl: "Jujutsu"
+        case .references: "References"
         }
     }
 }
@@ -181,6 +182,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     private(set) var worktree: SidebarFileTree?
     private var scratches: SidebarFileTree?
     private(set) var sourceControl: SourceControlSidebar?
+    private var references: ReferencesSidebar?
     private var scratchReload: Task<Void, Never>?
 
     var mode: SidebarMode { rememberedMode ?? (document.folderURL == nil ? .scratches : .search) }
@@ -190,7 +192,8 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     private var sourceControlVisible: Bool { isVisible && mode == .sourceControl }
     private var worktreeFile: URL? { document.scratchFile == nil ? document.displayedFileURL : nil }
     var scratchOutline: NSOutlineView? { scratches?.outline }
-    var hasContent: Bool { search != nil || worktree != nil || scratches != nil || sourceControl != nil }
+    var hasReferences: Bool { references != nil }
+    var hasContent: Bool { search != nil || worktree != nil || scratches != nil || sourceControl != nil || hasReferences }
     var worktreeShowsHidden: Bool { worktree?.showsHidden ?? restoredWorktreeShowsHidden }
 
     init(document: DocumentWindow, app: Edit) {
@@ -241,6 +244,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         case .worktree: showWorktree(focus: false)
         case .scratches: showScratches(focus: false)
         case .sourceControl: showSourceControl(focus: false)
+        case .references: showReferences(focus: false)
         }
     }
 
@@ -280,6 +284,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         case .worktree: showWorktree()
         case .scratches: showScratches()
         case .sourceControl: showSourceControl()
+        case .references: showReferences()
         }
     }
 
@@ -353,6 +358,31 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         panel.setActive(true)
     }
 
+    func showReferences(symbol: String, originURL: URL, originLine: Int, originColumn: Int,
+                        results: [ReferenceResult], open: @escaping (ReferenceResult) -> Void) {
+        guard !results.isEmpty else { return }
+        let panel: ReferencesSidebar
+        if let references {
+            panel = references
+        } else {
+            panel = ReferencesSidebar { [weak self] in self?.returnFocus() }
+            references = panel
+            panel.view.isHidden = true
+            installContent(panel.view)
+        }
+        panel.update(symbol: symbol, originURL: originURL, originLine: originLine, originColumn: originColumn,
+                     root: document.folderURL ?? originURL.deletingLastPathComponent(), results: results, open: open)
+        rememberFocus()
+        showReferences()
+    }
+
+    private func showReferences(focus: Bool = true) {
+        guard let references else { return }
+        selectMode(.references)
+        present(focusing: focus ? references.focusResponder : nil)
+        references.revealSelection()
+    }
+
     private func installContent(_ view: NSView) {
         view.translatesAutoresizingMaskIntoConstraints = false
         controller.view.addSubview(view)
@@ -387,6 +417,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         worktree?.view.isHidden = mode != .worktree
         scratches?.view.isHidden = mode != .scratches
         sourceControl?.view.isHidden = mode != .sourceControl
+        references?.view.isHidden = mode != .references
         if mode != .worktree { worktree?.setActive(false) }
         if mode != .scratches { scratches?.setActive(false) }
         if mode != .sourceControl { sourceControl?.setActive(false) }
@@ -411,6 +442,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     private func availableMode(_ mode: SidebarMode) -> SidebarMode {
         if mode == .sourceControl, !document.hasJujutsuWorkspace { return document.folderURL == nil ? .search : .worktree }
         if mode == .worktree, document.folderURL == nil { return .search }
+        if mode == .references, !hasReferences { return .search }
         return mode
     }
 
@@ -488,6 +520,10 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
             menu.addItem(withTitle: SidebarMode.search.title, action: #selector(selectSearchSidebar(_:)),
                          keyEquivalent: "").target = self
         }
+        if hasReferences, menu.item(withTitle: SidebarMode.references.title) == nil {
+            menu.addItem(withTitle: SidebarMode.references.title, action: #selector(selectReferencesSidebar(_:)),
+                         keyEquivalent: "").target = self
+        }
         menu.item(withTitle: SidebarMode.worktree.title)?.isEnabled = document.folderURL != nil
         menu.item(withTitle: SidebarMode.sourceControl.title)?.isEnabled = document.hasJujutsuWorkspace
         picker.selectItem(at: menu.indexOfItem(withTitle: mode.title))
@@ -508,6 +544,8 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
             scratches?.addRootCreationItems(to: menu)
         case .sourceControl:
             menu.addItem(withTitle: "Refresh Changes", action: #selector(refreshSourceControl(_:)), keyEquivalent: "").target = self
+        case .references:
+            break
         }
     }
 
@@ -630,6 +668,11 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     @objc private func selectSourceControlSidebar(_ sender: Any?) {
         rememberFocus()
         showSourceControl()
+    }
+
+    @objc private func selectReferencesSidebar(_ sender: Any?) {
+        rememberFocus()
+        showReferences()
     }
 
     @objc private func toggleHiddenFiles(_ sender: Any?) {

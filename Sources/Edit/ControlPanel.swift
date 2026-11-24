@@ -466,7 +466,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             $0.isAvailable(in: document, focus: originalFocus)
         }
         let available = (ControlCommand.fromMenu(menu) + ControlCommand.editorCommands(for: document)
-                         + ControlCommand.searchCommands(for: app)).filter {
+                         + ControlCommand.searchCommands(for: app)
+                         + ControlCommand.languageServerCommands(for: document)).filter {
             $0.isAvailable(in: document, focus: originalFocus)
         }
         let arranged = terminalSplits + history.arrange(available)

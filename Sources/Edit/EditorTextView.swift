@@ -63,6 +63,19 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     let syntaxAnalysis = EditorSyntaxAnalysis()
     lazy var bracketNavigation = BracketNavigation(editor: self)
     lazy var occurrenceHighlighting = OccurrenceHighlighting(editor: self)
+    private lazy var languageInteraction = EditorLanguageInteraction(editor: self)
+    private var languageTrackingArea: NSTrackingArea?
+    var languageProbe: ((Int, NSRange) async -> NSRange?)?
+    var languageHover: ((Int, NSRange) async -> EditorLanguageHover?)?
+    var languageFollowLink: ((Int, NSRange) -> Void)?
+    var languageInteractionEnabled = false {
+        didSet {
+            guard languageInteractionEnabled != oldValue else { return }
+            languageInteraction.setEnabled(languageInteractionEnabled)
+            updateTrackingAreas()
+        }
+    }
+    var languageDefinitionLinkRange: NSRange? { languageInteractionEnabled ? languageInteraction.linkRange : nil }
     var preferredLineEnding = "\n"
     var syntaxLanguage: SyntaxLanguage = .plainText
 
@@ -150,6 +163,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             setCurrentLine(.zero)
             bracketNavigation.clearHighlights()
         }
+        if languageInteractionEnabled { languageInteraction.keyWindowChanged() }
         occurrenceHighlighting.focusChanged(focused)
         requestLineRefresh()
     }
@@ -416,6 +430,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        if languageInteractionEnabled, languageInteraction.followClick(event) { return }
         onFindEditorInteraction?()
         if let focusSession, event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty {
             let offset = characterIndexForInsertion(at: convert(event.locationInWindow, from: nil))
@@ -652,6 +667,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             super.cancelOperation(sender)
             return
         }
+        if languageInteractionEnabled, languageInteraction.dismissHover() { return }
         if jjInlineDiff?.collapseAll() == true { return }
 
         if let scope = focusRanges {
@@ -1061,6 +1077,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     @objc private func storageDidEdit(_ notification: Notification) {
         guard let storage = notification.object as? NSTextStorage, storage.editedMask.contains(.editedCharacters) else { return }
         syntaxHighlighting?.storageDidEdit(storage)
+        if languageInteractionEnabled { languageInteraction.invalidate(afterTextEdit: true) }
         layoutSpacing.sourceDidEdit()
         // Both preedit and its rollback are presentation. Subscribers still hold
         // the baseline onto which the real replacements will be applied.
@@ -1225,6 +1242,52 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
               let viewport = manager.textViewportLayoutController.viewportRange,
               let caret = manager.location(manager.documentRange.location, offsetBy: offset) else { return true }
         return caret.compare(viewport.location) != .orderedAscending && caret.compare(viewport.endLocation) != .orderedDescending
+    }
+
+    func invalidateLanguageInteraction() {
+        if languageInteractionEnabled { languageInteraction.invalidate() }
+    }
+
+    func showLanguageFeedback(_ message: String, at range: NSRange) {
+        if languageInteractionEnabled { languageInteraction.showFeedback(message, at: range) }
+    }
+
+    func hasLanguageDefinitionLink(at point: NSPoint) -> Bool {
+        languageInteractionEnabled && languageInteraction.linkContains(point)
+    }
+
+#if EDIT_AGENT_CHECKS
+    var languageHoverWindowForCheck: NSWindow? { languageInteraction.hoverWindow }
+#endif
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let languageTrackingArea {
+            removeTrackingArea(languageTrackingArea)
+            self.languageTrackingArea = nil
+        }
+        guard languageInteractionEnabled else { return }
+        let area = NSTrackingArea(rect: .zero, options: [.activeInKeyWindow, .inVisibleRect, .mouseEnteredAndExited, .mouseMoved],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        languageTrackingArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        if languageInteractionEnabled { languageInteraction.track(at: event.locationInWindow, modifiers: event.modifierFlags) }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        if languageInteractionEnabled, event.trackingArea === languageTrackingArea {
+            languageInteraction.track(at: event.locationInWindow, modifiers: event.modifierFlags)
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        if languageInteractionEnabled, event.trackingArea === languageTrackingArea { languageInteraction.pointerExited() }
     }
 
     override func cursorUpdate(with event: NSEvent) {

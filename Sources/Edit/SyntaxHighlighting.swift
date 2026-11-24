@@ -148,6 +148,7 @@ final class SyntaxHighlighting {
         let visible = visible.map { NSIntersectionRange($0, document) }
         let colors = visible.map { spans(overlapping: $0) } ?? []
         let conflictColors = visible.flatMap { editor.jjConflictDecorations?.foregrounds(in: $0) } ?? []
+        let link = visible.flatMap { visible in editor.languageDefinitionLinkRange.map { NSIntersectionRange(visible, $0) } }
         guard (previous?.length ?? 0) > 0 || (visible?.length ?? 0) > 0 else {
             backedColorRange = nil
             return
@@ -168,11 +169,14 @@ final class SyntaxHighlighting {
                 for (range, color) in conflictColors {
                     storage.addAttribute(.foregroundColor, value: color, range: range)
                 }
+                if let link, link.length > 0 {
+                    storage.addAttribute(.foregroundColor, value: NSColor.linkColor, range: link)
+                }
             }
             storage.endEditing()
         }
         editor.typingAttributes = typingAttributes
-        backedColorRange = colors.isEmpty && conflictColors.isEmpty ? nil : visible
+        backedColorRange = colors.isEmpty && conflictColors.isEmpty && (link?.length ?? 0) == 0 ? nil : visible
     }
 
     private func visibleRange() -> NSRange? {
@@ -190,11 +194,13 @@ final class SyntaxHighlighting {
         hasRenderingColors = false
         if let manager = editor?.textLayoutManager {
             manager.removeRenderingAttribute(.foregroundColor, for: manager.documentRange)
+            manager.removeRenderingAttribute(.underlineStyle, for: manager.documentRange)
         }
     }
 
     private func paint(_ range: NSTextRange, using manager: NSTextLayoutManager) {
-        guard !spans.isEmpty || editor?.jjConflictDecorations?.hasHighlights == true else { return }
+        let link = editor?.languageDefinitionLinkRange
+        guard !spans.isEmpty || editor?.jjConflictDecorations?.hasHighlights == true || link != nil else { return }
         let origin = manager.documentRange.location
         let start = manager.offset(from: origin, to: range.location)
         let end = start + manager.offset(from: range.location, to: range.endLocation)
@@ -213,6 +219,13 @@ final class SyntaxHighlighting {
         }
         for (range, color) in editor?.jjConflictDecorations?.foregrounds(in: visible) ?? [] {
             paintColor(color, in: range)
+        }
+        if let editor, let link {
+            let linked = NSIntersectionRange(visible, link)
+            if linked.length > 0, let target = editor.textRange(linked, in: manager) {
+                paintColor(.linkColor, in: linked)
+                manager.addRenderingAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, for: target)
+            }
         }
     }
 

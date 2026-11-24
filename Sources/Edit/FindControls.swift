@@ -312,16 +312,7 @@ final class FindResultsTable: NSTableView {
     }
 }
 
-final class FindResultRow: NSTableRowView {
-    override func drawSelection(in dirtyRect: NSRect) {
-        let color: NSColor = isEmphasized ? .selectedContentBackgroundColor : .unemphasizedSelectedContentBackgroundColor
-        color.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 0), xRadius: 8, yRadius: 8).fill()
-    }
-}
-
-final class FindResultCell: NSTableCellView {
-    private let excerpt = NSTextField(labelWithString: "")
+final class FindResultCell: SidebarResultExcerptCell {
     private static let actionSize: CGFloat = 20
     private static let actionSpacing: CGFloat = 1
     // The button's hit area extends beyond its glyph. Let the excerpt use that transparent leading edge.
@@ -346,17 +337,7 @@ final class FindResultCell: NSTableCellView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        clipsToBounds = true
-        excerpt.allowsEditingTextAttributes = true
-        excerpt.maximumNumberOfLines = 1
-        excerpt.cell?.usesSingleLineMode = true
-        excerpt.cell?.wraps = false
-        excerpt.lineBreakMode = .byTruncatingTail
-        excerpt.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        excerpt.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        excerpt.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(excerpt)
+        fullExcerptWidth.isActive = false
         for (button, label, action) in [
             (applyButton, "Replace This Match", #selector(applyMatch(_:))),
             (dismissButton, "Dismiss This Match", #selector(dismissMatch(_:))),
@@ -377,23 +358,20 @@ final class FindResultCell: NSTableCellView {
             ])
         }
         NSLayoutConstraint.activate([
-            excerpt.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3),
-            excerpt.heightAnchor.constraint(lessThanOrEqualTo: heightAnchor),
-            excerpt.centerYAnchor.constraint(equalTo: centerYAnchor),
             dismissButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1),
             applyButton.trailingAnchor.constraint(equalTo: dismissButton.leadingAnchor, constant: -Self.actionSpacing),
             excerptBeforeDismiss,
         ])
     }
 
+    @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("Find result cells are programmatically constructed") }
 
     func configure(
         text: NSAttributedString, replacementAvailable: Bool, acceptsActions: Bool,
         selected: Bool, apply: @escaping () -> Void, dismiss: @escaping () -> Void
     ) {
-        excerpt.attributedStringValue = text
-        setAccessibilityLabel(excerpt.stringValue)
+        configureExcerpt(text)
         self.acceptsActions = acceptsActions
         // Keep the same text column whether the row actions are currently visible or hidden.
         if self.replacementAvailable != replacementAvailable {

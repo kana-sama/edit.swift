@@ -124,6 +124,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private(set) var isTerminalVisible = false
     private var pendingTerminalFocus: Bool?
     private(set) lazy var titleBar = DocumentTitleBar(document: self, app: app)
+    private(set) lazy var languageFeatures = DocumentLanguageFeatures(document: self, app: app)
 
     private unowned let app: Edit
     private(set) var fileURL: URL? {
@@ -310,6 +311,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             self.editor.occurrenceHighlighting.selectionChanged()
         }
         editor.onBlur = { [weak self] in self?.editorLostFocus() }
+        languageFeatures.connectEditor()
         for name in [Notification.Name.NSUndoManagerDidUndoChange, .NSUndoManagerDidRedoChange] {
             NotificationCenter.default.addObserver(self, selector: #selector(undoOrRedo(_:)), name: name, object: nil)
         }
@@ -618,6 +620,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         guard !app.isQuitting, window.attachedSheet == nil else { return false }
         return switch mode {
         case .search: hasTextDocument
+        case .references: sidebar.hasReferences
         case .worktree: folderURL != nil
         case .sourceControl: hasJujutsuWorkspace
         case .scratches: true
@@ -1636,6 +1639,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         autosave.scheduleIdle()
         refreshSyntax(immediate: false)
         jjDocumentChanges?.bufferChanged()
+        languageFeatures.documentTextChanged()
     }
 
     private func refreshSyntax(immediate: Bool, preparedSyntax: SyntaxSnapshot? = nil) {
@@ -1923,6 +1927,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         if !app.isQuitting { discardDraftCheckpoint() }
         fileRefresh.stop()
+        languageFeatures.close()
         closeTerminalSessions()
         jjDocumentChanges?.stop()
         clearSourceControlFile()
@@ -2023,6 +2028,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             window.title = displayName
         }
         titleBar.update()
+        languageFeatures.updateDocument()
         sidebar.documentTitleChanged(reveal: revealInWorktree)
         updateJJContext()
     }
