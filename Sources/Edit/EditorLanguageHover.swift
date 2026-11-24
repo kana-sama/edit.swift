@@ -107,13 +107,11 @@ struct EditorHoverContent: Sendable {
         let codeBackground = NSColor.labelColor.withAlphaComponent(0.075)
         for (index, block) in blocks.enumerated() {
             let paragraph = NSMutableParagraphStyle()
-            paragraph.paragraphSpacing = 7
-            paragraph.lineSpacing = 2
+            paragraph.lineSpacing = block.isCode ? 0 : 2
             paragraph.lineBreakMode = .byWordWrapping
             if block.indentation > 0 {
                 paragraph.firstLineHeadIndent = CGFloat(block.indentation - 1) * 14
                 paragraph.headIndent = CGFloat(block.indentation) * 14
-                if index + 1 < blocks.count, blocks[index + 1].indentation > 0 { paragraph.paragraphSpacing = 2 }
             }
             if block.isQuote {
                 paragraph.firstLineHeadIndent += 12
@@ -121,17 +119,19 @@ struct EditorHoverContent: Sendable {
             }
             let size: CGFloat = block.heading == 1 ? 15 : block.heading != nil ? 14 : 13
             let foreground: NSColor = block.isQuote ? .secondaryLabelColor : .labelColor
-            let base = [NSAttributedString.Key.font: NSFont.systemFont(ofSize: size),
+            let baseFont = block.isCode ? EditorTextView.defaultFont : NSFont.systemFont(ofSize: size)
+            let base = [NSAttributedString.Key.font: baseFont,
                         .foregroundColor: foreground, .paragraphStyle: paragraph] as [NSAttributedString.Key: Any]
 
+            let blockStart = result.length
             if let marker = block.listMarker { result.append(NSAttributedString(string: marker, attributes: base)) }
             let start = result.length
             for run in block.runs {
                 var attributes = base
-                if block.isCode || run.code {
+                if run.code && !block.isCode {
                     attributes[.font] = EditorTextView.defaultFont
                     attributes[.backgroundColor] = codeBackground
-                } else if run.strong || block.heading != nil {
+                } else if !block.isCode && (run.strong || block.heading != nil) {
                     attributes[.font] = NSFont.systemFont(ofSize: size, weight: .semibold)
                 }
                 if run.emphasis, let font = attributes[.font] as? NSFont {
@@ -145,8 +145,21 @@ struct EditorHoverContent: Sendable {
                 result.addAttribute(.foregroundColor, value: span.color.nativeColor,
                                     range: NSRange(location: start + span.start, length: span.end - span.start))
             }
-            if index < blocks.count - 1, result.mutableString.hasSuffix("\n") == false {
+            // Foundation includes the newline before the closing Markdown fence in the code.
+            if block.isCode, result.length > start, result.mutableString.hasSuffix("\n") {
+                result.deleteCharacters(in: NSRange(location: result.length - 1, length: 1))
+            }
+            if index < blocks.count - 1, block.isCode || !result.mutableString.hasSuffix("\n") {
                 result.append(NSAttributedString(string: "\n", attributes: base))
+            }
+            if index > 0, blockStart < result.length {
+                let previous = blocks[index - 1]
+                let leadingParagraph = NSMutableParagraphStyle()
+                leadingParagraph.setParagraphStyle(paragraph)
+                leadingParagraph.paragraphSpacingBefore = previous.isCode && block.isCode ? 4 : 7
+                if previous.indentation > 0 && block.indentation > 0 { leadingParagraph.paragraphSpacingBefore = 2 }
+                let first = result.mutableString.paragraphRange(for: NSRange(location: blockStart, length: 0))
+                result.addAttribute(.paragraphStyle, value: leadingParagraph, range: first)
             }
         }
         return result
@@ -167,15 +180,17 @@ final class EditorHoverPopover {
           onNavigate: @escaping (LSPLocation) -> Void, onEnter: @escaping () -> Void, onExit: @escaping () -> Void) {
         guard !anchor.isEmpty, text.length > 0, let screen = owner.screen ?? NSScreen.main else { return nil }
         let area = screen.visibleFrame.insetBy(dx: 8, dy: 8)
-        let inset: CGFloat = 12
+        let inset = NSSize(width: 12, height: 10)
         let maximumWidth = min(460, area.width)
-        let options: NSString.DrawingOptions = [.usesLineFragmentOrigin, .usesFontLeading]
-        let width = text.boundingRect(with: NSSize(width: maximumWidth - inset * 2,
-                                                  height: .greatestFiniteMagnitude), options: options).width
-        let panelWidth = min(maximumWidth, max(84, ceil(width) + inset * 2))
-        let textHeight = ceil(text.boundingRect(with: NSSize(width: panelWidth - inset * 2,
-                                                            height: .greatestFiniteMagnitude), options: options).height)
-        let contentHeight = textHeight + 20
+        let richText = HoverTextView(width: maximumWidth, text: text, inset: inset)
+        guard let layout = richText.textLayoutManager else { return nil }
+        layout.ensureLayout(for: layout.documentRange)
+        let panelWidth = min(maximumWidth, max(84, ceil(layout.usageBoundsForTextContainer.maxX) + inset.width * 2))
+        if panelWidth < maximumWidth {
+            richText.setFrameSize(NSSize(width: panelWidth, height: 0))
+            layout.ensureLayout(for: layout.documentRange)
+        }
+        let contentHeight = ceil(layout.usageBoundsForTextContainer.maxY) + inset.height * 2
         let gap: CGFloat = 4
         let spaceAbove = max(0, area.maxY - anchor.maxY - gap)
         let spaceBelow = max(0, anchor.minY - area.minY - gap)
@@ -188,7 +203,7 @@ final class EditorHoverPopover {
 
         self.anchor = anchor
         panel = HoverPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        content = HoverSurface(size: frame.size, contentHeight: contentHeight, text: text, inset: inset,
+        content = HoverSurface(size: frame.size, contentHeight: contentHeight, richText: richText,
                                onNavigate: onNavigate, onEnter: onEnter, onExit: onExit)
         panel.contentView = content
         panel.setFrame(frame, display: false)
@@ -228,12 +243,12 @@ private final class HoverSurface: NSVisualEffectView, NSTextViewDelegate {
 
     var selecting: Bool { richText.selecting }
 
-    init(size: NSSize, contentHeight: CGFloat, text: NSAttributedString, inset: CGFloat,
+    init(size: NSSize, contentHeight: CGFloat, richText: HoverTextView,
          onNavigate: @escaping (LSPLocation) -> Void, onEnter: @escaping () -> Void, onExit: @escaping () -> Void) {
         self.onNavigate = onNavigate
         self.onEnter = onEnter
         self.onExit = onExit
-        richText = HoverTextView(frame: NSRect(x: 0, y: 0, width: size.width, height: max(size.height, contentHeight)))
+        self.richText = richText
         super.init(frame: NSRect(origin: .zero, size: size))
         identifier = .init("EditorLanguageHover")
         material = .popover
@@ -244,18 +259,8 @@ private final class HoverSurface: NSVisualEffectView, NSTextViewDelegate {
         layer?.cornerCurve = .continuous
         layer?.masksToBounds = true
 
-        richText.identifier = .init("EditorLanguageHoverText")
-        richText.isEditable = false
-        richText.isSelectable = true
-        richText.isRichText = true
-        richText.drawsBackground = false
-        richText.textContainerInset = NSSize(width: inset, height: 10)
-        richText.textContainer?.lineFragmentPadding = 0
-        richText.textContainer?.widthTracksTextView = true
-        richText.textContainer?.heightTracksTextView = false
-        richText.linkTextAttributes = [.foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue]
+        richText.setFrameSize(NSSize(width: size.width, height: max(size.height, contentHeight)))
         richText.delegate = self
-        richText.textStorage?.setAttributedString(text)
 
         let scroll = NSScrollView(frame: bounds)
         scroll.drawsBackground = false
@@ -293,6 +298,21 @@ private final class HoverSurface: NSVisualEffectView, NSTextViewDelegate {
 
 final class HoverTextView: NSTextView {
     private(set) var selecting = false
+
+    convenience init(width: CGFloat, text: NSAttributedString, inset: NSSize) {
+        self.init(frame: NSRect(x: 0, y: 0, width: width, height: 0))
+        identifier = .init("EditorLanguageHoverText")
+        isEditable = false
+        isSelectable = true
+        isRichText = true
+        drawsBackground = false
+        textContainerInset = inset
+        textContainer?.lineFragmentPadding = 0
+        textContainer?.widthTracksTextView = true
+        textContainer?.heightTracksTextView = false
+        linkTextAttributes = [.foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue]
+        textStorage?.setAttributedString(text)
+    }
 
     override var needsPanelToBecomeKey: Bool { true }
 

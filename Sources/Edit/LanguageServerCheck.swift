@@ -8,8 +8,9 @@ enum LanguageServerCheck {
     }
 
     static func run(in app: Edit, document: DocumentWindow, capture: (NSWindow) throws -> Void,
-                    captureHover: (NSView) throws -> Void,
+                    captureHover: (NSView, String) throws -> Void,
                     captureServers: (NSView, LanguageServerCommand) throws -> Void) async throws {
+        try checkHoverLayout(in: document.window, capture: captureHover)
         let folder = FileManager.default.temporaryDirectory.appending(path: "ZLS fixture \(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer {
@@ -148,7 +149,9 @@ enum LanguageServerCheck {
         try await wait("synchronize the referenced-type fixture") { lsp.session.supportsHover }
         let variant = (typedText as NSString).range(of: "variant")
         let typeLine = (fontText as NSString).range(of: "pub const FontVariant").location
-        try await checkHoverDefinitionLink(in: document, word: variant, file: font, lineOffset: typeLine, capture: captureHover)
+        try await checkHoverDefinitionLink(in: document, word: variant, file: font, lineOffset: typeLine) { view in
+            try captureHover(view, "hover")
+        }
         await app.navigate(.back)
         try expect(document.fileURL == typed && document.editor.selectedRange().location == variant.location,
                    "Go Back returns to the word whose hover was followed")
@@ -291,6 +294,49 @@ enum LanguageServerCheck {
         let down = try event(.leftMouseDown, .command, clicks: 1)
         NSApp.postEvent(try event(.leftMouseUp, .command, clicks: 1), atStart: true)
         editor.mouseDown(with: down)
+    }
+
+    private static func checkHoverLayout(in owner: NSWindow, capture: (NSView, String) throws -> Void) throws {
+        guard let screen = owner.screen ?? NSScreen.main else { throw Failure("find a screen for the hover layout") }
+        let area = screen.visibleFrame
+        let anchor = NSRect(x: area.midX, y: area.midY, width: 20, height: 14)
+        let structure = """
+            const Binding = struct {
+                keys: []const u8,
+                action: u64,
+                key_context: ?KeyContext = null,
+                arg: u64 = 0,
+                convention: ?Convention = null,
+            }
+            """
+        var insets: [(top: CGFloat, bottom: CGFloat)] = []
+        var hasCodeBackground = false
+        var codeLineGap: CGFloat?
+        for (id, code) in [("hover-short", "const std_scoped = std.log.scoped(scope)"), ("hover-code", structure)] {
+            let markdown = "```zig\n\(code)\n```\n```zig\n(type)\n```"
+            let attributed = EditorHoverContent(text: markdown, isMarkdown: true).attributedText()
+            guard let panel = EditorHoverPopover(owner: owner, appearance: owner.effectiveAppearance, anchor: anchor,
+                                                  text: attributed, onNavigate: { _ in }, onEnter: {}, onExit: {}),
+                  let view = panel.window.contentView,
+                  let text = descend(view, matching: { $0.identifier?.rawValue == "EditorLanguageHoverText" }) as? NSTextView
+            else { throw Failure("lay out a fenced code hover") }
+            defer { panel.close(restoreFocus: false) }
+            try capture(view, id)
+            let type = (text.string as NSString).range(of: "(type)")
+            try expect(type.location != NSNotFound, "show the type below the code")
+            let first = text.firstRect(forCharacterRange: NSRange(location: 0, length: 1), actualRange: nil)
+            let last = text.firstRect(forCharacterRange: type, actualRange: nil)
+            insets.append((panel.frame.maxY - first.maxY, last.minY - panel.frame.minY))
+            hasCodeBackground = hasCodeBackground || attributed.attribute(.backgroundColor, at: 0, effectiveRange: nil) != nil
+            let lineBreak = (code as NSString).range(of: "\n")
+            if lineBreak.location != NSNotFound {
+                let next = text.firstRect(forCharacterRange: NSRange(location: NSMaxRange(lineBreak), length: 1), actualRange: nil)
+                codeLineGap = first.minY - next.maxY
+            }
+        }
+        try expect(insets.allSatisfy { abs($0.top - $0.bottom) < 2 }, "fit the hover with balanced vertical padding (\(insets))")
+        try expect(!hasCodeBackground, "avoid text background stripes in fenced code")
+        try expect(codeLineGap.map { abs($0) < 1 } == true, "keep consecutive code lines at the normal line height")
     }
 
     private static func checkHoverDefinitionLink(in document: DocumentWindow, word: NSRange, file: URL, lineOffset: Int,

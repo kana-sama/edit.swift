@@ -1297,9 +1297,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case "lsp":
             try await LanguageServerCheck.run(in: self, document: document, capture: { window in
                 try self.checkWindow(window, screenshot: screenshot)
-            }, captureHover: { view in
+            }, captureHover: { view, suffix in
                 guard let screenshot else { return }
-                let file = URL(fileURLWithPath: screenshot).deletingPathExtension().path + "-hover.png"
+                let file = URL(fileURLWithPath: screenshot).deletingPathExtension().path + "-" + suffix + ".png"
                 try self.captureCheckView(view, screenshot: file)
             }, captureServers: { view, toggle in
                 guard let screenshot else { return }
