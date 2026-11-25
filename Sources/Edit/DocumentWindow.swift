@@ -761,7 +761,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if markdownPreview != nil {
             return command == .find || command == .next || command == .previous || command == .toggleSidebar
         }
-        if !hasTextDocument { return command == .toggleSidebar }
+        if !hasTextDocument { return command == .toggleSidebar || (command == .find && folderURL != nil) }
         if !hasEditableTextDocument && (command == .replace || command == .toggleReplace) { return false }
         return sidebar.canPerformFind(command)
     }
@@ -2917,7 +2917,6 @@ extension DocumentWindow {
             if isCurrent(), !Task.isCancelled { await showError("Could Not Prepare Markdown Preview", detail: error.localizedDescription) }
             return nil
         }
-        sidebar.searchDocumentPresented()
     }
 
     private func presentMarkdownOpening(_ prepared: PreparedMarkdownOpening) {
@@ -2945,6 +2944,7 @@ extension DocumentWindow {
             if focus { focusContent() }
             restoreEditorPosition(position, showingMarkdownPreview: markdownLink?.showsPreview)
         }
+        sidebar.searchDocumentPresented()
     }
 
     private func resetMarkdownView(keepingPresentation: Bool = false) {
