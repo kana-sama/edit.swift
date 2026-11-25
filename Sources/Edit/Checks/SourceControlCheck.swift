@@ -789,17 +789,74 @@ enum SourceControlCheck {
         let diffPoint = format.convert(NSPoint(x: diffFrame.midX, y: diffFrame.midY), to: nil)
         try expect(EditApplication.clickCursor(in: document.window, at: diffPoint) === NSCursor.pointingHand,
                    "show the pointing hand over a conflict format")
-        format.buttonForCheck(at: 1).performClick(nil)
-        try expect(format.selectedSegment == 0, "keep Diff selected until the Snapshot text is ready")
-        try await waitFor("switch all open conflict blocks to Snapshot") {
-            let current = document.displayedConflicts
-            return current.count == 2 && current.allSatisfy { $0.style == .snapshot }
+        func checkDimSlide(to style: JJConflict.Style, select: () throws -> Void) async throws {
+            let window = document.window
+            let frame = window.frame
+            window.setFrameOrigin(NSPoint(x: -10_000, y: -10_000))
+            window.orderBack(nil)
+            defer {
+                window.orderOut(nil)
+                window.setFrame(frame, display: false)
+            }
+            window.layoutIfNeeded()
+            CATransaction.flush()
+            let formatX = format.convert(format.bounds, to: nil).minX
+            let navigationX = navigation.convert(navigation.bounds, to: nil).minX
+            let startWidth = panel.intrinsicContentSize.width
+            let showing = style == .diff
+            try select()
+            try await waitFor("switch both conflict blocks to \(style)") {
+                let current = document.displayedConflicts
+                return current.count == 2 && current.allSatisfy { $0.style == style }
+            }
+            window.layoutIfNeeded()
+            let previous = showing ? JJConflict.Style.snapshot : .diff
+            try expect(format.isEnabled && format.selectedSegment == style.rawValue &&
+                       format.hasLocalSlideForCheck(from: previous.rawValue, to: style.rawValue),
+                       "slide the selection within the control as the conflict text updates")
+            try expect(pending.isEnabled == showing, "disable Dim as soon as Snapshot appears")
+            if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                guard let clip = pending.superview, let layer = pending.layer,
+                      let animation = layer.animation(forKey: "dimSlide") as? CABasicAnimation,
+                      let displacement = animation.fromValue as? CGFloat else {
+                    throw Failure("start a native Dim slide when the new format appears")
+                }
+                let edge = panel.convert(format.bounds, from: format).minX
+                try expect(abs(animation.duration - 0.160) < 0.001 &&
+                           abs(displacement - clip.bounds.width * (showing ? 1 : -1)) < 0.5 &&
+                           clip.clipsToBounds && abs(clip.frame.maxX - edge) < 0.5,
+                           "slide Dim for 160 ms and clip it at the format control's edge")
+                CATransaction.flush()
+                var sawPartialButton = false
+                let deadline = ContinuousClock.now + .milliseconds(450)
+                repeat {
+                    if let painted = layer.presentation()?.frame {
+                        let exposed = clip.bounds.intersection(painted).width
+                        sawPartialButton = sawPartialButton || (exposed > 1 && exposed < pending.bounds.width - 1)
+                    }
+                    try expect(abs(format.convert(format.bounds, to: nil).minX - formatX) < 1,
+                               "keep the active format control anchored while Dim slides")
+                    if sawPartialButton && layer.animation(forKey: "dimSlide") == nil { break }
+                    try await Task.sleep(for: .milliseconds(12))
+                } while ContinuousClock.now < deadline
+                try expect(sawPartialButton, "paint a partially revealed Dim button during the slide")
+            }
+            try await waitFor("settle Dim and release its space in Snapshot") { pending.isHidden == !showing }
+            window.layoutIfNeeded()
+            let endWidth = panel.intrinsicContentSize.width
+            let endNavigationX = navigation.convert(navigation.bounds, to: nil).minX
+            try expect(showing ? endWidth > startWidth : endWidth < startWidth,
+                       "reserve Dim's width only in Diff after the slide")
+            try expect(abs(format.convert(format.bounds, to: nil).minX - formatX) < 1 &&
+                       abs(endNavigationX - navigationX - (startWidth - endWidth)) < 1,
+                       "move only navigation to make room beside the anchored format control")
+        }
+        try await checkDimSlide(to: .snapshot) {
+            format.buttonForCheck(at: 1).performClick(nil)
+            try expect(format.selectedSegment == 0 && editor.string == original && !pending.isHidden,
+                       "keep Diff text and its controls together while preparing Snapshot")
         }
         let snapshotBlocks = document.displayedConflicts
-        document.window.layoutIfNeeded()
-        try expect(format.isEnabled && format.selectedSegment == 1 && format.hasLocalSlideForCheck(from: 0, to: 1),
-                   "slide the selection from Diff to Snapshot within the control when the text updates")
-        try expect(!pending.isEnabled && pending.isHidden, "limit the dim toggle to Diff")
         try checkConflictColors(snapshotBlocks[0], in: editor)
         try expect(zip(snapshotBlocks, originalBlocks).allSatisfy { $0.sides == $1.sides },
                    "retain each side when changing the editable representation")
@@ -818,8 +875,8 @@ enum SourceControlCheck {
         }
         undo.undo()
         try await waitFor("undo a resolution and recover all three sides") { document.displayedConflicts == snapshotBlocks }
-        undo.undo()
-        try await waitFor("undo a format switch") { editor.string == original && format.isEnabled }
+        try await checkDimSlide(to: .diff) { undo.undo() }
+        try expect(editor.string == original, "restore the Diff text after undoing the format switch")
         try expect(pending.isEnabled && pending.state == .on, "restore the toggle when returning to Diff")
         pending.performClick(nil)
         reveal(originalBlocks[0].range)

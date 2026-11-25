@@ -17,6 +17,8 @@ final class JJConflictPanel: NSView {
     private static let height = ModeSelector.height
     private static let spacing: CGFloat = 4
     private static let controlFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+    private static let dimSlideDuration: TimeInterval = 0.160
+    private static let dimSlideKey = "dimSlide"
 
     var onNavigate: ((Int) -> Void)?
     var onChangeStyle: ((JJConflict.Style) -> Void)?
@@ -33,10 +35,13 @@ final class JJConflictPanel: NSView {
     private let format = ModeSelector(["Diff", "Snapshot"])
     private let formatMenu = NSPopUpButton(frame: .zero, pullsDown: false)
     private let formatDisplay = NSMenuItem(title: "Format", action: nil, keyEquivalent: "")
+    private let dimClip = NSView()
     private let pending = NSButton()
     private let pendingCell = ConflictDimmingCell()
     private var selectedFormat: JJConflict.Style?
     private var showsDim = false
+    private var closingDim = false
+    private var dimTransition: Task<Void, Never>?
     private var current = false
 
     init() {
@@ -50,6 +55,7 @@ final class JJConflictPanel: NSView {
         navigation.cornerRadius = ModeSelector.cornerRadius
         navigation.fillColor = .labelColor.withAlphaComponent(0.10)
         navigation.contentViewMargins = .zero
+        navigation.wantsLayer = true
         navigation.setAccessibilityLabel("Navigate conflicts")
         configureNavigation(previous, symbol: "chevron.up", name: "Previous Conflict", identifier: "JujutsuPreviousConflict", offset: -1)
         configureNavigation(next, symbol: "chevron.down", name: "Next Conflict", identifier: "JujutsuNextConflict", offset: 1)
@@ -73,6 +79,9 @@ final class JJConflictPanel: NSView {
         formatMenu.target = self
         formatMenu.action = #selector(changeStyleFromMenu)
 
+        dimClip.clipsToBounds = true
+        dimClip.wantsLayer = true
+        dimClip.layer?.masksToBounds = true
         pending.identifier = .init("JujutsuPendingChanges")
         pending.cell = pendingCell
         pending.setButtonType(.pushOnPushOff)
@@ -83,13 +92,18 @@ final class JJConflictPanel: NSView {
         pending.setAccessibilityLabel("Dim resolved diff fragments")
         pending.target = self
         pending.action = #selector(changePending)
+        pending.wantsLayer = true
+        dimClip.addSubview(pending)
 
-        for control in [navigation as NSView, pending, format, formatMenu] { addSubview(control) }
+        for control in [dimClip, navigation, format, formatMenu] { addSubview(control) }
+        pending.setAccessibilityElement(false)
         updatePresentation()
         suspend()
     }
 
     required init?(coder: NSCoder) { fatalError("Conflict panels are created in code.") }
+
+    deinit { dimTransition?.cancel() }
 
     override var intrinsicContentSize: NSSize {
         NSSize(width: width(for: presentation), height: Self.height)
@@ -97,7 +111,7 @@ final class JJConflictPanel: NSView {
 
     func width(for presentation: Presentation) -> CGFloat {
         navigationWidth(for: presentation) + Self.spacing + formatWidth(for: presentation)
-            + (showsDim ? Self.spacing + dimWidth(for: presentation) : 0)
+            + (showsDim || closingDim ? dimTravel(for: presentation) : 0)
     }
 
     override func layout() {
@@ -105,20 +119,18 @@ final class JJConflictPanel: NSView {
         let y = (bounds.height - Self.height) / 2
         let navWidth = navigationWidth(for: presentation)
         let arrow = arrowWidth(for: presentation)
-        navigation.frame = NSRect(x: 0, y: y, width: navWidth, height: Self.height)
+        let dimSpace = showsDim || closingDim ? dimTravel(for: presentation) : 0
+        navigation.frame = NSRect(x: closingDim ? dimSpace : 0, y: y, width: navWidth, height: Self.height)
         previous.frame = NSRect(x: 0, y: 0, width: arrow, height: Self.height)
         status.frame = NSRect(x: arrow, y: (Self.height - status.intrinsicContentSize.height) / 2,
                               width: navWidth - arrow * 2, height: status.intrinsicContentSize.height)
         next.frame = NSRect(x: navWidth - arrow, y: 0, width: arrow, height: Self.height)
 
-        var x = navWidth + Self.spacing
-        if showsDim {
-            let dimWidth = dimWidth(for: presentation)
-            pending.frame = NSRect(x: x, y: y, width: dimWidth, height: Self.height)
-            x += dimWidth + Self.spacing
-        }
+        let x = navWidth + Self.spacing
+        dimClip.frame = NSRect(x: x, y: y, width: dimSpace, height: Self.height)
+        pending.frame = NSRect(x: showsDim ? 0 : dimSpace, y: 0, width: dimWidth(for: presentation), height: Self.height)
         let formatControl: NSControl = presentation == .segments ? format : formatMenu
-        formatControl.frame = NSRect(x: x, y: y, width: formatWidth(for: presentation), height: Self.height)
+        formatControl.frame = NSRect(x: x + dimSpace, y: y, width: formatWidth(for: presentation), height: Self.height)
     }
 
     private func arrowWidth(for presentation: Presentation) -> CGFloat {
@@ -131,6 +143,10 @@ final class JJConflictPanel: NSView {
 
     private func dimWidth(for presentation: Presentation) -> CGFloat {
         pendingCell.width(for: presentation.dimTitle)
+    }
+
+    private func dimTravel(for presentation: Presentation) -> CGFloat {
+        dimWidth(for: presentation) + Self.spacing
     }
 
     private func formatWidth(for presentation: Presentation) -> CGFloat {
@@ -160,10 +176,13 @@ final class JJConflictPanel: NSView {
     }
 
     private func updatePresentation() {
+        // The compact control can have a different travel distance during live resizing.
+        navigation.layer?.removeAnimation(forKey: Self.dimSlideKey)
+        pending.layer?.removeAnimation(forKey: Self.dimSlideKey)
         format.isHidden = presentation != .segments
         formatMenu.isHidden = presentation == .segments
         formatMenu.imagePosition = presentation == .compactMenu ? .imageOnly : .noImage
-        pending.isHidden = !showsDim
+        pending.isHidden = !showsDim && !closingDim
         pending.title = presentation.dimTitle
         pending.imagePosition = presentation == .compactMenu ? .imageOnly : .imageLeading
         updateFormatSelection()
@@ -189,19 +208,33 @@ final class JJConflictPanel: NSView {
     func update(_ conflicts: [JJConflict], selected index: Int, hasDraft: Bool, pendingChanges: Bool, canShowPending: Bool) {
         guard conflicts.indices.contains(index) else { return }
         let oldWidth = width(for: presentation)
+        let style = conflicts[index].style
+        let showDim = style == .diff
+        let visibilityChanged = showsDim != showDim
+        let animateDim = visibilityChanged && window != nil && !isHiddenOrHasHiddenAncestor &&
+            !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let start = animateDim ? dimSlideStart() : nil
+        if visibilityChanged {
+            dimTransition?.cancel()
+            dimTransition = nil
+            navigation.layer?.removeAnimation(forKey: Self.dimSlideKey)
+            pending.layer?.removeAnimation(forKey: Self.dimSlideKey)
+            showsDim = showDim
+            closingDim = animateDim && !showDim
+            pending.isHidden = !showsDim && !closingDim
+            pending.setAccessibilityElement(showsDim)
+            needsLayout = true
+        }
         let count = "\(index + 1)/\(conflicts.count)"
         if status.stringValue != count {
             status.stringValue = count
             status.setAccessibilityLabel("Conflict \(index + 1) of \(conflicts.count)")
         }
-        let style = conflicts[index].style
         let newFormat = style != .git && conflicts.allSatisfy { $0.style == style } ? style : nil
         if selectedFormat != newFormat {
             selectedFormat = newFormat
             updateFormatSelection()
         }
-        showsDim = style == .diff
-        pending.isHidden = !showsDim
         let canChangeFormat = !hasDraft && conflicts.allSatisfy(\.canChangeStyle)
         let formatHelp = hasDraft ? "Resolve or undo the snapshot edits to switch conflict format." : nil
         for control in [format as NSControl, formatMenu] {
@@ -212,13 +245,66 @@ final class JJConflictPanel: NSView {
         previous.isEnabled = conflicts.count > 1
         next.isEnabled = conflicts.count > 1
         pending.state = pendingChanges ? .on : .off
-        pending.isEnabled = canShowPending
+        pending.isEnabled = showsDim && canShowPending
         updatePendingHelp()
         current = true
-        if oldWidth != width(for: presentation) {
-            invalidateIntrinsicContentSize()
-            needsLayout = true
-            onPreferredSizeChange?()
+        preferredSizeChanged(from: oldWidth)
+        if let start { slideDim(from: start) }
+    }
+
+    private func preferredSizeChanged(from oldWidth: CGFloat) {
+        guard oldWidth != width(for: presentation) else { return }
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+        onPreferredSizeChange?()
+    }
+
+    private func dimSlideStart() -> (navigation: CGFloat, button: CGFloat) {
+        let end: CGFloat = showsDim ? 0 : 1
+        let travel = dimTravel(for: presentation)
+        func fraction(_ view: NSView) -> CGFloat {
+            guard let layer = view.layer, layer.animation(forKey: Self.dimSlideKey) != nil,
+                  let x = layer.presentation()?.frame.minX else { return end }
+            return min(1, max(0, x / travel))
+        }
+        return (fraction(navigation), fraction(pending))
+    }
+
+    private func slideDim(from start: (navigation: CGFloat, button: CGFloat)) {
+        window?.layoutIfNeeded()
+        layoutSubtreeIfNeeded()
+        let travel = dimTravel(for: presentation)
+        let end: CGFloat = showsDim ? 0 : 1
+        let duration = Self.dimSlideDuration
+        let navigationDuration = duration * 0.8
+        let navigationDelay = showsDim ? 0 : duration - navigationDuration
+        let now = CACurrentMediaTime()
+
+        func slide(_ view: NSView, from fraction: CGFloat, duration: TimeInterval, delay: TimeInterval = 0) {
+            guard let layer = view.layer, fraction != end else { return }
+            let animation = CABasicAnimation(keyPath: "position.x")
+            animation.isAdditive = true
+            animation.fromValue = (fraction - end) * travel
+            animation.toValue = 0
+            animation.beginTime = layer.convertTime(now, from: nil) + delay
+            animation.duration = duration
+            animation.timingFunction = CAMediaTimingFunction(controlPoints: 0.24, 0.74, 0.26, 1)
+            animation.fillMode = .backwards
+            layer.add(animation, forKey: Self.dimSlideKey)
+        }
+        slide(navigation, from: start.navigation, duration: navigationDuration, delay: navigationDelay)
+        slide(pending, from: start.button, duration: duration)
+
+        guard closingDim else { return }
+        // Keep the toolbar item wide while Dim slides under the stationary format control.
+        dimTransition = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(duration))
+            guard let self, !Task.isCancelled else { return }
+            let oldWidth = width(for: presentation)
+            closingDim = false
+            pending.isHidden = true
+            dimTransition = nil
+            preferredSizeChanged(from: oldWidth)
         }
     }
 
