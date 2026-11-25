@@ -563,12 +563,19 @@ enum FindCheck {
         replacement.insertText("digest", replacementRange: NSRange(location: 0, length: replacement.string.utf16.count))
         let table = try require(descendant(of: sidebar, type: SidebarActionResultTable.self), "Find has a native results table")
         try await waitUntil("one result per long source line") { table.numberOfRows == lines.count }
+        let group = try require(descendant(of: sidebar, type: SidebarResultGroupHeader.self), "find the Search file heading")
+        let groupIcon = try require(group.subviews.first { $0 is NSImageView }, "find the Search file icon")
+        let groupBadge = try require(group.subviews.first { $0 is NSBox && !$0.isHidden }, "find the Search count badge")
         table.selectRowIndexes(IndexSet(integer: 4), byExtendingSelection: false)
         window.layoutIfNeeded()
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         for width in [280.0, split.splitViewItems[0].minimumThickness] {
             split.splitView.setPosition(width, ofDividerAt: 0)
             window.layoutIfNeeded()
+            let iconLeft = sidebar.convert(groupIcon.bounds, from: groupIcon).minX
+            let badgeRight = sidebar.bounds.maxX - sidebar.convert(groupBadge.bounds, from: groupBadge).maxX
+            try expect(abs(iconLeft - 10) < 1 && abs(badgeRight - 10) < 1,
+                       "align the Search file heading with the controls (icon \(iconLeft), badge \(badgeRight))")
             let cell = try require(table.view(atColumn: 0, row: 4, makeIfNecessary: true) as? SidebarActionResultCell,
                                    "a visible match has a result row")
             cell.layoutSubtreeIfNeeded()

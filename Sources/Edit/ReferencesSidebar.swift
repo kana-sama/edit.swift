@@ -12,7 +12,7 @@ struct ReferenceResult: Sendable {
 @MainActor
 final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private enum Row {
-        case folder(URL, depth: Int)
+        case folder(URL, count: Int, depth: Int)
         case file(URL, count: Int, depth: Int)
         case reference(ReferenceResult, depth: Int)
     }
@@ -44,7 +44,7 @@ final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDeleg
             return false
         }
         table.onClickGroup = { [weak self] row in
-            guard let self, case .folder(let folder, _) = self.row(at: row) else { return false }
+            guard let self, case .folder(let folder, _, _) = self.row(at: row) else { return false }
             table.window?.makeFirstResponder(table)
             toggleFolder(folder)
             return true
@@ -75,8 +75,8 @@ final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDeleg
         header.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(header)
         NSLayoutConstraint.activate([
-            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
-            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
+            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: SidebarResults.panelInset),
+            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -SidebarResults.panelInset),
             header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 6),
             header.heightAnchor.constraint(equalToConstant: SidebarResults.rowHeight),
             scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 5),
@@ -122,15 +122,21 @@ final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDeleg
 
     private func buildRows() {
         rows.removeAll(keepingCapacity: true)
-        let files = Dictionary(grouping: results, by: { $0.url.standardizedFileURL }).sorted { $0.key.path < $1.key.path }
+        let files = Dictionary(grouping: results, by: { $0.url.standardizedFileURL })
+            .sorted { $0.key.path < $1.key.path }
+            .map { file, hits in (file: file, hits: hits, folders: treeMode ? ancestors(of: file) : []) }
+        var folderCounts: [URL: Int] = [:]
+        for (_, hits, folders) in files {
+            for folder in folders { folderCounts[folder, default: 0] += hits.count }
+        }
         var previous: [URL] = []
-        for (file, hits) in files {
-            let folders = treeMode ? ancestors(of: file) : []
+        for (file, hits, folders) in files {
             let openFolders = folders.prefix { !collapsedFolders.contains($0) }
             let visibleCount = min(openFolders.count + 1, folders.count)
             let shared = zip(previous, folders).prefix { $0 == $1 }.count
             for depth in shared..<max(shared, visibleCount) {
-                rows.append(.folder(folders[depth], depth: depth))
+                let folder = folders[depth]
+                rows.append(.folder(folder, count: folderCounts[folder, default: 0], depth: depth))
             }
             previous = folders
             guard openFolders.count == folders.count else { continue }
@@ -142,9 +148,10 @@ final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDeleg
 
     private func ancestors(of file: URL) -> [URL] {
         guard let root, WorktreeFileOperations.contains(file, in: root) else { return [] }
+        let rootPath = WorktreeFileOperations.path(root)
         var folders: [URL] = []
         var folder = file.deletingLastPathComponent()
-        while folder.path != root.path {
+        while WorktreeFileOperations.path(folder) != rootPath {
             folders.append(folder)
             let parent = folder.deletingLastPathComponent()
             guard parent.path != folder.path else { return [] }
@@ -177,19 +184,21 @@ final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDeleg
 
     private func folderRow(for folder: URL) -> Int? {
         rows.firstIndex { row in
-            guard case .folder(let url, _) = row else { return false }
+            guard case .folder(let url, _, _) = row else { return false }
             return url == folder
         }
     }
 
     private func navigateTree(expand: Bool) -> Bool {
-        guard case .folder(let folder, _) = row(at: table.selectedRow) else { return false }
+        guard case .folder(let folder, _, _) = row(at: table.selectedRow) else { return false }
         if collapsedFolders.contains(folder) == expand { toggleFolder(folder) }
         return true
     }
 
     private func dismiss(_ index: Int) {
         guard let removed = rows.indices.first(where: { reference(at: $0)?.index == index }) else { return }
+        let nextReference = rows.indices.dropFirst(removed + 1).lazy.compactMap { self.reference(at: $0) }.first
+            ?? rows.indices.prefix(removed).reversed().lazy.compactMap { self.reference(at: $0) }.first
         let selection = row(at: table.selectedRow)
         let wasPreviewing = isPreviewing
         results.removeAll { $0.index == index }
@@ -197,13 +206,14 @@ final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDeleg
         buildRows()
         let retained: Int?
         switch selection {
-        case .folder(let folder, _): retained = folderRow(for: folder)
+        case .folder(let folder, _, _): retained = folderRow(for: folder)
         case .reference(let reference, _) where reference.index != index:
             retained = rows.indices.first { self.reference(at: $0)?.index == reference.index }
         default: retained = nil
         }
-        let replacement = retained ?? rows.indices.first { $0 >= removed && reference(at: $0) != nil }
-            ?? rows.indices.last { reference(at: $0) != nil }
+        let replacement = retained ?? nextReference.flatMap { next in
+            rows.indices.first { reference(at: $0)?.index == next.index }
+        }
         reload(selecting: replacement)
         if replacement == nil { clearPreview() }
         else if wasPreviewing { revealSelection(previewSelection: true) }
@@ -238,7 +248,7 @@ final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDeleg
 
     private func activateSelection() {
         switch row(at: table.selectedRow) {
-        case .folder(let folder, _): toggleFolder(folder)
+        case .folder(let folder, _, _): toggleFolder(folder)
         case .reference(let result, _):
             isPreviewing = true
             activate?(result, results.map(\.index))
@@ -278,19 +288,16 @@ final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDeleg
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         switch rows[row] {
-        case .folder(let folder, let depth):
-            let identifier = NSUserInterfaceItemIdentifier("ReferenceFolder")
-            let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? ReferenceFolderCell
-                ?? ReferenceFolderCell()
-            cell.identifier = identifier
-            cell.update(folder: folder, depth: depth, expanded: !collapsedFolders.contains(folder))
-            return cell
-        case .file(let file, let count, let depth):
-            let identifier = NSUserInterfaceItemIdentifier("ReferenceFile")
-            let header = tableView.makeView(withIdentifier: identifier, owner: nil) as? SidebarResultFileHeader
-                ?? SidebarResultFileHeader(name: "", detail: "")
+        case .folder(let url, let count, let depth), .file(let url, let count, let depth):
+            let identifier = NSUserInterfaceItemIdentifier("ReferenceGroup")
+            let header = tableView.makeView(withIdentifier: identifier, owner: nil) as? SidebarResultGroupHeader
+                ?? SidebarResultGroupHeader(name: "", detail: "")
             header.identifier = identifier
-            header.updateFile(file.lastPathComponent, url: file)
+            if case .folder = rows[row] {
+                header.updateFolder(url, expanded: !collapsedFolders.contains(url))
+            } else {
+                header.updateFile(url.lastPathComponent, url: url)
+            }
             header.setIndent(depth)
             header.updateCount(count, accessibilityLabel: count == 1 ? "1 reference" : "\(count) references")
             return header
@@ -307,45 +314,5 @@ final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDeleg
             cell.setAccessibilityLabel("Line \(result.line + 1), \(cell.excerpt.stringValue)")
             return cell
         }
-    }
-
-}
-
-@MainActor
-private final class ReferenceFolderCell: NSTableCellView {
-    private let disclosure = NSImageView()
-    private let name = NSTextField(labelWithString: "")
-    private lazy var leading = disclosure.leadingAnchor.constraint(equalTo: leadingAnchor)
-
-    init() {
-        super.init(frame: .zero)
-        disclosure.contentTintColor = .secondaryLabelColor
-        disclosure.setAccessibilityElement(false)
-        name.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
-        name.lineBreakMode = .byTruncatingMiddle
-        for view in [disclosure, name] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(view)
-        }
-        NSLayoutConstraint.activate([
-            leading,
-            disclosure.widthAnchor.constraint(equalToConstant: 16),
-            disclosure.heightAnchor.constraint(equalToConstant: 16),
-            disclosure.centerYAnchor.constraint(equalTo: centerYAnchor),
-            name.leadingAnchor.constraint(equalTo: disclosure.trailingAnchor, constant: 5),
-            name.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10),
-            name.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-    }
-
-    required init?(coder: NSCoder) { nil }
-
-    func update(folder: URL, depth: Int, expanded: Bool) {
-        leading.constant = SidebarResults.fileLeading + SidebarResults.indentation(at: depth)
-        name.stringValue = folder.lastPathComponent
-        disclosure.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
-        toolTip = folder.path
-        setAccessibilityLabel("\(folder.lastPathComponent), \(expanded ? "expanded" : "collapsed")")
     }
 }

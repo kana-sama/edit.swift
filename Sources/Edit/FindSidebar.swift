@@ -8,7 +8,6 @@ enum FindCommand {
 
 @MainActor
 final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-    private static let contentInset: CGFloat = 10
     private unowned let document: DocumentWindow
     private let onReturnFocus: () -> Void
     private var settings: FindSettings {
@@ -22,7 +21,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private let replaceInput = FindInput(name: "Replace")
     private let replaceToggle = NSButton(title: "", target: nil, action: nil)
     private let replaceButton = NSButton(title: "", target: nil, action: nil)
-    private let resultHeader = SidebarResultFileHeader(name: "Untitled", detail: "No results")
+    private let resultHeader = SidebarResultGroupHeader(name: "Untitled", detail: "No results")
     private let results = SidebarActionResultTable()
     private let resultScroll = SidebarActionResultScrollView()
     private let replaceRow = NSStackView()
@@ -246,9 +245,9 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             resultScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 0),
         ])
         for control in [findRow, replaceRow] {
-            control.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -2 * Self.contentInset).isActive = true
+            control.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -2 * SidebarResults.panelInset).isActive = true
         }
-        resultHeader.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        resultHeader.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -2 * SidebarResults.rowMargin).isActive = true
         resultScroll.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         resultScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
         replaceButton.isEnabled = false

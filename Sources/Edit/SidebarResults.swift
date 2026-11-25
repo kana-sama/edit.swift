@@ -4,8 +4,9 @@ import AppKit
 enum SidebarResults {
     static let rowHeight: CGFloat = 24
     static let fileGroupSpacing: CGFloat = 8
-    static let fileLeading: CGFloat = 10
-    static let excerptLeading: CGFloat = 36
+    static let panelInset: CGFloat = 10
+    static let rowMargin: CGFloat = 6
+    static let excerptLeading: CGFloat = 30
 
     static func indentation(at depth: Int) -> CGFloat { CGFloat(min(depth, 6)) * 12 }
 
@@ -163,13 +164,16 @@ class SidebarResultTable: NSTableView {
 }
 
 @MainActor
-final class SidebarResultFileHeader: NSTableCellView {
+final class SidebarResultGroupHeader: NSTableCellView {
+    private static let horizontalInset = SidebarResults.panelInset - SidebarResults.rowMargin
+    private static let badgePadding: CGFloat = 5
     private let name: NSTextField
     private let icon = NSImageView()
     private let detail: NSTextField
     private let badge = NSBox()
     private var file: URL?
     private var language: String?
+    private var isFolder = false
     private lazy var iconLeading = icon.leadingAnchor.constraint(equalTo: leadingAnchor)
 
     var detailText: String {
@@ -214,10 +218,10 @@ final class SidebarResultFileHeader: NSTableCellView {
             self.name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5),
             self.name.centerYAnchor.constraint(equalTo: centerYAnchor),
             self.name.trailingAnchor.constraint(lessThanOrEqualTo: self.detail.leadingAnchor, constant: -5),
-            self.detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -15),
+            self.detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.horizontalInset - Self.badgePadding),
             self.detail.centerYAnchor.constraint(equalTo: centerYAnchor),
-            badge.leadingAnchor.constraint(equalTo: self.detail.leadingAnchor, constant: -5),
-            badge.trailingAnchor.constraint(equalTo: self.detail.trailingAnchor, constant: 5),
+            badge.leadingAnchor.constraint(equalTo: self.detail.leadingAnchor, constant: -Self.badgePadding),
+            badge.trailingAnchor.constraint(equalTo: self.detail.trailingAnchor, constant: Self.badgePadding),
             badge.centerYAnchor.constraint(equalTo: self.detail.centerYAnchor),
             badge.heightAnchor.constraint(equalToConstant: 16),
         ])
@@ -228,6 +232,11 @@ final class SidebarResultFileHeader: NSTableCellView {
     required init?(coder: NSCoder) { fatalError("Sidebar result headers are created in code.") }
 
     func updateFile(_ title: String, url: URL?, language: String? = nil) {
+        if isFolder {
+            isFolder = false
+            icon.contentTintColor = nil
+            setAccessibilityLabel(nil)
+        }
         name.stringValue = title
         file = url
         self.language = language
@@ -235,8 +244,18 @@ final class SidebarResultFileHeader: NSTableCellView {
         updateIcon()
     }
 
+    func updateFolder(_ url: URL, expanded: Bool) {
+        isFolder = true
+        name.stringValue = url.lastPathComponent
+        icon.contentTintColor = .secondaryLabelColor
+        icon.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+        toolTip = url.path
+        setAccessibilityLabel("\(name.stringValue), \(expanded ? "expanded" : "collapsed")")
+    }
+
     func setIndent(_ depth: Int) {
-        iconLeading.constant = SidebarResults.fileLeading + SidebarResults.indentation(at: depth)
+        iconLeading.constant = Self.horizontalInset + SidebarResults.indentation(at: depth)
     }
 
     func updateCount(_ count: Int, accessibilityLabel: String) {
@@ -247,7 +266,7 @@ final class SidebarResultFileHeader: NSTableCellView {
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        updateIcon()
+        if !isFolder { updateIcon() }
     }
 
     private func updateIcon() {
@@ -260,7 +279,7 @@ final class SidebarResultRow: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         let color: NSColor = isEmphasized ? .selectedContentBackgroundColor : .unemphasizedSelectedContentBackgroundColor
         color.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 0), xRadius: 8, yRadius: 8).fill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: SidebarResults.rowMargin, dy: 0), xRadius: 8, yRadius: 8).fill()
     }
 }
 

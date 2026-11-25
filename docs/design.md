@@ -28,7 +28,7 @@ Use the same revision hover card in the Jujutsu graph and on the Read-only statu
 
 ## Sidebar results
 
-Reuse the editor’s existing result component and interaction patterns for new lists of document locations. Match Search’s row spacing, excerpts, highlight treatment, and focus behavior. Place the file icon and name at the leading edge, indent excerpts slightly past the filename, and give separate file groups 8 points of additional space. Keep the full path in the heading tooltip and show the group count in a subdued numeric badge. When file groups are always open, treat each file heading as a label and skip it in mouse and keyboard selection.
+Reuse the editor’s existing result component and interaction patterns for new lists of document locations. Match Search’s row spacing, excerpts, highlight treatment, and focus behavior. Align top-level file icons and folder chevrons with the Search controls and Worktree's first level. Indent excerpts slightly past the filename and give separate file groups 8 points of additional space. Keep the full path in the heading tooltip and align subdued count badges 10 points from the trailing edge. When file groups are always open, treat each file heading as a label and skip it in mouse and keyboard selection.
 
 Clicking a result or moving with the arrow keys selects it and reveals its location while focus stays in the list. Space and Return activate the result and give focus to the editor. Keep the selected row available for subsequent navigation. When the preview goes to another file, update the document and highlighted location together, and apply the latest selection if several previews overlap.
 
