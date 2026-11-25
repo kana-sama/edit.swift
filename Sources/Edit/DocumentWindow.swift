@@ -103,6 +103,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     enum CloseDestination {
         case window
+        case workspace
         case buffer(FileBuffer?, focusEditor: Bool = true, scratch: ScratchFile? = nil, folder: URL? = nil)
         case preview(OpenFilePreview, focusEditor: Bool, folder: URL? = nil)
         case sourceControlPreview(SourceControlRevisionPreview, selection: SourceControlFile)
@@ -167,6 +168,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     #if EDIT_AGENT_CHECKS
     var beforePresentMarkdownForCheck: ((MarkdownPreviewView) async -> Void)?
     var beforeInstallFileForCheck: ((FileBuffer) async -> Void)?
+    var beforeCloseWorkspaceForCheck: (() async -> Void)?
     #endif
     private var emptyFolderView: EmptyFolderView?
     private var sourceControlRevision: SourceControlRevisionPreview?
@@ -342,6 +344,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     var isBusy: Bool { activity.isBusy }
     var canReplaceBuffer: Bool { !isBusy && window.attachedSheet == nil }
     var canCloseDocument: Bool { canReplaceBuffer && !app.isQuitting }
+    var canCloseWorkspace: Bool { folderURL != nil && canCloseDocument }
     var canToggleWordWrap: Bool {
         hasTextDocument && window.attachedSheet == nil && !app.isQuitting
     }
@@ -1848,6 +1851,18 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         window.performClose(nil)
     }
 
+    func closeWorkspace() {
+        guard canCloseWorkspace, let folder = folderURL else { return }
+        if sourceControlRevision != nil || displayedFileURL.map({ WorktreeFileOperations.contains($0, in: folder) }) == true {
+            requestClose(.workspace)
+        } else {
+            _ = beginOpenRequest()
+            sidebar.hideWorkspacePanel()
+            setFolder(nil)
+            app.workspaceDidClose(in: self)
+        }
+    }
+
     private func requestClose(_ destination: CloseDestination) {
         activity.beginClose(invalidateOpenRequests: true)
         Task { await closeBuffer(destination: destination) }
@@ -1887,7 +1902,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             editor.isEditable = hasEditableTextDocument && wasEditable
             if conflictPresentationCurrent { updateConflictActions() }
             activity.endReplacement()
-            if folderURL != previousFolder { sidebar.folderChanged() }
+            if folderURL != previousFolder {
+                sidebar.folderChanged()
+                if folderURL == nil { app.workspaceDidClose(in: self) }
+            }
             autosave.resume()
             fileRefresh.resume()
             scheduleSourceControlFileTransition()
@@ -1937,6 +1955,20 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
         let previousResource = navigationResource
         switch destination {
+        case .workspace:
+            #if EDIT_AGENT_CHECKS
+            if let beforeCloseWorkspaceForCheck {
+                await beforeCloseWorkspaceForCheck()
+                guard isCurrent(), !Task.isCancelled else { return false }
+            }
+            #endif
+            rememberFilePosition()
+            rememberFileUndoHistory()
+            app.recordClosedFile(in: self)
+            sidebar.hideWorkspacePanel()
+            folderURL = nil
+            installUntitled()
+            focusContent()
         case .buffer(let file, let focusEditor, let scratch, let folder):
             let restoreFocus = focusEditor || contentHasFocus
             editor.breakUndoCoalescing()
@@ -1986,12 +2018,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             } else {
                 rememberFilePosition()
                 rememberFileUndoHistory()
-                installContent(in: folder) {
-                    removeSourceControlRevision()
-                    removeFilePreview()
-                    removeEmptyFolder()
-                    resetDocument()
-                }
+                installContent(in: folder) { installUntitled() }
             }
             autosave.clearFailure()
             finishOpeningPresentation(preparedMarkdown, position: position, focus: restoreFocus, markdownLink: markdownLink)
@@ -2045,6 +2072,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private func installContent(in folder: URL?, _ install: () -> Void) {
         if let folder { folderURL = folder }
         install()
+    }
+
+    private func installUntitled() {
+        removeSourceControlRevision()
+        removeFilePreview()
+        removeEmptyFolder()
+        resetDocument()
     }
 
     func openScratch(_ file: ScratchFile, focusEditor: Bool = true, shouldOpen: @escaping () -> Bool = { true }) async -> Bool {

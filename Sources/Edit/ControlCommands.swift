@@ -33,6 +33,7 @@ struct ControlCommand {
         if action == #selector(Edit.focusSelection(_:)) { return document.canFocusSelection }
         if action == #selector(Edit.exitFocus(_:)) { return document.canExitFocus }
         if action == #selector(Edit.closeDocument(_:)) { return document.canCloseDocument }
+        if action == #selector(Edit.closeWorkspace(_:)) { return document.canCloseWorkspace }
         if action == #selector(Edit.toggleWordWrap(_:)) { return document.canToggleWordWrap }
         if action == #selector(DocumentWindow.performMarkdownTableCommand(_:)) { return document.currentMarkdownTable != nil }
         if documentOnly {
@@ -72,6 +73,10 @@ struct ControlCommand {
         }
         if action == #selector(Edit.closeDocument(_:)) {
             document.closeDocument()
+            return
+        }
+        if action == #selector(Edit.closeWorkspace(_:)) {
+            document.closeWorkspace()
             return
         }
         if action == #selector(Edit.toggleMarkdownPreview(_:)) {

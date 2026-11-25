@@ -443,6 +443,10 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         app.updateJujutsuShortcut()
     }
 
+    func hideWorkspacePanel() {
+        if worktreeVisible || sourceControlVisible { hide() }
+    }
+
     func recheckJujutsuAvailability(_ available: Bool) {
         if mode == .sourceControl, !available { switchToAvailableMode() }
         sidebarHeader?.menu.item(withTitle: SidebarMode.sourceControl.title)?.isEnabled = available

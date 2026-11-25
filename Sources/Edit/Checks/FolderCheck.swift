@@ -2,6 +2,91 @@ import AppKit
 
 @MainActor
 enum FolderCheck {
+    static func checkCloseWorkspace(in app: Edit, capture: (NSWindow, String) throws -> Void) async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "close-workspace-\(UUID())")
+        let folder = root.appending(path: "Project", directoryHint: .isDirectory)
+        let outsideFolder = root.appending(path: "Project Notes", directoryHint: .isDirectory)
+        try makeDirectory(folder)
+        try makeDirectory(outsideFolder)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let inside = try write("Project text\n", to: folder.appending(path: "Readme.txt"))
+        let outside = try write("Separate notes\n", to: outsideFolder.appending(path: "Notes.txt"))
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        let editor = document.editor
+        let window = document.window
+        let canonicalFolder = FileBuffer.canonicalURL(folder)
+        guard let menu = NSApp.mainMenu,
+              let item = menu.item(withTitle: "File")?.submenu?.item(withTitle: "Close Workspace"),
+              let action = item.action,
+              let command = ControlCommand.fromMenu(menu).first(where: { $0.title == "File: Close Workspace" }) else {
+            throw Failure("Close Workspace is in the File menu and Command Mode")
+        }
+        try expect(!app.validateUserInterfaceItem(item) && !command.isAvailable(in: document, focus: editor),
+                   "Close Workspace is unavailable before opening a folder")
+        _ = try await app.openFile(folder, in: document)
+        _ = try await app.openFile(inside, in: document)
+        document.toggleSidebarFocus(.worktree)
+        editor.insertText("Autosaved edit\n", replacementRange: NSRange(location: 0, length: 0))
+        let outgoing = editor.string
+
+        let (pending, release) = AsyncStream<Void>.makeStream()
+        var staged = false
+        document.beforeCloseWorkspaceForCheck = {
+            staged = true
+            for await _ in pending { break }
+        }
+        defer {
+            document.beforeCloseWorkspaceForCheck = nil
+            release.finish()
+        }
+        try expect(app.validateUserInterfaceItem(item) && command.isAvailable(in: document, focus: window.firstResponder) &&
+                   NSApp.sendAction(action, to: item.target, from: item), "run Close Workspace from the File menu")
+        try await waitFor("hold the workspace before installing Untitled") { staged }
+        try capture(window, "pending")
+        try expect(document.folderURL?.path == canonicalFolder.path && window.title == "Project — Readme.txt" &&
+                   document.contentResponder === editor && editor.string == outgoing &&
+                   document.isSidebarVisible && document.sidebarMode == .worktree,
+                   "the pending close keeps the complete project presentation and title")
+        release.finish()
+        try await waitFor("show the standalone editor") { !document.isBusy }
+        try expect(app.documents.contains { $0 === document } && document.sessionDocument().folderPath == nil &&
+                   document.fileURL == nil && document.contentResponder === editor && window.representedURL == nil &&
+                   window.title == "Untitled" && editor.string.isEmpty && editor.isEditable &&
+                   window.firstResponder === editor && !document.isSidebarVisible && !document.canFocusSidebar(.worktree),
+                   "the first standalone presentation is an empty editable Untitled in the same window")
+        try capture(window, "standalone")
+        let saved = try String(contentsOf: inside, encoding: .utf8)
+        try expect(saved == outgoing, "Close Workspace finishes autosave before closing the file")
+        try expect(!app.validateUserInterfaceItem(item) && !command.isAvailable(in: document, focus: editor),
+                   "both command entry points are unavailable in the standalone window")
+
+        _ = try await app.openFile(folder, in: document)
+        try expect(document.fileURL == FileBuffer.canonicalURL(inside), "reopening the folder restores the remembered file")
+        _ = try await app.openFile(outside, in: document)
+        let selection = NSRange(location: 0, length: 8)
+        editor.setSelectedRange(selection)
+        command.run(in: document)
+        try expect(document.folderURL == nil && window.title == "Notes.txt" && editor.selectedRange() == selection &&
+                   document.fileURL == FileBuffer.canonicalURL(outside) && editor.string == "Separate notes\n",
+                   "the command palette closes the folder and preserves an external file and its selection")
+
+        let empty = root.appending(path: "Empty", directoryHint: .isDirectory)
+        try makeDirectory(empty)
+        _ = try await app.openFile(empty, in: document)
+        try expect(document.showsEmptyFolder, "show No File Open before closing the empty folder")
+        command.run(in: document)
+        try expect(document.folderURL == nil && !document.showsEmptyFolder && window.title == "Untitled" &&
+                   editor.isEditable && editor.string.isEmpty, "closing No File Open produces a fresh Untitled")
+
+        _ = try await app.openFile(empty, in: document)
+        await document.newBuffer()
+        editor.insertText("Unsaved draft", replacementRange: NSRange(location: 0, length: 0))
+        command.run(in: document)
+        try expect(document.folderURL == nil && window.title == "Untitled" && window.isDocumentEdited &&
+                   editor.string == "Unsaved draft", "closing the folder preserves an unsaved untitled draft")
+    }
+
     static func run(in app: Edit) async throws -> NSWindow {
         let root = FileManager.default.temporaryDirectory.appending(path: "Folder check #\(UUID())")
         let project = root.appending(path: "Project One")

@@ -166,6 +166,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     receivedInitialSession = true
                     let folderWindow = try await FolderCheck.run(in: self)
                     try checkWindow(folderWindow, screenshot: nil)
+                    try await FolderCheck.checkCloseWorkspace(in: self) { _, _ in }
                     try await HeaderCheck.run(in: self)
                     try await WorktreeCheck.run(in: self)
                     try await checkJJ()
@@ -416,6 +417,14 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     @objc func closeDocument(_ sender: Any?) {
         activeDocument?.closeDocument()
+    }
+
+    @objc func closeWorkspace(_ sender: Any?) {
+        activeDocument?.closeWorkspace()
+    }
+
+    func workspaceDidClose(in document: DocumentWindow) {
+        controlPanel?.folderDidChange(in: document)
     }
 
     @objc func openDocument(_ sender: Any?) {
@@ -717,6 +726,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case #selector(goForward(_:)): return canNavigate(.forward)
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
         case #selector(closeDocument(_:)): return activeDocument?.canCloseDocument ?? false
+        case #selector(closeWorkspace(_:)): return activeDocument?.canCloseWorkspace ?? false
         case #selector(showGoToFile(_:)), #selector(showCommandMode(_:)), #selector(showWorkspaceSymbols(_:)):
             return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(showLanguageModes(_:)), #selector(showDocumentSymbols(_:)):
@@ -1264,6 +1274,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         file.addCommand("Save As…", #selector(saveDocumentAs(_:)), "s", [.command, .shift]).target = self
         file.addCommand("Save as Scratch…", #selector(saveDocumentAsScratch(_:))).target = self
         file.addCommand("Close", #selector(closeDocument(_:)), "w").target = self
+        file.addCommand("Close Workspace", #selector(closeWorkspace(_:))).target = self
         file.addCommand("Reopen Closed File", #selector(reopenClosedFile(_:)), "t", [.command, .shift]).target = self
 
         let edit = addMenu("Edit")
@@ -1380,9 +1391,13 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 try JJInlineDiffCheck.run(in: document)
             }
             try JJEditorCheck.run(in: makeDocument())
-        case "files" where screenshot == nil:
+        case "files":
             _ = try await FilesCheck.run(in: self)
             try await FilesCheck.checkFilePreview(in: self)
+            try await FolderCheck.checkCloseWorkspace(in: self) { window, suffix in
+                let target = screenshot.map { URL(fileURLWithPath: $0).deletingPathExtension().path + "-\(suffix).png" }
+                try checkWindow(window, screenshot: target)
+            }
         case "markdown":
             try await MarkdownCheck.run(in: self, screenshot: screenshot)
         case "control":
