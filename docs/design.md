@@ -22,7 +22,7 @@ Place context-wide status controls at the trailing edge of the relevant header. 
 
 ## Sidebar results
 
-Reuse the editor’s existing result component and interaction patterns for new lists of document locations. Match Search’s row spacing, excerpts, highlight treatment, and focus behavior. Align file icons and names at the leading edge. When file groups are always open, treat each file heading as a label and skip it in mouse and keyboard selection.
+Reuse the editor’s existing result component and interaction patterns for new lists of document locations. Match Search’s row spacing, excerpts, highlight treatment, and focus behavior. Place the file icon and name at the leading edge, indent excerpts slightly past the filename, and give separate file groups 8 points of additional space. Keep the full path in the heading tooltip and show the group count in a subdued numeric badge. When file groups are always open, treat each file heading as a label and skip it in mouse and keyboard selection.
 
 Clicking a result or moving with the arrow keys selects it and reveals its location while focus stays in the list. Space and Return activate the result and give focus to the editor. Keep the selected row available for subsequent navigation. When the preview goes to another file, update the document and highlighted location together, and apply the latest selection if several previews overlap.
 

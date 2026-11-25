@@ -177,6 +177,8 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     private(set) var isVisible = false
     var width = SessionFindSettings.defaultWidth
     private var restoredWorktreeShowsHidden = false
+    private(set) var searchTreeMode = false
+    private(set) var referencesTreeMode = false
 
     private var search: FindSidebar?
     private(set) var worktree: SidebarFileTree?
@@ -208,10 +210,13 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
 
     deinit { scratchReload?.cancel() }
 
-    func restore(mode: SidebarMode?, width: Double, visible: Bool, showsHidden: Bool) {
+    func restore(mode: SidebarMode?, width: Double, visible: Bool, showsHidden: Bool,
+                 searchTreeMode: Bool, referencesTreeMode: Bool) {
         rememberedMode = mode.map(availableMode)
         self.width = width
         restoredWorktreeShowsHidden = showsHidden
+        self.searchTreeMode = searchTreeMode
+        self.referencesTreeMode = referencesTreeMode
         document.updateOccurrenceFindSettings()
         if visible { showCurrentMode() }
     }
@@ -365,14 +370,15 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     }
 
     func showReferences(symbol: String, originURL: URL, originLine: Int, originColumn: Int,
-                        results: [ReferenceResult], preview: @escaping (ReferenceResult) -> Void,
-                        activate: @escaping (ReferenceResult) -> Void, didHide: @escaping () -> Void) {
+                        results: [ReferenceResult], preview: @escaping (ReferenceResult, [Int]) -> Void,
+                        activate: @escaping (ReferenceResult, [Int]) -> Void, didHide: @escaping () -> Void) {
         guard !results.isEmpty else { return }
         let panel: ReferencesSidebar
         if let references {
             panel = references
         } else {
             panel = ReferencesSidebar { [weak self] in self?.returnFocus() }
+            panel.setTreeMode(referencesTreeMode)
             references = panel
             panel.view.isHidden = true
             installContent(panel.view)
@@ -548,6 +554,8 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         switch mode {
         case .search:
             menu.addItem(withTitle: "Refresh Search", action: #selector(refreshSearch(_:)), keyEquivalent: "").target = self
+            menu.addItem(.separator())
+            addTreeMode(to: menu, enabled: searchTreeMode)
         case .worktree:
             guard let worktree, document.folderURL != nil else { return }
             worktree.addRootCreationItems(to: menu)
@@ -560,8 +568,14 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         case .sourceControl:
             menu.addItem(withTitle: "Refresh Changes", action: #selector(refreshSourceControl(_:)), keyEquivalent: "").target = self
         case .references:
-            break
+            addTreeMode(to: menu, enabled: referencesTreeMode)
         }
+    }
+
+    private func addTreeMode(to menu: NSMenu, enabled: Bool) {
+        let item = menu.addItem(withTitle: "Tree Mode", action: #selector(toggleResultTreeMode(_:)), keyEquivalent: "")
+        item.target = self
+        item.state = enabled ? .on : .off
     }
 
     private func installIfNeeded() {
@@ -698,6 +712,17 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     }
 
     @objc private func refreshSearch(_ sender: Any?) { search?.perform(.refresh) }
+
+    @objc private func toggleResultTreeMode(_ sender: Any?) {
+        switch mode {
+        case .search: searchTreeMode.toggle()
+        case .references:
+            referencesTreeMode.toggle()
+            references?.setTreeMode(referencesTreeMode)
+        default: return
+        }
+        updateSidebarMenu()
+    }
 
     @objc private func refreshSourceControl(_ sender: Any?) { sourceControl?.refresh() }
 }

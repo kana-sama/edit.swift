@@ -155,6 +155,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try await BracketCheck.run(in: self)
                     try await OccurrenceCheck.run(in: self)
                     try await FindCheck.run(in: self)
+                    try ReferencesCheck.run(in: makeDocument()) { _, _ in }
                     try await NavigationHistoryCheck.run(in: self)
                     try await FocusCheck.run(in: self)
                     try checkWindow(sample.window, screenshot: arguments.first)
@@ -1400,6 +1401,12 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             }
         case "markdown":
             try await MarkdownCheck.run(in: self, screenshot: screenshot)
+        case "results":
+            try ReferencesCheck.run(in: document) { window, suffix in
+                let target = screenshot.map { URL(fileURLWithPath: $0).deletingPathExtension().path + "-\(suffix).png" }
+                try checkWindow(window, screenshot: target)
+            }
+            try await FindCheck.run(in: self)
         case "control":
             try await ControlSearchCheck.run(in: self) { view in
                 try self.captureCheckView(view, screenshot: screenshot)

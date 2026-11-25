@@ -89,7 +89,7 @@ enum FocusCheck {
         document.findSettings.query = "LOCAL"
         document.findSettings.replacement = "local"
         document.performFind(.replace)
-        let results = try require(descendant(of: window.contentView, type: FindResultsTable.self))
+        let results = try require(descendant(of: window.contentView, type: SidebarActionResultTable.self))
         try await waitFor("Focus Search lists only the two in-scope matches") { results.numberOfRows == 2 }
         document.performFind(.replaceAll)
         try expect(editor.string == lowercased, "Replace All leaves the protected match intact")

@@ -407,10 +407,10 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
             if let navigationOrigin { app.recordNavigation(navigationOrigin, reason: .selection) }
             document.sidebar.showReferences(symbol: symbol, originURL: query.url,
                                             originLine: origin.line, originColumn: origin.character,
-                                            results: results, preview: { [weak self] row in
-                self?.selectReference(matches[row.index], in: matches, symbol: symbol, activate: false)
-            }, activate: { [weak self] row in
-                self?.selectReference(matches[row.index], in: matches, symbol: symbol, activate: true)
+                                            results: results, preview: { [weak self] row, retained in
+                self?.selectReference(matches[row.index], in: retained.map { matches[$0] }, symbol: symbol, activate: false)
+            }, activate: { [weak self] row, retained in
+                self?.selectReference(matches[row.index], in: retained.map { matches[$0] }, symbol: symbol, activate: true)
             }, didHide: { [weak self] in
                 self?.clearReferencePreview()
             })

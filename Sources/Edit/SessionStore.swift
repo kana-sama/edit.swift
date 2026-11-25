@@ -93,6 +93,8 @@ struct SessionDocument: Codable, Sendable {
     var editorPosition: EditorPosition? = nil
     var sidebarMode: SidebarMode? = nil
     var worktreeShowsHidden: Bool? = nil
+    var searchTreeMode: Bool? = nil
+    var referencesTreeMode: Bool? = nil
     var isFilePreview: Bool? = nil
     var showsEmptyFolder: Bool? = nil
     var terminal: DocumentTerminalState? = nil

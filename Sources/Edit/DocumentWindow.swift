@@ -774,7 +774,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if let saved { findSettings = saved.search }
         sidebar.restore(mode: record.sidebarMode ?? (saved == nil ? nil : .search),
                         width: saved?.width ?? SessionFindSettings.defaultWidth, visible: saved?.visible ?? false,
-                        showsHidden: record.worktreeShowsHidden ?? false)
+                        showsHidden: record.worktreeShowsHidden ?? false, searchTreeMode: record.searchTreeMode ?? false,
+                        referencesTreeMode: record.referencesTreeMode ?? false)
     }
 
     func present() {
@@ -1301,6 +1302,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             editorPosition: hasEditableTextDocument || markdownRevisionRecord != nil ? captureFileEditorPosition() : nil,
             sidebarMode: sidebar.rememberedMode,
             worktreeShowsHidden: sidebar.worktreeShowsHidden ? true : nil,
+            searchTreeMode: sidebar.searchTreeMode ? true : nil,
+            referencesTreeMode: sidebar.referencesTreeMode ? true : nil,
             isFilePreview: displayedFileURL != nil && isShowingFilePreview ? true : nil,
             showsEmptyFolder: folderURL != nil && displayedFileURL == nil ? showsEmptyFolder || sourceControlRevision != nil : nil,
             terminal: terminalSessionState(),

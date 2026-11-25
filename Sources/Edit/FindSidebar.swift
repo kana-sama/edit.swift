@@ -23,8 +23,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private let replaceToggle = NSButton(title: "", target: nil, action: nil)
     private let replaceButton = NSButton(title: "", target: nil, action: nil)
     private let resultHeader = SidebarResultFileHeader(name: "Untitled", detail: "No results")
-    private let results = FindResultsTable()
-    private let resultScroll = FindResultsScrollView()
+    private let results = SidebarActionResultTable()
+    private let resultScroll = SidebarActionResultScrollView()
     private let replaceRow = NSStackView()
     private let surface = NSView()
     var view: NSView { surface }
@@ -245,9 +245,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             content.bottomAnchor.constraint(equalTo: surface.bottomAnchor),
             resultScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 0),
         ])
-        for control in [findRow, replaceRow, resultHeader] {
+        for control in [findRow, replaceRow] {
             control.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -2 * Self.contentInset).isActive = true
         }
+        resultHeader.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         resultScroll.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         resultScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
         replaceButton.isEnabled = false
@@ -493,8 +494,11 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         results.reloadData()
         results.deselectAll(nil)
         editingResults = false
-        resultHeader.detailText = invalid ? "Invalid regex" : matches.isEmpty ? "No results"
-            : matches.count == 1 ? "1 match" : "\(matches.count) matches"
+        if invalid || matches.isEmpty {
+            resultHeader.detailText = invalid ? "Invalid regex" : "No results"
+        } else {
+            resultHeader.updateCount(matches.count, accessibilityLabel: matches.count == 1 ? "1 match" : "\(matches.count) matches")
+        }
         updateReplaceAvailability()
         if let advanceFrom {
             self.advanceFrom = nil
@@ -686,14 +690,15 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let identifier = NSUserInterfaceItemIdentifier("FindMatch")
-        let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? FindResultCell
-            ?? FindResultCell(frame: .zero)
+        let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? SidebarActionResultCell
+            ?? SidebarActionResultCell(frame: .zero)
         cell.identifier = identifier
         configure(cell, row: row)
         return cell
     }
 
-    private func configure(_ cell: FindResultCell, row: Int) {
+    private func configure(_ cell: SidebarActionResultCell, row: Int) {
+        cell.excerptLeading.constant = SidebarResults.excerptLeading
         let range = matches[row].range
         let text = SidebarResults.excerpt(of: resultSnapshot as NSString, match: range, scope: matches[row].scope)
         cell.configure(text: text, replacementAvailable: settings.showsReplacement,
@@ -708,14 +713,14 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
     private func updateRowSelection(_ row: Int?) {
         guard let row, matches.indices.contains(row) else { return }
-        (results.view(atColumn: 0, row: row, makeIfNecessary: false) as? FindResultCell)?.updateSelection(selected == row)
+        (results.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarActionResultCell)?.updateSelection(selected == row)
     }
 
     private func refreshVisibleRows() {
         let visible = results.rows(in: results.visibleRect)
         guard visible.location != NSNotFound else { return }
         for row in visible.location..<min(NSMaxRange(visible), matches.count) {
-            if let cell = results.view(atColumn: 0, row: row, makeIfNecessary: false) as? FindResultCell {
+            if let cell = results.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarActionResultCell {
                 configure(cell, row: row)
             }
         }

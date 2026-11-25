@@ -14,7 +14,7 @@ enum FindCheck {
         editor.setSelectedRange(NSRange(location: 0, length: 3))
         document.performFind(.find)
         let table = try require(
-            descendant(of: window.contentView, type: FindResultsTable.self),
+            descendant(of: window.contentView, type: SidebarActionResultTable.self),
             "Find installs a native result table"
         )
         try await waitUntil("initial matches") { table.numberOfRows == 3 }
@@ -91,7 +91,7 @@ enum FindCheck {
         editor.string = "cat cat cat"
         editor.setSelectedRange(NSRange(location: 0, length: 3))
         document.performFind(.find)
-        let table = try require(descendant(of: document.window.contentView, type: FindResultsTable.self), "find the results")
+        let table = try require(descendant(of: document.window.contentView, type: SidebarActionResultTable.self), "find the results")
         try await waitUntil("three initial matches") { table.numberOfRows == 3 }
         table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
         document.performFind(.dismissSelected)
@@ -168,7 +168,7 @@ enum FindCheck {
                    restored[1].sessionDocument().findSettings == secondSettings,
                    "each window restores its own replacement, options, width, and visibility")
 
-        let firstTable = try require(descendant(of: restored[0].window.contentView, type: FindResultsTable.self),
+        let firstTable = try require(descendant(of: restored[0].window.contentView, type: SidebarActionResultTable.self),
                                      "the first sidebar reopens visibly")
         try await waitUntil("the first window reruns its case-insensitive query") { firstTable.numberOfRows == 2 }
         try expect(restored[1].window.contentViewController as? NSSplitViewController == nil && restored[1].canPerformFind(.next),
@@ -178,7 +178,7 @@ enum FindCheck {
                    "Command-B restores a legacy Search sidebar")
         restored[1].performFind(.find)
         let secondField = try require(restored[1].window.firstResponder as? FindFieldTextView, "the restored second query field")
-        let secondTable = try require(descendant(of: restored[1].window.contentView, type: FindResultsTable.self),
+        let secondTable = try require(descendant(of: restored[1].window.contentView, type: SidebarActionResultTable.self),
                                       "the second sidebar opens on demand")
         try expect(secondField.string == "B.ta", "opening hidden Find preserves its saved query")
         try await waitUntil("the second window reruns its regex") { secondTable.numberOfRows == 2 }
@@ -205,7 +205,7 @@ enum FindCheck {
         editor.string = "cat cat\ncat"
         document.performFind(.find)
         let find = try require(window.firstResponder as? FindFieldTextView, "Return check Find field")
-        let table = try require(descendant(of: window.contentView, type: FindResultsTable.self), "Return check results")
+        let table = try require(descendant(of: window.contentView, type: SidebarActionResultTable.self), "Return check results")
         let pressReturn = try require(
             NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                              windowNumber: window.windowNumber, context: nil, characters: "\r",
@@ -271,7 +271,7 @@ enum FindCheck {
         _ = try await app.openFile(first, in: document)
         document.performFind(.find)
         let field = try require(window.firstResponder as? FindFieldTextView, "Find starts in its query field")
-        let table = try require(descendant(of: window.contentView, type: FindResultsTable.self), "Find result focus table")
+        let table = try require(descendant(of: window.contentView, type: SidebarActionResultTable.self), "Find result focus table")
         func key(_ characters: String, code: UInt16) throws -> NSEvent {
             try require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                                          windowNumber: window.windowNumber, context: nil, characters: characters,
@@ -358,7 +358,7 @@ enum FindCheck {
         document.setSyntaxLanguage(.rust)
         document.performFind(.find)
         let input = try require(window.firstResponder as? FindFieldTextView, "Find input for the render check")
-        let table = try require(descendant(of: window.contentView, type: FindResultsTable.self), "render check result table")
+        let table = try require(descendant(of: window.contentView, type: SidebarActionResultTable.self), "render check result table")
         let manager = try require(editor.textLayoutManager, "TextKit 2 for the render check")
         input.insertText("us", replacementRange: NSRange(location: 0, length: 0))
         // Use the backing layer of a non-interactive, transparent window without repainting for the capture.
@@ -548,7 +548,7 @@ enum FindCheck {
                    !items[2].isEnabled && !items[2].isHidden && items[3].isEnabled && items[3].state == .on,
                    "the sidebar title is a mode switcher with unavailable modes listed")
         let menuButton = try require(options.view as? NSButton, "native ellipsis button")
-        try expect(!options.isHidden && !menuButton.isBordered && options.menu.items.map(\.title) == ["Refresh Search"] &&
+        try expect(!options.isHidden && !menuButton.isBordered && options.menu.items.filter { !$0.isSeparatorItem }.map(\.title) == ["Refresh Search", "Tree Mode"] &&
                    menuButton.target === options && menuButton.action != nil,
                    "the borderless ellipsis opens Search actions only")
         let menuOrigin = options.popupOrigin(in: menuButton)
@@ -561,7 +561,7 @@ enum FindCheck {
         document.performFind(.replace)
         let replacement = try require(window.firstResponder as? NSTextView, "Replace focuses its input")
         replacement.insertText("digest", replacementRange: NSRange(location: 0, length: replacement.string.utf16.count))
-        let table = try require(descendant(of: sidebar, type: FindResultsTable.self), "Find has a native results table")
+        let table = try require(descendant(of: sidebar, type: SidebarActionResultTable.self), "Find has a native results table")
         try await waitUntil("one result per long source line") { table.numberOfRows == lines.count }
         table.selectRowIndexes(IndexSet(integer: 4), byExtendingSelection: false)
         window.layoutIfNeeded()
@@ -569,7 +569,7 @@ enum FindCheck {
         for width in [280.0, split.splitViewItems[0].minimumThickness] {
             split.splitView.setPosition(width, ofDividerAt: 0)
             window.layoutIfNeeded()
-            let cell = try require(table.view(atColumn: 0, row: 4, makeIfNecessary: true) as? FindResultCell,
+            let cell = try require(table.view(atColumn: 0, row: 4, makeIfNecessary: true) as? SidebarActionResultCell,
                                    "a visible match has a result row")
             cell.layoutSubtreeIfNeeded()
             let field = try require(descendant(of: cell, type: NSTextField.self), "result has an excerpt")
@@ -692,12 +692,12 @@ enum FindCheck {
                    "reopening the sidebar installs a visible menu")
     }
 
-    private static func resultAction(in cell: FindResultCell, named name: String) throws -> NSButton {
+    private static func resultAction(in cell: SidebarActionResultCell, named name: String) throws -> NSButton {
         try require(cell.subviews.compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == name },
                     "result row action \(name)")
     }
 
-    private static func checkExcerptGap(_ excerpt: NSTextField, before button: NSButton, in cell: FindResultCell) throws {
+    private static func checkExcerptGap(_ excerpt: NSTextField, before button: NSButton, in cell: SidebarActionResultCell) throws {
         let buttonCell = try require(button.cell as? NSButtonCell, "the row action has a native button cell")
         let glyph = button.convert(buttonCell.imageRect(forBounds: button.bounds), to: cell)
         let gap = glyph.minX - excerpt.frame.maxX
@@ -732,12 +732,12 @@ enum FindCheck {
                     "search result hover event")
     }
 
-    private static func checkResultHover(in table: FindResultsTable, window: NSWindow) throws {
+    private static func checkResultHover(in table: SidebarActionResultTable, window: NSWindow) throws {
         let scroll = try require(table.enclosingScrollView, "search results are scrollable")
         let clip = scroll.contentView
         let row = table.rect(ofRow: 4)
         let location = table.convert(NSPoint(x: row.midX, y: row.midY), to: nil)
-        let before = try require(table.view(atColumn: 0, row: 4, makeIfNecessary: true) as? FindResultCell, "first hovered row")
+        let before = try require(table.view(atColumn: 0, row: 4, makeIfNecessary: true) as? SidebarActionResultCell, "first hovered row")
         let dismissBefore = try resultAction(in: before, named: "Dismiss This Match")
         let field = try require(descendant(of: before, type: NSTextField.self), "search-only excerpt")
         before.layoutSubtreeIfNeeded()
@@ -751,13 +751,13 @@ enum FindCheck {
         let hovered = table.row(at: table.convert(location, from: nil))
         try expect(hovered >= 0 && hovered != 4 && dismissBefore.isHidden,
                    "scrolling clears hover from the old or reused row")
-        let after = try require(table.view(atColumn: 0, row: hovered, makeIfNecessary: true) as? FindResultCell, "new hovered row")
+        let after = try require(table.view(atColumn: 0, row: hovered, makeIfNecessary: true) as? SidebarActionResultCell, "new hovered row")
         let dismissAfter = try resultAction(in: after, named: "Dismiss This Match")
         table.mouseEntered(with: try hoverEvent(.mouseEntered, at: location, in: window))
         try expect(!dismissAfter.isHidden, "the pointer location resolves to the new row after scrolling")
         let visible = table.rows(in: table.visibleRect)
         for row in visible.location..<NSMaxRange(visible) where row != hovered {
-            guard let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? FindResultCell else { continue }
+            guard let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarActionResultCell else { continue }
             let button = try resultAction(in: cell, named: "Dismiss This Match")
             try expect(button.isHidden, "other inactive rows stay clear after scrolling")
         }
@@ -1036,7 +1036,7 @@ enum FindCheck {
         try expect(restored.sidebarMode == .worktree && restored.isSidebarVisible && !restoredOptions.isHidden &&
                    restoredButton.window === restored.window && abs(restoredInset - 10) < 0.5,
                    "restoring an open Worktree places its menu at the trailing edge (\(restoredInset) pt)")
-        try expect(descendant(of: restoredSidebar, type: FindResultsTable.self) == nil,
+        try expect(descendant(of: restoredSidebar, type: SidebarActionResultTable.self) == nil,
                    "restoring Worktree does not construct the Search panel")
         let restoredOutline = try require(restored.worktreeSidebar?.outline, "find the restored Worktree outline")
         restored.window.makeFirstResponder(restoredOutline)

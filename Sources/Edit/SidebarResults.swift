@@ -3,6 +3,11 @@ import AppKit
 @MainActor
 enum SidebarResults {
     static let rowHeight: CGFloat = 24
+    static let fileGroupSpacing: CGFloat = 8
+    static let fileLeading: CGFloat = 10
+    static let excerptLeading: CGFloat = 36
+
+    static func indentation(at depth: Int) -> CGFloat { CGFloat(min(depth, 6)) * 12 }
 
     static func configure(_ table: NSTableView, in scroll: NSScrollView) {
         table.headerView = nil
@@ -72,6 +77,8 @@ class SidebarResultTable: NSTableView {
     var onEscape: (() -> Void)?
     var onClickSelectedRow: ((Int) -> Void)?
     var isFileHeader: ((Int) -> Bool)?
+    var onClickGroup: ((Int) -> Bool)?
+    var onHorizontalNavigation: ((Bool) -> Bool)?
 
     func install(in scrollView: NSScrollView, column identifier: NSUserInterfaceItemIdentifier,
                  accessibilityLabel: String) {
@@ -95,6 +102,7 @@ class SidebarResultTable: NSTableView {
     override func mouseDown(with event: NSEvent) {
         let clicked = row(at: convert(event.locationInWindow, from: nil))
         let plainClick = event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty
+        if plainClick && clicked >= 0 && onClickGroup?(clicked) == true { return }
         if clicked >= 0, let isFileHeader {
             guard !isFileHeader(clicked) else { return }
             if plainClick {
@@ -126,6 +134,8 @@ class SidebarResultTable: NSTableView {
             case 53:
                 onEscape?()
                 return
+            case 123, 124:
+                if onHorizontalNavigation?(event.keyCode == 124) == true { return }
             case 125, 126:
                 if let isFileHeader {
                     moveResult(by: event.keyCode == 125 ? 1 : -1, isFileHeader: isFileHeader)
@@ -157,46 +167,61 @@ final class SidebarResultFileHeader: NSTableCellView {
     private let name: NSTextField
     private let icon = NSImageView()
     private let detail: NSTextField
+    private let badge = NSBox()
     private var file: URL?
     private var language: String?
+    private lazy var iconLeading = icon.leadingAnchor.constraint(equalTo: leadingAnchor)
 
     var detailText: String {
         get { detail.stringValue }
-        set { detail.stringValue = newValue }
+        set {
+            detail.stringValue = newValue
+            detail.setAccessibilityLabel(newValue)
+            badge.isHidden = true
+        }
     }
 
-    init(name: String, detail: String, prioritizesName: Bool = false, leadingInset: CGFloat = 4) {
+    init(name: String, detail: String) {
         self.name = NSTextField(labelWithString: name)
         self.detail = NSTextField(labelWithString: detail)
         super.init(frame: .zero)
         self.name.maximumNumberOfLines = 1
         self.name.lineBreakMode = .byTruncatingMiddle
-        self.name.setContentCompressionResistancePriority(prioritizesName ? .defaultHigh : .defaultLow,
-                                                          for: .horizontal)
+        self.name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         self.name.setContentHuggingPriority(.defaultLow, for: .horizontal)
         self.name.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        self.detail.lineBreakMode = prioritizesName ? .byTruncatingHead : .byTruncatingTail
+        self.detail.lineBreakMode = .byTruncatingTail
         self.detail.textColor = .secondaryLabelColor
         self.detail.setContentHuggingPriority(.required, for: .horizontal)
-        self.detail.setContentCompressionResistancePriority(prioritizesName ? .defaultLow : .defaultHigh,
-                                                            for: .horizontal)
+        self.detail.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         self.detail.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        badge.boxType = .custom
+        badge.borderWidth = 0
+        badge.cornerRadius = 4
+        badge.fillColor = .quaternaryLabelColor
+        badge.isHidden = true
+        badge.setAccessibilityElement(false)
         icon.setAccessibilityElement(false)
-        for label in [icon, self.name, self.detail] {
+        for label in [icon, self.name, badge, self.detail] {
             label.translatesAutoresizingMaskIntoConstraints = false
             addSubview(label)
         }
         NSLayoutConstraint.activate([
             icon.widthAnchor.constraint(equalToConstant: 16),
             icon.heightAnchor.constraint(equalToConstant: 16),
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leadingInset),
+            iconLeading,
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             self.name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5),
             self.name.centerYAnchor.constraint(equalTo: centerYAnchor),
             self.name.trailingAnchor.constraint(lessThanOrEqualTo: self.detail.leadingAnchor, constant: -5),
-            self.detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            self.detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -15),
             self.detail.centerYAnchor.constraint(equalTo: centerYAnchor),
+            badge.leadingAnchor.constraint(equalTo: self.detail.leadingAnchor, constant: -5),
+            badge.trailingAnchor.constraint(equalTo: self.detail.trailingAnchor, constant: 5),
+            badge.centerYAnchor.constraint(equalTo: self.detail.centerYAnchor),
+            badge.heightAnchor.constraint(equalToConstant: 16),
         ])
+        setIndent(0)
     }
 
     @available(*, unavailable)
@@ -206,7 +231,18 @@ final class SidebarResultFileHeader: NSTableCellView {
         name.stringValue = title
         file = url
         self.language = language
+        toolTip = url?.path
         updateIcon()
+    }
+
+    func setIndent(_ depth: Int) {
+        iconLeading.constant = SidebarResults.fileLeading + SidebarResults.indentation(at: depth)
+    }
+
+    func updateCount(_ count: Int, accessibilityLabel: String) {
+        detail.stringValue = count.formatted()
+        detail.setAccessibilityLabel(accessibilityLabel)
+        badge.isHidden = false
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -262,4 +298,179 @@ class SidebarResultExcerptCell: NSTableCellView {
         excerpt.attributedStringValue = text
         setAccessibilityLabel(excerpt.stringValue)
     }
+}
+
+final class SidebarActionResultScrollView: NSScrollView {
+    override func reflectScrolledClipView(_ clipView: NSClipView) {
+        super.reflectScrolledClipView(clipView)
+        (documentView as? SidebarActionResultTable)?.refreshHover()
+    }
+}
+
+final class SidebarActionResultTable: SidebarResultTable {
+    private var pointerTracking: NSTrackingArea?
+    private var hoveredRow = -1
+    private weak var hoveredCell: SidebarActionResultCell?
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        updateHover(at: nil)
+        let center = NotificationCenter.default
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            if let window { center.removeObserver(self, name: name, object: window) }
+            if let newWindow {
+                center.addObserver(self, selector: #selector(refreshHover), name: name, object: newWindow)
+            }
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if pointerTracking == nil {
+            let tracking = NSTrackingArea(rect: .zero,
+                                          options: [.inVisibleRect, .activeInKeyWindow, .mouseEnteredAndExited, .mouseMoved],
+                                          owner: self, userInfo: nil)
+            addTrackingArea(tracking)
+            pointerTracking = tracking
+        }
+        refreshHover()
+    }
+
+    override func mouseEntered(with event: NSEvent) { updateHover(at: event.locationInWindow) }
+    override func mouseMoved(with event: NSEvent) { updateHover(at: event.locationInWindow) }
+    override func mouseExited(with event: NSEvent) { updateHover(at: nil) }
+
+    @objc func refreshHover() {
+        guard let window, window.isKeyWindow else {
+            updateHover(at: nil)
+            return
+        }
+        updateHover(at: window.mouseLocationOutsideOfEventStream)
+    }
+
+    func configureHover(for cell: SidebarActionResultCell, row: Int) {
+        let hovered = hoveredRow == row
+        if hovered, hoveredCell !== cell {
+            hoveredCell?.updateHover(false)
+            hoveredCell = cell
+        }
+        cell.updateHover(hovered)
+    }
+
+    private func updateHover(at location: NSPoint?) {
+        let row = location.flatMap { location -> Int? in
+            let local = convert(location, from: nil)
+            return !isHiddenOrHasHiddenAncestor && visibleRect.contains(local) ? self.row(at: local) : nil
+        } ?? -1
+        if hoveredRow != row {
+            hoveredCell?.updateHover(false)
+            hoveredCell = nil
+            hoveredRow = row
+        }
+        if row >= 0, let cell = view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarActionResultCell {
+            configureHover(for: cell, row: row)
+        }
+    }
+}
+
+final class SidebarActionResultCell: SidebarResultExcerptCell {
+    private static let actionSize: CGFloat = 20
+    private static let actionSpacing: CGFloat = 1
+    // The button's hit area extends beyond its glyph. Let the excerpt use that transparent leading edge.
+    private static let excerptOverlap: CGFloat = 1
+    private let applyButton = NSButton(image: NSImage(systemSymbolName: "arrow.turn.down.right",
+                                                        accessibilityDescription: nil)!,
+                                             target: nil, action: nil)
+    private let dismissButton = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)!,
+                                         target: nil, action: nil)
+    private var hover = false
+    private var selected = false
+    private var acceptsActions = false
+    private var replacementAvailable = false
+    private lazy var excerptBeforeDismiss = excerpt.trailingAnchor.constraint(
+        equalTo: dismissButton.leadingAnchor, constant: Self.excerptOverlap
+    )
+    private lazy var excerptBeforeApply = excerpt.trailingAnchor.constraint(
+        equalTo: applyButton.leadingAnchor, constant: Self.excerptOverlap
+    )
+    private var onApply: (() -> Void)?
+    private var onDismiss: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        fullExcerptWidth.isActive = false
+        for (button, label, action) in [
+            (applyButton, "Replace This Match", #selector(applyMatch(_:))),
+            (dismissButton, "Dismiss This Match", #selector(dismissMatch(_:))),
+        ] {
+            button.isBordered = false
+            button.bezelStyle = .accessoryBarAction
+            button.controlSize = .small
+            button.target = self
+            button.action = action
+            button.toolTip = label
+            button.setAccessibilityLabel(label)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(button)
+            NSLayoutConstraint.activate([
+                button.widthAnchor.constraint(equalToConstant: Self.actionSize),
+                button.heightAnchor.constraint(equalToConstant: Self.actionSize),
+                button.centerYAnchor.constraint(equalTo: centerYAnchor),
+            ])
+        }
+        NSLayoutConstraint.activate([
+            dismissButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1),
+            applyButton.trailingAnchor.constraint(equalTo: dismissButton.leadingAnchor, constant: -Self.actionSpacing),
+            excerptBeforeDismiss,
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("Sidebar result cells are programmatically constructed") }
+
+    func configure(
+        text: NSAttributedString, replacementAvailable: Bool, acceptsActions: Bool,
+        selected: Bool, apply: (() -> Void)? = nil, dismiss: @escaping () -> Void
+    ) {
+        configureExcerpt(text)
+        self.acceptsActions = acceptsActions
+        // Keep the same text column whether the row actions are currently visible or hidden.
+        if self.replacementAvailable != replacementAvailable {
+            (self.replacementAvailable ? excerptBeforeApply : excerptBeforeDismiss).isActive = false
+            (replacementAvailable ? excerptBeforeApply : excerptBeforeDismiss).isActive = true
+            self.replacementAvailable = replacementAvailable
+        }
+        onApply = apply
+        onDismiss = dismiss
+        updateSelection(selected)
+    }
+
+    func updateSelection(_ selected: Bool) {
+        self.selected = selected
+        updateActions()
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        hover = false
+        selected = false
+        acceptsActions = false
+        updateActions()
+    }
+
+    func updateHover(_ hovered: Bool) {
+        guard hover != hovered else { return }
+        hover = hovered
+        updateActions()
+    }
+
+    private func updateActions() {
+        let showDismiss = acceptsActions && (hover || selected)
+        let showApply = showDismiss && replacementAvailable
+        dismissButton.isHidden = !showDismiss
+        applyButton.isHidden = !showApply
+    }
+
+    @objc private func applyMatch(_ sender: Any?) { onApply?() }
+    @objc private func dismissMatch(_ sender: Any?) { onDismiss?() }
 }
