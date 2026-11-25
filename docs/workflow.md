@@ -38,6 +38,8 @@ If repeated attempts uncover a concrete blocker or the implementation calls for 
 
 ## Verification and completion
 
+Update the [LSP checklist](lsp-checklist.md) in the same change when adding or changing an LSP capability or updating a supported language server.
+
 Review the diff against the request and the specification. Choose checks for the actual change. Review text and links for documentation, exercise affected scenarios for behavior, inspect the native UI for visual changes, and measure the reported workload for performance changes. Run the focused check during iteration and the full `./script/check` on the final code before recording the change. Build the review bundle once the last code change has passed. Each completed revision must build, run, and satisfy the specifications it contains.
 
 Check the final history and current working state after any amend or squash. Verify affected descendants when rewriting a mutable ancestor. Report the changed behavior, relevant commit or change ID, checks completed, and any specific limitation that remains.
