@@ -133,11 +133,28 @@ private final class ServerPopoverRow: NSView {
         directory = bundled
         #endif
         guard let directory else { return [:] }
-        return Dictionary(uniqueKeysWithValues: LanguageServer.allCases.compactMap { server in
-            let file = directory.appending(path: "\(server.executable).svg", directoryHint: .notDirectory)
+        func load(_ name: String) -> NSImage? {
+            let file = directory.appending(path: name, directoryHint: .notDirectory)
             guard let image = NSImage(contentsOf: file), image.size.width > 0, image.size.height > 0 else { return nil }
-            return (server, image)
-        })
+            return image
+        }
+        var logos: [LanguageServer: NSImage] = [:]
+        logos[.zig] = load("zls.svg")
+        if let swiftlang = load("swiftlang.png"), let clangd = load("clangd.svg") {
+            let height: CGFloat = 16
+            let spacing: CGFloat = 4
+            let swiftWidth = height * swiftlang.size.width / swiftlang.size.height
+            let clangWidth = height * clangd.size.width / clangd.size.height
+            let size = NSSize(width: swiftWidth + spacing + clangWidth, height: height)
+            logos[.sourceKit] = NSImage(size: size, flipped: false) { rect in
+                let scale = rect.height / height
+                swiftlang.draw(in: NSRect(x: rect.minX, y: rect.minY, width: swiftWidth * scale, height: rect.height))
+                clangd.draw(in: NSRect(x: rect.minX + (swiftWidth + spacing) * scale, y: rect.minY,
+                                      width: clangWidth * scale, height: rect.height))
+                return true
+            }
+        }
+        return logos
     }()
     private static let logoAspectRatio = logos[.zig].map { $0.size.width / $0.size.height } ?? 1
 
@@ -255,7 +272,7 @@ private final class ServerPopoverRow: NSView {
             widthAnchor.constraint(equalTo: logo.widthAnchor, constant: 249),
             logo.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             logo.centerYAnchor.constraint(equalTo: identity.centerYAnchor),
-            logo.heightAnchor.constraint(equalTo: identity.heightAnchor),
+            logo.heightAnchor.constraint(equalTo: identity.heightAnchor, multiplier: 0.5),
             logo.widthAnchor.constraint(equalTo: logo.heightAnchor, multiplier: Self.logoAspectRatio),
             identity.leadingAnchor.constraint(equalTo: logo.trailingAnchor, constant: 6),
             identity.centerYAnchor.constraint(equalTo: centerYAnchor),

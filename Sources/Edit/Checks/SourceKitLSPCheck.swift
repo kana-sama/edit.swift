@@ -256,18 +256,19 @@ enum SourceKitLSPCheck {
             row.subviews.first(where: { $0.identifier?.rawValue == "Edit.LanguageServer.logo" }) as? NSImageView
         }
         let identities = rows.compactMap { $0.subviews.compactMap { $0 as? NSStackView }.first }
-        guard logos.count == 2, identities.count == 2, let zigLogo = logos[0].image else {
-            throw Failure(detail: "load the ZLS wordmark and reserve a logo slot for each server")
+        guard logos.count == 2, identities.count == 2, let zigLogo = logos[0].image, let sourceKitLogo = logos[1].image else {
+            throw Failure(detail: "load the ZLS wordmark and the paired SourceKit-LSP artwork")
         }
         let slot = logos[0].frame
-        let scaledLogoWidth = slot.height * zigLogo.size.width / zigLogo.size.height
+        let logoHeight = identities[0].frame.height / 2
+        let scaledLogoWidth = logoHeight * zigLogo.size.width / zigLogo.size.height
         try require(slot.size == logos[1].frame.size && slot.width > 3 * slot.height &&
-                    abs(slot.height - identities[0].frame.height) < 0.5 && abs(slot.width - scaledLogoWidth) < 1 &&
+                    abs(slot.height - logoHeight) < 1 && abs(slot.width - scaledLogoWidth) < 1 &&
                     abs(slot.midY - identities[0].frame.midY) < 0.5 &&
                     identities[0].frame.minX == identities[1].frame.minX &&
                     logos.allSatisfy { $0.imageAlignment == .alignCenter && $0.imageScaling == .scaleProportionallyUpOrDown } &&
-                    logos[1].image == nil,
-                    "size both logo slots from the two-line label (logos \(logos.map(\.frame)), labels \(identities.map(\.frame)))")
+                    sourceKitLogo.size.width > 2 * sourceKitLogo.size.height,
+                    "size both logo slots to half the two-line label (logos \(logos.map(\.frame)), labels \(identities.map(\.frame)))")
         guard let toggle = rows[1].subviews.first(where: { $0.identifier?.rawValue == "Edit.LanguageServer.toggle" }) as? NSButton,
               let restart = rows[1].subviews.first(where: { $0.identifier?.rawValue == "Edit.LanguageServer.restart" }) as? NSButton
         else { throw Failure(detail: "find the Swift controls") }
