@@ -9,7 +9,10 @@ enum LanguageServerStateCheck {
 
     static func run(in app: Edit, replacing initial: DocumentWindow, capture: (NSWindow) throws -> Void) async throws {
         let files = FileManager.default
-        let profile = files.temporaryDirectory
+        guard let profilePath = ProcessInfo.processInfo.environment["TMPDIR"], !profilePath.isEmpty else {
+            throw Failure(detail: "locate the disposable check profile")
+        }
+        let profile = URL(filePath: profilePath, directoryHint: .isDirectory)
         let workspace = FileBuffer.canonicalURL(profile.appending(path: "LSP Workspace", directoryHint: .isDirectory))
         let firstProject = workspace.appending(path: "First", directoryHint: .isDirectory)
         let secondProject = workspace.appending(path: "Second", directoryHint: .isDirectory)
@@ -56,6 +59,7 @@ enum LanguageServerStateCheck {
             }
             try require(lsp.canPerform(.start), "offer an explicit start after restoration")
             try require(!app.workspaceLanguageServers.isStopped(.zig, in: workspace), "keep ZLS enabled independently")
+            try await checkHeaderColors(in: document, text: text)
             lsp.perform(.start)
             try await wait("explicitly start the restored server") { session.state == .ready }
             try require(!WorkspaceLanguageServers(defaults: defaults).isStopped(.sourceKit, in: workspace),
@@ -81,18 +85,21 @@ enum LanguageServerStateCheck {
         try await wait("stop the server in both workspace windows") {
             session.state == .stopped && peerSession.state == .stopped && lsp.statusIndicatorForCheck == .stopped
         }
-        try require(document.resolvedSyntaxLanguage == .cpp, "auto-detect the header as C++")
-        if let manager = document.editor.textLayoutManager {
-            for token in ["#ifndef", "<stdint.h>", "typedef", "uint32_t"] {
-                try await SyntaxCheck.waitForColor(at: (text as NSString).range(of: token), in: manager)
-            }
-        } else { throw Failure(detail: "get the header's rendering attributes") }
+        try await checkHeaderColors(in: document, text: text)
         try capture(document.window)
 
         peer.setFolder(secondProject)
         try await wait("allow a different workspace to start the server for the same project") { peerSession.state == .ready }
         try require(session.state == .stopped, "leave the original workspace stopped")
         keepPreferences = true
+    }
+
+    private static func checkHeaderColors(in document: DocumentWindow, text: String) async throws {
+        try require(document.resolvedSyntaxLanguage == .cpp, "auto-detect the header as C++")
+        guard let manager = document.editor.textLayoutManager else { throw Failure(detail: "get the header's rendering attributes") }
+        for token in ["#ifndef", "<stdint.h>", "typedef", "uint32_t"] {
+            try await SyntaxCheck.waitForColor(at: (text as NSString).range(of: token), in: manager)
+        }
     }
 
     private static func require(_ condition: Bool, _ detail: String) throws {
