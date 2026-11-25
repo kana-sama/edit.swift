@@ -93,6 +93,7 @@ typedef struct {
     // A viewport query can visit an injection before the complete query visits it.
     __unsafe_unretained NSMutableDictionary<NSString *, NSValue *> *trees;
     bool previewPass;
+    uint32_t highlightLimit;
 } Input;
 
 static bool cancelled(Input *input) {
@@ -353,6 +354,77 @@ done:
     free(ignored);
 }
 
+typedef struct {
+    TSNode content;
+    TSTree *tree;
+} MarkdownInlineParse;
+
+static bool markdownLiteralAt(Input *input, TSNode root, uint32_t start, MarkdownInlineParse *cached) {
+    TSNode node = ts_node_named_descendant_for_byte_range(root, start * 2u, (start + 4u) * 2u);
+    TSNode inlineContent = {0};
+    for (; !ts_node_is_null(node); node = ts_node_parent(node)) {
+        const char *type = ts_node_type(node);
+        if (strcmp(type, "fenced_code_block") == 0 || strcmp(type, "indented_code_block") == 0 ||
+            strcmp(type, "link_destination") == 0 || strcmp(type, "link_title") == 0 ||
+            strcmp(type, "minus_metadata") == 0 || strcmp(type, "plus_metadata") == 0) return true;
+        if (strcmp(type, "inline") == 0 || strcmp(type, "pipe_table_cell") == 0) inlineContent = node;
+    }
+    if (ts_node_is_null(inlineContent)) return false;
+
+    const uint32_t from = ts_node_start_byte(inlineContent);
+    if (!ts_node_eq(cached->content, inlineContent)) {
+        if (cached->tree) ts_tree_delete(cached->tree);
+        cached->content = inlineContent;
+        cached->tree = NULL;
+        Input section = *input;
+        section.units += from / 2u;
+        section.bytes = ts_node_end_byte(inlineContent) - from;
+        TSParser *parser = ts_parser_new();
+        if (!parser) return false;
+        ts_parser_set_language(parser, tree_sitter_markdown_inline());
+        TSInput text = {.payload = &section, .read = readInput, .encoding = TSInputEncodingUTF16LE};
+        TSParseOptions options = {.payload = &section, .progress_callback = parseProgress};
+        cached->tree = ts_parser_parse_with_options(parser, NULL, text, options);
+        ts_parser_delete(parser);
+    }
+    if (!cached->tree) return false;
+    const uint32_t local = start * 2u - from;
+    node = ts_node_named_descendant_for_byte_range(ts_tree_root_node(cached->tree), local, local + 8u);
+    bool literal = false;
+    for (; !ts_node_is_null(node) && !literal; node = ts_node_parent(node)) {
+        const char *type = ts_node_type(node);
+        literal = strcmp(type, "code_span") == 0 || strcmp(type, "link_destination") == 0 ||
+            strcmp(type, "link_title") == 0 || strcmp(type, "html_tag") == 0;
+    }
+    return literal;
+}
+
+static uint32_t unclosedMarkdownComment(Input *input, TSNode root) {
+    const uint16_t *units = input->units;
+    const uint32_t length = input->bytes / 2u;
+    uint32_t suffix = length;
+    // Only an opener after the final raw terminator can run to the end of the buffer.
+    while (suffix >= 3u) {
+        if ((suffix & 4095u) == 0 && cancelled(input)) return length;
+        if (units[suffix - 1] == '>' && units[suffix - 2] == '-' && units[suffix - 3] == '-') break;
+        --suffix;
+    }
+    MarkdownInlineParse cached = {0};
+    uint32_t opener = length;
+    for (uint32_t start = suffix >= 3u ? suffix : 0; start + 4u <= length; ++start) {
+        if ((start & 4095u) == 0 && cancelled(input)) break;
+        if (units[start] != '<' || units[start + 1] != '!' || units[start + 2] != '-' || units[start + 3] != '-') continue;
+        uint32_t escape = start;
+        while (escape > 0 && units[escape - 1] == '\\') --escape;
+        if ((start - escape) % 2u == 0 && !markdownLiteralAt(input, root, start, &cached)) {
+            opener = start;
+            break;
+        }
+    }
+    if (cached.tree) ts_tree_delete(cached.tree);
+    return opener;
+}
+
 static void runQuery(Input *input, const TSQuery *query, TSNode root, NSString *directory,
                      uint32_t offset, int depth, bool injection, const Preview *preview) {
     TSQueryCursor *cursor = ts_query_cursor_new();
@@ -379,9 +451,14 @@ static void runQuery(Input *input, const TSQuery *query, TSNode root, NSString *
                 uint32_t from = ts_node_start_byte(capture.node);
                 uint32_t to = ts_node_end_byte(capture.node);
                 if (from >= to || to > input->bytes) continue;
+                const uint32_t start = offset + from / 2u;
+                const uint32_t end = offset + to / 2u;
                 if (!injection) {
-                    input->highlight(input->context, offset + from / 2u, offset + to / 2u, name);
+                    if (start < input->highlightLimit) {
+                        input->highlight(input->context, start, MIN(end, input->highlightLimit), name);
+                    }
                 } else if (nestedName && strcmp(name, "injection.content") == 0 && !cancelled(input)) {
+                    if (start >= input->highlightLimit && !input->bracket) continue;
                     Input section = *input;
                     section.units += from / 2u;
                     section.bytes = to - from;
@@ -423,6 +500,14 @@ static bool runGrammar(Input input, const char *name, NSString *directory, uint3
     const bool parsed = tree != NULL;
     if (parsed) {
         TSNode root = ts_tree_root_node(tree);
+        const uint32_t commentEnd = MIN(input.highlightLimit, offset + input.bytes / 2u);
+        if (strcmp(name, "markdown") == 0 && !cancelled(&input)) {
+            uint32_t markdownComment = unclosedMarkdownComment(&input, root);
+            if (markdownComment < input.bytes / 2u) {
+                input.highlightLimit = MIN(input.highlightLimit, offset + markdownComment);
+                if (input.bracket) input.bracket(input.context, offset + markdownComment, offset + input.bytes / 2u, NULL);
+            }
+        }
         const TSQuery *injections = NULL;
         if (depth < 4 && !cancelled(&input) &&
             (strcmp(name, "markdown") == 0 || strcmp(name, "markdown-inline") == 0 || strcmp(name, "html") == 0)) {
@@ -434,10 +519,12 @@ static bool runGrammar(Input input, const char *name, NSString *directory, uint3
                 Input visible = input;
                 visible.bracket = NULL;
                 visible.previewPass = true;
+                if (input.highlightLimit < commentEnd) input.highlight(input.context, input.highlightLimit, commentEnd, "comment");
                 runQuery(&visible, query, root, directory, offset, depth, false, preview);
                 if (injections) runQuery(&visible, injections, root, directory, offset, depth, true, preview);
                 if (!cancelled(&input)) preview->publish(input.context);
             }
+            if (input.highlightLimit < commentEnd) input.highlight(input.context, input.highlightLimit, commentEnd, "comment");
             if (!cancelled(&input)) runQuery(&input, query, root, directory, offset, depth, false, NULL);
         }
         if (input.bracket && !cancelled(&input)) readBracketContext(&input, root, language, name, offset, depth);
@@ -458,7 +545,7 @@ EDIT_VISIBLE bool edit_syntax_analyze_v1(const char *language, const char *query
         if (!directory) return false;
         const bool canPreview = highlight && publishPreview && previewStart < previewEnd && previewEnd <= count;
         NSMutableDictionary<NSString *, NSValue *> *trees = canPreview ? [NSMutableDictionary dictionary] : nil;
-        Input input = {units, count * 2u, highlight, bracket, check, context, trees, false};
+        Input input = {units, count * 2u, highlight, bracket, check, context, trees, false, count};
         Preview preview = {previewStart * 2u, previewEnd * 2u, publishPreview};
         const bool result = runGrammar(input, language, directory, 0, 0, canPreview ? &preview : NULL);
         for (NSValue *tree in trees.allValues) ts_tree_delete(tree.pointerValue);

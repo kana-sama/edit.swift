@@ -11,6 +11,8 @@ Edit colors source code and markup with Tree-sitter. Highlighting and [bracket n
 
 C, C++, Clojure, CSS, Erlang, Go, HTML, JavaScript, JavaScript JSX, JSON, Lua, Markdown, Python, Ruby, Rust, Shell Script, Solidity, Swift, TOML, TypeScript, TypeScript JSX, YAML, and Zig. JSON also recognizes comments in JSONC, Clojure covers EDN, and Zig covers ZON. Markdown uses inline and fenced-code grammars and HTML supports embedded JavaScript and CSS.
 
+In Markdown, apply inline code highlighting inside table cells and color heading markers with the heading. An HTML comment in Markdown keeps its comment color from its opener through its close, or through the end of the buffer while it is unclosed. Comment-like text inside code stays code.
+
 [Grammar versions and licenses](../../../resources/syntax/README.md)
 
 ## Acceptance
@@ -18,4 +20,5 @@ C, C++, Clojure, CSS, Erlang, Go, HTML, JavaScript, JavaScript JSX, JSON, Lua, M
 - Open `main.RS`, `widget.test.ts`, `widget.tsx`, `data.jsonc`, `.zshrc`, `Cargo.lock`, `Gemfile`, `library.h`, `build.zig.zon`, `app.app.src`, and `deps.edn`. Check that their resolved languages and syntax colors match the file modes.
 - Select Rust on an untitled buffer, save to a different extension, and verify the manual mode follows the buffer. Select Plain Text, and then Auto Detect to restore path-based colors. Quit and reopen named and untitled drafts to check persistent choices.
 - Change a highlighted buffer containing Unicode and incomplete code. Undo and redo, and switch modes while highlighting runs. Verify that no obsolete syntax result overlays the document and that the caret, selections, scroll, and dirty state behave normally.
+- Open a Markdown table with inline code and a heading with leading and trailing `#` markers. Check both table header and body cells, and compare the heading markers with its text. Type `<!--` above a heading and a fence and check that the comment color runs to the end. Close the comment before the heading and check that ordinary highlighting resumes. Repeat with a literal comment opener inside inline code or a fenced block.
 - `./script/check` checks real captures in every bundled grammar and checks the pixels on the first frame after opening a small Rust file and a Swift file above 64 KiB. It samples the stationary viewport after opening and reopening a Swift file with a saved position beyond the preview budget, then checks color when scrolling past the prepared range. It also checks that highlighting preserves the text, selection, dirty state, and undo history, and validates Plain Text clearing and manual mode recovery.
