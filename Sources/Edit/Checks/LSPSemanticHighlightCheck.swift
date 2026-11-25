@@ -34,7 +34,8 @@ enum LSPSemanticHighlightCheck {
             let package = Package(name: "Fixture", targets: [.target(name: "Fixture")])
             """
         try manifest.write(to: root.appending(path: "Package.swift"), atomically: true, encoding: .utf8)
-        let zigText = "pub const none: ?u64 = null;\r\nconst label = \"🧩\"; pub const ZigWidget = struct {};\r\npub var Counter: u64 = 3;\r\n"
+        let zigText = "pub const none: ?u64 = null;\r\nconst label = \"🧩\"; pub const ZigWidget = struct {};\r\n"
+            + "pub const WidgetAlias = ZigWidget;\r\npub var Counter: u64 = 3;\r\n"
         try zigText.write(to: zig, atomically: true, encoding: .utf8)
         try swiftText.write(to: swift, atomically: true, encoding: .utf8)
         try "fn marker() -> i32 { 7 }\n".write(to: rust, atomically: true, encoding: .utf8)
@@ -53,9 +54,12 @@ enum LSPSemanticHighlightCheck {
             hasColor("null", in: document, color: .control) && hasColor("null", in: document, layer: .lsp, color: .control)
                 && paintedColor("null", in: document) == SyntaxColor.control.nativeColor
         }
+        try require(hasColor("ZigWidget", in: document, color: .type) && hasColor("ZigWidget", in: document, layer: .lsp, color: .type)
+                    && paintedColor("ZigWidget", in: document) == SyntaxColor.type.nativeColor,
+                    "use the same type color for a direct container declaration")
         try require(!hasColor("Counter", in: document) && hasColor("Counter", in: document, layer: .lsp, color: .plain)
                     && paintedColor("Counter", in: document) == .textColor &&
-                    !hasColor("ZigWidget", in: document) && paintedColor("ZigWidget", in: document) == SyntaxColor.type.nativeColor,
+                    !hasColor("WidgetAlias", in: document) && paintedColor("WidgetAlias", in: document) == SyntaxColor.type.nativeColor,
                     "let ZLS classify ambiguous declarations while Tree-sitter paints syntax")
 
         document.performFind(.find)
@@ -67,8 +71,9 @@ enum LSPSemanticHighlightCheck {
                     "share the setting in one workspace only")
         try require(paintedColor("null", in: document) == SyntaxColor.control.nativeColor,
                     "keep the literal color when removing the semantic overlay")
-        try require(paintedColor("ZigWidget", in: document) == .textColor,
-                    "leave the type declaration name uncolored with the semantic overlay off")
+        try require(paintedColor("ZigWidget", in: document) == SyntaxColor.type.nativeColor
+                    && paintedColor("WidgetAlias", in: document) == .textColor,
+                    "keep the direct type declaration colored and leave the alias to ZLS")
         try await wait("keep Tree-sitter in both windows") {
             [document, swiftWindow].allSatisfy {
                 $0.editor.syntaxHighlighting?.usesLSPForCheck == false

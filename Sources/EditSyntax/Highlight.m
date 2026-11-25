@@ -137,11 +137,44 @@ static NSString *queryValue(const TSQuery *query, uint32_t id) {
     return [[NSString alloc] initWithBytes:value length:length encoding:NSUTF8StringEncoding];
 }
 
-static NSString *captureValue(Input *input, TSQueryMatch match, uint32_t id) {
+static TSNode captureNode(TSQueryMatch match, uint32_t id) {
     for (uint16_t i = 0; i < match.capture_count; ++i) {
-        if (match.captures[i].index == id) return stringForNode(input, match.captures[i].node);
+        if (match.captures[i].index == id) return match.captures[i].node;
     }
-    return nil;
+    return (TSNode){0};
+}
+
+static NSString *captureValue(Input *input, TSQueryMatch match, uint32_t id) {
+    TSNode node = captureNode(match, id);
+    return ts_node_is_null(node) ? nil : stringForNode(input, node);
+}
+
+static bool zigStructTypeIsKnown(Input *input, TSNode node) {
+    uint32_t count = ts_node_child_count(node);
+    if (!count) return false;
+    TSNode closer = ts_node_child(node, count - 1);
+    if (ts_node_is_missing(closer) || strcmp(ts_node_type(closer), "}") != 0) return false;
+
+    // An ordinary struct is a type even when ZLS cannot resolve one of its field types.
+    // For tuple structs, ZLS needs the element types before it colors the binding.
+    bool inBody = false;
+    bool hasUnresolvedTupleField = false;
+    for (uint32_t i = 0; i + 1 < count; ++i) {
+        TSNode child = ts_node_child(node, i);
+        const char *type = ts_node_type(child);
+        if (strcmp(type, "{") == 0) inBody = true;
+        if (!inBody || !ts_node_is_named(child) || ts_node_is_extra(child) ||
+            ts_node_start_byte(child) == ts_node_end_byte(child)) continue;
+        if (strcmp(type, "container_field") == 0) {
+            if (!ts_node_is_null(ts_node_child_by_field_name(child, "type", 4))) return true;
+            TSNode element = ts_node_child_by_field_name(child, "name", 4);
+            if (ts_node_is_null(element) || strcmp(ts_node_type(element), "builtin_type") != 0 ||
+                [stringForNode(input, element) isEqualToString:@"anytype"]) hasUnresolvedTupleField = true;
+        } else if (strcmp(type, "ERROR") != 0) {
+            return true;
+        }
+    }
+    return inBody && !hasUnresolvedTupleField;
 }
 
 // Tree-sitter returns predicate expressions for its consumer to evaluate.
@@ -154,10 +187,38 @@ static bool matchesPredicates(Input *input, const TSQuery *query, TSQueryMatch m
         while (end < count && steps[end].type != TSQueryPredicateStepTypeDone) ++end;
         if (end >= start + 3 && steps[start + 1].type == TSQueryPredicateStepTypeCapture) {
             NSString *name = queryValue(query, steps[start].value_id);
-            NSString *value = captureValue(input, match, steps[start + 1].value_id);
+            TSNode node = captureNode(match, steps[start + 1].value_id);
+            if ([name isEqualToString:@"zig-type-binding?"]) {
+                if (steps[start + 2].type != TSQueryPredicateStepTypeCapture || ts_node_is_null(node)) return false;
+                TSNode initializer = captureNode(match, steps[start + 2].value_id);
+                if (ts_node_is_null(initializer)) return false;
+                TSNode annotation = ts_node_child_by_field_name(ts_node_parent(node), "type", 4);
+                if (!ts_node_is_null(annotation) && ![stringForNode(input, annotation) isEqualToString:@"type"]) return false;
+                if (strcmp(ts_node_type(initializer), "struct_declaration") == 0 && !zigStructTypeIsKnown(input, initializer)) return false;
+                start = end + 1;
+                continue;
+            }
             NSString *argument = steps[start + 2].type == TSQueryPredicateStepTypeCapture
                 ? captureValue(input, match, steps[start + 2].value_id)
                 : queryValue(query, steps[start + 2].value_id);
+            if ([name isEqualToString:@"not-followed-by?"]) {
+                if (ts_node_is_null(node)) return false;
+                TSNode sibling = ts_node_next_sibling(node);
+                while (!ts_node_is_null(sibling) && ts_node_is_extra(sibling)) sibling = ts_node_next_sibling(sibling);
+                if (!ts_node_is_null(sibling) && [argument isEqualToString:@(ts_node_type(sibling))]) return false;
+                start = end + 1;
+                continue;
+            }
+            if ([name isEqualToString:@"not-field?"]) {
+                if (ts_node_is_null(node)) return false;
+                const char *field = argument.UTF8String;
+                TSNode parent = ts_node_parent(node);
+                if (field && !ts_node_is_null(parent) &&
+                    ts_node_eq(node, ts_node_child_by_field_name(parent, field, (uint32_t)strlen(field)))) return false;
+                start = end + 1;
+                continue;
+            }
+            NSString *value = ts_node_is_null(node) ? nil : stringForNode(input, node);
             if ([name isEqualToString:@"eq?"] || [name isEqualToString:@"not-eq?"]) {
                 if ([value isEqualToString:argument] == [name hasPrefix:@"not-"]) return false;
             } else if ([name isEqualToString:@"match?"] || [name isEqualToString:@"not-match?"]) {

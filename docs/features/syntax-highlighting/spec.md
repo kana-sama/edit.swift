@@ -7,13 +7,21 @@ Edit colors source code and markup with a Tree-sitter layer and an independent [
 - Manual choices follow their buffer through Save As. Edit remembers up to 100 named path overrides and restores the mode of each saved session document, including an untitled draft. An older session or an unknown mode can fall back to automatic detection.
 - When switching files, keep the current buffer visible while preparing syntax for the incoming viewport on a background task. Parse from the beginning through the visible lines and a small margin within a bounded prefix. A file whose opening viewport exceeds that prefix can display immediately while syntax runs in the background. A prepared viewport keeps its colors while the full document is parsed and queried. Mode changes request syntax immediately and redraw the visible editor as results become available. Edits schedule a background parse after 45 ms and leave existing colors in place until the replacement arrives. TextKit applies available captures as new fragments become visible. A canceled or outdated result cannot recolor the current document. An unavailable query leaves editable plain text. If no first result is available for 150 ms, the window shows an activity indicator. Rendering adapts to macOS appearance.
 
+## Tree-sitter and semantic tokens
+
+Apply these rules when adding a language with semantic tokens or updating an existing Tree-sitter or LSP integration for such a language.
+
+- Use Tree-sitter for roles the grammar can prove, including literals, comments, keywords, and structurally unambiguous declarations where the language grammar identifies them.
+- Leave a range in the default text color when choosing its color requires symbol or type resolution. For example, if a language assigns different colors to identifiers used as types and values, let semantic tokens classify any identifier whose role cannot be distinguished by the grammar. Spelling conventions and typical uses of a parse position are insufficient evidence.
+- Use the same theme color in both layers for a range they both classify. For the same source text, receiving semantic tokens keeps the color of syntax already painted by Tree-sitter. Verify the overlap against the supported server, including ambiguous or incomplete code. When a capture disagrees with the server, narrow or remove it or align the theme mappings.
+
 ## Bundled languages
 
 C, C++, Clojure, CSS, Erlang, Go, HTML, JavaScript, JavaScript JSX, JSON, Lua, Markdown, Objective-C, Objective-C++, Python, Ruby, Rust, Shell Script, Solidity, Swift, TOML, TypeScript, TypeScript JSX, YAML, and Zig. JSON also recognizes comments in JSONC, Clojure covers EDN, and Zig covers ZON. Markdown uses inline and fenced-code grammars and HTML supports embedded JavaScript and CSS.
 
 Auto Detect uses Objective-C for `.m`, Objective-C++ for `.mm`, and C++ for ambiguous `.h` headers. C++ uses the shared C-family rules for directives, keywords, types, literals, and comments, including when no language server runs. Use the language picker to select a different mode for a header.
 
-The Zig and ZON base layer colors syntax such as keywords, literals, primitive types, and comments. Zig keyword literals use the same color as ZLS. Identifiers, including built-in function names and quoted names, stay in the default text color until semantic tokens supply a color.
+The Zig and ZON base layer colors keywords, literals, primitive types, comments, and explicit field designators. In Zig it also colors labels, explicit error tags, named container fields, single `const` bindings with an unambiguous type expression, and parameter names with a direct primitive type annotation. The two layers use the ZLS color for these roles. In `const a: X = struct {}`, the role of `X` comes from semantic analysis. Function and call names, arbitrary field access, tuple element type names, and other unresolved identifiers get their colors from ZLS.
 
 In Markdown, apply inline code highlighting inside table cells and color heading markers with the heading. An HTML comment in Markdown keeps its comment color from its opener through its close, or through the end of the buffer while it is unclosed. Comment-like text inside code stays code.
 

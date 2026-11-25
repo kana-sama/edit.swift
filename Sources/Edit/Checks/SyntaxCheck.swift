@@ -371,6 +371,7 @@ enum SyntaxCheck {
             (.typescript, "type Shape = { radius: number };", "Shape", .type),
             (.tsx, "const card = <section />;", "section", .markup),
             (.yaml, "name: Edit\n", "name", .property),
+            (.zig, ".{ .version = \"0.1.0\" }", "version", .property),
             (.zig, ".{ .version = \"0.1.0\", .id = 0x0123456789abcdef }", "\"0.1.0\"", .string),
             (.zig, "fn use(arg: u32) void {}", "u32", .type),
             (.zig, #"const @"quoted\nname" = "ordinary\ntext";"#, #""ordinary\ntext""#, .string),
@@ -390,33 +391,67 @@ enum SyntaxCheck {
                 throw Failure("Missing Zig keyword literal color for \(literal).")
             }
         }
-        let zigSource = """
+        let zigSource = #"""
             const std = @import("module");
             const MAX_SIZE = 32;
-            const record = struct { field: u32 };
-            const tuple = struct { TupleItem, TupleItem };
-            const @"quoted\\nname" = "ordinary\\ntext";
+            const Record = struct { field: u32, null: f80 };
+            const Tuple = struct { TupleItem, TupleItem };
+            const KnownTuple = struct { u8, bool };
+            const Explicit: type = struct {};
+            const Options = enum { One, @"two words", true };
+            const Variant = union(enum) { empty, tagged: c_char };
+            const Faults = error{ Declared };
+            const missing = error.Missing;
+            const frameType = anyframe->void;
+            const frameValue = anyframe;
+            const ByteSlice = []const u8;
+            const unresolved: UnknownType = struct {};
+            const unknownSlice = []UnknownType;
+            const claimedType: type = 21;
+            const @"quoted\nname" = "ordinary\ntext";
             var Counter: u32 = 0;
             var usingnamespace = 42;
             var async = 1;
             var await = 2;
-            fn declare(obj: InputType) void {
+            extern "c" fn variadic(ordinaryParam: c_int, ...) void;
+            fn declare(comptime TypeParam: type, someInt: u32, zeroBit: u0, obj: InputType) void {
                 _ = obj.Member;
                 _ = obj.size;
-                _ = .green;
-                _ = record{ .field = 1 };
+                _ = obj.c_char;
+                _ = .looseTag;
+                _ = Record{ .designator = 1 };
                 callee();
                 obj.callback();
-                blockName: { break :blockName; }
+                blockName: { break :breakTarget; }
             }
-            """
+            """#
         guard let zigSpans = SyntaxEngine.spans(in: zigSource, language: .zig) else {
             throw Failure("Missing Zig Tree-sitter captures.")
         }
-        for name in ["std", "@import", "MAX_SIZE", "record", "Counter", "Member", "size", "green", "field", ".field",
-                     "TupleItem", #"@"quoted\nname""#, "usingnamespace", "async", "await", "declare", "obj", "InputType",
-                     "callee", "callback", "blockName"] {
-            let token = (zigSource as NSString).range(of: name)
+        let source = zigSource as NSString
+        let coloredTokens: [(String, SyntaxColor)] = [
+            ("Record", .type), ("KnownTuple", .type), ("Explicit", .type), ("Options", .type), ("Variant", .type), ("Faults", .type),
+            ("Declared", .type), ("Missing", .type), ("f80", .type), ("c_char", .type), ("ByteSlice", .type),
+            ("TypeParam", .type), ("u0", .type), ("...", .type),
+            ("field", .property), ("null", .property), ("One", .property), (#"@"two words""#, .property),
+            ("true", .property), ("empty", .property), ("tagged", .property), ("designator", .property),
+            ("ordinaryParam", .property), ("someInt", .property), ("zeroBit", .property),
+            ("blockName", .control), ("breakTarget", .control), ("anyframe", .keyword),
+        ]
+        for (spelling, color) in coloredTokens {
+            let token = source.range(of: spelling)
+            guard zigSpans.contains(where: { $0.start == token.location && $0.end == token.upperBound && $0.color == color }) else {
+                throw Failure("Expected Zig Tree-sitter color \(color) for \(spelling).")
+            }
+        }
+        let standaloneFrame = source.range(of: "anyframe", options: .backwards)
+        guard zigSpans.contains(where: { $0.start == standaloneFrame.location && $0.end == standaloneFrame.upperBound && $0.color == .type }) else {
+            throw Failure("Expected the standalone Zig anyframe type color.")
+        }
+        for name in ["std", "@import", "MAX_SIZE", "Counter", "Member", "size", "looseTag", "obj.c_char", "Tuple", "TupleItem",
+                     #"@"quoted\nname""#, "usingnamespace", "async", "await", "declare", "obj", "InputType", "callee",
+                     "callback", "unresolved", "UnknownType", "unknownSlice", "claimedType"] {
+            let token = source.range(of: name)
             guard token.location != NSNotFound,
                   !zigSpans.contains(where: { $0.start < token.upperBound && $0.end > token.location }) else {
                 throw Failure("Expected an uncolored Zig identifier for \(name).")
