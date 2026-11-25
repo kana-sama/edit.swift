@@ -66,6 +66,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     private lazy var sessionStore = SessionStore.application()
     lazy var draftRecovery = DraftRecoveryStore(directory: storageFolder.appending(path: "DraftRecovery", directoryHint: .isDirectory))
     lazy var syntaxOverrides = SyntaxLanguageOverrides(defaults: isAgentCheck ? nil : .standard)
+    lazy var fileWordWrap = FileWordWrap(defaults: isAgentCheck ? nil : .standard)
     private weak var recentMenu: NSMenu?
     private weak var focusJujutsuItem: NSMenuItem?
     private weak var findPreviousItem: NSMenuItem?
@@ -159,6 +160,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try checkWindow(sample.window, screenshot: arguments.first)
                     try MultiCaretCheck.runComposition(in: sample.editor)
                     try await checkEditorViewport()
+                    try await WordWrapCheck.run(in: self) { window, _ in
+                        try checkWindow(window, screenshot: nil)
+                    }
                     receivedInitialSession = true
                     let folderWindow = try await FolderCheck.run(in: self)
                     try checkWindow(folderWindow, screenshot: nil)
@@ -590,6 +594,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     @objc func focusSelection(_ sender: Any?) { activeDocument?.focusSelection() }
     @objc func exitFocus(_ sender: Any?) { activeDocument?.exitFocus() }
     @objc func toggleMarkdownPreview(_ sender: Any?) { activeDocument?.toggleMarkdownPreview() }
+    @objc func toggleWordWrap(_ sender: Any?) { activeDocument?.toggleWordWrap() }
 
     @objc func goBack(_ sender: Any?) { Task { await navigate(.back) } }
     @objc func goForward(_ sender: Any?) { Task { await navigate(.forward) } }
@@ -705,6 +710,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case #selector(focusSelection(_:)): return activeDocument?.canFocusSelection ?? false
         case #selector(exitFocus(_:)): return activeDocument?.canExitFocus ?? false
         case #selector(toggleMarkdownPreview(_:)): return activeDocument?.canToggleMarkdownPreview ?? false
+        case #selector(toggleWordWrap(_:)):
+            (item as? NSMenuItem)?.state = activeDocument?.editor.wrapsWords == true ? .on : .off
+            return activeDocument?.canToggleWordWrap ?? false
         case #selector(goBack(_:)): return canNavigate(.back)
         case #selector(goForward(_:)): return canNavigate(.forward)
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
@@ -1323,6 +1331,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         view.addCommand("Command Mode…", #selector(showCommandMode(_:)), "p", [.command, .shift]).target = self
         view.addCommand("Change Language Mode…", #selector(showLanguageModes(_:))).target = self
         view.addItem(.separator())
+        view.addCommand("Toggle Word Wrap", #selector(toggleWordWrap(_:))).target = self
         view.addCommand("Increase Text Size", #selector(EditorTextView.increaseTextSize(_:)), "=")
         view.addCommand("Decrease Text Size", #selector(EditorTextView.decreaseTextSize(_:)), "-")
         view.addCommand("Reset Text Size", #selector(EditorTextView.resetTextSize(_:)), "0")
@@ -1357,6 +1366,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             try MultiCaretCheck.runComposition(in: document.editor)
             document.window.close()
             try await checkEditorViewport()
+            try await WordWrapCheck.run(in: self) { window, suffix in
+                let target = screenshot.map { URL(fileURLWithPath: $0).deletingPathExtension().path + "-\(suffix).png" }
+                try checkWindow(window, screenshot: target)
+            }
             try await NavigationHistoryCheck.run(in: self)
         case "inline-diff":
             if let screenshot {

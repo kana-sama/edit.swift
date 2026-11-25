@@ -2,7 +2,7 @@
 
 A new untitled Edit window opens with a focused, empty plain-text buffer and one caret. [Files](../files/spec.md) defines how to open, save, and restore documents. The system supplies the window title bar, traffic lights, menus, scrollbars, caret, and selection appearance. AppKit and TextKit 2 handle text input and layout.
 
-Use Menlo Regular at 12 points with an 18-point line height, matching the default editor typography in VS Code on macOS. Show the caret and highlight its current line across the viewport while the editor has focus in the key window. When focus leaves the buffer, keep its selections visible in the inactive selection color. Use a single text surface that follows macOS appearance. Lines can extend beyond the viewport and scroll horizontally without wrapping. Both axes use native macOS scrollbar preferences. Resizing the window or a split pane preserves the viewport relative to the exposed edge, within the available scroll range.
+Use Menlo Regular at 12 points with an 18-point line height, matching the default editor typography in VS Code on macOS. Show the caret and highlight its current line across the viewport while the editor has focus in the key window. When focus leaves the buffer, keep its selections visible in the inactive selection color. Use a single text surface that follows macOS appearance. By default, lines can extend beyond the viewport and scroll horizontally. [Toggle Word Wrap](../word-wrap/spec.md) fits lines to the editor width for the current file. Both axes use native macOS scrollbar preferences. Resizing the window or a split pane preserves the viewport relative to the exposed edge, within the available scroll range.
 
 ## Editing
 

@@ -166,6 +166,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var markdownRevisions: [String: (SourceControlFile, EditorPosition)] = [:]
     #if EDIT_AGENT_CHECKS
     var beforePresentMarkdownForCheck: ((MarkdownPreviewView) async -> Void)?
+    var beforeInstallFileForCheck: ((FileBuffer) async -> Void)?
     #endif
     private var emptyFolderView: EmptyFolderView?
     private var sourceControlRevision: SourceControlRevisionPreview?
@@ -341,6 +342,22 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     var isBusy: Bool { activity.isBusy }
     var canReplaceBuffer: Bool { !isBusy && window.attachedSheet == nil }
     var canCloseDocument: Bool { canReplaceBuffer && !app.isQuitting }
+    var canToggleWordWrap: Bool {
+        hasEditableTextDocument && !isShowingMarkdownPreview && canReplaceBuffer && !editor.hasMarkedText()
+    }
+
+    func toggleWordWrap() {
+        guard canToggleWordWrap else { return }
+        let enabled = !editor.wrapsWords
+        editor.setWordWrap(enabled, preservingViewport: true)
+        if let fileURL {
+            app.fileWordWrap.set(enabled, for: fileURL)
+            for document in app.documents where document !== self && document.fileURL == fileURL {
+                document.editor.setWordWrap(enabled, preservingViewport: !document.scrollView.isHidden)
+            }
+        }
+    }
+
     var canRequestOpen: Bool { window.attachedSheet == nil && activity.acceptsOpenRequest }
     var canRestoreSession: Bool {
         folderURL == nil && displayedFileURL == nil && !sidebar.hasContent && terminalPanel == nil &&
@@ -880,6 +897,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if let scratch { detectedSyntaxLanguage = SyntaxLanguage.detected(at: scratch.filenameURL) }
         manualSyntaxLanguage = storedSyntaxLanguage.flatMap(SyntaxLanguage.init(rawValue:))
             ?? app.syntaxOverrides.language(for: fileURL)
+        editor.setWordWrap(app.fileWordWrap.isEnabled(for: fileURL))
         installText(file.text, preparedSyntax: preparedSyntax, openingConflicts: openingConflicts)
     }
 
@@ -921,6 +939,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         pinToEditorContent(view)
         window.initialFirstResponder = view
         scrollView.isHidden = true
+        editor.setWordWrap(false)
         installText("", revealInWorktree: revealInWorktree)
     }
 
@@ -1129,6 +1148,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             savedText = text as NSString
             self.format = format
             editor.isEditable = false
+            editor.setWordWrap(false)
             installText(text, confirmedConflicts: analysis.conflicts)
             setConflictAnalysisMarks(analysis)
             editor.jjInlineDiff?.expandAll()
@@ -1185,6 +1205,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         format = FileFormat()
         revision = nil
         autosave.clearFailure()
+        editor.setWordWrap(false)
         installText("")
     }
 
@@ -1250,6 +1271,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         revision = record.revision
         manualSyntaxLanguage = record.syntaxLanguage.flatMap(SyntaxLanguage.init(rawValue:))
             ?? app.syntaxOverrides.language(for: fileURL)
+        editor.setWordWrap(app.fileWordWrap.isEnabled(for: fileURL))
         installText(text, openingConflicts: openingConflicts, restoredConflicts: restoredConflicts)
         if fileURL == nil {
             draftRecoveryRevision = record.draftRecovery
@@ -1474,6 +1496,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func adoptSavedFile(_ file: FileBuffer, scratch: ScratchFile? = nil) {
+        let wasUntitled = fileURL == nil
         let changedPath = fileURL != file.url
         if changedPath {
             clearSourceControlFile()
@@ -1488,6 +1511,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
         if changedPath {
             app.syntaxOverrides.set(manualSyntaxLanguage, for: fileURL)
+            if wasUntitled && editor.wrapsWords { app.fileWordWrap.set(true, for: file.url) }
+            editor.setWordWrap(app.fileWordWrap.isEnabled(for: file.url), preservingViewport: true)
         }
         if resolvedSyntaxLanguage != previousLanguage {
             refreshSyntax(immediate: true)
@@ -1715,6 +1740,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         } else {
             manualSyntaxLanguage = nil
             format = FileFormat()
+            editor.setWordWrap(false)
             installText("")
         }
         if wasPreview && wasFocused { focusContent() }
@@ -1937,6 +1963,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                         guard isCurrent(), !Task.isCancelled else { prepared.view.removeFromSuperview(); return false }
                         preparedMarkdown = prepared
                     }
+                    #if EDIT_AGENT_CHECKS
+                    if let beforeInstallFileForCheck {
+                        await beforeInstallFileForCheck(file)
+                        guard isCurrent(), !Task.isCancelled else { preparedMarkdown?.view.removeFromSuperview(); return false }
+                    }
+                    #endif
                     rememberFileUndoHistory()
                     installContent(in: folder) {
                         load(file, preparedSyntax: preparedSyntax, openingConflicts: openingConflicts, scratch: scratch,

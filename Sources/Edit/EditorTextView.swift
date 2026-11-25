@@ -50,6 +50,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     private static let defaultFontSize: CGFloat = 12
     static let defaultFont = codeFont(ofSize: defaultFontSize)
     private var fontSize = EditorTextView.defaultFontSize
+    private(set) var wrapsWords = false
     private let currentLineHighlight = CurrentLineHighlight()
     private var lineRefreshPending = false
     let multiCaret = MultiCaretState()
@@ -964,6 +965,31 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
                               verticalOffset: top, topLine: capturePositionTopLine(at: top), focus: focus)
     }
 
+    func setWordWrap(_ enabled: Bool, preservingViewport: Bool = false) {
+        guard wrapsWords != enabled, let scroll = enclosingScrollView as? EditorScrollView,
+              let container = textContainer else { return }
+        let anchor = preservingViewport ? zoomAnchor() : nil
+        wrapsWords = enabled
+        isHorizontallyResizable = !enabled
+        autoresizingMask = enabled ? [.height] : [.width, .height]
+        container.widthTracksTextView = enabled
+        if !enabled {
+            container.size = maxSize
+            setFrameSize(NSSize(width: scroll.contentSize.width, height: frame.height))
+        }
+        scroll.horizontalScrollElasticity = enabled ? .none : .automatic
+        scroll.hasHorizontalScroller = !enabled
+        scroll.updateWordWrapWidth()
+        if enabled {
+            scroll.scrollToVisibleContentOrigin(NSPoint(x: 0, y: scroll.visibleContentOrigin.y))
+        }
+        if preservingViewport {
+            textLayoutManager?.textViewportLayoutController.layoutViewport()
+            if let anchor { restoreZoomAnchor(anchor, in: scroll, horizontalOrigin: 0) }
+        }
+        requestLineRefresh()
+    }
+
     func restorePosition(_ position: EditorPosition) {
         if let text = textStorage?.mutableString {
             let focusRestored = position.focus.map { restoreFocusPosition($0, in: text) } ?? false
@@ -1092,10 +1118,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
                           visibleActiveLine: visibleActiveLine, horizontalOrigin: scroll.visibleContentOrigin.x)
     }
 
-    private func restoreZoomAnchor(_ anchor: ZoomAnchor, in scroll: NSScrollView) {
+    private func restoreZoomAnchor(_ anchor: ZoomAnchor, in scroll: NSScrollView, horizontalOrigin: CGFloat? = nil) {
         guard let topLine = layoutLine(at: anchor.topLine) else { return }
+        let horizontalOrigin = horizontalOrigin ?? anchor.horizontalOrigin
         let offset = min(anchor.offsetIntoTopLine, max(0, topLine.height - 1))
-        scrollToTextTop(topLine.minY + offset, horizontalOrigin: anchor.horizontalOrigin, in: scroll)
+        scrollToTextTop(topLine.minY + offset, horizontalOrigin: horizontalOrigin, in: scroll)
 
         let visible = textViewport(in: scroll)
         guard let active = anchor.visibleActiveLine, let line = layoutLine(at: active) else { return }
@@ -1105,7 +1132,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         } else if line.minY >= visible.upperBound {
             top = line.maxY - (visible.upperBound - visible.lowerBound)
         }
-        scrollToTextTop(top, horizontalOrigin: anchor.horizontalOrigin, in: scroll)
+        scrollToTextTop(top, horizontalOrigin: horizontalOrigin, in: scroll)
     }
 
     private func layoutLine(at offset: Int) -> NSRect? {
@@ -1635,12 +1662,26 @@ private final class EditorScrollView: NSScrollView {
 
     override var contentInsets: NSEdgeInsets {
         get { super.contentInsets }
-        set { preserveViewport { super.contentInsets = newValue } }
+        set {
+            preserveViewport {
+                super.contentInsets = newValue
+                updateWordWrapWidth()
+            }
+        }
     }
 
     override func tile() {
         super.tile()
+        updateWordWrapWidth()
         refreshScrollDecorations()
+    }
+
+    func updateWordWrapWidth() {
+        guard let editor = documentView as? EditorTextView, editor.wrapsWords else { return }
+        // The scroll view underlaps the sidebars. Wrap within the exposed buffer.
+        let width = max(1, contentView.bounds.width - contentInsets.left - contentInsets.right)
+        guard editor.frame.width != width else { return }
+        editor.setFrameSize(NSSize(width: width, height: editor.frame.height))
     }
 
     override func reflectScrolledClipView(_ clipView: NSClipView) {

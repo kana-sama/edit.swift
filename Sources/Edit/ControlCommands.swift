@@ -33,6 +33,7 @@ struct ControlCommand {
         if action == #selector(Edit.focusSelection(_:)) { return document.canFocusSelection }
         if action == #selector(Edit.exitFocus(_:)) { return document.canExitFocus }
         if action == #selector(Edit.closeDocument(_:)) { return document.canCloseDocument }
+        if action == #selector(Edit.toggleWordWrap(_:)) { return document.canToggleWordWrap }
         if action == #selector(DocumentWindow.performMarkdownTableCommand(_:)) { return document.currentMarkdownTable != nil }
         if documentOnly {
             guard document.hasTextDocument, !document.isShowingMarkdownPreview, document.window.attachedSheet == nil,
@@ -75,6 +76,10 @@ struct ControlCommand {
         }
         if action == #selector(Edit.toggleMarkdownPreview(_:)) {
             document.toggleMarkdownPreview()
+            return
+        }
+        if action == #selector(Edit.toggleWordWrap(_:)) {
+            document.toggleWordWrap()
             return
         }
         if documentOnly {
@@ -192,7 +197,7 @@ struct ControlCommand {
                action != #selector(NSWindow.performMiniaturize(_:)),
                action != #selector(NSWindow.performZoom(_:)) { return [] }
             let title = action == #selector(Edit.goBack(_:)) || action == #selector(Edit.goForward(_:))
-                || action == #selector(Edit.toggleMarkdownPreview(_:))
+                || action == #selector(Edit.toggleMarkdownPreview(_:)) || action == #selector(Edit.toggleWordWrap(_:))
                 ? item.title : "\(prefix): \(item.title)"
             return [ControlCommand(id: NSStringFromSelector(action), title: title, item: item,
                                    documentOnly: isBracketCommand(action) || isCaseCommand(action))]
