@@ -105,6 +105,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             updateTrackingAreas()
         }
     }
+    var markdownLink: ((Int, Bool) -> Bool)?
+    private var pointsAtMarkdownLink = false
     var languageDefinitionLinkRange: NSRange? { languageInteractionEnabled ? languageInteraction.linkRange : nil }
     var preferredLineEnding = "\n"
     var syntaxLanguage: SyntaxLanguage = .plainText
@@ -571,6 +573,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             }
             _ = onCancelSymbolRename?()
         }
+        if markdownLink(at: event.locationInWindow, modifiers: event.modifierFlags, activate: true) { return }
         if languageInteractionEnabled, languageInteraction.followClick(event) { return }
         onFindEditorInteraction?()
         if let focusSession, event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty {
@@ -1468,7 +1471,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             removeTrackingArea(languageTrackingArea)
             self.languageTrackingArea = nil
         }
-        guard languageInteractionEnabled else { return }
+        guard languageInteractionEnabled || syntaxLanguage == .markdown else { return }
         let area = NSTrackingArea(rect: .zero, options: [.activeInKeyWindow, .inVisibleRect, .mouseEnteredAndExited, .mouseMoved],
                                   owner: self, userInfo: nil)
         addTrackingArea(area)
@@ -1477,11 +1480,14 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
-        if languageInteractionEnabled { languageInteraction.track(at: event.locationInWindow, modifiers: event.modifierFlags) }
+        if !updateMarkdownPointer(at: event.locationInWindow, modifiers: event.modifierFlags), languageInteractionEnabled {
+            languageInteraction.track(at: event.locationInWindow, modifiers: event.modifierFlags)
+        }
     }
 
     override func mouseEntered(with event: NSEvent) {
         super.mouseEntered(with: event)
+        if updateMarkdownPointer(at: event.locationInWindow, modifiers: event.modifierFlags) { return }
         if languageInteractionEnabled, event.trackingArea === languageTrackingArea {
             languageInteraction.track(at: event.locationInWindow, modifiers: event.modifierFlags)
         }
@@ -1489,13 +1495,42 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
+        pointsAtMarkdownLink = false
         if languageInteractionEnabled, event.trackingArea === languageTrackingArea { languageInteraction.pointerExited() }
     }
 
     override func cursorUpdate(with event: NSEvent) {
         // Native tracking can come straight to the text view, even beneath window chrome.
         if let window, (NSApp as? EditApplication)?.updatePointerCursor(in: window) == true { return }
+        if updateMarkdownPointer(at: event.locationInWindow, modifiers: event.modifierFlags) { return }
         super.cursorUpdate(with: event)
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        super.flagsChanged(with: event)
+        if let window { _ = updateMarkdownPointer(at: window.mouseLocationOutsideOfEventStream, modifiers: event.modifierFlags) }
+    }
+
+    private func updateMarkdownPointer(at position: NSPoint, modifiers: NSEvent.ModifierFlags) -> Bool {
+        let linked = markdownLink(at: position, modifiers: modifiers, activate: false)
+        if linked { NSCursor.pointingHand.set() }
+        else if pointsAtMarkdownLink { NSCursor.iBeam.set() }
+        pointsAtMarkdownLink = linked
+        return linked
+    }
+
+    private func markdownLink(at position: NSPoint, modifiers: NSEvent.ModifierFlags, activate: Bool) -> Bool {
+        guard syntaxLanguage == .markdown, modifiers.intersection([.command, .option, .control, .shift]) == .command,
+              let markdownLink else { return false }
+        let point = convert(position, from: nil)
+        guard visibleRect.contains(point) else { return false }
+        let offset = characterIndexForInsertion(at: point)
+        guard offset != NSNotFound else { return false }
+        if offset < string.utf16.count,
+           highlightRects(for: [NSRange(location: offset, length: 1)]).contains(where: { $0.contains(point) }),
+           markdownLink(offset, activate) { return true }
+        return offset > 0 && highlightRects(for: [NSRange(location: offset - 1, length: 1)]).contains(where: { $0.contains(point) })
+            && markdownLink(offset - 1, activate)
     }
 
     override func drawBackground(in dirtyRect: NSRect) {

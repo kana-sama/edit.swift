@@ -52,6 +52,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     private struct ClosedFile {
         let url: URL
         let folder: URL?
+        let markdown: EditorPosition?
+        let revision: MarkdownRevisionRecord?
+        let syntax: String?
         weak var document: DocumentWindow?
     }
 
@@ -147,6 +150,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try await ControlPanel(app: self).checkPins(in: sample)
                     try await ControlSearchCheck.run(in: self)
                     try await SyntaxCheck.run(in: self)
+                    try await MarkdownCheck.run(in: self)
                     try await BracketCheck.run(in: self)
                     try await OccurrenceCheck.run(in: self)
                     try await FindCheck.run(in: self)
@@ -265,6 +269,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 updateJujutsuShortcut()
             }
             let document = documents.first { $0.window === event.window }
+            if modifiers.isEmpty, event.keyCode == 53, document?.handleMarkdownEscape() == true { return nil }
+            if (modifiers == .command || modifiers == [.command, .shift]),
+               event.charactersIgnoringModifiers?.lowercased() == "z",
+               document?.handleMarkdownUndo(redo: modifiers.contains(.shift)) == true { return nil }
             return document?.handleTerminalKey(event) == true ? nil : event
         default:
             return routeTitleClick(event)
@@ -466,14 +474,30 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         Task {
             defer { reopeningClosedFile = false }
             do {
-                if let document = entry.document, documents.contains(where: { $0 === document }),
+                if let revision = entry.revision {
+                    let loaded = try await revision.load()
+                    guard !isQuitting else { return }
+                    let document: DocumentWindow
+                    if let previous = entry.document, documents.contains(where: { $0 === previous }),
+                       previous.showsEmptyFolder, previous.folderURL == entry.folder, previous.canReplaceBuffer {
+                        document = previous
+                    } else {
+                        document = makeDocument()
+                        if let folder = entry.folder { document.setFolder(folder) }
+                    }
+                    document.restoreMarkdownRevision(loaded, syntax: entry.syntax)
+                    document.restoreEditorPosition(entry.markdown)
+                    if !isAgentCheck { document.present() }
+                } else if let document = entry.document, documents.contains(where: { $0 === document }),
                    document.folderURL == entry.folder, document.showsEmptyFolder, document.canReplaceBuffer {
                     guard try await openFile(entry.url, in: document, shouldOpen: {
                         document.showsEmptyFolder && document.folderURL == entry.folder
                     }) != nil else { return }
+                    if entry.markdown != nil { document.restoreEditorPosition(entry.markdown) }
                     if !isAgentCheck && !isQuitting { document.present() }
                 } else {
-                    guard try await openInAnotherWindow(entry.url, folder: entry.folder) != nil else { return }
+                    guard let document = try await openInAnotherWindow(entry.url, folder: entry.folder) else { return }
+                    if entry.markdown != nil { document.restoreEditorPosition(entry.markdown) }
                 }
                 // New closes can append entries while the reopen is preparing the file.
                 closedFiles.remove(at: index)
@@ -502,6 +526,11 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     @objc func openFind(_ sender: Any?) {
+        if let document = activeDocument, document.isShowingMarkdownPreview {
+            controlPanel?.dismiss(restoreFocus: true)
+            document.performFind(.find)
+            return
+        }
         focusSidebar(.search)
     }
 
@@ -556,6 +585,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     @objc func focusSelection(_ sender: Any?) { activeDocument?.focusSelection() }
     @objc func exitFocus(_ sender: Any?) { activeDocument?.exitFocus() }
+    @objc func toggleMarkdownPreview(_ sender: Any?) { activeDocument?.toggleMarkdownPreview() }
 
     @objc func goBack(_ sender: Any?) { Task { await navigate(.back) } }
     @objc func goForward(_ sender: Any?) { Task { await navigate(.forward) } }
@@ -611,24 +641,32 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         defer { navigationHistory.finish(move, opened: opened) }
 
         if document.navigationLocation?.resource != location.resource {
-            guard case .file(let url) = location.resource else {
+            if case .revision(let key) = location.resource {
+                guard await document.reopenMarkdownRevision(key, while: { [weak self] in
+                    self?.navigationHistory.isPending(move) == true
+                }) else {
+                    navigationHistory.remove(window: location.window, resource: location.resource)
+                    return true
+                }
+            } else if case .file(let url) = location.resource {
+                let missing = await Self.navigationFileIsMissing(url)
+                guard !Task.isCancelled, navigationHistory.isPending(move) else { return false }
+                if missing {
+                    navigationHistory.removeFiles { $0 == url }
+                    return true
+                }
+                do {
+                    guard try await openFile(url, in: document, focusEditor: false, shouldOpen: { [weak self] in
+                        self?.navigationHistory.isPending(move) == true
+                    }) === document else { return false }
+                } catch {
+                    guard navigationHistory.isPending(move) else { return false }
+                    await document.showError("Could Not Open “\(url.lastPathComponent)”", detail: error.localizedDescription)
+                    return false
+                }
+            } else {
                 navigationHistory.remove(window: location.window, resource: location.resource)
                 return true
-            }
-            let missing = await Self.navigationFileIsMissing(url)
-            guard !Task.isCancelled, navigationHistory.isPending(move) else { return false }
-            if missing {
-                navigationHistory.removeFiles { $0 == url }
-                return true
-            }
-            do {
-                guard try await openFile(url, in: document, focusEditor: false, shouldOpen: { [weak self] in
-                    self?.navigationHistory.isPending(move) == true
-                }) === document else { return false }
-            } catch {
-                guard navigationHistory.isPending(move) else { return false }
-                await document.showError("Could Not Open “\(url.lastPathComponent)”", detail: error.localizedDescription)
-                return false
             }
         }
         guard navigationHistory.isPending(move), documents.contains(where: { $0 === document }) else { return false }
@@ -636,7 +674,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         defer { navigationReplays.remove(location.window) }
         controlPanel?.dismiss(restoreFocus: false)
         if !isAgentCheck && !document.window.isKeyWindow { document.present() }
-        if let selection = location.selection, document.hasTextDocument {
+        if let markdown = location.markdown { document.restoreMarkdownState(markdown) }
+        if let selection = location.selection, document.hasTextDocument, location.markdown?.showsPreview != true {
             document.restoreNavigationSelection(selection)
         } else {
             document.focusContent()
@@ -661,6 +700,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         switch item.action {
         case #selector(focusSelection(_:)): return activeDocument?.canFocusSelection ?? false
         case #selector(exitFocus(_:)): return activeDocument?.canExitFocus ?? false
+        case #selector(toggleMarkdownPreview(_:)): return activeDocument?.canToggleMarkdownPreview ?? false
         case #selector(goBack(_:)): return canNavigate(.back)
         case #selector(goForward(_:)): return canNavigate(.forward)
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
@@ -791,12 +831,13 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     func recordClosedFile(in document: DocumentWindow) {
-        guard !isQuitting, let url = document.displayedFileURL else { return }
-        closedFiles.append(ClosedFile(url: url, folder: document.folderURL, document: document))
+        let revision = document.markdownRevisionRecord
+        guard !isQuitting, let url = document.displayedFileURL ?? (revision == nil ? nil : document.fileIconURL) else { return }
+        closedFiles.append(ClosedFile(url: url, folder: document.folderURL, markdown: document.markdownPositionForClose,
+                                      revision: revision, syntax: document.manualSyntaxLanguage?.rawValue, document: document))
     }
 
     func didClose(_ document: DocumentWindow) {
-        recordClosedFile(in: document)
         navigationHistory.remove(window: ObjectIdentifier(document))
         if openPanelDocument === document { openFilePanel?.cancel() }
         lastPlacement = document.placement
@@ -871,6 +912,16 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         var warnings: [String] = []
         for (index, savedRecord) in previous.documents.enumerated() {
             var record = savedRecord
+            let historical: MarkdownRevisionRecord.Loaded?
+            if let revision = record.markdownRevision {
+                do { historical = try await revision.load() }
+                catch {
+                    historical = nil
+                    warnings.append("“\(revision.path)” — \(error.localizedDescription)")
+                }
+            } else {
+                historical = nil
+            }
             let url = record.path.map { URL(fileURLWithPath: $0) }
             let isScratch = url.map(scratchStore.identifiesScratch(at:)) ?? false
             let scratch: ScratchFile?
@@ -936,7 +987,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 ? placeholder : makeDocument()
             document.restorePlacement(record.placement)
             if let folder { document.setFolder(folder) }
-            if let draft = record.draft {
+            if let historical {
+                document.restoreMarkdownRevision(historical, syntax: record.syntaxLanguage)
+            } else if let draft = record.draft {
                 document.restoreDraft(record, text: restoredConflicts?.text ?? draft, identity: identity, scratch: scratch,
                                       openingConflicts: openingConflicts, restoredConflicts: restoredConflicts?.edits ?? [])
             } else if let opened, document.folderURL == nil || opened.identity != nil {
@@ -951,6 +1004,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             } else if document.folderURL != nil && (record.path != nil || record.showsEmptyFolder != false) {
                 document.loadEmptyFolder()
                 document.focusContent()
+            } else if record.path == nil, record.syntaxLanguage != nil {
+                document.restoreDraft(record, text: "")
             }
             document.restoreSidebar(record)
             document.restoreTerminal(record.terminal)
@@ -1252,6 +1307,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         edit.addItem(withTitle: "Selection", action: nil, keyEquivalent: "").submenu = selection
 
         let view = addMenu("View")
+        view.addCommand("Markdown: preview", #selector(toggleMarkdownPreview(_:))).target = self
         view.addCommand("Toggle Sidebar", #selector(toggleSidebar(_:)), "b").target = self
         view.addCommand("Focus Worktree", #selector(toggleWorktreeSidebar(_:)), "e", [.command, .shift]).target = self
         view.addCommand("Focus Scratches", #selector(focusScratches(_:)), "w", [.command, .shift]).target = self
@@ -1309,6 +1365,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case "files" where screenshot == nil:
             _ = try await FilesCheck.run(in: self)
             try await FilesCheck.checkFilePreview(in: self)
+        case "markdown":
+            try await MarkdownCheck.run(in: self, screenshot: screenshot)
         case "control":
             try await ControlSearchCheck.run(in: self) { view in
                 try self.captureCheckView(view, screenshot: screenshot)

@@ -43,7 +43,8 @@ build_fingerprint() {
         /usr/bin/shasum -a 256 "${sources[@]}" Package.swift Package.resolved resources/Info.plist resources/Edit.icns \
             script/build script/build-syntax script/app-bundle.sh script/publish-app.c Sources/Edit/Resources/Seti/* \
             Sources/EditSyntax/Highlight.m Sources/EditSyntaxABI/* resources/syntax/sources.tar.gz \
-            resources/syntax/queries/*.scm resources/syntax/licenses/* resources/syntax/README.md
+            resources/syntax/queries/*.scm resources/syntax/licenses/* resources/syntax/README.md \
+            resources/markdown/assets.tar.gz resources/markdown/preview.html
     } | /usr/bin/shasum -a 256
 }
 
@@ -98,6 +99,9 @@ cp -p "$products/$product" "$app/Contents/MacOS/Edit"
 syntax_library="$(<"$stage/syntax-library")"
 cp -p "$syntax_library" "$app/Contents/Frameworks/libEditSyntax.dylib"
 cp -R resources/syntax/queries resources/syntax/licenses resources/syntax/README.md "$app/Contents/Resources/syntax/"
+mkdir "$app/Contents/Resources/markdown"
+/usr/bin/tar -xzf resources/markdown/assets.tar.gz -C "$app/Contents/Resources/markdown"
+cp resources/markdown/preview.html "$app/Contents/Resources/markdown/"
 cp "$swiftpm_scratch/checkouts/SwiftTerm/LICENSE" "$app/Contents/Resources/SwiftTerm-LICENSE.txt"
 cp resources/Info.plist "$app/Contents/Info.plist"
 cp resources/Edit.icns "$app/Contents/Resources/"

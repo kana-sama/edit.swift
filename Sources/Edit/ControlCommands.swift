@@ -34,7 +34,7 @@ struct ControlCommand {
         if action == #selector(Edit.exitFocus(_:)) { return document.canExitFocus }
         if action == #selector(DocumentWindow.performMarkdownTableCommand(_:)) { return document.currentMarkdownTable != nil }
         if documentOnly {
-            guard document.hasTextDocument, document.window.attachedSheet == nil,
+            guard document.hasTextDocument, !document.isShowingMarkdownPreview, document.window.attachedSheet == nil,
                   document.editor.responds(to: action) else { return false }
             if Self.isCaseCommand(action) { return document.editor.validateUserInterfaceItem(item) }
             return !Self.isBracketCommand(action) || document.editor.canNavigateBrackets
@@ -67,6 +67,10 @@ struct ControlCommand {
         }
         if action == #selector(Edit.exitFocus(_:)) {
             document.exitFocus()
+            return
+        }
+        if action == #selector(Edit.toggleMarkdownPreview(_:)) {
+            document.toggleMarkdownPreview()
             return
         }
         if documentOnly {
@@ -184,6 +188,7 @@ struct ControlCommand {
                action != #selector(NSWindow.performMiniaturize(_:)),
                action != #selector(NSWindow.performZoom(_:)) { return [] }
             let title = action == #selector(Edit.goBack(_:)) || action == #selector(Edit.goForward(_:))
+                || action == #selector(Edit.toggleMarkdownPreview(_:))
                 ? item.title : "\(prefix): \(item.title)"
             return [ControlCommand(id: NSStringFromSelector(action), title: title, item: item,
                                    documentOnly: isBracketCommand(action) || isCaseCommand(action))]

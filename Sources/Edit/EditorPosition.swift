@@ -32,6 +32,7 @@ struct EditorPosition: Codable, Equatable, Sendable {
     let verticalOffset: CGFloat
     let topLine: TopLine?
     var focus: Focus? = nil
+    var markdown: MarkdownViewState? = nil
 
     func mappingOffsets(_ map: (Int) -> Int) -> Self {
         let selections = selections.map { selection in
@@ -40,6 +41,6 @@ struct EditorPosition: Codable, Equatable, Sendable {
         }
         let topLine = topLine.map { TopLine(textOffset: map($0.textOffset), offsetIntoLine: $0.offsetIntoLine) }
         return Self(selections: selections, horizontalOffset: horizontalOffset, verticalOffset: verticalOffset,
-                    topLine: topLine, focus: focus)
+                    topLine: topLine, focus: focus, markdown: markdown)
     }
 }

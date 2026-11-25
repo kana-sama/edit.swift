@@ -1,0 +1,176 @@
+import AppKit
+
+@MainActor
+enum MarkdownCheck {
+    private struct Failure: LocalizedError {
+        let errorDescription: String?
+        init(_ message: String) { errorDescription = message }
+    }
+
+    static func run(in app: Edit, screenshot: String? = nil) async throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let source = """
+        # Markdown in Edit
+
+        - [ ] A task
+
+        > [!WARNING]
+        > Keep this visible.
+
+        | Command | Value |
+        | :--- | ---: |
+        | `swift` | one |
+
+        <details>
+        <summary>More</summary>
+
+        A footnote[^one] and another reference[^one].
+
+        </details>
+
+        [Other](Other.md#target)
+
+        ```swift
+        func example() -> Int { 1 }
+        ```
+
+        Math $x^2$ and :rocket:.
+
+        ```mermaid
+        graph TD
+            A --> B
+        ```
+
+        ![Remote](https://example.invalid/remote.png)
+
+        [^one]: A note.
+
+        """
+        let file = folder.appending(path: "Main.md")
+        let other = folder.appending(path: "Other.md")
+        try source.write(to: file, atomically: true, encoding: .utf8)
+        try "# Elsewhere\n\n## Target\n\nDestination\n".write(to: other, atomically: true, encoding: .utf8)
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        guard try await app.openFile(file, in: document) === document else { throw Failure("Could not open Markdown fixture.") }
+        let text = document.editor
+        let tableCaret = (text.string as NSString).range(of: "`swift`").location + 1
+        text.setSelectedRange(NSRange(location: tableCaret, length: 0))
+        guard let table = document.currentMarkdownTable else { throw Failure("Missing table command at the body cell.") }
+        let formatted = table.edit(.format).text
+        let inserted = table.edit(.columnRight).text
+        let borderless = table.edit(.toggleBorders).text
+        guard formatted.contains("`swift`"), formatted.contains(":---"), inserted.contains("`swift`"),
+              borderless.hasPrefix("Command | Value"), borderless.contains("`swift` | one"),
+              MarkdownTable(source: borderless, caret: (borderless as NSString).range(of: "`swift`").location) != nil,
+              MarkdownTable(source: "```md\n\(formatted)\n```", caret: 18) == nil else {
+            throw Failure("Formatting a Markdown table lost content, alignment, or valid table syntax.")
+        }
+        let originalPosition = text.selectedRange()
+        if let command = ControlCommand.markdownTableCommands(for: document).first {
+            command.run(in: document)
+            guard text.string.contains(formatted) else { throw Failure("Control did not format the table.") }
+            text.undoManager?.undo()
+            guard text.string == source, text.selectedRange() == originalPosition else { throw Failure("Undo did not restore the table source.") }
+        }
+        document.toggleMarkdownPreview()
+        guard let preview = document.markdownPreviewForCheck else { throw Failure("Could not enter Markdown preview.") }
+        try await wait("formatted document, Mermaid, and math") {
+            try await preview.evaluateForCheck("!!document.querySelector('.alert.warning') && !!document.querySelector('.diagram svg') && !!document.querySelector('.katex')") as? Bool == true
+        }
+        guard try await preview.evaluateForCheck("document.querySelectorAll('a[data-footnote-ref]').length === 2 && !!document.querySelector('[data-load-image]') && !!document.querySelector('.syntax-function')") as? Bool == true else {
+            throw Failure("The preview is missing footnotes, the image control, or code colors.")
+        }
+        document.performFind(.find)
+        guard preview.isFinding, document.handleMarkdownEscape(), document.isShowingMarkdownPreview else {
+            throw Failure("Escape did not dismiss preview Find before leaving preview.")
+        }
+        _ = try await preview.evaluateForCheck("document.querySelector('[data-task]').click(); document.querySelector('details').open = true;")
+        try await wait("source task edit") { text.string.contains("- [x] A task") }
+        text.undoManager?.undo()
+        try await wait("task undo") { text.string.contains("- [ ] A task") }
+        try await wait("rerendered task after Undo") {
+            try await preview.evaluateForCheck("document.querySelector('[data-task]')?.checked === false") as? Bool == true
+        }
+        guard text.selectedRange() == originalPosition else { throw Failure("A preview edit moved the editor selection.") }
+        if let screenshot { try await preview.captureForCheck(to: screenshot) }
+        await document.followMarkdownForCheck("Other.md#target")
+        guard document.fileURL == FileBuffer.canonicalURL(other), document.isShowingMarkdownPreview else {
+            throw Failure("A local preview link changed mode or opened the wrong file.")
+        }
+        guard try await app.openFile(file, in: document) === document, document.isShowingMarkdownPreview,
+              let reopened = document.markdownPreviewForCheck else { throw Failure("A reopened file lost its preview mode.") }
+        try await wait("stored disclosure") { try await reopened.evaluateForCheck("document.querySelector('details')?.open === true") as? Bool == true }
+        document.toggleMarkdownPreview()
+        await document.followMarkdownForCheck("Other.md#target")
+        guard !document.isShowingMarkdownPreview, document.fileURL == FileBuffer.canonicalURL(other),
+              document.editor.selectedRange().location == 13 else { throw Failure("A source link did not reveal its heading in source mode.") }
+        let draft = app.makeDocument()
+        defer { draft.window.close() }
+        draft.editor.string = "# Draft"
+        draft.setSyntaxLanguage(.markdown)
+        draft.toggleMarkdownPreview()
+        guard draft.sessionDocument().editorPosition?.markdown?.showsPreview == true else {
+            throw Failure("The untitled Markdown buffer did not save its preview mode in session state.")
+        }
+        try await checkHistory(in: app, project: folder.appending(path: "Project"))
+    }
+
+    private static func checkHistory(in app: Edit, project: URL) async throws {
+        guard let executable = JJRepository.executable else { return }
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let result = try await JJCommand.run(executable, arguments: ["git", "init", "--colocate"], in: project,
+                                             limit: 16_384, timeout: 12)
+        guard result.status == 0, let workspace = await JJRepository.discover(at: project) else {
+            throw Failure("Could not create the Markdown history fixture.")
+        }
+        let main = project.appending(path: "Main.md")
+        let other = project.appending(path: "Other.md")
+        try "# Recorded\n\n- [ ] Task\n\n[Other](/Other.md)\n".write(to: main, atomically: true, encoding: .utf8)
+        try "# Recorded destination\n".write(to: other, atomically: true, encoding: .utf8)
+        _ = try await JJRepository.command(["describe", "-m", "Markdown revision"], in: workspace)
+        _ = try await JJRepository.command(["new", "-m", "Working copy"], in: workspace)
+        try "# Different working destination\n".write(to: other, atomically: true, encoding: .utf8)
+        _ = try await JJRepository.command(["util", "snapshot"], in: workspace)
+        let graph = try await JJSourceControlRepository.graph(in: workspace, revset: "@ | @-")
+        guard let revision = graph.revisions.first(where: { $0.subject == "Markdown revision" }) else {
+            throw Failure("The fixture's Markdown revision was not recorded.")
+        }
+        let file = try await JJSourceControlRepository.linkedFile("Main.md", in: revision, workspace: workspace, at: graph.operationID)
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        document.setFolder(project)
+        guard await document.openSourceControlFile(file, in: revision, workspace: workspace, operationID: graph.operationID, while: { true }) else {
+            throw Failure("Could not open recorded Markdown.")
+        }
+        document.toggleMarkdownPreview()
+        guard let preview = document.markdownPreviewForCheck else { throw Failure("Recorded Markdown cannot enter preview.") }
+        try await wait("disabled task in a recorded revision") {
+            try await preview.evaluateForCheck("document.querySelector('[data-task]')?.disabled === true") as? Bool == true
+        }
+        await document.followMarkdownForCheck("/Other.md")
+        guard document.editor.string.contains("Recorded destination"), document.isShowingMarkdownPreview,
+              let recorded = document.sessionDocument().markdownRevision else {
+            throw Failure("A historical link opened the working copy or left preview.")
+        }
+        let restored = app.makeDocument()
+        defer { restored.window.close() }
+        let loaded = try await recorded.load()
+        restored.restoreMarkdownRevision(loaded)
+        restored.restoreEditorPosition(document.sessionDocument().editorPosition)
+        guard restored.isShowingMarkdownPreview, restored.editor.string == document.editor.string else {
+            throw Failure("A restored historical window lost its revision or mode.")
+        }
+    }
+
+    private static func wait(_ description: String, until condition: () async throws -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(12)
+        repeat {
+            if try await condition() { return }
+            try await Task.sleep(for: .milliseconds(40))
+        } while ContinuousClock.now < deadline
+        throw Failure("Timed out waiting for \(description).")
+    }
+}

@@ -309,20 +309,23 @@ extension SyntaxColor {
 
     var nativeColor: NSColor { Self.colors[self] ?? .textColor }
 
-    private func makeNativeColor() -> NSColor {
-        let pair: (dark: UInt32, light: UInt32)
+    var appearanceRGB: (dark: UInt32, light: UInt32) {
         switch self {
-        case .keyword: pair = (0x569CD6, 0x0000FF)
-        case .control: pair = (0xC586C0, 0xAF00DB)
-        case .type: pair = (0x4EC9B0, 0x226E84)
-        case .function: pair = (0xDCDCAA, 0x795E26)
-        case .string: pair = (0xCE9178, 0xA31515)
-        case .number: pair = (0xB5CEA8, 0x08764D)
-        case .comment: pair = (0x6E9D59, 0x007800)
-        case .property: pair = (0x9CDCFE, 0x001080)
-        case .markup: pair = (0x569CD6, 0x800000)
-        case .attribute: pair = (0x9CDCFE, 0xC00000)
+        case .keyword: (0x569CD6, 0x0000FF)
+        case .control: (0xC586C0, 0xAF00DB)
+        case .type: (0x4EC9B0, 0x226E84)
+        case .function: (0xDCDCAA, 0x795E26)
+        case .string: (0xCE9178, 0xA31515)
+        case .number: (0xB5CEA8, 0x08764D)
+        case .comment: (0x6E9D59, 0x007800)
+        case .property: (0x9CDCFE, 0x001080)
+        case .markup: (0x569CD6, 0x800000)
+        case .attribute: (0x9CDCFE, 0xC00000)
         }
+    }
+
+    private func makeNativeColor() -> NSColor {
+        let pair = appearanceRGB
         return NSColor(name: nil) { appearance in
             let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             let rgb = dark ? pair.dark : pair.light

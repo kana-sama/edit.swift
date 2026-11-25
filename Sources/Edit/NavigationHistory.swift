@@ -16,6 +16,7 @@ final class NavigationHistory {
     enum Resource: Equatable {
         case file(URL)
         case buffer(UUID)
+        case revision(String)
     }
 
     struct Selection: Equatable {
@@ -102,6 +103,7 @@ final class NavigationHistory {
         let window: ObjectIdentifier
         let resource: Resource
         let selection: Selection?
+        var markdown: MarkdownViewState? = nil
 
         fileprivate func matchesEditor(_ other: Location) -> Bool {
             window == other.window && resource == other.resource
@@ -182,7 +184,8 @@ final class NavigationHistory {
         for index in entries.indices {
             let location = entries[index]
             guard case .file(let url) = location.resource, let moved = destination(url) else { continue }
-            entries[index] = Location(window: location.window, resource: .file(moved), selection: location.selection)
+            entries[index] = Location(window: location.window, resource: .file(moved), selection: location.selection,
+                                      markdown: location.markdown)
             if pending?.index == index { pending = nil }
         }
     }

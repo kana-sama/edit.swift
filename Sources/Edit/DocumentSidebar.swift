@@ -480,6 +480,8 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
 
     func editorBufferReplaced() { search?.bufferReplaced() }
 
+    func markdownModeChanged() { search?.updateReplaceAvailability() }
+
     func makeSidebarHeader() -> SidebarMenuItem {
         let item = SidebarMenuItem(itemIdentifier: DocumentTitleBar.sidebarItemIdentifier, showsTitle: true, mode: mode)
         let options = SidebarMenuItem(itemIdentifier: Self.sidebarMenuItem, showsTitle: false, mode: mode)

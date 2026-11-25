@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+    <title>Markdown Preview</title>
+    <style>
+        :root { color-scheme: light dark; font: 15px/1.55 -apple-system, sans-serif;
+            --surface: Canvas; --text: CanvasText; --rule: color-mix(in srgb, CanvasText 21%, Canvas);
+            --muted: color-mix(in srgb, CanvasText 68%, Canvas); --code: color-mix(in srgb, CanvasText 7%, Canvas); }
+        html, body { margin: 0; color: var(--text); background: var(--surface); }
+        article { max-width: 75ch; margin: auto; padding: 28px clamp(16px, 5vw, 52px) 60px; overflow-wrap: anywhere; }
+        article > :first-child { margin-top: 0; }
+        h1, h2, h3, h4, h5, h6 { line-height: 1.25; margin: 1.35em 0 .5em; }
+        h1 { font-size: 2em; } h2 { font-size: 1.55em; } h3 { font-size: 1.25em; }
+        p, ul, ol, blockquote, pre, table, details { margin: 0 0 1em; }
+        ol, ul { padding-left: 1.75em; } li > ul, li > ol { margin-bottom: 0; }
+        a { color: LinkText; text-underline-offset: .12em; }
+        a, button, summary, input:enabled { cursor: pointer; }
+        hr { border: 0; border-top: 1px solid var(--rule); margin: 1.5em 0; }
+        blockquote { border-inline-start: 3px solid var(--rule); color: var(--muted); padding-inline-start: 1em; }
+        blockquote.alert { color: inherit; border-color: var(--alert); }
+        .alert-title { color: var(--alert); font-weight: 650; }
+        .note { --alert: light-dark(#135dae, #65a9ff); } .tip { --alert: light-dark(#19733c, #63c681); }
+        .important { --alert: light-dark(#7739b3, #c298fb); } .warning { --alert: light-dark(#7e5400, #ebbd56); }
+        .caution { --alert: light-dark(#a62524, #fb8581); }
+        code, kbd, samp, pre { font-family: ui-monospace, Menlo, monospace; }
+        code, kbd { background: var(--code); border-radius: .28em; padding: .12em .35em; font-size: .9em; }
+        pre { background: var(--code); overflow: auto; border-radius: 7px; padding: .85em 1em; }
+        pre code { background: none; padding: 0; }
+        .table-scroll { overflow: auto; margin-bottom: 1em; }
+        table { border-collapse: collapse; margin-bottom: 0; overflow-wrap: normal; }
+        th, td { border: 1px solid var(--rule); padding: .38em .7em; }
+        th { background: var(--code); }
+        details { border: 1px solid var(--rule); border-radius: 6px; padding: .55em .8em; }
+        details[open] > summary { margin-bottom: .65em; }
+        img { max-width: 100%; height: auto; } .diagram svg { max-width: 100%; height: auto; }
+        .task-list-item { list-style: none; } input[type=checkbox] { margin-inline: -1.25em .38em; }
+        .footnotes { border-top: 1px solid var(--rule); font-size: .9em; padding-top: 1em; }
+        .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+        .image-control { font: inherit; color: LinkText; border: 0; padding: 0; background: transparent; text-decoration: underline; }
+        .equation { background: transparent; padding: 0; }
+        /* Code colors */
+    </style>
+</head>
+<body>
+<article aria-label="Markdown preview"></article>
+<script>
+    (() => {
+        const article = document.querySelector('article');
+        let revision = 0;
+        let restoring = false;
+        let timer;
+        const post = (kind, payload = {}) => window.webkit.messageHandlers.markdown.postMessage({kind, revision, ...payload});
+        const blocks = () => [...article.querySelectorAll('[data-offset]')];
+        const details = () => [...article.querySelectorAll('[data-disclosure]')];
+
+        function reading() {
+            const top = blocks().find(element => element.getClientRects().length && element.getBoundingClientRect().bottom > 0);
+            return {
+                sourceOffset: top ? Number(top.dataset.offset) : 0,
+                offsetIntoBlock: top ? -top.getBoundingClientRect().top : 0,
+                disclosures: Object.fromEntries(details().map(element => [element.dataset.disclosure, element.open])),
+            };
+        }
+
+        function reportState() {
+            if (!restoring) post('state', {state: reading()});
+        }
+
+        function scrollToSource(offset, adjustment) {
+            if (offset === 0 && adjustment === 0) { window.scrollTo(0, 0); return; }
+            const candidates = blocks().filter(element => element.getClientRects().length);
+            const target = candidates.sort((a, b) => Number(a.dataset.offset) - Number(b.dataset.offset)).findLast(
+                element => Number(element.dataset.offset) <= offset,
+            ) ?? candidates[0];
+            if (target) window.scrollTo(0, Math.max(0, target.getBoundingClientRect().top + scrollY + adjustment));
+        }
+
+        function jump(fragment) {
+            const target = [...article.querySelectorAll('[id]')].find(element => element.id === fragment);
+            if (!target) return null;
+            for (let node = target.parentElement; node && node !== article; node = node.parentElement) {
+                if (node.tagName === 'DETAILS') node.open = true;
+            }
+            target.scrollIntoView({block: 'start'});
+            reportState();
+            return reading();
+        }
+
+        window.EditPreview = {
+            show({html, highlighted, state, writable, token, fragment}) {
+                clearTimeout(timer);
+                restoring = true;
+                revision = token;
+                article.innerHTML = html;
+                for (const table of article.querySelectorAll('table')) {
+                    const wrapper = document.createElement('div');
+                    wrapper.className = 'table-scroll';
+                    table.replaceWith(wrapper);
+                    wrapper.append(table);
+                }
+                for (const input of article.querySelectorAll('[data-task]')) input.disabled = !writable;
+                for (const code of article.querySelectorAll('[data-code]')) {
+                    const html = highlighted[Number(code.dataset.code)];
+                    if (html) code.innerHTML = html;
+                }
+                for (const element of details()) {
+                    const saved = state.disclosures[element.dataset.disclosure];
+                    if (typeof saved === 'boolean') element.open = saved;
+                }
+                if (window.EditMath) window.EditMath.render(article);
+                scrollToSource(state.sourceOffset, state.offsetIntoBlock);
+                const destination = fragment ? jump(fragment) : null;
+                restoring = false;
+                reportState();
+                if (fragment) post('fragment', {target: fragment, found: destination !== null});
+                if (window.EditDiagrams) window.EditDiagrams.render(article);
+                for (const image of article.querySelectorAll('[data-image]')) post('image', {index: Number(image.dataset.image)});
+                return true;
+            },
+            jump,
+            restore(state) {
+                for (const element of details()) {
+                    const saved = state.disclosures[element.dataset.disclosure];
+                    if (typeof saved === 'boolean') element.open = saved;
+                }
+                scrollToSource(state.sourceOffset, state.offsetIntoBlock);
+                reportState();
+            },
+            image(index, url, remote) {
+                const image = article.querySelector(`img[data-image="${index}"]`);
+                if (!image) return;
+                const prior = article.querySelector(`button[data-load-image="${index}"]`);
+                if (url) {
+                    prior?.remove();
+                    image.src = url;
+                    image.hidden = false;
+                } else if (remote && !prior) {
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.className = 'image-control';
+                    button.dataset.loadImage = index;
+                    button.textContent = image.alt ? `Load image · ${image.alt}` : 'Load image';
+                    image.hidden = true;
+                    image.after(button);
+                }
+            },
+        };
+
+        article.addEventListener('click', event => {
+            const link = event.target.closest('a');
+            const image = event.target.closest('[data-load-image]');
+            if (link) {
+                event.preventDefault();
+                reportState();
+                if (link.dataset.target) post('link', {target: link.dataset.target});
+            } else if (image) {
+                post('image', {index: Number(image.dataset.loadImage), activate: true});
+            }
+        });
+        article.addEventListener('change', event => {
+            if (event.target.matches('[data-task]')) {
+                post('task', {offset: Number(event.target.dataset.task), checked: event.target.checked});
+            }
+        });
+        article.addEventListener('toggle', reportState, true);
+        window.addEventListener('scroll', () => {
+            clearTimeout(timer);
+            timer = setTimeout(reportState, 50);
+        }, {passive: true});
+    })();
+</script>
+</body>
+</html>

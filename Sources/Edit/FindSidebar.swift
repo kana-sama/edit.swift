@@ -78,7 +78,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         case .refresh, .toggleReplace, .toggleCase, .toggleWholeWord, .toggleRegex:
             return searchVisible
         case .replaceAll:
-            return searchVisible && settings.showsReplacement && validResults && !matches.isEmpty &&
+            return !document.isShowingMarkdownPreview && searchVisible && settings.showsReplacement && validResults && !matches.isEmpty &&
                 document.editor.isEditable && !document.editor.hasMarkedText()
         case .replaceSelected:
             return canPerform(.replaceAll) && selected != nil
@@ -580,7 +580,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         if previous != index { updateRowSelection(index) }
         if reveal, let index {
             results.scrollRowToVisible(index)
-            document.editor.scrollRangeToVisible(matches[index].range)
+            if !document.isShowingMarkdownPreview { document.editor.scrollRangeToVisible(matches[index].range) }
         }
         refreshDecorations()
     }
@@ -605,7 +605,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     private func openResult(at row: Int) {
-        guard validResults, matches.indices.contains(row) else { return }
+        guard !document.isShowingMarkdownPreview, validResults, matches.indices.contains(row) else { return }
         selectRow(row, reveal: false, preview: false)
         let caret = NSRange(location: NSMaxRange(matches[row].range), length: 0)
         let editor = document.editor
@@ -635,7 +635,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     private func apply(_ hits: [FindHit], advance: Bool) {
-        guard validResults, searchVisible, settings.showsReplacement,
+        guard !document.isShowingMarkdownPreview, validResults, searchVisible, settings.showsReplacement,
               document.editor.isEditable, !document.editor.hasMarkedText(),
               let first = hits.first, let last = hits.last, document.editor.string == resultSnapshot else { return }
         let source = resultSnapshot as NSString
@@ -661,7 +661,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         }
     }
 
-    private func updateReplaceAvailability() { replaceButton.isEnabled = canPerform(.replaceAll) }
+    func updateReplaceAvailability() { replaceButton.isEnabled = canPerform(.replaceAll) }
 
     func refreshDecorations() {
         guard !document.isSidebarVisible || document.sidebarMode != .references else { return }

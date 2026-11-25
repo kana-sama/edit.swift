@@ -22,6 +22,7 @@ Use separate fresh directories via `EDIT_BUILD_DIR` and `EDIT_SDK_CACHE_DIR` to 
 - `./script/check --only editor [screenshot-path]` checks editing, multiple carets, viewport resizing, zoom, and active-line painting. The optional PNG captures the initial editor fixture.
 - `./script/check --only inline-diff [screenshot-path]` checks the inline diff, Escape priority, sidebar geometry, and overscroll. The optional PNG captures the viewport at the final right overscroll position, or the viewport where the geometry check failed.
 - `./script/check --only files` checks file and folder opening, saves, autosave, session restoration, and previews.
+- `./script/check --only markdown [screenshot-path]` exercises Markdown table edits, rendering, task undo, link navigation, and preview state. The optional PNG captures the rendered Markdown fixture in the isolated test app.
 - `./script/check --only control [screenshot-path]` checks file and workspace-symbol ranking, project isolation in Go to File and Open Recent, and history migration. The optional PNG captures the ranked README results.
 - `./script/check --only jj [screenshot-path]` checks recorded and live Jujutsu indicators, inline diff, and command completion. The optional PNG captures the editor and Worktree with recorded changes.
 - `./script/check --only source-control [screenshot-path]` checks the Jujutsu shortcut, graph, changed-file outline, revision preview, and repository Undo and Redo. The optional PNG captures the Jujutsu sidebar beside a changed file.

@@ -1,0 +1,20 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")"
+destination="$PWD/assets.tar.gz"
+stage="$(mktemp -d)"
+trap 'rm -rf -- "$stage"' EXIT
+cp package.json package-lock.json render.js math.js diagrams.js "$stage/"
+cd "$stage"
+npm ci --ignore-scripts --no-audit --no-fund
+mkdir output
+esbuild=node_modules/.bin/esbuild
+options=(--bundle --platform=browser --target=safari18 --format=iife --minify --legal-comments=external)
+"$esbuild" render.js "${options[@]}" --conditions=worker --global-name=EditMarkdown --outfile=output/render.js
+"$esbuild" math.js "${options[@]}" --global-name=EditMath --loader:.woff2=dataurl --loader:.woff=dataurl --loader:.ttf=dataurl --outfile=output/math.js
+"$esbuild" diagrams.js "${options[@]}" --global-name=EditDiagrams --outfile=output/diagrams.js
+find node_modules -type f \( -iname license -o -iname 'license.*' -o -iname copying \) | LC_ALL=C sort | while IFS= read -r license; do
+    printf '\n%s\n' "$license"
+    cat "$license"
+done > output/LICENSES.txt
+COPYFILE_DISABLE=1 /usr/bin/tar --format ustar -czf "$destination" -C output .

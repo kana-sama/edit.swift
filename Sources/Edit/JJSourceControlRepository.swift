@@ -232,6 +232,24 @@ enum JJSourceControlRepository {
         }
     }
 
+    static func linkedFile(_ path: String, in revision: JJSourceControlRevision, workspace: JJWorkspace,
+                           at operationID: String) async throws -> JJSourceControlFile {
+        guard JJRepository.isHexID(revision.id), JJRepository.isRelativePath(path) else { throw Failure.invalidResponse }
+        let fileset = JJRepository.literalFileset(path)
+        let value = try await read(workspace, operation: operationID,
+                                   arguments: ["file", "list", "-r", revision.id, "-T", "file_type", fileset])
+        guard let kind = JJEntryKind(rawValue: value), kind == .file || kind == .conflict else {
+            throw CocoaError(.fileReadNoSuchFile)
+        }
+        return JJSourceControlFile(path: path, sourcePath: nil, kind: kind == .conflict ? .conflict : .modified,
+                                   source: .absent, target: kind)
+    }
+
+    static func savedRevision(_ commit: String, in workspace: JJWorkspace, at operation: String) async throws -> JJSourceControlRevision {
+        guard JJRepository.isHexID(commit) else { throw Failure.invalidResponse }
+        return try await singleRevision(commit, in: workspace, at: operation)
+    }
+
     static func departedFile(
         _ file: JJSourceControlFile, from revision: JJSourceControlRevision, lastCommitID: String,
         lastOperationID: String, in workspace: JJWorkspace, at operationID: String

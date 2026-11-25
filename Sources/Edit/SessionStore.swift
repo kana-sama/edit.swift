@@ -98,6 +98,7 @@ struct SessionDocument: Codable, Sendable {
     var terminal: DocumentTerminalState? = nil
     var draftRecovery: DraftRecoveryRevision? = nil
     var conflictDrafts: [JJConflictEdit.SavedDraft]? = nil
+    var markdownRevision: MarkdownRevisionRecord? = nil
 }
 
 struct EditorSession: Codable, Sendable {

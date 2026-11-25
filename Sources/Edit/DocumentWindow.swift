@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 @MainActor
 enum PanelLayout {
@@ -149,6 +150,15 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var filePreview: OpenFilePreview?
     private var filePreviewView: FilePreviewView?
     private var markdownTableContext: (source: String, caret: Int, table: MarkdownTable?)?
+    private var markdownPreview: MarkdownPreviewView?
+    private var markdownState = MarkdownViewState()
+    private var markdownRender: Task<Void, Never>?
+    private var markdownPage: (source: String, document: MarkdownDocument)?
+    private var markdownNoteOrigins: [String: Int] = [:]
+    private var pendingMarkdownFragment: String?
+    private var markdownOpeningMode: (file: URL, preview: Bool)?
+    private var markdownFiles: [(url: URL, identity: FileIdentity, state: MarkdownViewState)] = []
+    private var markdownRevisions: [String: (SourceControlFile, EditorPosition)] = [:]
     private var emptyFolderView: EmptyFolderView?
     private var sourceControlRevision: SourceControlRevisionPreview?
     private struct SourceControlFile: Equatable {
@@ -188,7 +198,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     var fileIconURL: URL? { scratchFile?.filenameURL ?? displayedFileURL ?? sourceControlRevision?.url }
     var displayName: String { scratchFile?.name ?? fileIconURL?.lastPathComponent ?? "Untitled" }
     var hasJujutsuWorkspace: Bool { folderURL.map(JJRepository.hasWorkspace(at:)) ?? false }
-    var contentResponder: NSView { (filePreviewView as NSView?) ?? (emptyFolderView as NSView?) ?? editor }
+    var contentResponder: NSView { markdownPreview?.responder ?? (filePreviewView as NSView?) ?? (emptyFolderView as NSView?) ?? editor }
 
     func focusContent() {
         window.makeFirstResponder(contentResponder)
@@ -197,7 +207,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     var navigationLocation: NavigationHistory.Location? { navigationLocation(at: nil) }
 
     private var navigationResource: NavigationHistory.Resource? {
-        guard !showsEmptyFolder, sourceControlRevision == nil else { return nil }
+        guard !showsEmptyFolder else { return nil }
+        if sourceControlRevision != nil {
+            return sourceControlFile.map { .revision(markdownRevisionKey($0)) }
+        }
         return displayedFileURL.map { .file($0.standardizedFileURL) } ?? .buffer(navigationBufferID)
     }
 
@@ -205,13 +218,16 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         guard let resource = navigationResource else { return nil }
         let selection: NavigationHistory.Selection?
         if hasTextDocument, editor.conflictEdits.isEmpty, let text = editor.textStorage?.mutableString {
-            let caret = range ?? editor.selectedRange()
+            let caret = range ?? (markdownState.showsPreview ? markdownState.reading.map {
+                NSRange(location: min($0.sourceOffset, text.length), length: 0)
+            } : nil) ?? editor.selectedRange()
             selection = .init(range: caret, in: text, activeEnd: editor.activeEnd(of: caret), previousAnchor: navigationSelectionAnchor)
             navigationSelectionAnchor = selection?.anchor
         } else {
             selection = nil
         }
-        return .init(window: ObjectIdentifier(self), resource: resource, selection: selection)
+        return .init(window: ObjectIdentifier(self), resource: resource, selection: selection,
+                     markdown: resolvedSyntaxLanguage == .markdown ? markdownState : nil)
     }
 
     func restoreNavigationSelection(_ selection: NavigationHistory.Selection) {
@@ -351,7 +367,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         window.tabbingMode = .disallowed
         window.delegate = self
         appearanceObservation = window.observe(\.effectiveAppearance) { [weak self] _, _ in
-            Task { @MainActor in self?.titleBar.update() }
+            Task { @MainActor in
+                guard let self else { return }
+                self.titleBar.update()
+                if self.isShowingMarkdownPreview { self.refreshMarkdown(immediate: true) }
+            }
         }
         window.contentView = editorContentView
         pinToEditorContent(scrollView)
@@ -361,6 +381,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         window.initialFirstResponder = editor
         window.makeFirstResponder(editor)
         editor.onTextChange = { [weak self] in self?.textDidChange() }
+        editor.markdownLink = { [weak self] offset, activate in self?.markdownLink(at: offset, activate: activate) ?? false }
         editor.onNavigationSelectionChange = { [weak self] in self?.recordEditorSelection() }
         editor.onNavigationTextEdit = { [weak self] range in
             if let self, let anchor = navigationSelectionAnchor, range.location <= anchor.offset {
@@ -650,7 +671,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func setEditorBottomInset(_ height: CGFloat) {
-        for case let view? in [scrollView as NSView?, filePreviewView, emptyFolderView] {
+        for case let view? in [scrollView as NSView?, filePreviewView, emptyFolderView, markdownPreview] {
             var insets = view.additionalSafeAreaInsets
             guard insets.bottom != height else { continue }
             insets.bottom = height
@@ -670,6 +691,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func canPerformFind(_ command: FindCommand) -> Bool {
         guard window.attachedSheet == nil else { return false }
+        if markdownPreview != nil {
+            return command == .find || command == .next || command == .previous || command == .toggleSidebar
+        }
         if !hasTextDocument { return command == .toggleSidebar }
         if !hasEditableTextDocument && (command == .replace || command == .toggleReplace) { return false }
         return sidebar.canPerformFind(command)
@@ -677,6 +701,14 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func performFind(_ command: FindCommand) {
         guard !app.isQuitting, window.attachedSheet == nil, canPerformFind(command) else { return }
+        if let markdownPreview {
+            switch command {
+            case .find: markdownPreview.showFind(); return
+            case .next: markdownPreview.find(); return
+            case .previous: markdownPreview.find(backward: true); return
+            default: break
+            }
+        }
         sidebar.performFind(command)
     }
 
@@ -830,6 +862,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         _ file: FileBuffer, storedSyntaxLanguage: String? = nil, preparedSyntax: SyntaxSnapshot? = nil,
         openingConflicts: JJOpeningConflicts? = nil, scratch: ScratchFile? = nil
     ) {
+        resetMarkdownView()
         removeSourceControlRevision()
         removeFilePreview()
         removeEmptyFolder()
@@ -863,6 +896,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func installFilePreview(_ preview: OpenFilePreview, revealInWorktree: Bool) {
+        resetMarkdownView()
         let view = FilePreviewView(preview: preview)
         removeFilePreview()
         removeEmptyFolder()
@@ -928,6 +962,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             }
             guard await open(destination, while: isCurrent), isCurrent() else { return false }
             observeSourceControlFile(selection)
+            if let position = markdownRevisions[markdownRevisionKey(selection)]?.1 { restoreEditorPosition(position) }
             return true
         } catch {
             if isWanted(), !app.isQuitting, !Task.isCancelled, canReplaceBuffer,
@@ -950,6 +985,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func clearSourceControlFile() {
+        rememberMarkdownRevisionPosition()
         sourceControlFileTransition?.cancel()
         sourceControlFileTransition = nil
         app.jjChanges.unsubscribe(sourceControlFileSubscription)
@@ -1069,6 +1105,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func loadSourceControlRevision(_ preview: SourceControlRevisionPreview) {
+        resetMarkdownView()
         removeSourceControlRevision()
         removeFilePreview()
         removeEmptyFolder()
@@ -1130,6 +1167,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func resetDocument() {
+        resetMarkdownView()
         clearSourceControlFile()
         navigationBufferID = UUID()
         fileURL = nil
@@ -1178,7 +1216,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             NSLayoutConstraint.activate(editorPanelConstraints)
 
             // Keep the scrolling surface under the native toolbar, including when AppKit detaches it.
-            for case let view? in [scrollView as NSView?, filePreviewView] {
+            for case let view? in [scrollView as NSView?, filePreviewView, markdownPreview] {
                 var insets = view.additionalSafeAreaInsets
                 if insets.top == height { continue }
                 insets.top = height
@@ -1189,6 +1227,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func restoreDraft(_ record: SessionDocument, text: String, identity: FileIdentity? = nil, scratch: ScratchFile? = nil,
                       openingConflicts: JJOpeningConflicts? = nil, restoredConflicts: [JJConflictEdit] = []) {
+        resetMarkdownView()
         clearSourceControlFile()
         removeSourceControlRevision()
         fileRefresh.stop()
@@ -1220,14 +1259,15 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             syntaxLanguage: manualSyntaxLanguage?.rawValue,
             folderPath: folderURL?.path,
             findSettings: savedFind == .empty ? nil : savedFind,
-            editorPosition: hasEditableTextDocument ? captureFileEditorPosition() : nil,
+            editorPosition: hasEditableTextDocument || markdownRevisionRecord != nil ? captureFileEditorPosition() : nil,
             sidebarMode: sidebar.rememberedMode,
             worktreeShowsHidden: sidebar.worktreeShowsHidden ? true : nil,
             isFilePreview: displayedFileURL != nil && isShowingFilePreview ? true : nil,
             showsEmptyFolder: folderURL != nil && displayedFileURL == nil ? showsEmptyFolder || sourceControlRevision != nil : nil,
             terminal: terminalSessionState(),
             draftRecovery: draftRecoveryRevision,
-            conflictDrafts: conflictDrafts.isEmpty ? nil : conflictDrafts
+            conflictDrafts: conflictDrafts.isEmpty ? nil : conflictDrafts,
+            markdownRevision: markdownRevisionRecord
         )
     }
 
@@ -1237,16 +1277,29 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         window.layoutIfNeeded()
         let projection = JJConflictEdit.projection(for: editor.conflictEdits)
         editor.restorePosition(position.mappingOffsets(projection.visibleOffset))
+        if resolvedSyntaxLanguage == .markdown {
+            var state = position.markdown ?? MarkdownViewState()
+            if let opening = markdownOpeningMode, opening.file == fileURL { state.showsPreview = opening.preview }
+            restoreMarkdownState(state)
+        }
     }
 
     private func captureFileEditorPosition() -> EditorPosition {
         let projection = JJConflictEdit.projection(for: editor.conflictEdits)
-        return editor.capturePosition().mappingOffsets(projection.rawOffset)
+        var position = editor.capturePosition().mappingOffsets(projection.rawOffset)
+        if resolvedSyntaxLanguage == .markdown { position.markdown = markdownState }
+        return position
     }
 
     func rememberFilePosition(_ position: EditorPosition? = nil) {
         guard let fileURL, let fileIdentity else { return }
-        app.recentFiles.rememberPosition(position ?? captureFileEditorPosition(), for: fileURL, identity: fileIdentity)
+        let position = position ?? captureFileEditorPosition()
+        if let state = position.markdown {
+            markdownFiles.removeAll { $0.url == fileURL || $0.identity == fileIdentity }
+            markdownFiles.insert((fileURL, fileIdentity, state), at: 0)
+            if markdownFiles.count > 100 { markdownFiles.removeLast() }
+        }
+        app.recentFiles.rememberPosition(position, for: fileURL, identity: fileIdentity)
     }
 
     private func rememberFileUndoHistory() {
@@ -1658,6 +1711,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private var contentHasFocus: Bool {
+        if let markdownPreview { return markdownPreview.containsResponder(window.firstResponder) }
         guard let view = window.firstResponder as? NSView else { return false }
         return view.isDescendant(of: contentResponder)
     }
@@ -1715,6 +1769,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func refreshSyntax(immediate: Bool, preparedSyntax: SyntaxSnapshot? = nil) {
         let language = resolvedSyntaxLanguage
+        refreshMarkdown(immediate: immediate)
         editor.syntaxLanguage = language
         editor.bracketNavigation.setLanguage(language)
         editor.occurrenceHighlighting.update(language: language)
@@ -1842,8 +1897,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 if file.url != fileURL {
                     rememberFilePosition()
                     position = await app.recentFiles.position(for: file.url, identity: file.identity)
+                    if let state = markdownFiles.first(where: { $0.url == file.url || $0.identity == file.identity })?.state {
+                        if position == nil { position = EditorPosition(selections: [], horizontalOffset: 0, verticalOffset: 0, topLine: nil) }
+                        position?.markdown = state
+                    }
                     guard isCurrent(), !Task.isCancelled else { return false }
-                    async let syntax = prepareOpeningSyntax(file, position: position, scratch: scratch)
+                    let openingPosition = position
+                    async let syntax = prepareOpeningSyntax(file, position: openingPosition, scratch: scratch)
                     async let conflicts = JJOpeningConflicts.prepare(file.text, at: scratch == nil ? file.url : nil)
                     let (preparedSyntax, openingConflicts) = await (syntax, conflicts)
                     guard isCurrent(), !Task.isCancelled else { return false }
@@ -1886,6 +1946,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             let restoreFocus = contentHasFocus
             rememberFilePosition()
             rememberFileUndoHistory()
+            resetMarkdownView()
             clearSourceControlFile()
             loadSourceControlRevision(preview)
             if restoreFocus { focusContent() }
@@ -1986,11 +2047,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.undoManager
     }
 
-    var canFocusSelection: Bool { canReplaceBuffer && hasEditableTextDocument && editor.canFocusSelection }
-    var canExitFocus: Bool { canReplaceBuffer && editor.focusRanges != nil }
+    var canFocusSelection: Bool { markdownPreview == nil && canReplaceBuffer && hasEditableTextDocument && editor.canFocusSelection }
+    var canExitFocus: Bool { markdownPreview == nil && canReplaceBuffer && editor.focusRanges != nil }
 
     var currentMarkdownTable: MarkdownTable? {
-        guard hasEditableTextDocument, canReplaceBuffer, editor.isEditable,
+        guard markdownPreview == nil, hasEditableTextDocument, canReplaceBuffer, editor.isEditable,
               resolvedSyntaxLanguage == .markdown, !editor.hasMarkedText() else { return nil }
         let source = editor.string
         let caret = editor.selectedRange().location
@@ -2026,6 +2087,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        app.recordClosedFile(in: self)
         if !app.isQuitting { discardDraftCheckpoint() }
         fileRefresh.stop()
         languageFeatures.close()
@@ -2035,6 +2097,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         rememberFilePosition()
         editor.exitFocus(notify: false)
         filePreviewView?.stop()
+        markdownRender?.cancel()
         syntaxHighlighting?.cancel(clearingColors: false)
         autosave.reset()
         app.didClose(self)
@@ -2558,4 +2621,343 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             Task { await showError("Could Not Update Draft Recovery", detail: detail) }
         }
     }
+}
+
+extension DocumentWindow {
+    var isShowingMarkdownPreview: Bool { markdownPreview != nil }
+    var markdownPositionForClose: EditorPosition? {
+        hasTextDocument && resolvedSyntaxLanguage == .markdown ? captureFileEditorPosition() : nil
+    }
+
+    var markdownRevisionRecord: MarkdownRevisionRecord? {
+        guard sourceControlRevision != nil, resolvedSyntaxLanguage == .markdown, let file = sourceControlFile else { return nil }
+        return MarkdownRevisionRecord(root: file.workspace.root, path: file.file.path, commit: file.revision.id,
+                                      operation: file.operationID)
+    }
+
+    func restoreMarkdownRevision(_ loaded: MarkdownRevisionRecord.Loaded, syntax: String? = nil) {
+        clearSourceControlFile()
+        loadSourceControlRevision(loaded.preview)
+        observeSourceControlFile(SourceControlFile(file: loaded.file, revision: loaded.revision,
+                                                  workspace: loaded.workspace, operationID: loaded.operation))
+        if let syntax, let language = SyntaxLanguage(rawValue: syntax) { setSyntaxLanguage(language) }
+        focusContent()
+    }
+
+    var canToggleMarkdownPreview: Bool {
+        hasTextDocument && resolvedSyntaxLanguage == .markdown && canReplaceBuffer && !editor.hasMarkedText()
+    }
+
+    func toggleMarkdownPreview() {
+        guard canToggleMarkdownPreview else { return }
+        setMarkdownPreview(!isShowingMarkdownPreview, focus: true)
+    }
+
+    func handleMarkdownEscape() -> Bool {
+        guard let markdownPreview, window.attachedSheet == nil, markdownPreview.containsResponder(window.firstResponder) else { return false }
+        if !markdownPreview.dismissFind() { setMarkdownPreview(false, focus: true) }
+        return true
+    }
+
+    func handleMarkdownUndo(redo: Bool) -> Bool {
+        guard let preview = markdownPreview, window.attachedSheet == nil, preview.containsResponder(window.firstResponder),
+              !preview.isFinding, markdownTasksAreWritable, let manager = editor.undoManager else { return false }
+        if redo { manager.redo() } else { manager.undo() }
+        return true
+    }
+
+    func restoreMarkdownState(_ state: MarkdownViewState) {
+        guard hasTextDocument, resolvedSyntaxLanguage == .markdown else { return }
+        let focus = contentHasFocus
+        markdownState = state
+        setMarkdownPreview(state.showsPreview, focus: focus)
+        if let reading = state.reading { markdownPreview?.restore(reading) }
+    }
+
+    private func setMarkdownPreview(_ enabled: Bool, focus: Bool) {
+        markdownState.showsPreview = enabled
+        if enabled, markdownPreview == nil {
+            if markdownState.reading == nil {
+                markdownState.reading = .init(sourceOffset: captureFileEditorPosition().topLine?.textOffset ?? 0)
+            }
+            let view = MarkdownPreviewView()
+            markdownPreview = view
+            view.onState = { [weak self] reading in self?.markdownState.reading = reading }
+            view.onTask = { [weak self] offset, checked in self?.toggleMarkdownTask(at: offset, checked: checked) }
+            view.onLink = { [weak self] target in Task { await self?.followMarkdown(target, from: nil) } }
+            view.onImage = { [weak self] index, activate in Task { await self?.loadMarkdownImage(index, activate: activate) } }
+            view.onFragment = { [weak self] fragment, found in
+                guard let self else { return }
+                if found { recordMarkdownAnchorJump(fragment) }
+                else { app.recordNavigation(in: self, reason: .jump) }
+                if !found { Task { await showError("Heading or Anchor Not Found", detail: fragment) } }
+            }
+            pinToEditorContent(view)
+            layoutEditorPanels()
+            scrollView.isHidden = true
+            refreshMarkdown(immediate: true)
+        } else if !enabled, let view = markdownPreview {
+            markdownPreview = nil
+            view.removeFromSuperview()
+            scrollView.isHidden = isShowingFilePreview || showsEmptyFolder
+        }
+        window.initialFirstResponder = contentResponder
+        sidebar.markdownModeChanged()
+        if focus { focusContent() }
+    }
+
+    private func resetMarkdownView() {
+        rememberMarkdownRevisionPosition()
+        setMarkdownPreview(false, focus: false)
+        markdownRender?.cancel()
+        markdownRender = nil
+        markdownPage = nil
+        markdownNoteOrigins.removeAll()
+        markdownState = MarkdownViewState()
+        pendingMarkdownFragment = nil
+    }
+
+    private func rememberMarkdownRevisionPosition() {
+        if sourceControlRevision != nil, let file = sourceControlFile {
+            markdownRevisions[markdownRevisionKey(file)] = (file, captureFileEditorPosition())
+        }
+    }
+
+    private func refreshMarkdown(immediate: Bool) {
+        markdownRender?.cancel()
+        guard hasTextDocument, resolvedSyntaxLanguage == .markdown else {
+            setMarkdownPreview(false, focus: isShowingMarkdownPreview && contentHasFocus)
+            markdownPage = nil
+            return
+        }
+        let source = editor.string
+        let includesPreview = isShowingMarkdownPreview
+        markdownRender = Task { [weak self] in
+            do {
+                if !immediate { try await Task.sleep(for: .milliseconds(60)) }
+                let loaded = try await MarkdownDocumentRenderer.shared.render(source, includeHTML: includesPreview)
+                let highlights = includesPreview ? await Task.detached(priority: .userInitiated) {
+                    loaded.code.map { $0.highlighted() }
+                }.value : []
+                guard let self, !Task.isCancelled, editor.string == source, resolvedSyntaxLanguage == .markdown else { return }
+                markdownPage = (source, loaded)
+                if let preview = markdownPreview, includesPreview {
+                    preview.show(html: loaded.html, highlighted: highlights,
+                                 reading: markdownState.reading ?? .init(sourceOffset: 0),
+                                 writable: markdownTasksAreWritable, fragment: pendingMarkdownFragment)
+                    pendingMarkdownFragment = nil
+                }
+            } catch {
+                guard let self, !Task.isCancelled, let preview = markdownPreview else { return }
+                preview.show(html: "<p>Could not render this Markdown document.</p>", highlighted: [],
+                             reading: .init(sourceOffset: 0), writable: false, fragment: nil)
+            }
+        }
+    }
+
+    private var markdownTasksAreWritable: Bool {
+        guard hasEditableTextDocument else { return false }
+        return fileURL.map { FileManager.default.isWritableFile(atPath: $0.path) || revision == .missing } ?? true
+    }
+
+    private func toggleMarkdownTask(at offset: Int, checked: Bool) {
+        guard markdownPreview != nil, markdownTasksAreWritable, canReplaceBuffer, !editor.hasMarkedText(),
+              let markdownPage, markdownPage.source == editor.string else { return }
+        let text = markdownPage.source as NSString
+        guard offset > 0, offset + 1 < text.length, text.character(at: offset - 1) == 91,
+              text.character(at: offset + 1) == 93, [32, 88, 120].contains(text.character(at: offset)) else { return }
+        let edit = EditorTextEdit(range: NSRange(location: offset, length: 1), text: checked ? "x" : " ")
+        if !editor.applyMultiEdits([edit], selections: editor.caretSelections, actionName: "Toggle Markdown Task") {
+            refreshMarkdown(immediate: true)
+        }
+    }
+
+    private func markdownLink(at offset: Int, activate: Bool) -> Bool {
+        guard resolvedSyntaxLanguage == .markdown, markdownPreview == nil,
+              let markdownPage, markdownPage.source == editor.string,
+              let link = markdownPage.document.links.first(where: { $0.start <= offset && offset < $0.end }) else { return false }
+        if activate {
+            let origin = navigationLocation(at: NSRange(location: offset, length: 0))
+            if let target = link.target {
+                Task { await followMarkdown(target, from: origin) }
+            } else if let note = link.note {
+                if let destination = link.destination {
+                    markdownNoteOrigins[note] = link.start
+                    navigate(to: NSRange(location: destination, length: 0), from: origin)
+                } else if let reference = markdownNoteOrigins[note] ?? link.references?.first {
+                    navigate(to: NSRange(location: reference, length: 0), from: origin)
+                }
+            }
+        }
+        return true
+    }
+
+    private var markdownFileURL: URL? { sourceControlRevision?.url ?? (scratchFile == nil ? fileURL : nil) }
+
+    private func markdownTarget(_ path: String) async -> URL? {
+        if let url = URL(string: path), url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost" {
+            return url.standardizedFileURL
+        }
+        guard let decoded = path.removingPercentEncoding else { return nil }
+        let directory = markdownFileURL?.deletingLastPathComponent() ?? folderURL
+        if decoded.hasPrefix("/") {
+            let start = directory
+            let historyRoot = sourceControlRevision == nil ? nil : sourceControlFile?.workspace.root
+            let root = await Task.detached { () -> URL? in
+                if let historyRoot { return historyRoot }
+                guard var candidate = start else { return nil }
+                while true {
+                    if [".git", ".jj"].contains(where: {
+                        FileManager.default.fileExists(atPath: candidate.appending(path: $0).path)
+                    }) { return candidate }
+                    let parent = candidate.deletingLastPathComponent()
+                    if parent.path == candidate.path || candidate.path == "/" { return nil }
+                    candidate = parent
+                }
+            }.value
+            return (root ?? folderURL ?? directory)?.appending(path: String(decoded.dropFirst())).standardizedFileURL
+        }
+        return directory?.appending(path: decoded).standardizedFileURL
+    }
+
+    private func followMarkdown(_ target: String, from sourceOrigin: NavigationHistory.Location?) async {
+        if let url = URL(string: target), let scheme = url.scheme?.lowercased(), ["http", "https", "mailto"].contains(scheme) {
+            if !app.isAgentCheck { NSWorkspace.shared.open(url) }
+            return
+        }
+        let origin = sourceOrigin ?? navigationLocation
+        let opensPreview = isShowingMarkdownPreview
+        let parts = target.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let path = parts.first.map(String.init) else { return }
+        let fragment = parts.count > 1 ? String(parts[1]).removingPercentEncoding : nil
+        if path.isEmpty {
+            if let fragment { await revealMarkdownFragment(fragment, from: origin) }
+            return
+        }
+        if let scheme = URL(string: path)?.scheme, scheme.lowercased() != "file" { return }
+        let initialGeneration = openRequestGeneration
+        guard let targetURL = await markdownTarget(path), initialGeneration == openRequestGeneration else {
+            if initialGeneration == openRequestGeneration { await showError("Could Not Open Link", detail: path) }
+            return
+        }
+        do {
+            if let history = sourceControlRevision != nil ? sourceControlFile : nil {
+                guard let path = Self.worktreePathSuffix(from: history.workspace.root, to: targetURL), !path.isEmpty else {
+                    throw CocoaError(.fileReadNoSuchFile)
+                }
+                if path == history.file.path {
+                    if let fragment { await revealMarkdownFragment(fragment, from: origin) }
+                    return
+                }
+                let file = try await JJSourceControlRepository.linkedFile(path, in: history.revision, workspace: history.workspace,
+                                                                         at: history.operationID)
+                guard initialGeneration == openRequestGeneration,
+                      await openSourceControlFile(file, in: history.revision, workspace: history.workspace,
+                                                  operationID: history.operationID, while: { true }) else { return }
+            } else {
+                let canonical = await Task.detached { FileBuffer.canonicalURL(targetURL) }.value
+                guard initialGeneration == openRequestGeneration else { return }
+                guard FileManager.default.isReadableFile(atPath: canonical.path) else { throw CocoaError(.fileReadNoSuchFile) }
+                markdownOpeningMode = (canonical, opensPreview)
+                defer { if markdownOpeningMode?.file == canonical { markdownOpeningMode = nil } }
+                guard try await app.openFile(canonical, in: self, focusEditor: false) != nil else { return }
+            }
+            if let origin { app.recordNavigation(origin, reason: .selection) }
+            if resolvedSyntaxLanguage == .markdown && hasTextDocument {
+                setMarkdownPreview(opensPreview, focus: true)
+                if let fragment { await revealMarkdownFragment(fragment, from: nil) }
+                else { app.recordNavigation(in: self, reason: .jump) }
+            } else {
+                focusContent()
+                app.recordNavigation(in: self, reason: .jump)
+            }
+        } catch {
+            await showError("Could Not Open Link", detail: targetURL.path)
+        }
+    }
+
+    private func revealMarkdownFragment(_ fragment: String, from origin: NavigationHistory.Location?) async {
+        if let preview = markdownPreview {
+            if !preview.hasCurrentDocument || markdownPage?.source != editor.string {
+                pendingMarkdownFragment = fragment
+                refreshMarkdown(immediate: true)
+                return
+            }
+            if await preview.jump(to: fragment) {
+                if let origin { app.recordNavigation(origin, reason: .selection) }
+                recordMarkdownAnchorJump(fragment)
+                return
+            }
+        } else {
+            let source = editor.string
+            let page: MarkdownDocument?
+            if markdownPage?.source == source { page = markdownPage?.document }
+            else { page = try? await MarkdownDocumentRenderer.shared.render(source, includeHTML: false) }
+            guard source == editor.string else { return }
+            if let offset = page?.anchors[fragment] {
+                navigate(to: NSRange(location: offset, length: 0), from: origin)
+                return
+            }
+        }
+        await showError("Heading or Anchor Not Found", detail: fragment)
+    }
+
+    private func recordMarkdownAnchorJump(_ fragment: String) {
+        let range = markdownPage?.document.anchors[fragment].map { NSRange(location: $0, length: 0) }
+        if let location = navigationLocation(at: range) { app.recordNavigation(location, reason: .jump) }
+    }
+
+    private func loadMarkdownImage(_ index: Int, activate: Bool) async {
+        guard let preview = markdownPreview, let page = markdownPage, page.document.images.indices.contains(index) else { return }
+        let value = page.document.images[index]
+        var data: Data?
+        var type: String?
+        if let url = URL(string: value), let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) {
+            let key = "markdown-approved-image-urls"
+            var approved = Set(app.isAgentCheck ? [] : UserDefaults.standard.stringArray(forKey: key) ?? [])
+            guard activate || approved.contains(url.absoluteString) else {
+                preview.showImage(index, url: nil, remote: true)
+                return
+            }
+            let session = URLSession(configuration: .ephemeral)
+            defer { session.finishTasksAndInvalidate() }
+            if let (bytes, response) = try? await session.data(from: url), response.mimeType?.hasPrefix("image/") == true {
+                data = bytes
+                type = response.mimeType
+                if activate && !app.isAgentCheck {
+                    approved.insert(url.absoluteString)
+                    UserDefaults.standard.set(approved.sorted(), forKey: key)
+                }
+            }
+        } else if let url = await markdownTarget(value), let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType,
+                  mime.hasPrefix("image/") {
+            type = mime
+            if let history = sourceControlRevision != nil ? sourceControlFile : nil {
+                if let path = Self.worktreePathSuffix(from: history.workspace.root, to: url),
+                   let file = try? await JJSourceControlRepository.linkedFile(path, in: history.revision, workspace: history.workspace,
+                                                                             at: history.operationID) {
+                    data = try? await JJSourceControlRepository.file(file, in: history.revision, workspace: history.workspace,
+                                                                    at: history.operationID).recorded
+                }
+            } else {
+                data = await Task.detached { try? Data(contentsOf: url) }.value
+            }
+        }
+        guard markdownPreview === preview, markdownPage?.source == page.source, let data, let type else { return }
+        preview.showImage(index, url: "data:\(type);base64,\(data.base64EncodedString())", remote: false)
+    }
+
+    private func markdownRevisionKey(_ file: SourceControlFile) -> String {
+        "\(file.workspace.root.path)\u{1f}\(file.revision.id)\u{1f}\(file.file.path)"
+    }
+
+    func reopenMarkdownRevision(_ key: String, while wanted: @escaping () -> Bool) async -> Bool {
+        guard let (file, _) = markdownRevisions[key] else { return false }
+        return await openSourceControlFile(file.file, in: file.revision, workspace: file.workspace, operationID: file.operationID, while: wanted)
+    }
+
+    #if EDIT_AGENT_CHECKS
+    var markdownPreviewForCheck: MarkdownPreviewView? { markdownPreview }
+    func followMarkdownForCheck(_ target: String) async { await followMarkdown(target, from: nil) }
+    #endif
 }
