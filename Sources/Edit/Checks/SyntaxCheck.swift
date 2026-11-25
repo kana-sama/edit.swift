@@ -371,9 +371,9 @@ enum SyntaxCheck {
             (.typescript, "type Shape = { radius: number };", "Shape", .type),
             (.tsx, "const card = <section />;", "section", .markup),
             (.yaml, "name: Edit\n", "name", .property),
-            (.zig, ".{ .version = \"0.1.0\", .id = 0x0123456789abcdef }", "version", .property),
-            (.zig, "fn use(arg: input_type) void {}", "input_type", .type),
-            (.zig, "fn use() void { obj.run(); }", "run", .function),
+            (.zig, ".{ .version = \"0.1.0\", .id = 0x0123456789abcdef }", "\"0.1.0\"", .string),
+            (.zig, "fn use(arg: u32) void {}", "u32", .type),
+            (.zig, #"const @"quoted\nname" = "ordinary\ntext";"#, #""ordinary\ntext""#, .string),
         ]
         for (mode, source, text, color) in fixtures {
             let token = (source as NSString).range(of: text)
@@ -382,24 +382,44 @@ enum SyntaxCheck {
                 throw Failure("Missing \(mode.displayName) capture for \(text).")
             }
         }
+        for literal in ["null", "undefined", "unreachable", "true", "false"] {
+            let source = "const value = \(literal);"
+            let token = (source as NSString).range(of: literal)
+            guard let spans = SyntaxEngine.spans(in: source, language: .zig),
+                  spans.contains(where: { $0.start == token.location && $0.end == token.upperBound && $0.color == .control }) else {
+                throw Failure("Missing Zig keyword literal color for \(literal).")
+            }
+        }
         let zigSource = """
-            const std = @import("std");
+            const std = @import("module");
             const MAX_SIZE = 32;
             const record = struct { field: u32 };
+            const tuple = struct { TupleItem, TupleItem };
+            const @"quoted\\nname" = "ordinary\\ntext";
             var Counter: u32 = 0;
-            fn use(obj: record) void {
+            var usingnamespace = 42;
+            var async = 1;
+            var await = 2;
+            fn declare(obj: InputType) void {
                 _ = obj.Member;
                 _ = obj.size;
                 _ = .green;
+                _ = record{ .field = 1 };
+                callee();
+                obj.callback();
+                blockName: { break :blockName; }
             }
             """
         guard let zigSpans = SyntaxEngine.spans(in: zigSource, language: .zig) else {
             throw Failure("Missing Zig Tree-sitter captures.")
         }
-        for name in ["std", "MAX_SIZE", "record", "Counter", "Member", "size", "green"] {
+        for name in ["std", "@import", "MAX_SIZE", "record", "Counter", "Member", "size", "green", "field", ".field",
+                     "TupleItem", #"@"quoted\nname""#, "usingnamespace", "async", "await", "declare", "obj", "InputType",
+                     "callee", "callback", "blockName"] {
             let token = (zigSource as NSString).range(of: name)
-            guard !zigSpans.contains(where: { $0.start < token.upperBound && $0.end > token.location }) else {
-                throw Failure("Tree-sitter guessed a Zig symbol color for \(name).")
+            guard token.location != NSNotFound,
+                  !zigSpans.contains(where: { $0.start < token.upperBound && $0.end > token.location }) else {
+                throw Failure("Expected an uncolored Zig identifier for \(name).")
             }
         }
         let names: [(String, SyntaxLanguage)] = [

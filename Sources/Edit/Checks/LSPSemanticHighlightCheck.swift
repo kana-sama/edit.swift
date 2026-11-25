@@ -49,8 +49,8 @@ enum LSPSemanticHighlightCheck {
         document.setFolder(root)
         try require(try await app.openFile(zig, in: document) === document, "open Zig")
         try await wait("show ZLS tokens after an astral character") { hasSemanticColor("ZigWidget", in: document) }
-        try await wait("keep Tree-sitter colors underneath LSP") {
-            hasColor("null", in: document, color: .keyword) && hasColor("null", in: document, layer: .lsp, color: .control)
+        try await wait("use the same keyword literal color in both layers") {
+            hasColor("null", in: document, color: .control) && hasColor("null", in: document, layer: .lsp, color: .control)
                 && paintedColor("null", in: document) == SyntaxColor.control.nativeColor
         }
         try require(!hasColor("Counter", in: document) && hasColor("Counter", in: document, layer: .lsp, color: .plain)
@@ -65,8 +65,8 @@ enum LSPSemanticHighlightCheck {
         }
         try require(!swiftWindow.isHighlightingEnabled(.lsp) && otherWindow.isHighlightingEnabled(.lsp),
                     "share the setting in one workspace only")
-        try require(paintedColor("null", in: document) == SyntaxColor.keyword.nativeColor,
-                    "reveal Tree-sitter at once when removing the semantic overlay")
+        try require(paintedColor("null", in: document) == SyntaxColor.control.nativeColor,
+                    "keep the literal color when removing the semantic overlay")
         try require(paintedColor("ZigWidget", in: document) == .textColor,
                     "leave the type declaration name uncolored with the semantic overlay off")
         try await wait("keep Tree-sitter in both windows") {
@@ -96,7 +96,7 @@ enum LSPSemanticHighlightCheck {
             try captureControl($0, "switches-tree-off")
         }
         try await wait("restore Tree-sitter under the unchanged overlay") {
-            hasColor("null", in: document, color: .keyword) && paintedColor("null", in: document) == SyntaxColor.control.nativeColor
+            hasColor("null", in: document, color: .control) && paintedColor("null", in: document) == SyntaxColor.control.nativeColor
         }
 
         let editor = document.editor
@@ -116,7 +116,7 @@ enum LSPSemanticHighlightCheck {
         editor.insertText("pub const Added = struct {};\n", replacementRange: NSRange(location: 0, length: 0))
         try await wait("receive an edited token result") { responsePending }
         try await Task.sleep(for: .milliseconds(450))
-        try require(document.window.title == outgoingTitle && hasColor("null", in: document, color: .keyword)
+        try require(document.window.title == outgoingTitle && hasColor("null", in: document, color: .control)
                     && hasColor("null", in: document, layer: .lsp, color: .control)
                     && paintedColor("null", in: document) == SyntaxColor.control.nativeColor,
                     "keep both layers and the title while a replacement overlay is held")

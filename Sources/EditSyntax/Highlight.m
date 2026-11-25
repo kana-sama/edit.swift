@@ -440,12 +440,22 @@ static uint32_t unclosedMarkdownComment(Input *input, TSNode root) {
     return opener;
 }
 
+static bool zigQuotedIdentifierString(TSNode node, const char *capture) {
+    // The Zig grammar represents @"name" as an identifier containing a string.
+    if (strcmp(capture, "string.escape") == 0) node = ts_node_parent(node);
+    else if (strcmp(capture, "string") != 0) return false;
+    if (ts_node_is_null(node) || strcmp(ts_node_type(node), "string") != 0) return false;
+    TSNode parent = ts_node_parent(node);
+    return !ts_node_is_null(parent) && strcmp(ts_node_type(parent), "identifier") == 0;
+}
+
 static void runQuery(Input *input, const TSQuery *query, TSNode root, NSString *directory,
                      uint32_t offset, int depth, bool injection, const Preview *preview) {
     TSQueryCursor *cursor = ts_query_cursor_new();
     if (preview) ts_query_cursor_set_byte_range(cursor, preview->startByte, preview->endByte);
     const TSQueryCursorOptions options = {.payload = input, .progress_callback = queryProgress};
     ts_query_cursor_exec_with_options(cursor, query, root, &options);
+    const bool zig = !injection && ts_node_language(root) == tree_sitter_zig();
     NSMutableDictionary<NSString *, id> *regexes = [NSMutableDictionary dictionary];
     TSQueryMatch match;
     uint32_t count = 0;
@@ -469,7 +479,7 @@ static void runQuery(Input *input, const TSQuery *query, TSNode root, NSString *
                 const uint32_t start = offset + from / 2u;
                 const uint32_t end = offset + to / 2u;
                 if (!injection) {
-                    if (start < input->highlightLimit) {
+                    if (start < input->highlightLimit && !(zig && zigQuotedIdentifierString(capture.node, name))) {
                         input->highlight(input->context, start, MIN(end, input->highlightLimit), name);
                     }
                 } else if (nestedName && strcmp(name, "injection.content") == 0 && !cancelled(input)) {

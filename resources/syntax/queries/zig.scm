@@ -1,65 +1,16 @@
-; Parameters
-(parameter
-  name: (identifier) @variable.parameter)
-
 ; Types
-(parameter
-  type: (identifier) @type)
-
 [
   (builtin_type)
   "anyframe"
 ] @type.builtin
 
-; Constants
+; Keyword literals use the same color as ZLS keywordLiteral tokens.
 [
   "null"
   "unreachable"
   "undefined"
-] @constant.builtin
-
-; Labels
-(block_label
-  (identifier) @label)
-
-(break_label
-  (identifier) @label)
-
-; Fields
-(field_initializer
-  .
-  (identifier) @variable.member)
-
-(container_field
-  name: (identifier) @property)
-
-(initializer_list
-  (assignment_expression
-    left: (field_expression
-      .
-      member: (identifier) @property)))
-
-; Functions
-(builtin_identifier) @function.builtin
-
-(call_expression
-  function: (identifier) @function.call)
-
-(call_expression
-  function: (field_expression
-    member: (identifier) @function.call))
-
-(function_declaration
-  name: (identifier) @function.definition)
-
-; Builtins
-[
-  "c"
-  "..."
-] @variable.builtin
-
-((identifier) @variable.builtin
-  (#eq? @variable.builtin "_"))
+  (boolean)
+] @keyword.control
 
 ; Keywords
 [
@@ -80,8 +31,6 @@
 ] @keyword.type
 
 [
-  "async"
-  "await"
   "suspend"
   "nosuspend"
   "resume"
@@ -110,10 +59,7 @@
   "continue"
 ] @keyword.repeat
 
-[
-  "usingnamespace"
-  "export"
-] @keyword.import
+"export" @keyword.import
 
 [
   "try"
@@ -205,8 +151,6 @@
 (integer) @number
 
 (float) @number.float
-
-(boolean) @boolean
 
 (escape_sequence) @string.escape
 
