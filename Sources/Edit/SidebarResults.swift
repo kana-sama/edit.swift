@@ -71,12 +71,62 @@ enum SidebarResults {
     }
 }
 
+enum SidebarGroupedResultRow<Hit> {
+    case folder(URL, count: Int, depth: Int)
+    case file(URL, count: Int, depth: Int)
+    case hit(Hit, depth: Int)
+
+    static func layout(_ groups: [(URL, [Hit])], root: URL?, collapsed: Set<URL>) -> [Self] {
+        let files = groups.map { file, hits in (file, hits, root.map { ancestors(of: file, in: $0) } ?? []) }
+        var counts: [URL: Int] = [:]
+        for (_, hits, folders) in files {
+            for folder in folders { counts[folder, default: 0] += hits.count }
+        }
+        var rows: [Self] = []
+        var previous: [URL] = []
+        for (file, hits, folders) in files {
+            let expanded = folders.prefix { !collapsed.contains($0) }.count
+            let visible = min(expanded + 1, folders.count)
+            let shared = zip(previous, folders).prefix { $0 == $1 }.count
+            for depth in shared..<max(shared, visible) {
+                let folder = folders[depth]
+                rows.append(.folder(folder, count: counts[folder, default: 0], depth: depth))
+            }
+            previous = folders
+            guard expanded == folders.count else { continue }
+            rows.append(.file(file, count: hits.count, depth: folders.count))
+            rows += hits.map { .hit($0, depth: folders.count) }
+        }
+        return rows
+    }
+
+    private static func ancestors(of file: URL, in root: URL) -> [URL] {
+        guard WorktreeFileOperations.contains(file, in: root) else { return [] }
+        let rootPath = WorktreeFileOperations.path(root)
+        var folders: [URL] = []
+        var folder = file.deletingLastPathComponent()
+        while WorktreeFileOperations.path(folder) != rootPath {
+            folders.append(folder)
+            let parent = folder.deletingLastPathComponent()
+            guard parent.path != folder.path else { return [] }
+            folder = parent
+        }
+        return folders.reversed()
+    }
+}
+
+@MainActor
+protocol SidebarResultHover: AnyObject {
+    func updateHover(_ hovered: Bool)
+}
+
 @MainActor
 class SidebarResultTable: NSTableView {
     var onReturn: (() -> Void)?
     var onSpace: (() -> Void)?
     var onEscape: (() -> Void)?
     var onClickSelectedRow: ((Int) -> Void)?
+    var onDoubleClickResult: ((Int) -> Void)?
     var isFileHeader: ((Int) -> Bool)?
     var onClickGroup: ((Int) -> Bool)?
     var onHorizontalNavigation: ((Bool) -> Bool)?
@@ -108,6 +158,10 @@ class SidebarResultTable: NSTableView {
             guard !isFileHeader(clicked) else { return }
             if plainClick {
                 window?.makeFirstResponder(self)
+                if event.clickCount == 2, let onDoubleClickResult {
+                    onDoubleClickResult(clicked)
+                    return
+                }
                 if selectedRow == clicked { onClickSelectedRow?(clicked) }
                 else { selectRowIndexes(IndexSet(integer: clicked), byExtendingSelection: false) }
                 return
@@ -164,13 +218,17 @@ class SidebarResultTable: NSTableView {
 }
 
 @MainActor
-final class SidebarResultGroupHeader: NSTableCellView {
+final class SidebarResultGroupHeader: NSTableCellView, SidebarResultHover {
     private static let horizontalInset = SidebarResults.panelInset - SidebarResults.rowMargin
     private static let badgePadding: CGFloat = 5
     private let name: NSTextField
     private let icon = NSImageView()
     private let detail: NSTextField
     private let badge = NSBox()
+    private let applyButton = NSButton()
+    private var onApply: (() -> Void)?
+    private lazy var nameBeforeCount = name.trailingAnchor.constraint(lessThanOrEqualTo: detail.leadingAnchor, constant: -5)
+    private lazy var nameBeforeAction = name.trailingAnchor.constraint(lessThanOrEqualTo: applyButton.leadingAnchor, constant: -2)
     private var file: URL?
     private var language: String?
     private var isFolder = false
@@ -206,7 +264,16 @@ final class SidebarResultGroupHeader: NSTableCellView {
         badge.isHidden = true
         badge.setAccessibilityElement(false)
         icon.setAccessibilityElement(false)
-        for label in [icon, self.name, badge, self.detail] {
+        applyButton.image = NSImage(systemSymbolName: "arrow.turn.down.right", accessibilityDescription: nil)
+        applyButton.isBordered = false
+        applyButton.bezelStyle = .accessoryBarAction
+        applyButton.controlSize = .small
+        applyButton.toolTip = "Replace All in File"
+        applyButton.setAccessibilityLabel("Replace All in File")
+        applyButton.target = self
+        applyButton.action = #selector(apply)
+        applyButton.isHidden = true
+        for label in [icon, self.name, badge, self.detail, applyButton] {
             label.translatesAutoresizingMaskIntoConstraints = false
             addSubview(label)
         }
@@ -217,7 +284,11 @@ final class SidebarResultGroupHeader: NSTableCellView {
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             self.name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5),
             self.name.centerYAnchor.constraint(equalTo: centerYAnchor),
-            self.name.trailingAnchor.constraint(lessThanOrEqualTo: self.detail.leadingAnchor, constant: -5),
+            nameBeforeCount,
+            applyButton.trailingAnchor.constraint(equalTo: badge.leadingAnchor, constant: -2),
+            applyButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            applyButton.widthAnchor.constraint(equalToConstant: 20),
+            applyButton.heightAnchor.constraint(equalToConstant: 20),
             self.detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.horizontalInset - Self.badgePadding),
             self.detail.centerYAnchor.constraint(equalTo: centerYAnchor),
             badge.leadingAnchor.constraint(equalTo: self.detail.leadingAnchor, constant: -Self.badgePadding),
@@ -263,6 +334,16 @@ final class SidebarResultGroupHeader: NSTableCellView {
         detail.setAccessibilityLabel(accessibilityLabel)
         badge.isHidden = false
     }
+
+    func setFileAction(_ apply: (() -> Void)?) {
+        onApply = apply
+        nameBeforeAction.isActive = apply != nil
+        updateHover(false)
+    }
+
+    func updateHover(_ hovered: Bool) { applyButton.isHidden = !hovered || onApply == nil }
+
+    @objc private func apply() { onApply?() }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
@@ -326,10 +407,10 @@ final class SidebarActionResultScrollView: NSScrollView {
     }
 }
 
-final class SidebarActionResultTable: SidebarResultTable {
+class SidebarActionResultTable: SidebarResultTable {
     private var pointerTracking: NSTrackingArea?
     private var hoveredRow = -1
-    private weak var hoveredCell: SidebarActionResultCell?
+    private weak var hoveredCell: (any SidebarResultHover)?
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         updateHover(at: nil)
@@ -367,7 +448,7 @@ final class SidebarActionResultTable: SidebarResultTable {
         updateHover(at: window.mouseLocationOutsideOfEventStream)
     }
 
-    func configureHover(for cell: SidebarActionResultCell, row: Int) {
+    func configureHover(for cell: any SidebarResultHover, row: Int) {
         let hovered = hoveredRow == row
         if hovered, hoveredCell !== cell {
             hoveredCell?.updateHover(false)
@@ -386,13 +467,13 @@ final class SidebarActionResultTable: SidebarResultTable {
             hoveredCell = nil
             hoveredRow = row
         }
-        if row >= 0, let cell = view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarActionResultCell {
+        if row >= 0, let cell = view(atColumn: 0, row: row, makeIfNecessary: false) as? any SidebarResultHover {
             configureHover(for: cell, row: row)
         }
     }
 }
 
-final class SidebarActionResultCell: SidebarResultExcerptCell {
+final class SidebarActionResultCell: SidebarResultExcerptCell, SidebarResultHover {
     private static let actionSize: CGFloat = 20
     private static let actionSpacing: CGFloat = 1
     // The button's hit area extends beyond its glyph. Let the excerpt use that transparent leading edge.

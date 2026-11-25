@@ -1,7 +1,7 @@
 import AppKit
 
 enum FindCommand {
-    case find, replace, next, previous, toggleSidebar
+    case find, findWorkspace, replace, next, previous, toggleSidebar
     case refresh, toggleReplace, toggleCase, toggleWholeWord, toggleRegex
     case replaceAll, replaceSelected, dismissSelected, clearSelection
 }
@@ -9,6 +9,7 @@ enum FindCommand {
 @MainActor
 final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private unowned let document: DocumentWindow
+    private unowned let app: Edit
     private let onReturnFocus: () -> Void
     private var settings: FindSettings {
         get { document.findSettings }
@@ -28,6 +29,12 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private let surface = NSView()
     var view: NSView { surface }
     private let searchContent = NSStackView()
+    private lazy var workspace = WorkspaceFindSidebar(document: document, app: app, onReturnFocus: onReturnFocus,
+        focusFind: { [weak self] in self?.focusFindInput() },
+        availabilityChanged: { [weak self] in self?.updateReplaceAvailability() })
+    private let scopePicker = NSSegmentedControl(labels: ["Current Buffer", "Workspace"], trackingMode: .selectOne,
+                                                  target: nil, action: nil)
+    private var searchesWorkspace: Bool { document.findScope == .workspace }
     private var decorations: FindDecorations { document.resultDecorations }
 
     var queryResponder: NSView { findInput.input }
@@ -52,8 +59,9 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private weak var pendingResultFocus: FindFieldTextView?
     private var advanceFrom: Int?
 
-    init(document: DocumentWindow, onReturnFocus: @escaping () -> Void) {
+    init(document: DocumentWindow, app: Edit, onReturnFocus: @escaping () -> Void) {
         self.document = document
+        self.app = app
         self.onReturnFocus = onReturnFocus
         bufferSnapshot = document.editor.string
         super.init()
@@ -69,8 +77,15 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func canPerform(_ action: FindCommand) -> Bool {
+        if searchesWorkspace {
+            switch action {
+            case .find, .findWorkspace, .replace, .toggleSidebar: return false
+            case .refresh, .toggleReplace, .toggleCase, .toggleWholeWord, .toggleRegex: return searchVisible
+            default: return workspace.canPerform(action)
+            }
+        }
         switch action {
-        case .find, .replace, .toggleSidebar:
+        case .find, .findWorkspace, .replace, .toggleSidebar:
             return false
         case .next, .previous:
             return !settings.query.isEmpty
@@ -90,8 +105,16 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
     func perform(_ action: FindCommand) {
         guard canPerform(action) else { return }
+        if searchesWorkspace {
+            switch action {
+            case .next, .previous, .replaceAll, .replaceSelected, .dismissSelected, .clearSelection:
+                workspace.perform(action)
+                return
+            default: break
+            }
+        }
         switch action {
-        case .find, .replace, .toggleSidebar:
+        case .find, .findWorkspace, .replace, .toggleSidebar:
             return
         case .next:
             moveResult(by: 1)
@@ -133,12 +156,25 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         queuedDirection = nil
         pendingResultFocus = nil
         bufferSnapshot = document.editor.string
+        bufferSearchScheduled = false
+        if searchesWorkspace { return }
         publish([])
         requestSearchIfNeeded()
     }
 
     private func bufferDidEdit(_ storage: NSTextStorage, edits: [EditorTextEdit]?) {
         let text = storage.string
+        if searchesWorkspace {
+            bufferSnapshot = text
+            guard !bufferSearchScheduled else { return }
+            bufferSearchScheduled = true
+            Task { @MainActor [weak self] in
+                guard let self, bufferSearchScheduled else { return }
+                bufferSearchScheduled = false
+                if searchesWorkspace { workspace.bufferEdited() }
+            }
+            return
+        }
         if selectedMatchLocation != nil || !dismissed.isEmpty {
             let changes: [EditorTextEdit]
             if let edits {
@@ -168,13 +204,14 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         bufferSearchScheduled = true
         // TextKit finishes its edit notification before decoration updates can lay out text.
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, bufferSearchScheduled else { return }
             bufferSearchScheduled = false
             requestSearchIfNeeded()
         }
     }
 
     func editorInteracted() {
+        if searchesWorkspace { workspace.editorInteracted(); return }
         guard !applyingEdits, previewRequested else { return }
         previewRequested = false
         refreshDecorations()
@@ -205,7 +242,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         replaceInput.onChange = { [weak self] in
             guard let self else { return }
             settings.replacement = replaceInput.value
-            refreshDecorations()
+            if searchesWorkspace { workspace.replacementChanged() }
+            else { refreshDecorations() }
         }
         findInput.onReturn = { [weak self] in self?.advanceFindFocus() }
         replaceInput.onReturn = { [weak self] in self?.focusFirstResult() }
@@ -225,9 +263,14 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
         resultHeader.heightAnchor.constraint(equalToConstant: SidebarResults.rowHeight).isActive = true
         setupResults()
+        scopePicker.controlSize = .small
+        scopePicker.segmentDistribution = .fillEqually
+        scopePicker.setAccessibilityLabel("Search scope")
+        scopePicker.target = self
+        scopePicker.action = #selector(changeScope)
 
         let content = searchContent
-        for control in [findRow, replaceRow, resultHeader, resultScroll] {
+        for control in [findRow, replaceRow, scopePicker] + workspace.filterViews + [resultHeader, resultScroll, workspace.resultView] {
             content.addArrangedSubview(control)
         }
         content.orientation = .vertical
@@ -244,14 +287,89 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             content.bottomAnchor.constraint(equalTo: surface.bottomAnchor),
             resultScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 0),
         ])
-        for control in [findRow, replaceRow] {
+        for control in [findRow, replaceRow, scopePicker] + workspace.filterViews {
             control.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -2 * SidebarResults.panelInset).isActive = true
         }
         resultHeader.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -2 * SidebarResults.rowMargin).isActive = true
         resultScroll.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        workspace.resultView.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         resultScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
+        workspace.resultView.setContentHuggingPriority(.defaultLow, for: .vertical)
         replaceButton.isEnabled = false
+        folderChanged()
     }
+
+    func folderChanged() {
+        workspace.setRoot(document.folderURL)
+        if document.folderURL == nil { _ = selectScope(.buffer) }
+        updateScopeVisibility()
+        if searchVisible { searchWhenShown() }
+    }
+
+    func documentPresented() { if searchesWorkspace { workspace.documentPresented() } }
+
+    func treeModeChanged() { if searchesWorkspace { workspace.treeModeChanged() } }
+
+    @discardableResult
+    func selectScope(_ scope: FindScope) -> Bool {
+        guard scope != document.findScope, scope == .buffer || document.folderURL != nil else { return false }
+        workspace.switchedAway()
+        document.findScope = scope
+        generation &+= 1
+        work?.cancel()
+        activity?.cancel()
+        validResults = false
+        pending = false
+        previewRequested = false
+        bufferSearchScheduled = false
+        updateScopeVisibility()
+        if searchesWorkspace { workspace.invalidate() }
+        else if searchVisible { searchWhenShown() }
+        return true
+    }
+
+    func openWorkspace(in directory: URL?, reveal: (NSView, Bool) -> Void) {
+        _ = selectScope(.workspace)
+        if let directory { workspace.findIn(directory) }
+        openField(replace: false, seedSelection: directory == nil, reveal: reveal)
+    }
+
+    private func updateScopeVisibility() {
+        scopePicker.isHidden = document.folderURL == nil
+        scopePicker.selectedSegment = searchesWorkspace ? 1 : 0
+        searchContent.setCustomSpacing(scopePicker.isHidden ? 10 : 5, after: replaceRow)
+        for field in workspace.filterViews { field.isHidden = !searchesWorkspace }
+        resultHeader.isHidden = searchesWorkspace
+        resultScroll.isHidden = searchesWorkspace
+        workspace.resultView.isHidden = !searchesWorkspace
+        updateKeyOrder()
+        updateReplaceAvailability()
+    }
+
+    private func updateKeyOrder() {
+        if searchesWorkspace {
+            let views = [findInput.input] + (settings.showsReplacement ? [replaceInput.input] : []) +
+                [scopePicker, workspace.includeInput, workspace.excludeInput, workspace.resultResponder]
+            for (view, next) in zip(views, views.dropFirst()) { view.nextKeyView = next }
+            views.last?.nextKeyView = views.first
+        } else if document.folderURL != nil {
+            findInput.input.nextKeyView = settings.showsReplacement ? replaceInput.input : scopePicker
+            replaceInput.input.nextKeyView = scopePicker
+            scopePicker.nextKeyView = results
+            results.nextKeyView = findInput.input
+        } else {
+            findInput.input.nextKeyView = nil
+            replaceInput.input.nextKeyView = nil
+            results.nextKeyView = nil
+            document.window.recalculateKeyViewLoop()
+        }
+    }
+
+    @objc private func changeScope() {
+        _ = selectScope(scopePicker.selectedSegment == 1 ? .workspace : .buffer)
+    }
+
+    private func focusFindInput() { document.window.makeFirstResponder(findInput.input) }
 
     private func horizontal(_ views: [NSView]) -> NSStackView {
         let stack = NSStackView(views: views)
@@ -307,6 +425,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func focusSearch(reveal: (NSView, Bool) -> Void) {
+        if searchesWorkspace { openField(replace: false, reveal: reveal); return }
         guard selectedMatchLocation != nil else {
             openField(replace: false, reveal: reveal)
             return
@@ -320,10 +439,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         }
     }
 
-    func openField(replace: Bool, reveal: (NSView, Bool) -> Void) {
+    func openField(replace: Bool, seedSelection: Bool = true, reveal: (NSView, Bool) -> Void) {
         document.requestAutosave()
         var changedQuery = false
-        if let editor = document.window.firstResponder as? EditorTextView, editor === document.editor {
+        if seedSelection, let editor = document.window.firstResponder as? EditorTextView, editor === document.editor {
             let selection = editor.selectedRange()
             let text = editor.string as NSString
             if selection.length > 0 && NSMaxRange(selection) <= text.length {
@@ -349,6 +468,11 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             }
         }
         reveal(replace ? replaceInput.input : findInput.input, replace)
+        if searchesWorkspace {
+            if changedQuery { workspace.invalidate(resetDismissals: true) }
+            workspace.searchWhenShown()
+            return
+        }
         previewRequested = false
         if changedQuery || (!validResults && !pending) { requestSearch() }
         refreshDecorations()
@@ -361,6 +485,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         }
         settings.showsReplacement = visible
         updateReplacementVisibility()
+        if searchesWorkspace { workspace.replacementChanged(); return }
         if let selected { selectRow(selected, reveal: false, preview: visible && previewRequested) }
         refreshVisibleRows()
         refreshDecorations()
@@ -371,23 +496,27 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         replaceToggle.image = NSImage(systemSymbolName: settings.showsReplacement ? "chevron.down" : "chevron.right",
                                       accessibilityDescription: nil)
         replaceRow.isHidden = !settings.showsReplacement
+        updateKeyOrder()
     }
 
     @objc private func toggleReplaceSection(_ sender: Any?) { perform(.toggleReplace) }
     @objc private func replaceAllMatches(_ sender: Any?) { perform(.replaceAll) }
     func searchWhenShown() {
+        if searchesWorkspace { workspace.searchWhenShown(); return }
         if !validResults && !pending { requestSearch() }
     }
 
-    func cancelPendingFocus() { pendingResultFocus = nil }
+    func cancelPendingFocus() { pendingResultFocus = nil; if searchesWorkspace { workspace.cancelPendingFocus() } }
 
     func clearTransientFocus() {
         pendingResultFocus = nil
         previewRequested = false
+        if searchesWorkspace { workspace.switchedAway() }
     }
 
     func switchedAway() {
         clearTransientFocus()
+        if searchesWorkspace { return }
         queuedDirection = nil
         requestSearchIfNeeded()
     }
@@ -411,6 +540,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     private func resetMatches() {
+        if searchesWorkspace { workspace.invalidate(resetDismissals: true); return }
         dismissed.removeAll()
         queuedDirection = nil
         pendingResultFocus = nil
@@ -422,6 +552,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     private func requestSearchIfNeeded() {
+        if searchesWorkspace { workspace.invalidate(); return }
         if searchVisible || queuedDirection != nil {
             requestSearch()
         } else {
@@ -551,6 +682,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     private func focusFirstResult() {
+        if searchesWorkspace { workspace.focusFirstResult(); return }
         guard searchVisible else { return }
         let window = document.window
         if pending || bufferSearchScheduled {
@@ -664,9 +796,15 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         }
     }
 
-    func updateReplaceAvailability() { replaceButton.isEnabled = canPerform(.replaceAll) }
+    func updateReplaceAvailability() {
+        let title = searchesWorkspace ? "Replace All in Workspace" : "Replace All"
+        replaceButton.toolTip = title
+        replaceButton.setAccessibilityLabel(title)
+        replaceButton.isEnabled = canPerform(.replaceAll)
+    }
 
     func refreshDecorations() {
+        if searchesWorkspace { workspace.refreshDecorations(); return }
         guard !document.isSidebarVisible || document.sidebarMode != .references else { return }
         let hit = validResults ? selected.map { matches[$0] } : nil
         let preview = previewRequested && searchVisible && settings.showsReplacement

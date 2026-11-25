@@ -67,6 +67,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     lazy var draftRecovery = DraftRecoveryStore(directory: storageFolder.appending(path: "DraftRecovery", directoryHint: .isDirectory))
     lazy var syntaxOverrides = SyntaxLanguageOverrides(defaults: isAgentCheck ? nil : .standard)
     lazy var fileWordWrap = FileWordWrap(defaults: isAgentCheck ? nil : .standard)
+    lazy var workspaceFindPreferences = WorkspaceFindPreferences(defaults: isAgentCheck ? nil : .standard)
     private weak var recentMenu: NSMenu?
     private weak var focusJujutsuItem: NSMenuItem?
     private weak var findPreviousItem: NSMenuItem?
@@ -155,6 +156,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try await BracketCheck.run(in: self)
                     try await OccurrenceCheck.run(in: self)
                     try await FindCheck.run(in: self)
+                    try await WorkspaceFindCheck.run(in: self) { _, _ in }
                     try ReferencesCheck.run(in: makeDocument()) { _, _ in }
                     try await NavigationHistoryCheck.run(in: self)
                     try await FocusCheck.run(in: self)
@@ -544,12 +546,15 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     @objc func openFind(_ sender: Any?) {
-        if let document = activeDocument, document.isShowingMarkdownPreview {
-            controlPanel?.dismiss(restoreFocus: true)
-            document.performFind(.find)
-            return
-        }
-        focusSidebar(.search)
+        guard let document = activeDocument, document.canPerformFind(.find) else { return }
+        controlPanel?.dismiss(restoreFocus: true)
+        document.performFind(.find)
+    }
+
+    @objc func openWorkspaceFind(_ sender: Any?) {
+        guard let document = activeDocument, document.canPerformFind(.findWorkspace) else { return }
+        controlPanel?.dismiss(restoreFocus: true)
+        document.performFind(.findWorkspace)
     }
 
     @objc func openReplace(_ sender: Any?) {
@@ -741,6 +746,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)), #selector(saveDocumentAsScratch(_:)):
             return activeDocument.map { $0.hasEditableTextDocument && !$0.isBusy && $0.window.attachedSheet == nil } ?? false
         case #selector(openFind(_:)): return activeDocument?.canPerformFind(.find) ?? false
+        case #selector(openWorkspaceFind(_:)): return activeDocument?.canPerformFind(.findWorkspace) ?? false
         case #selector(openReplace(_:)): return activeDocument?.canPerformFind(.replace) ?? false
         case #selector(toggleSidebar(_:)), #selector(focusScratches(_:)), #selector(toggleTerminal(_:)):
             return activeDocument.map { $0.window.attachedSheet == nil } ?? false
@@ -1091,10 +1097,12 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     @discardableResult
     func openFile(
         _ url: URL, allowMissing: Bool = false, in sourceDocument: DocumentWindow? = nil,
-        focusEditor: Bool = true, markdownLink: MarkdownLinkOpening? = nil, shouldOpen: @escaping () -> Bool = { true }
+        focusEditor: Bool = true, markdownLink: MarkdownLinkOpening? = nil, matchingText: String? = nil,
+        shouldOpen: @escaping () -> Bool = { true }
     ) async throws -> DocumentWindow? {
         guard let request = beginOpening(in: sourceDocument, while: shouldOpen) else { return nil }
-        return try await openFile(url, allowMissing: allowMissing, request: request, focusEditor: focusEditor, markdownLink: markdownLink)
+        return try await openFile(url, allowMissing: allowMissing, request: request, focusEditor: focusEditor,
+                                  markdownLink: markdownLink, matchingText: matchingText)
     }
 
     private func beginOpening(in source: DocumentWindow?, while isWanted: @escaping () -> Bool) -> OpenRequest? {
@@ -1111,7 +1119,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     private func openFile(
-        _ url: URL, allowMissing: Bool, request: OpenRequest, focusEditor: Bool, markdownLink: MarkdownLinkOpening? = nil
+        _ url: URL, allowMissing: Bool, request: OpenRequest, focusEditor: Bool,
+        markdownLink: MarkdownLinkOpening? = nil, matchingText: String? = nil
     ) async throws -> DocumentWindow? {
         guard isCurrent(request, at: url) else { return nil }
         let document = request.document
@@ -1124,13 +1133,16 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             return (path, identity, isDirectory.boolValue)
         }.value
         guard isCurrent(request, at: canonical) else { return nil }
+        guard matchingText == nil || canonical.path == url.path else { return nil }
         if isFolder {
+            guard matchingText == nil else { return nil }
             let folder = URL(filePath: canonical.path, directoryHint: .isDirectory)
             return await openFolder(url, canonical: folder, request: request, focusEditor: focusEditor)
         }
         let isScratch = scratchStore.identifiesScratch(at: canonical)
         if document.hasTextDocument &&
             (document.fileURL == canonical || (identity != nil && identity == document.fileIdentity)) {
+            if let matchingText, !document.editor.string.utf8.elementsEqual(matchingText.utf8) { return nil }
             if let scratch = document.scratchFile { await recordScratchOpen(scratch) }
             else if !isScratch { await recentFiles.record(url, in: document.folderURL) }
             return document
@@ -1144,6 +1156,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         } catch {
             guard isCurrent(request, at: canonical) else { return nil }
             throw error
+        }
+        if let matchingText {
+            guard case .text(let file) = opened, file.text.utf8.elementsEqual(matchingText.utf8) else { return nil }
         }
         guard await document.open(opened.destination(focusEditor: focusEditor, scratch: scratch), markdownLink: markdownLink, while: {
             self.isCurrent(request, at: canonical)
@@ -1292,6 +1307,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         edit.addItem(.separator())
 
         edit.addCommand("Find…", #selector(openFind(_:)), "f").target = self
+        edit.addCommand("Find in Workspace", #selector(openWorkspaceFind(_:)), "f", [.command, .shift]).target = self
         edit.addCommand("Replace…", #selector(openReplace(_:)), "f", [.command, .option]).target = self
         edit.addCommand("Find Next", #selector(findNext(_:)), "g").target = self
         let previousItem = edit.addCommand("Find Previous", #selector(findPrevious(_:)), "g", [.command, .shift])
@@ -1407,6 +1423,11 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 try checkWindow(window, screenshot: target)
             }
             try await FindCheck.run(in: self)
+        case "workspace-search":
+            try await WorkspaceFindCheck.run(in: self) { window, suffix in
+                let target = screenshot.map { URL(fileURLWithPath: $0).deletingPathExtension().path + "-\(suffix).png" }
+                try checkWindow(window, screenshot: target)
+            }
         case "control":
             try await ControlSearchCheck.run(in: self) { view in
                 try self.captureCheckView(view, screenshot: screenshot)

@@ -11,11 +11,7 @@ struct ReferenceResult: Sendable {
 
 @MainActor
 final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-    private enum Row {
-        case folder(URL, count: Int, depth: Int)
-        case file(URL, count: Int, depth: Int)
-        case reference(ReferenceResult, depth: Int)
-    }
+    private typealias Row = SidebarGroupedResultRow<ReferenceResult>
 
     let view = NSView()
     private let table = SidebarActionResultTable()
@@ -121,43 +117,10 @@ final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDeleg
     }
 
     private func buildRows() {
-        rows.removeAll(keepingCapacity: true)
         let files = Dictionary(grouping: results, by: { $0.url.standardizedFileURL })
             .sorted { $0.key.path < $1.key.path }
-            .map { file, hits in (file: file, hits: hits, folders: treeMode ? ancestors(of: file) : []) }
-        var folderCounts: [URL: Int] = [:]
-        for (_, hits, folders) in files {
-            for folder in folders { folderCounts[folder, default: 0] += hits.count }
-        }
-        var previous: [URL] = []
-        for (file, hits, folders) in files {
-            let openFolders = folders.prefix { !collapsedFolders.contains($0) }
-            let visibleCount = min(openFolders.count + 1, folders.count)
-            let shared = zip(previous, folders).prefix { $0 == $1 }.count
-            for depth in shared..<max(shared, visibleCount) {
-                let folder = folders[depth]
-                rows.append(.folder(folder, count: folderCounts[folder, default: 0], depth: depth))
-            }
-            previous = folders
-            guard openFolders.count == folders.count else { continue }
-            rows.append(.file(file, count: hits.count, depth: folders.count))
-            rows += hits.sorted { ($0.line, $0.column, $0.index) < ($1.line, $1.column, $1.index) }
-                .map { .reference($0, depth: folders.count) }
-        }
-    }
-
-    private func ancestors(of file: URL) -> [URL] {
-        guard let root, WorktreeFileOperations.contains(file, in: root) else { return [] }
-        let rootPath = WorktreeFileOperations.path(root)
-        var folders: [URL] = []
-        var folder = file.deletingLastPathComponent()
-        while WorktreeFileOperations.path(folder) != rootPath {
-            folders.append(folder)
-            let parent = folder.deletingLastPathComponent()
-            guard parent.path != folder.path else { return [] }
-            folder = parent
-        }
-        return folders.reversed()
+            .map { url, hits in (url, hits.sorted { ($0.line, $0.column, $0.index) < ($1.line, $1.column, $1.index) }) }
+        rows = Row.layout(files, root: treeMode ? root : nil, collapsed: collapsedFolders)
     }
 
     private func reload(selecting row: Int?) {
@@ -197,8 +160,9 @@ final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDeleg
 
     private func dismiss(_ index: Int) {
         guard let removed = rows.indices.first(where: { reference(at: $0)?.index == index }) else { return }
-        let nextReference = rows.indices.dropFirst(removed + 1).lazy.compactMap { self.reference(at: $0) }.first
-            ?? rows.indices.prefix(removed).reversed().lazy.compactMap { self.reference(at: $0) }.first
+        let next = rows.indices.dropFirst(removed + 1).first { reference(at: $0) != nil }
+        let previous = rows.indices.prefix(removed).last { reference(at: $0) != nil }
+        let nextReference = (next ?? previous).flatMap { reference(at: $0) }
         let selection = row(at: table.selectedRow)
         let wasPreviewing = isPreviewing
         results.removeAll { $0.index == index }
@@ -207,7 +171,7 @@ final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDeleg
         let retained: Int?
         switch selection {
         case .folder(let folder, _, _): retained = folderRow(for: folder)
-        case .reference(let reference, _) where reference.index != index:
+        case .hit(let reference, _) where reference.index != index:
             retained = rows.indices.first { self.reference(at: $0)?.index == reference.index }
         default: retained = nil
         }
@@ -235,7 +199,7 @@ final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDeleg
     private func row(at index: Int) -> Row? { rows.indices.contains(index) ? rows[index] : nil }
 
     private func reference(at row: Int) -> ReferenceResult? {
-        guard case .reference(let result, _) = self.row(at: row) else { return nil }
+        guard case .hit(let result, _) = self.row(at: row) else { return nil }
         return result
     }
 
@@ -249,7 +213,7 @@ final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDeleg
     private func activateSelection() {
         switch row(at: table.selectedRow) {
         case .folder(let folder, _, _): toggleFolder(folder)
-        case .reference(let result, _):
+        case .hit(let result, _):
             isPreviewing = true
             activate?(result, results.map(\.index))
         default: break
@@ -301,7 +265,7 @@ final class ReferencesSidebar: NSObject, NSTableViewDataSource, NSTableViewDeleg
             header.setIndent(depth)
             header.updateCount(count, accessibilityLabel: count == 1 ? "1 reference" : "\(count) references")
             return header
-        case .reference(let result, let depth):
+        case .hit(let result, let depth):
             let identifier = NSUserInterfaceItemIdentifier("ReferenceExcerpt")
             let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? SidebarActionResultCell
                 ?? SidebarActionResultCell(frame: .zero)

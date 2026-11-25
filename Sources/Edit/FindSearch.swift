@@ -77,44 +77,56 @@ enum FindSearch {
 
     static func match(_ query: String, in text: String, options: FindOptions, ranges: [NSRange]? = nil) -> Outcome {
         guard !query.isEmpty else { return .matches([]) }
-        var pattern = options.regularExpression ? normalizeNamedGroups(query) : NSRegularExpression.escapedPattern(for: query)
-        if options.wholeWord {
-            if options.regularExpression {
-                pattern = "\\b(?:\(pattern))\\b"
-            } else {
-                let word = "[\\p{L}\\p{N}_]"
-                if let first = query.unicodeScalars.first, isWord(first) { pattern = "(?<!\(word))" + pattern }
-                if let last = query.unicodeScalars.last, isWord(last) { pattern += "(?!\(word))" }
-            }
-        }
-        guard let regex = try? NSRegularExpression(
-            pattern: pattern, options: options.caseSensitive ? [] : [.caseInsensitive]
-        ) else { return .invalidExpression }
+        guard let matcher = Matcher(query, options: options) else { return .invalidExpression }
+        return .matches(matcher.matches(in: text, ranges: ranges))
+    }
 
-        var hits: [FindHit] = []
-        func collect(in fragment: String, scope: NSRange?) {
-            regex.enumerateMatches(in: fragment, options: [.reportProgress],
-                                   range: NSRange(fragment.startIndex..., in: fragment)) { match, _, stop in
-                if Task.isCancelled {
-                    stop.pointee = true
-                } else if let match {
-                    hits.append(FindHit(result: match, scope: scope))
+    struct Matcher {
+        private let regex: NSRegularExpression
+
+        init?(_ query: String, options: FindOptions) {
+            var pattern = options.regularExpression ? normalizeNamedGroups(query) : NSRegularExpression.escapedPattern(for: query)
+            if options.wholeWord {
+                if options.regularExpression {
+                    pattern = "\\b(?:\(pattern))\\b"
+                } else {
+                    let word = "[\\p{L}\\p{N}_]"
+                    if let first = query.unicodeScalars.first, isWord(first) { pattern = "(?<!\(word))" + pattern }
+                    if let last = query.unicodeScalars.last, isWord(last) { pattern += "(?!\(word))" }
                 }
             }
+            guard let regex = try? NSRegularExpression(
+                pattern: pattern, options: options.caseSensitive ? [] : [.caseInsensitive]
+            ) else { return nil }
+            self.regex = regex
         }
-        if let ranges {
-            // A real substring gives anchors and boundary tests the same view as an isolated buffer.
-            let source = text as NSString
-            for range in ranges {
-                if Task.isCancelled { break }
-                guard range.location >= 0, range.location <= source.length,
-                      range.length >= 0, range.length <= source.length - range.location else { continue }
-                collect(in: source.substring(with: range), scope: range)
+
+        func matches(in text: String, ranges: [NSRange]? = nil, limit: Int = .max) -> [FindHit] {
+            var hits: [FindHit] = []
+            func collect(in fragment: String, scope: NSRange?) {
+                regex.enumerateMatches(in: fragment, options: [.reportProgress],
+                                       range: NSRange(fragment.startIndex..., in: fragment)) { match, _, stop in
+                    if Task.isCancelled || hits.count >= limit {
+                        stop.pointee = true
+                    } else if let match {
+                        hits.append(FindHit(result: match, scope: scope))
+                    }
+                }
             }
-        } else {
-            collect(in: text, scope: nil)
+            if let ranges {
+                // A real substring gives anchors and boundary tests the same view as an isolated buffer.
+                let source = text as NSString
+                for range in ranges {
+                    if Task.isCancelled || hits.count >= limit { break }
+                    guard range.location >= 0, range.location <= source.length,
+                          range.length >= 0, range.length <= source.length - range.location else { continue }
+                    collect(in: source.substring(with: range), scope: range)
+                }
+            } else {
+                collect(in: text, scope: nil)
+            }
+            return hits
         }
-        return .matches(hits)
     }
 
     private static func normalizeNamedGroups(_ query: String) -> String {

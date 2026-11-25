@@ -1067,11 +1067,24 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         if let scratchSource { return scratchMenu(for: item, in: root, actions: scratchSource.actions) }
         guard let url = item.fileURL, let folder = root.fileURL, let actions = worktreeSource?.actions else { return nil }
         let urls = row >= 0 ? selectedItems.filter { $0 !== provisionalEntry }.compactMap(\.fileURL) : []
-        return actions.menu(for: url, isDirectory: item.isDirectory, selection: urls, root: folder) { [weak self] in
+        let menu = actions.menu(for: url, isDirectory: item.isDirectory, selection: urls, root: folder) { [weak self] in
             guard let self, actions.canTrash(urls, in: folder) else { return }
             document.window.makeFirstResponder(tree)
             actions.trash(urls, within: folder, updateSelection: fileSelectionUpdate(in: folder))
         }
+        if item.isDirectory, urls.count <= 1, WorktreeFileOperations.contains(url, in: folder) {
+            let find = menu.insertItem(withTitle: "Find Here", action: #selector(findHere(_:)), keyEquivalent: "", at: 0)
+            find.target = self
+            find.representedObject = url
+            find.isEnabled = document.canPerformFind(.findWorkspace)
+            menu.insertItem(.separator(), at: 1)
+        }
+        return menu
+    }
+
+    @objc private func findHere(_ sender: NSMenuItem) {
+        guard let directory = sender.representedObject as? URL, document.canPerformFind(.findWorkspace) else { return }
+        document.sidebar.findInWorkspace(directory)
     }
 
     private func sourceControlMenu(for item: Item) -> NSMenu? {

@@ -30,7 +30,11 @@ Use the same revision hover card in the Jujutsu graph and on the Read-only statu
 
 ## Sidebar results
 
+Use one content grid for controls and results. Align both edges of the control stack with the first-level file and folder gutter and the trailing count column. For two exclusive modes, use the small native segmented control with equal segments spanning the stack. Give independent text inputs a full row each, with short visible labels and full accessible names. Keep contextual options inside the field they affect. Check the full stack at the sidebar’s minimum width.
+
 Reuse the editor’s existing result component and interaction patterns for new lists of document locations. Match Search’s row spacing, excerpts, highlight treatment, and focus behavior. Align top-level file icons and folder chevrons with the Search controls and Worktree's first level. Indent excerpts slightly past the filename and give separate file groups 8 points of additional space. Keep the full path in the heading tooltip and align subdued count badges 10 points from the trailing edge. When file groups are always open, treat each file heading as a label and skip it in mouse and keyboard selection.
+
+Keep folder and file counts in one column at every nesting depth. A folder count includes all retained results beneath it and stays visible when collapsed. Use the ellipsis menu for the tree layout preference. Reserve space for row actions so excerpts keep the same width when those actions appear.
 
 Clicking a result or moving with the arrow keys selects it and reveals its location while focus stays in the list. Space and Return activate the result and give focus to the editor. Keep the selected row available for subsequent navigation. When the preview goes to another file, update the document and highlighted location together, and apply the latest selection if several previews overlap.
 

@@ -224,7 +224,8 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     func canPerformFind(_ command: FindCommand) -> Bool {
         switch command {
         case .find, .replace, .toggleSidebar: return true
-        case .next, .previous: return !document.findSettings.query.isEmpty
+        case .findWorkspace: return document.folderURL != nil
+        case .next, .previous: return search?.canPerform(command) ?? !document.findSettings.query.isEmpty
         default: return search?.canPerform(command) == true
         }
     }
@@ -232,7 +233,12 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     func performFind(_ command: FindCommand) {
         switch command {
         case .find:
-            toggleFocus(of: .search)
+            if searchPanel().selectScope(.buffer) {
+                rememberFocus()
+                searchPanel().openField(replace: false, reveal: revealSearch)
+            } else { toggleFocus(of: .search) }
+        case .findWorkspace:
+            findInWorkspace()
         case .replace:
             rememberFocus()
             searchPanel().openField(replace: true, reveal: revealSearch)
@@ -243,6 +249,14 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
             searchPanel().perform(command)
         }
     }
+
+    func findInWorkspace(_ directory: URL? = nil) {
+        guard document.folderURL != nil else { return }
+        rememberFocus()
+        searchPanel().openWorkspace(in: directory, reveal: revealSearch)
+    }
+
+    func selectBufferSearch() { _ = search?.selectScope(.buffer) }
 
     private func showCurrentMode() {
         switch availableMode(mode) {
@@ -256,7 +270,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
 
     private func searchPanel() -> FindSidebar {
         if let search { return search }
-        let search = FindSidebar(document: document) { [weak self] in
+        let search = FindSidebar(document: document, app: app) { [weak self] in
             self?.returnFocus()
         }
         self.search = search
@@ -442,6 +456,8 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     }
 
     func folderChanged() {
+        if document.folderURL == nil, search == nil { document.findScope = .buffer }
+        search?.folderChanged()
         if worktreeVisible, let folder = document.folderURL { worktree?.update(folder: folder, currentFile: worktreeFile) }
         switchToAvailableMode()
         reloadScratches()
@@ -489,6 +505,8 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     func revealCurrentScratch() { scratches?.revealCurrentScratch() }
 
     func editorBufferReplaced() { search?.bufferReplaced() }
+
+    func searchDocumentPresented() { search?.documentPresented() }
 
     func markdownModeChanged() { search?.updateReplaceAvailability() }
 
@@ -715,7 +733,9 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
 
     @objc private func toggleResultTreeMode(_ sender: Any?) {
         switch mode {
-        case .search: searchTreeMode.toggle()
+        case .search:
+            searchTreeMode.toggle()
+            search?.treeModeChanged()
         case .references:
             referencesTreeMode.toggle()
             references?.setTreeMode(referencesTreeMode)

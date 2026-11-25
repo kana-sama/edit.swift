@@ -66,14 +66,16 @@ struct SessionFindSettings: Codable, Equatable, Sendable {
     var replacement: String
     var options: FindOptions
     var width: Double
+    var scope: FindScope?
 
-    init(search: FindSettings, sidebarVisible: Bool, sidebarWidth: Double) {
+    init(search: FindSettings, sidebarVisible: Bool, sidebarWidth: Double, scope: FindScope = .buffer) {
         visible = sidebarVisible
         showsReplacement = search.showsReplacement
         query = search.query
         replacement = search.replacement
         options = search.options
         width = sidebarWidth
+        self.scope = scope == .workspace ? scope : nil
     }
 
     var search: FindSettings {

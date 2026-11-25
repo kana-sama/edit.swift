@@ -168,6 +168,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     #if EDIT_AGENT_CHECKS
     var beforePresentMarkdownForCheck: ((MarkdownPreviewView) async -> Void)?
     var beforeInstallFileForCheck: ((FileBuffer) async -> Void)?
+    var confirmWorkspaceReplaceForCheck: ((Int, Int) async -> Bool)?
     var beforeCloseWorkspaceForCheck: (() async -> Void)?
     #endif
     private var emptyFolderView: EmptyFolderView?
@@ -315,6 +316,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var syntaxHighlighting: SyntaxHighlighting?
     private(set) lazy var sidebar = DocumentSidebar(document: self, app: app)
     var findSettings = FindSettings() {
+        didSet { updateOccurrenceFindSettings() }
+    }
+    var findScope: FindScope = .buffer {
         didSet { updateOccurrenceFindSettings() }
     }
     var sidebarMode: SidebarMode { sidebar.mode }
@@ -724,6 +728,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func canPerformFind(_ command: FindCommand) -> Bool {
         guard window.attachedSheet == nil else { return false }
+        if command == .findWorkspace { return folderURL != nil }
+        if findScope == .workspace && command != .find { return sidebar.canPerformFind(command) }
         if markdownPreview != nil {
             return command == .find || command == .next || command == .previous || command == .toggleSidebar
         }
@@ -734,9 +740,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func performFind(_ command: FindCommand) {
         guard !app.isQuitting, window.attachedSheet == nil, canPerformFind(command) else { return }
-        if let markdownPreview {
+        if let markdownPreview, command == .find || (findScope == .buffer && command != .findWorkspace) {
             switch command {
-            case .find: markdownPreview.showFind(); return
+            case .find: sidebar.selectBufferSearch(); markdownPreview.showFind(); return
             case .next: markdownPreview.find(); return
             case .previous: markdownPreview.find(backward: true); return
             default: break
@@ -765,13 +771,14 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func updateOccurrenceFindSettings() {
         editor.occurrenceHighlighting.updateFind(options: findSettings.options,
-                                                 activeQuery: sidebar.isSearchVisible ? findSettings.query : nil)
+                                                 activeQuery: sidebar.isSearchVisible && findScope == .buffer ? findSettings.query : nil)
     }
 
     func restoreSidebar(_ record: SessionDocument) {
         // Older sessions omitted the mode for Search even when they saved its sidebar state.
         let saved = record.findSettings
         if let saved { findSettings = saved.search }
+        if folderURL != nil { findScope = saved?.scope ?? .buffer }
         sidebar.restore(mode: record.sidebarMode ?? (saved == nil ? nil : .search),
                         width: saved?.width ?? SessionFindSettings.defaultWidth, visible: saved?.visible ?? false,
                         showsHidden: record.worktreeShowsHidden ?? false, searchTreeMode: record.searchTreeMode ?? false,
@@ -1288,7 +1295,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func sessionDocument() -> SessionDocument {
-        let savedFind = SessionFindSettings(search: findSettings, sidebarVisible: sidebar.isVisible, sidebarWidth: sidebar.width)
+        let savedFind = SessionFindSettings(search: findSettings, sidebarVisible: sidebar.isVisible, sidebarWidth: sidebar.width,
+                                             scope: findScope)
         let conflictDrafts = inlineConflictDrafts
         return SessionDocument(
             path: displayedFileURL?.path,
@@ -1530,6 +1538,20 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         updateTitle()
         updateEditedState()
         autosave.clearFailure()
+    }
+
+    func canApplyWorkspaceFind(_ change: WorkspaceFindReplacement.Change, disk: FileBuffer) -> Bool {
+        fileURL?.path == disk.url.path && revision == disk.revision && fileIdentity == disk.identity &&
+            editor.conflictEdits.isEmpty && editor.renameRange == nil && !editor.hasMarkedText() &&
+            editor.jjInlineDiff?.projectedEditRange == nil && editor.textStorage != nil &&
+            editor.string.utf8.elementsEqual(change.original.utf8) && editor.focusAllowsSourceEdits(change.edits.map(\.range))
+    }
+
+    func applyWorkspaceFind(_ change: WorkspaceFindReplacement.Change, saved: FileBuffer) {
+        let selections = MultiCaretEditing.mapped(editor.caretSelections, after: change.edits)
+        _ = editor.applyMultiEdits(change.edits, selections: selections, validate: false, actionName: "Replace in Workspace")
+        adoptSavedFile(saved)
+        autosave.didSave(through: autosave.generation)
     }
 
     var canScheduleAutosave: Bool {
@@ -2787,7 +2809,7 @@ extension DocumentWindow {
         if let reading = state.reading { markdownPreview?.restore(reading) }
     }
 
-    private func setMarkdownPreview(_ enabled: Bool, focus: Bool) {
+    func setMarkdownPreview(_ enabled: Bool, focus: Bool) {
         markdownState.showsPreview = enabled
         if enabled, markdownPreview == nil {
             editor.setMarkdownToolTipLinks([])
@@ -2881,6 +2903,7 @@ extension DocumentWindow {
             if isCurrent(), !Task.isCancelled { await showError("Could Not Prepare Markdown Preview", detail: error.localizedDescription) }
             return nil
         }
+        sidebar.searchDocumentPresented()
     }
 
     private func presentMarkdownOpening(_ prepared: PreparedMarkdownOpening) {
