@@ -35,7 +35,7 @@ struct ControlCommand {
         if action == #selector(Edit.closeDocument(_:)) { return document.canCloseDocument }
         if action == #selector(Edit.closeWorkspace(_:)) { return document.canCloseWorkspace }
         if action == #selector(Edit.toggleWordWrap(_:)) { return document.canToggleWordWrap }
-        if action == #selector(Edit.toggleLSPHighlight(_:)) { return document.canToggleLSPHighlight }
+        if Self.highlightingLayer(for: action) != nil { return document.canToggleHighlighting }
         if action == #selector(Edit.performFindControlAction(_:)), let command = item.representedObject as? FindCommand {
             return document.canPerformFind(command)
         }
@@ -63,7 +63,8 @@ struct ControlCommand {
 
     func toggleState(in document: DocumentWindow) -> Bool? {
         switch item.action {
-        case #selector(Edit.toggleLSPHighlight(_:)): return document.isLSPHighlightEnabled
+        case #selector(Edit.toggleLSPHighlight(_:)), #selector(Edit.toggleTreeSitterHighlight(_:)):
+            return Self.highlightingLayer(for: item.action).map { document.isHighlightingEnabled($0) }
         case #selector(Edit.toggleWordWrap(_:)): return document.editor.wrapsWords
         case #selector(Edit.toggleMarkdownPreview(_:)): return document.isShowingMarkdownPreview
         case #selector(Edit.toggleSidebar(_:)): return document.isSidebarVisible
@@ -114,8 +115,8 @@ struct ControlCommand {
             document.toggleWordWrap()
             return
         }
-        if action == #selector(Edit.toggleLSPHighlight(_:)) {
-            document.toggleLSPHighlight()
+        if let layer = Self.highlightingLayer(for: action) {
+            document.toggleHighlighting(layer)
             return
         }
         if action == #selector(Edit.toggleSidebar(_:)) {
@@ -250,7 +251,7 @@ struct ControlCommand {
                action != #selector(NSWindow.performZoom(_:)) { return [] }
             let title = action == #selector(Edit.goBack(_:)) || action == #selector(Edit.goForward(_:))
                 || action == #selector(Edit.toggleMarkdownPreview(_:))
-                || action == #selector(Edit.toggleLSPHighlight(_:))
+                || highlightingLayer(for: action) != nil
                 ? item.title : "\(prefix): \(item.title)"
             return [ControlCommand(id: NSStringFromSelector(action), title: title, item: item,
                                    documentOnly: isBracketCommand(action) || isCaseCommand(action))]
@@ -259,6 +260,14 @@ struct ControlCommand {
 
     private static func isBracketCommand(_ action: Selector) -> Bool {
         action == #selector(EditorTextView.goToBracket(_:)) || action == #selector(EditorTextView.selectToBracket(_:))
+    }
+
+    private static func highlightingLayer(for action: Selector?) -> HighlightingLayer? {
+        switch action {
+        case #selector(Edit.toggleLSPHighlight(_:)): .lsp
+        case #selector(Edit.toggleTreeSitterHighlight(_:)): .treeSitter
+        default: nil
+        }
     }
 
     private static func isCaseCommand(_ action: Selector) -> Bool {

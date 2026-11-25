@@ -3,10 +3,11 @@ import EditSyntaxABI
 import Foundation
 
 enum SyntaxColor: Sendable, Hashable, CaseIterable {
-    case keyword, control, type, function, string, number, comment, property, markup, attribute
+    case plain, keyword, control, type, function, string, number, comment, property, markup, attribute
 
     fileprivate var priority: Int {
         switch self {
+        case .plain: 0
         case .property, .attribute, .function, .control: 3
         case .comment, .markup, .type: 2
         case .keyword, .string, .number: 1

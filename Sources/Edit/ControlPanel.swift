@@ -571,12 +571,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     }
 
     #if EDIT_AGENT_CHECKS
-    func checkToggleSwitches(in document: DocumentWindow, enabled: Bool, clickLSP: Bool,
+    func checkToggleSwitches(in document: DocumentWindow, lspEnabled: Bool, treeEnabled: Bool,
+                             click: HighlightingLayer,
                              capture: (NSView) throws -> Void) throws {
         show(in: document, mode: .commands)
         defer { dismiss(restoreFocus: false) }
         let expected: [String: Bool] = [
-            "Toggle LSP Highlight": enabled, "View: Toggle Word Wrap": false,
+            "Toggle LSP Highlight": lspEnabled, "Toggle Tree-sitter Highlight": treeEnabled, "View: Toggle Word Wrap": false,
             "View: Toggle Sidebar": true, "View: Toggle Terminal": false,
             "Toggle Match Case": true, "Toggle Match Whole Word": false,
             "Toggle Regular Expression": false, "Toggle Replace Section": false
@@ -586,7 +587,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         apply(matches, selected: matches.first?.entry.id)
         panel.layoutIfNeeded()
         panel.contentView?.layoutSubtreeIfNeeded()
-        var lsp: NSSwitch?
+        let targetTitle = click == .lsp ? "Toggle LSP Highlight" : "Toggle Tree-sitter Highlight"
+        var selectedSwitch: NSSwitch?
         var trailing: CGFloat?
         for (row, match) in matches.enumerated() {
             let title = match.entry.title
@@ -607,14 +609,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
                     throw CheckFailure.invalidSwitch("shortcut placement in \(title)")
                 }
             }
-            if title == "Toggle LSP Highlight" { lsp = control }
+            if title == targetTitle { selectedSwitch = control }
         }
         if let view = panel.contentView { try capture(view) }
-        if clickLSP {
-            guard let lsp, let action = lsp.action, NSApp.sendAction(action, to: lsp.target, from: lsp),
-                  document.isLSPHighlightEnabled != enabled else {
-                throw CheckFailure.invalidSwitch("activation")
-            }
+        guard let control = selectedSwitch, let action = control.action,
+              NSApp.sendAction(action, to: control.target, from: control),
+              document.isHighlightingEnabled(click) != expected[targetTitle] else {
+            throw CheckFailure.invalidSwitch("activation")
         }
     }
 

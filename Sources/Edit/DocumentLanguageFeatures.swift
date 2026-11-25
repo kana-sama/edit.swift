@@ -46,7 +46,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     private var sessions: [LanguageServerSession] { [zig, sourceKit] }
     var workspaceSessions: [LanguageServerSession] { sessions.filter(\.supportsWorkspaceSymbols) }
     var highlightingSession: LanguageServerSession? {
-        guard !isClosed, document.isLSPHighlightEnabled, document.editor.conflictEdits.isEmpty,
+        guard !isClosed, document.isHighlightingEnabled(.lsp), document.editor.conflictEdits.isEmpty,
               sourceURL != nil, sourceURL == document.fileURL, sourceLanguage == document.resolvedSyntaxLanguage,
               session.supportsSemanticTokens else { return nil }
         return session

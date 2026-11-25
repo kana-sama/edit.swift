@@ -66,14 +66,26 @@ struct LSPTextIndex: @unchecked Sendable {
 
     func position(at offset: Int) -> LSPPosition? {
         guard (0...text.length).contains(offset), isScalarBoundary(offset) else { return nil }
+        let line = lineContaining(offset)
+        guard offset <= lineEnds[line] else { return nil }
+        return LSPPosition(line: line, character: offset - lineStarts[line])
+    }
+
+    func semanticRequestRange(_ visible: NSRange) -> LSPRange {
+        let first = lineContaining(min(visible.location, text.length))
+        let last = lineContaining(min(max(visible.location, visible.upperBound - 1), text.length))
+        return LSPRange(start: .init(line: first, character: 0),
+                        end: .init(line: last, character: lineEnds[last] - lineStarts[last]))
+    }
+
+    private func lineContaining(_ offset: Int) -> Int {
         var lower = 0
         var upper = lineStarts.count
         while lower + 1 < upper {
             let middle = lower + (upper - lower) / 2
             if lineStarts[middle] <= offset { lower = middle } else { upper = middle }
         }
-        guard offset <= lineEnds[lower] else { return nil }
-        return LSPPosition(line: lower, character: offset - lineStarts[lower])
+        return lower
     }
 
     func nsRange(_ range: LSPRange, clampingColumns: Bool = true) -> NSRange? {

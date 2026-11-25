@@ -97,7 +97,7 @@ final class LanguageServerConnection: @unchecked Sendable {
     private enum Request: Sendable {
         case initialize, definition(Int), references(Int, Bool), hover(Int)
         case documentHighlight(Int), documentSymbols, workspaceSymbols(String)
-        case semanticTokensFull, semanticTokensDelta(String), semanticTokensRange
+        case semanticTokensFull, semanticTokensDelta(String), semanticTokensRange(NSRange?)
         case prepareRename(Int), rename(Int, String)
 
         var method: String {
@@ -325,9 +325,10 @@ final class LanguageServerConnection: @unchecked Sendable {
     }
 
     @concurrent func semanticTokens(in snapshot: LSPDocument, options: LSPSemanticTokenOptions,
-                                    previous: LSPSemanticTokens?) async throws -> (LSPSemanticTokens, [SyntaxSpan])? {
-        let full: Request = options.full ? .semanticTokensFull : .semanticTokensRange
-        let priorID = options.delta ? previous?.resultID : nil
+                                    previous: LSPSemanticTokens?, visibleRange: NSRange?) async throws
+        -> (LSPSemanticTokens, [SyntaxSpan])? {
+        let full: Request = options.full && visibleRange == nil ? .semanticTokensFull : .semanticTokensRange(visibleRange)
+        let priorID = options.delta && visibleRange == nil ? previous?.resultID : nil
 
         func load(_ method: Request, previous: LSPSemanticTokens?) async throws -> (LSPSemanticTokens, [SyntaxSpan])? {
             let reply = try await request(method, document: snapshot)
@@ -458,7 +459,7 @@ final class LanguageServerConnection: @unchecked Sendable {
                                                           "requests": ["full": ["delta": true], "range": true],
                                                           "tokenTypes": LSPSemanticTokens.tokenTypes,
                                                           "tokenModifiers": LSPSemanticTokens.tokenModifiers,
-                                                          "formats": ["relative"], "augmentsSyntaxTokens": false
+                                                          "formats": ["relative"], "augmentsSyntaxTokens": true
                                                       ],
                                                       "rename": ["prepareSupport": true]]]]
             if server == .sourceKit { params["initializationOptions"] = ["reportSyntacticHighlightInSemanticTokens": true] }
@@ -474,9 +475,9 @@ final class LanguageServerConnection: @unchecked Sendable {
         case .semanticTokensDelta(let id):
             params["previousResultId"] = id
             return params
-        case .semanticTokensRange:
+        case .semanticTokensRange(let visible):
             guard let index else { throw LSPFailure.invalidPosition }
-            params["range"] = index.fullRange.parameters
+            params["range"] = (visible.map(index.semanticRequestRange) ?? index.fullRange).parameters
             return params
         case .definition(let value), .references(let value, _), .hover(let value), .documentHighlight(let value),
              .prepareRename(let value), .rename(let value, _): offset = value

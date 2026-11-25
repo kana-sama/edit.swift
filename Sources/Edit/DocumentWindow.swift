@@ -282,6 +282,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             if wasFocused { focusContent() }
         }
         updateTitle()
+        updateTreeSitterHighlighting()
         sidebar.folderChanged()
     }
 
@@ -353,16 +354,26 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         hasTextDocument && window.attachedSheet == nil && !app.isQuitting
     }
 
-    var canToggleLSPHighlight: Bool { window.attachedSheet == nil && !app.isQuitting }
-    var isLSPHighlightEnabled: Bool { app.workspaceLSPHighlighting.isEnabled(in: folderURL) }
+    var canToggleHighlighting: Bool { window.attachedSheet == nil && !app.isQuitting }
 
-    func toggleLSPHighlight() {
-        guard canToggleLSPHighlight else { return }
+    func isHighlightingEnabled(_ layer: HighlightingLayer) -> Bool {
+        app.workspaceHighlighting.isEnabled(layer, in: folderURL)
+    }
+
+    func toggleHighlighting(_ layer: HighlightingLayer) {
+        guard canToggleHighlighting else { return }
         let folder = folderURL?.standardizedFileURL
-        app.workspaceLSPHighlighting.setEnabled(!isLSPHighlightEnabled, in: folder)
+        app.workspaceHighlighting.setEnabled(!isHighlightingEnabled(layer), for: layer, in: folder)
         for document in app.documents where document.folderURL?.standardizedFileURL == folder {
-            document.updateLSPHighlighting()
+            switch layer {
+            case .treeSitter: document.updateTreeSitterHighlighting()
+            case .lsp: document.updateLSPHighlighting()
+            }
         }
+    }
+
+    private func updateTreeSitterHighlighting() {
+        syntaxHighlighting?.setTreeSitterEnabled(isHighlightingEnabled(.treeSitter), language: resolvedSyntaxLanguage)
     }
 
     func updateLSPHighlighting(immediate: Bool = true) {
@@ -934,11 +945,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func prepareOpeningSyntax(
-        _ file: FileBuffer, position: EditorPosition?, storedSyntaxLanguage: String? = nil, scratch: ScratchFile? = nil
+        _ file: FileBuffer, position: EditorPosition?, folder: URL?, storedSyntaxLanguage: String? = nil,
+        scratch: ScratchFile? = nil
     ) async -> SyntaxSnapshot? {
         let language = storedSyntaxLanguage.flatMap(SyntaxLanguage.init(rawValue:))
             ?? app.syntaxOverrides.language(for: file.url) ?? SyntaxLanguage.detected(at: scratch?.filenameURL ?? file.url)
-        guard language != .plainText, position?.topLine != nil || (position?.verticalOffset ?? 0) <= 0 else { return nil }
+        guard app.workspaceHighlighting.isEnabled(.treeSitter, in: folder), language != .plainText,
+              position?.topLine != nil || (position?.verticalOffset ?? 0) <= 0 else { return nil }
         let topOffset = position?.topLine?.textOffset ?? 0
         let lineHeight = max(1, editor.defaultParagraphStyle?.maximumLineHeight ?? 18)
         let visibleLines = Int(ceil(scrollView.bounds.height / lineHeight)) + 2
@@ -1843,10 +1856,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if syntaxHighlighting == nil {
             syntaxHighlighting = SyntaxHighlighting(editor: editor)
         }
-        if let preparedSyntax, preparedSyntax.language == language {
+        let local = isHighlightingEnabled(.treeSitter)
+        if local, let preparedSyntax, preparedSyntax.language == language {
             syntaxHighlighting?.install(preparedSyntax)
         } else {
-            syntaxHighlighting?.update(language: language, immediate: immediate,
+            syntaxHighlighting?.update(language: language, immediate: immediate, treeSitter: local,
                                        session: allowsLSP ? languageFeatures.highlightingSession : nil)
         }
     }
@@ -2007,7 +2021,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                     }
                     guard isCurrent(), !Task.isCancelled else { return false }
                     let openingPosition = position
-                    async let syntax = prepareOpeningSyntax(file, position: openingPosition, scratch: scratch)
+                    let openingFolder = folder ?? folderURL
+                    async let syntax = prepareOpeningSyntax(file, position: openingPosition,
+                                                            folder: openingFolder, scratch: scratch)
                     async let conflicts = JJOpeningConflicts.prepare(file.text, at: scratch == nil ? file.url : nil)
                     let (preparedSyntax, openingConflicts) = await (syntax, conflicts)
                     guard isCurrent(), !Task.isCancelled else { return false }

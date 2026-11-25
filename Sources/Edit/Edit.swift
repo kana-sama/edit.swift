@@ -68,7 +68,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     lazy var syntaxOverrides = SyntaxLanguageOverrides(defaults: isAgentCheck ? nil : .standard)
     lazy var fileWordWrap = FileWordWrap(defaults: isAgentCheck ? nil : .standard)
     lazy var workspaceLanguageServers = WorkspaceLanguageServers(defaults: isAgentCheck ? nil : .standard)
-    lazy var workspaceLSPHighlighting = WorkspaceLSPHighlighting(defaults: isAgentCheck ? nil : .standard)
+    lazy var workspaceHighlighting = WorkspaceHighlighting(defaults: isAgentCheck ? nil : .standard)
     lazy var workspaceFindPreferences = WorkspaceFindPreferences(defaults: isAgentCheck ? nil : .standard)
     private weak var recentMenu: NSMenu?
     private weak var focusJujutsuItem: NSMenuItem?
@@ -612,7 +612,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     @objc func exitFocus(_ sender: Any?) { activeDocument?.exitFocus() }
     @objc func toggleMarkdownPreview(_ sender: Any?) { activeDocument?.toggleMarkdownPreview() }
     @objc func toggleWordWrap(_ sender: Any?) { activeDocument?.toggleWordWrap() }
-    @objc func toggleLSPHighlight(_ sender: Any?) { activeDocument?.toggleLSPHighlight() }
+    @objc func toggleLSPHighlight(_ sender: Any?) { activeDocument?.toggleHighlighting(.lsp) }
+    @objc func toggleTreeSitterHighlight(_ sender: Any?) { activeDocument?.toggleHighlighting(.treeSitter) }
 
     @objc func goBack(_ sender: Any?) { Task { await navigate(.back) } }
     @objc func goForward(_ sender: Any?) { Task { await navigate(.forward) } }
@@ -731,9 +732,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case #selector(toggleWordWrap(_:)):
             (item as? NSMenuItem)?.state = activeDocument?.editor.wrapsWords == true ? .on : .off
             return activeDocument?.canToggleWordWrap ?? false
-        case #selector(toggleLSPHighlight(_:)):
-            (item as? NSMenuItem)?.state = activeDocument?.isLSPHighlightEnabled == true ? .on : .off
-            return activeDocument?.canToggleLSPHighlight ?? false
+        case #selector(toggleLSPHighlight(_:)), #selector(toggleTreeSitterHighlight(_:)):
+            let layer: HighlightingLayer = item.action == #selector(toggleLSPHighlight(_:)) ? .lsp : .treeSitter
+            (item as? NSMenuItem)?.state = activeDocument?.isHighlightingEnabled(layer) == true ? .on : .off
+            return activeDocument?.canToggleHighlighting ?? false
         case #selector(goBack(_:)): return canNavigate(.back)
         case #selector(goForward(_:)): return canNavigate(.forward)
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
@@ -1009,7 +1011,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 restoredConflicts = nil
                 if case .text(let file) = opened, folder == nil || file.identity != nil {
                     async let conflicts = JJOpeningConflicts.prepare(file.text, at: isScratch ? nil : file.url)
-                    syntax = await placeholder.prepareOpeningSyntax(file, position: record.editorPosition,
+                    syntax = await placeholder.prepareOpeningSyntax(file, position: record.editorPosition, folder: folder,
                                                                     storedSyntaxLanguage: record.syntaxLanguage, scratch: scratch)
                     openingConflicts = await conflicts
                 } else {
@@ -1367,6 +1369,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         view.addItem(.separator())
         view.addCommand("Toggle Word Wrap", #selector(toggleWordWrap(_:))).target = self
         view.addCommand("Toggle LSP Highlight", #selector(toggleLSPHighlight(_:))).target = self
+        view.addCommand("Toggle Tree-sitter Highlight", #selector(toggleTreeSitterHighlight(_:))).target = self
         view.addCommand("Increase Text Size", #selector(EditorTextView.increaseTextSize(_:)), "=")
         view.addCommand("Decrease Text Size", #selector(EditorTextView.decreaseTextSize(_:)), "-")
         view.addCommand("Reset Text Size", #selector(EditorTextView.resetTextSize(_:)), "0")

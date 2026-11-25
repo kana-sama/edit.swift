@@ -102,6 +102,7 @@ struct LSPSemanticTokens: Sendable {
 
     private static func color(_ type: String) -> SyntaxColor? {
         switch type {
+        case "variable": .plain
         case "namespace", "type", "class", "enum", "interface", "struct", "typeParameter",
              "concept", "union", "opaque", "errorTag": .type
         case "function", "method", "builtin": .function

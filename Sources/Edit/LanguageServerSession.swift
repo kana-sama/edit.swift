@@ -52,6 +52,11 @@ final class LanguageServerSession {
         guard isReady, let options = capabilities?.semanticTokens else { return false }
         return options.full || options.range
     }
+    var canPreviewSemanticTokens: Bool {
+        // SourceKit computes file-wide semantic tokens even for a range request.
+        isReady && server == .zig && capabilities?.semanticTokens?.full == true
+            && capabilities?.semanticTokens?.range == true && document.text.utf8.count >= 64 * 1_024
+    }
     var supportsDocumentSymbols: Bool { isReady && capabilities?.documentSymbols == true }
     var supportsWorkspaceSymbols: Bool { isServerReady && capabilities?.workspaceSymbols == true }
     var supportsRename: Bool { isReady && capabilities?.rename == true }
@@ -239,15 +244,18 @@ final class LanguageServerSession {
         return result
     }
 
-    func semanticTokens() async throws -> [SyntaxSpan]? {
+    func semanticTokens(visibleRange: NSRange? = nil) async throws -> [SyntaxSpan]? {
         guard supportsSemanticTokens, let connection, let options = capabilities?.semanticTokens else {
             throw LSPFailure.unavailable
         }
         let snapshot = document
         let generation = generation
-        let result = try await connection.semanticTokens(in: snapshot, options: options, previous: semanticTokenResult)
+        let result = try await connection.semanticTokens(in: snapshot, options: options,
+                                                         previous: semanticTokenResult, visibleRange: visibleRange)
         try validate(revision: snapshot.revision, generation: generation)
-        semanticTokenResult = options.delta && result?.0.resultID != nil ? result?.0 : nil
+        if visibleRange == nil {
+            semanticTokenResult = options.delta && result?.0.resultID != nil ? result?.0 : nil
+        }
         return result?.1
     }
 

@@ -5,12 +5,16 @@ final class SyntaxHighlighting {
     private struct SemanticRequest: Equatable {
         let session: ObjectIdentifier
         let generation: Int
+        let language: SyntaxLanguage
         let revision: Int
         let refresh: Int
     }
 
     private weak var editor: EditorTextView?
-    private var spans: [SyntaxSpan] = []
+    private var treeSpans: [SyntaxSpan] = []
+    private var semanticSpans: [SyntaxSpan] = []
+    private var treeSitterEnabled = true
+    private var treeLanguage: SyntaxLanguage?
     private var hasRenderingColors = false
     private var backedColorRange: NSRange?
     private var task: Task<Void, Never>?
@@ -20,11 +24,13 @@ final class SyntaxHighlighting {
     private var semanticRequest: SemanticRequest?
     private var lastSemanticColors: (request: SemanticRequest, spans: [SyntaxSpan])?
     private var semanticTask: Task<Void, Never>?
-    private var fallbackTask: Task<Void, Never>?
-    private var usesTreeSitterWhileWaiting = true
+    private var semanticPreviewTask: Task<Void, Never>?
+    private var semanticExpiry: Task<Void, Never>?
 #if EDIT_AGENT_CHECKS
-    private(set) var usesLSPForCheck = false
-    var spansForCheck: [SyntaxSpan] { spans }
+    var usesLSPForCheck: Bool { !semanticSpans.isEmpty }
+    var treeSpansForCheck: [SyntaxSpan] { treeSpans }
+    var semanticSpansForCheck: [SyntaxSpan] { semanticSpans }
+    var needsFullSemanticTokensForCheck: Bool { lastSemanticColors == nil }
     var beforeInstallSemanticTokensForCheck: (() async -> Void)?
 #endif
 
@@ -34,52 +40,79 @@ final class SyntaxHighlighting {
     }
 
     deinit {
+        semanticPreviewTask?.cancel()
         semanticTask?.cancel()
-        fallbackTask?.cancel()
+        semanticExpiry?.cancel()
     }
 
-    func update(language: SyntaxLanguage, immediate: Bool, session: LanguageServerSession?) {
+    func update(language: SyntaxLanguage, immediate: Bool, treeSitter: Bool, session: LanguageServerSession?) {
         if let editor { editor.syntaxAnalysis.cancelIfChanged(to: editor.string, language: language) }
-        if let session {
-            if usesTreeSitterWhileWaiting {
-                updateTreeSitter(language: language, immediate: immediate, keepingColors: true)
-            }
-            requestSemanticTokens(from: session, language: language, immediate: immediate)
+        if treeSitterEnabled != treeSitter {
+            setTreeSitterEnabled(treeSitter, language: language)
+        } else if treeSitter {
+            updateTreeSitter(language: language, immediate: immediate, keepingColors: treeLanguage == language)
+        }
+        updateSemanticSource(session, language: language, immediate: immediate)
+    }
+
+    func setTreeSitterEnabled(_ enabled: Bool, language: SyntaxLanguage) {
+        guard enabled != treeSitterEnabled else { return }
+        treeSitterEnabled = enabled
+        if enabled {
+            updateTreeSitter(language: language, immediate: true, keepingColors: true)
         } else {
-            let keepingColors = semanticRequest != nil
-            cancelSemanticTokens()
-            if !immediate { lastSemanticColors = nil }
-            updateTreeSitter(language: language, immediate: immediate, keepingColors: keepingColors)
+            cancelPending()
+            displayTree([])
         }
     }
 
     func updateSemanticSource(_ session: LanguageServerSession?, language: SyntaxLanguage, immediate: Bool = true) {
-        if let session {
-            requestSemanticTokens(from: session, language: language, immediate: immediate)
-        } else if semanticRequest != nil {
-            update(language: language, immediate: immediate, session: nil)
+        guard let session else {
+            if semanticRequest != nil {
+                cancelSemanticTokens()
+                displaySemantic([])
+            }
+            return
         }
-    }
-
-    private func requestSemanticTokens(from session: LanguageServerSession, language: SyntaxLanguage, immediate: Bool) {
-        let request = SemanticRequest(session: ObjectIdentifier(session), generation: session.generation,
+        let request = SemanticRequest(session: ObjectIdentifier(session), generation: session.generation, language: language,
                                       revision: session.revision, refresh: session.semanticTokensRefresh)
-        guard request != semanticRequest else { return }
+        let previous = semanticRequest
+        guard request != previous else { return }
         semanticRequest = request
+        semanticPreviewTask?.cancel()
+        semanticPreviewTask = nil
         semanticTask?.cancel()
+
         if let cached = lastSemanticColors, cached.request == request {
             semanticTask = nil
             installSemanticColors(cached.spans, request: request)
             return
         }
         lastSemanticColors = nil
-
-        if !usesTreeSitterWhileWaiting && fallbackTask == nil {
-            // Start the deadline once, so continued typing cannot leave stale colors indefinitely.
-            fallbackTask = Task { [weak self] in
-                try? await Task.sleep(for: .milliseconds(350))
+        if let previous, (previous.session, previous.generation, previous.language) !=
+            (request.session, request.generation, request.language) {
+            semanticExpiry?.cancel()
+            semanticExpiry = nil
+            displaySemantic([])
+        } else if let previous, previous.revision != request.revision, !semanticSpans.isEmpty, semanticExpiry == nil {
+            // Keep remapped colors through ordinary edits. Repeated edits cannot extend the deadline.
+            semanticExpiry = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(1500))
                 guard !Task.isCancelled else { return }
-                self?.useTreeSitterWhileWaiting(language: language)
+                self?.semanticExpiry = nil
+                self?.displaySemantic([])
+            }
+        }
+
+        if previous == nil, immediate, session.canPreviewSemanticTokens,
+           let visible = visibleRange(), let length = editor?.textStorage?.length,
+           visible.length > 0, visible.length <= length / 4 {
+            semanticPreviewTask = Task { [weak self, weak session] in
+                guard let session, !Task.isCancelled else { return }
+                let spans = try? await session.semanticTokens(visibleRange: visible)
+                guard !Task.isCancelled, let self, self.semanticRequest == request else { return }
+                self.semanticPreviewTask = nil
+                if let spans, !spans.isEmpty { self.displaySemantic(spans) }
             }
         }
 
@@ -93,14 +126,12 @@ final class SyntaxHighlighting {
             guard !Task.isCancelled, self?.semanticRequest == request else { return }
             guard let spans else {
                 self?.semanticTask = nil
-                if self?.usesTreeSitterWhileWaiting == false { self?.useTreeSitterWhileWaiting(language: language) }
                 return
             }
             self?.installSemanticColors(spans, request: request)
-            // SourceKit can answer the first Swift request with syntax alone while
-            // loading build settings, without sending a refresh when they arrive.
+            // The first Swift response can be syntactic while SourceKit loads build settings.
             if immediate && language == .swift && !spans.contains(where: {
-                $0.color == .type || $0.color == .function || $0.color == .property
+                $0.color == .type || $0.color == .function || $0.color == .property || $0.color == .plain
             }) {
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled, self?.semanticRequest == request else { return }
@@ -114,33 +145,28 @@ final class SyntaxHighlighting {
 
     private func installSemanticColors(_ spans: [SyntaxSpan], request: SemanticRequest) {
         lastSemanticColors = (request, spans)
-        fallbackTask?.cancel()
-        fallbackTask = nil
-        cancelPending()
-        usesTreeSitterWhileWaiting = false
-        display(spans, semantic: true)
-    }
-
-    private func useTreeSitterWhileWaiting(language: SyntaxLanguage) {
-        fallbackTask?.cancel()
-        fallbackTask = nil
-        usesTreeSitterWhileWaiting = true
-        updateTreeSitter(language: language, immediate: true, keepingColors: true)
+        semanticPreviewTask?.cancel()
+        semanticPreviewTask = nil
+        semanticExpiry?.cancel()
+        semanticExpiry = nil
+        displaySemantic(spans)
     }
 
     private func cancelSemanticTokens() {
+        semanticPreviewTask?.cancel()
+        semanticPreviewTask = nil
         semanticTask?.cancel()
         semanticTask = nil
         semanticRequest = nil
-        fallbackTask?.cancel()
-        fallbackTask = nil
-        usesTreeSitterWhileWaiting = true
+        semanticExpiry?.cancel()
+        semanticExpiry = nil
     }
 
     private func updateTreeSitter(language: SyntaxLanguage, immediate: Bool, keepingColors: Bool) {
         cancelPending()
         let request = generation
-        if immediate && !keepingColors { display([]) }
+        treeLanguage = language
+        if immediate && !keepingColors { displayTree([]) }
         guard language != .plainText else { return }
 
         task = Task { @MainActor [weak self] in
@@ -154,16 +180,16 @@ final class SyntaxHighlighting {
                                                     visibleRange: visibleRange, publishesPreview: !keepingColors)
             for await preview in job.previews {
                 guard !Task.isCancelled, let self, self.generation == request else { return }
-                self.display(preview)
+                self.displayTree(preview)
                 self.stopProgress()
             }
             guard !Task.isCancelled else { return }
             let result = await job.task.value
             guard !Task.isCancelled, let self, self.generation == request else { return }
             if let result {
-                self.display(result.spans)
+                self.displayTree(result.spans)
             } else {
-                self.display([])
+                self.displayTree([])
             }
             self.stopProgress()
         }
@@ -182,10 +208,9 @@ final class SyntaxHighlighting {
         lastSemanticColors = nil
         cancelPending()
         editor?.syntaxAnalysis.cancel()
-        spans = []
-#if EDIT_AGENT_CHECKS
-        usesLSPForCheck = false
-#endif
+        treeLanguage = nil
+        treeSpans = []
+        semanticSpans = []
         clearColors()
         updateBackingColors(in: nil)
     }
@@ -194,7 +219,10 @@ final class SyntaxHighlighting {
         cancelSemanticTokens()
         lastSemanticColors = nil
         cancelPending()
-        display(snapshot.analysis.spans)
+        treeSitterEnabled = true
+        treeLanguage = snapshot.language
+        semanticSpans = []
+        displayTree(snapshot.analysis.spans)
         if snapshot.coversDocument, let editor {
             editor.syntaxAnalysis.install(snapshot.analysis, in: editor.string, language: snapshot.language)
         } else {
@@ -207,7 +235,11 @@ final class SyntaxHighlighting {
         lastSemanticColors = nil
         cancelPending()
         editor?.syntaxAnalysis.cancel()
-        if clearingColors { display([]) }
+        if clearingColors {
+            treeSpans = []
+            semanticSpans = []
+            repaintLayers()
+        }
     }
 
     private func cancelPending() {
@@ -217,13 +249,22 @@ final class SyntaxHighlighting {
         stopProgress()
     }
 
-    private func display(_ result: [SyntaxSpan], semantic: Bool = false) {
-#if EDIT_AGENT_CHECKS
-        usesLSPForCheck = semantic
-#endif
-        let needsRedraw = hasRenderingColors || backedColorRange != nil || !result.isEmpty
-        spans = result
-        if needsRedraw { refreshColors() }
+    private func displayTree(_ spans: [SyntaxSpan]) {
+        guard !treeSpans.isEmpty || !spans.isEmpty else { return }
+        treeSpans = spans
+        repaintLayers()
+    }
+
+    private func displaySemantic(_ spans: [SyntaxSpan]) {
+        guard !semanticSpans.isEmpty || !spans.isEmpty else { return }
+        semanticSpans = spans
+        repaintLayers()
+    }
+
+    private func repaintLayers() {
+        if hasRenderingColors || backedColorRange != nil || !treeSpans.isEmpty || !semanticSpans.isEmpty {
+            refreshColors()
+        }
     }
 
     func refreshColors() {
@@ -246,8 +287,10 @@ final class SyntaxHighlighting {
     }
 
     func storageDidEdit(_ storage: NSTextStorage, replacements: [EditorTextEdit]?) {
+        lastSemanticColors = nil
         guard let backed = backedColorRange else {
-            spans = []
+            treeSpans = []
+            semanticSpans = []
             return
         }
         let edit = storage.editedRange
@@ -256,16 +299,18 @@ final class SyntaxHighlighting {
         guard edit.location != NSNotFound, edit.location <= storage.length,
               edit.length <= storage.length - edit.location, replacedLength >= 0 else {
             backedColorRange = NSRange(location: 0, length: storage.length)
-            spans = []
+            treeSpans = []
+            semanticSpans = []
             return
         }
 
         // Conflict overlays can repaint existing syntax before the next parse. Keep the
         // visible colors aligned with the surviving text without walking offscreen captures.
-        if !spans.isEmpty {
+        if !treeSpans.isEmpty || !semanticSpans.isEmpty {
             let edits = replacements?.map { (range: $0.range, delta: $0.text.utf16.count - $0.range.length) }
                 ?? [(range: NSRange(location: edit.location, length: replacedLength), delta: delta)]
-            remapSpans(in: backed, after: edits)
+            treeSpans = remappedSpans(treeSpans, in: backed, after: edits)
+            semanticSpans = remappedSpans(semanticSpans, in: backed, after: edits)
         }
         let beforeEnd = edit.location + replacedLength
         if beforeEnd < backed.location {
@@ -278,11 +323,12 @@ final class SyntaxHighlighting {
         }
     }
 
-    private func remapSpans(in visible: NSRange, after edits: [(range: NSRange, delta: Int)]) {
+    private func remappedSpans(_ spans: [SyntaxSpan], in visible: NSRange,
+                              after edits: [(range: NSRange, delta: Int)]) -> [SyntaxSpan] {
         var mapped: [SyntaxSpan] = []
         var editIndex = 0
         var offset = 0
-        for span in spans(overlapping: visible) {
+        for span in self.spans(overlapping: visible, from: spans) {
             var start = span.start
             while editIndex < edits.count, edits[editIndex].range.location < span.end {
                 let edit = edits[editIndex]
@@ -298,7 +344,7 @@ final class SyntaxHighlighting {
                 mapped.append(SyntaxSpan(start: start + offset, end: span.end + offset, color: span.color))
             }
         }
-        spans = mapped
+        return mapped
     }
 
     private func updateBackingColors(in visible: NSRange?) {
@@ -307,7 +353,7 @@ final class SyntaxHighlighting {
         let document = NSRange(location: 0, length: storage.length)
         let previous = backedColorRange.map { NSIntersectionRange($0, document) }
         let visible = visible.map { NSIntersectionRange($0, document) }
-        let colors = visible.map { spans(overlapping: $0) } ?? []
+        let colors = visible.map { self.colors(in: $0) } ?? []
         let conflictColors = visible.flatMap { editor.jjConflictDecorations?.foregrounds(in: $0) } ?? []
         let link = visible.flatMap { visible in editor.languageDefinitionLinkRange.map { NSIntersectionRange(visible, $0) } }
         guard (previous?.length ?? 0) > 0 || (visible?.length ?? 0) > 0 else {
@@ -361,7 +407,8 @@ final class SyntaxHighlighting {
 
     private func paint(_ range: NSTextRange, using manager: NSTextLayoutManager) {
         let link = editor?.languageDefinitionLinkRange
-        guard !spans.isEmpty || editor?.jjConflictDecorations?.hasHighlights == true || link != nil else { return }
+        guard !treeSpans.isEmpty || !semanticSpans.isEmpty ||
+                editor?.jjConflictDecorations?.hasHighlights == true || link != nil else { return }
         let origin = manager.documentRange.location
         let start = manager.offset(from: origin, to: range.location)
         let end = start + manager.offset(from: range.location, to: range.endLocation)
@@ -375,7 +422,7 @@ final class SyntaxHighlighting {
             manager.addRenderingAttribute(.foregroundColor, value: color, for: target)
             hasRenderingColors = true
         }
-        for span in spans(overlapping: visible) {
+        for span in colors(in: visible) {
             paintColor(span.color.nativeColor, in: NSIntersectionRange(visible, NSRange(location: span.start, length: span.end - span.start)))
         }
         for (range, color) in editor?.jjConflictDecorations?.foregrounds(in: visible) ?? [] {
@@ -390,7 +437,14 @@ final class SyntaxHighlighting {
         }
     }
 
-    private func spans(overlapping range: NSRange) -> ArraySlice<SyntaxSpan> {
+    private func colors(in range: NSRange) -> [SyntaxSpan] {
+        let local = spans(overlapping: range, from: treeSpans)
+        let semantic = spans(overlapping: range, from: semanticSpans)
+        // Both TextKit drawing paths apply foregrounds in order.
+        return Array(local) + semantic
+    }
+
+    private func spans(overlapping range: NSRange, from spans: [SyntaxSpan]) -> ArraySlice<SyntaxSpan> {
         guard range.length > 0 else { return [] }
         var low = 0
         var high = spans.count
@@ -437,12 +491,13 @@ final class SyntaxHighlighting {
 }
 
 extension SyntaxColor {
-    private static let colors = Dictionary(uniqueKeysWithValues: allCases.map { ($0, $0.makeNativeColor()) })
+    private static let colors = Dictionary(uniqueKeysWithValues: allCases.filter { $0 != .plain }.map { ($0, $0.makeNativeColor()) })
 
     var nativeColor: NSColor { Self.colors[self] ?? .textColor }
 
     var appearanceRGB: (dark: UInt32, light: UInt32) {
         switch self {
+        case .plain: (0xFFFFFF, 0x000000)
         case .keyword: (0x569CD6, 0x0000FF)
         case .control: (0xC586C0, 0xAF00DB)
         case .type: (0x4EC9B0, 0x226E84)

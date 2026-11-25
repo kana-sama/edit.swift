@@ -34,7 +34,8 @@ enum LSPSemanticHighlightCheck {
             let package = Package(name: "Fixture", targets: [.target(name: "Fixture")])
             """
         try manifest.write(to: root.appending(path: "Package.swift"), atomically: true, encoding: .utf8)
-        try "const label = \"🧩\"; pub const ZigWidget = struct {};\r\n".write(to: zig, atomically: true, encoding: .utf8)
+        let zigText = "pub const none: ?u64 = null;\r\nconst label = \"🧩\"; pub const ZigWidget = struct {};\r\npub var Counter: u64 = 3;\r\n"
+        try zigText.write(to: zig, atomically: true, encoding: .utf8)
         try swiftText.write(to: swift, atomically: true, encoding: .utf8)
         try "fn marker() -> i32 { 7 }\n".write(to: rust, atomically: true, encoding: .utf8)
         swiftWindow.setFolder(root)
@@ -43,26 +44,56 @@ enum LSPSemanticHighlightCheck {
         try await wait("show SourceKit-LSP tokens (\(swiftWindow.languageFeatures.session.state.title))") {
             hasSemanticColor("struct", in: swiftWindow)
         }
-        try require(hasColor("// fixture", in: swiftWindow, color: .comment), "request Swift syntactic tokens from SourceKit-LSP")
+        try require(hasColor("// fixture", in: swiftWindow, layer: .lsp, color: .comment),
+                    "request Swift syntactic tokens from SourceKit-LSP")
         document.setFolder(root)
         try require(try await app.openFile(zig, in: document) === document, "open Zig")
         try await wait("show ZLS tokens after an astral character") { hasSemanticColor("ZigWidget", in: document) }
+        try await wait("keep Tree-sitter colors underneath LSP") {
+            hasColor("null", in: document, color: .keyword) && hasColor("null", in: document, layer: .lsp, color: .control)
+                && paintedColor("null", in: document) == SyntaxColor.control.nativeColor
+        }
+        try require(hasColor("Counter", in: document, color: .type) && hasColor("Counter", in: document, layer: .lsp, color: .plain)
+                    && paintedColor("Counter", in: document) == .textColor,
+                    "use the default text color when the server corrects a locally colored identifier to a variable")
 
         document.performFind(.find)
         let control = ControlPanel(app: app)
-        try control.checkToggleSwitches(in: document, enabled: true, clickLSP: true) { try captureControl($0, "switches-on") }
-        try require(!swiftWindow.isLSPHighlightEnabled && otherWindow.isLSPHighlightEnabled,
+        try control.checkToggleSwitches(in: document, lspEnabled: true, treeEnabled: true, click: .lsp) {
+            try captureControl($0, "switches-on")
+        }
+        try require(!swiftWindow.isHighlightingEnabled(.lsp) && otherWindow.isHighlightingEnabled(.lsp),
                     "share the setting in one workspace only")
-        try await wait("return to Tree-sitter in both windows") {
+        try require(paintedColor("null", in: document) == SyntaxColor.keyword.nativeColor,
+                    "reveal Tree-sitter at once when removing the semantic overlay")
+        try await wait("keep Tree-sitter in both windows") {
             [document, swiftWindow].allSatisfy {
-                $0.editor.syntaxHighlighting?.usesLSPForCheck == false && $0.editor.syntaxHighlighting?.spansForCheck.isEmpty == false
+                $0.editor.syntaxHighlighting?.usesLSPForCheck == false
+                    && $0.editor.syntaxHighlighting?.treeSpansForCheck.isEmpty == false
             }
         }
         try require(document.languageFeatures.session.supportsDefinition && swiftWindow.languageFeatures.session.supportsDefinition,
                     "keep language-server navigation enabled with highlighting off")
-        try control.checkToggleSwitches(in: document, enabled: false, clickLSP: true) { try captureControl($0, "switches-off") }
+        try control.checkToggleSwitches(in: document, lspEnabled: false, treeEnabled: true, click: .treeSitter) {
+            try captureControl($0, "switches-lsp-off")
+        }
+        try require(!swiftWindow.isHighlightingEnabled(.treeSitter) && otherWindow.isHighlightingEnabled(.treeSitter)
+                    && paintedColor("null", in: document) == .textColor,
+                    "turn off both layers only in the current workspace")
+        try control.checkToggleSwitches(in: document, lspEnabled: false, treeEnabled: false, click: .lsp) {
+            try captureControl($0, "switches-both-off")
+        }
         try await wait("restore semantic colors in both windows") {
             hasSemanticColor("ZigWidget", in: document) && hasSemanticColor("struct", in: swiftWindow)
+        }
+        try require(document.editor.syntaxHighlighting?.treeSpansForCheck.isEmpty == true
+                    && paintedColor("null", in: document) == SyntaxColor.control.nativeColor,
+                    "draw only the LSP layer when Tree-sitter is off")
+        try control.checkToggleSwitches(in: document, lspEnabled: true, treeEnabled: false, click: .treeSitter) {
+            try captureControl($0, "switches-tree-off")
+        }
+        try await wait("restore Tree-sitter under the unchanged overlay") {
+            hasColor("null", in: document, color: .keyword) && paintedColor("null", in: document) == SyntaxColor.control.nativeColor
         }
 
         let editor = document.editor
@@ -81,8 +112,11 @@ enum LSPSemanticHighlightCheck {
         let start = ContinuousClock.now
         editor.insertText("pub const Added = struct {};\n", replacementRange: NSRange(location: 0, length: 0))
         try await wait("receive an edited token result") { responsePending }
-        try require(document.window.title == outgoingTitle && highlighting.spansForCheck.isEmpty == false,
-                    "keep existing colors and the title while edited tokens are pending")
+        try await Task.sleep(for: .milliseconds(450))
+        try require(document.window.title == outgoingTitle && hasColor("null", in: document, color: .keyword)
+                    && hasColor("null", in: document, layer: .lsp, color: .control)
+                    && paintedColor("null", in: document) == SyntaxColor.control.nativeColor,
+                    "keep both layers and the title while a replacement overlay is held")
         try captureWindow(document.window, "pending")
         highlighting.beforeInstallSemanticTokensForCheck = nil
         release.finish()
@@ -112,6 +146,7 @@ enum LSPSemanticHighlightCheck {
         try require(document.window.title.hasSuffix("Other.rs") && !highlighting.usesLSPForCheck
                     && hasColor("marker", in: document, color: .function),
                     "show the incoming buffer, Tree-sitter colors and title together")
+        try await checkViewportPreview(in: app, document: document, folder: root, capture: captureWindow)
         for window in windows { window.window.close() }
         try await wait("stop fixture language servers before discarding the profile") {
             windows.allSatisfy { $0.languageFeatures.serversStoppedForCheck }
@@ -119,25 +154,71 @@ enum LSPSemanticHighlightCheck {
     }
 
     private static func hasSemanticColor(_ token: String, in document: DocumentWindow) -> Bool {
-        document.editor.syntaxHighlighting?.usesLSPForCheck == true && hasColor(token, in: document)
+        hasColor(token, in: document, layer: .lsp)
     }
 
-    private static func hasColor(_ token: String, in document: DocumentWindow, color: SyntaxColor? = nil) -> Bool {
+    private static func hasColor(_ token: String, in document: DocumentWindow, layer: HighlightingLayer = .treeSitter,
+                                 color: SyntaxColor? = nil) -> Bool {
         let range = (document.editor.string as NSString).range(of: token)
-        return document.editor.syntaxHighlighting?.spansForCheck.contains {
+        guard let syntax = document.editor.syntaxHighlighting, range.location != NSNotFound else { return false }
+        let spans = layer == .lsp ? syntax.semanticSpansForCheck : syntax.treeSpansForCheck
+        return spans.contains {
             $0.start == range.location && $0.end == range.upperBound && (color == nil || $0.color == color)
-        } == true
+        }
+    }
+
+    private static func paintedColor(_ token: String, in document: DocumentWindow) -> NSColor? {
+        let editor = document.editor
+        let range = (editor.string as NSString).range(of: token)
+        guard range.location != NSNotFound else { return nil }
+        return editor.textStorage?.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? NSColor
+    }
+
+    private static func checkViewportPreview(in app: Edit, document: DocumentWindow, folder: URL,
+                                             capture: (NSWindow, String) throws -> Void) async throws {
+        let target = folder.appending(path: "Large.zig")
+        let source = "pub const Visible = struct {};\n"
+            + (0..<2500).map { "pub fn sample\($0)(value: u64) u64 { return value + \($0); }\n" }.joined()
+            + "pub const Offscreen = struct {};\n"
+        try source.write(to: target, atomically: true, encoding: .utf8)
+        guard let drawing = document.editor.syntaxHighlighting else { throw Failure(detail: "prepare range preview") }
+        let (pending, release) = AsyncStream<Void>.makeStream()
+        var fullPending = false
+        drawing.beforeInstallSemanticTokensForCheck = {
+            fullPending = true
+            for await _ in pending { break }
+        }
+        defer {
+            drawing.beforeInstallSemanticTokensForCheck = nil
+            release.finish()
+        }
+        try require(try await app.openFile(target, in: document) === document, "open the large Zig fixture")
+        document.window.layoutIfNeeded()
+        try await wait("show viewport semantic tokens while the whole file is pending") {
+            fullPending && hasSemanticColor("Visible", in: document)
+        }
+        try require(document.window.title.hasSuffix("Large.zig") && drawing.needsFullSemanticTokensForCheck
+                    && !hasSemanticColor("Offscreen", in: document),
+                    "keep the preview limited to the viewport until the full update")
+        try capture(document.window, "viewport")
+        release.finish()
+        try await wait("extend semantic colors offscreen after the full result") {
+            !drawing.needsFullSemanticTokensForCheck && hasSemanticColor("Offscreen", in: document)
+        }
     }
 
     private static func checkPreferences(root: URL, other: URL) throws {
         let suite = "dev.edit-swift.lsp-highlighting.check.\(UUID())"
         guard let defaults = UserDefaults(suiteName: suite) else { throw Failure(detail: "create isolated preferences") }
         defer { defaults.removePersistentDomain(forName: suite) }
-        let preferences = WorkspaceLSPHighlighting(defaults: defaults)
-        try require(preferences.isEnabled(in: root), "default to enabled")
-        preferences.setEnabled(false, in: root)
-        let reopened = WorkspaceLSPHighlighting(defaults: defaults)
-        try require(!reopened.isEnabled(in: root) && reopened.isEnabled(in: other), "restore the workspace setting")
+        let preferences = WorkspaceHighlighting(defaults: defaults)
+        try require(HighlightingLayer.allCases.allSatisfy { preferences.isEnabled($0, in: root) }, "default both layers to enabled")
+        preferences.setEnabled(false, for: .lsp, in: root)
+        preferences.setEnabled(false, for: .treeSitter, in: other)
+        let reopened = WorkspaceHighlighting(defaults: defaults)
+        try require(!reopened.isEnabled(.lsp, in: root) && reopened.isEnabled(.treeSitter, in: root)
+                    && reopened.isEnabled(.lsp, in: other) && !reopened.isEnabled(.treeSitter, in: other),
+                    "restore independent workspace settings for both layers")
     }
 
     private static func checkTokenData() throws {
@@ -151,8 +232,11 @@ enum LSPSemanticHighlightCheck {
             .init(start: 9, deleteCount: 1, data: [0]), .init(start: 1, deleteCount: 1, data: [3])
         ])
         let index = LSPTextIndex("🧩 Type\r\nother\r\n")
+        try require(index.semanticRequestRange(NSRange(location: 2, length: 8)) ==
+                    LSPRange(start: .init(line: 0, character: 0), end: .init(line: 1, character: 5)),
+                    "request complete visible lines using UTF-16 positions")
         let spans = try delta.tokens(updating: tokens).spans(in: index, legend: legend)
-        try require(spans.count == 1 && spans[0].start == 3 && spans[0].end == 6 && spans[0].color == .type,
+        try require(spans.count == 2 && spans[0].start == 3 && spans[0].end == 6 && spans[0].color == .type && spans[1].color == .plain,
                     "apply unordered deltas with UTF-16 and CRLF")
         let invalid = LSPSemanticTokens.Response(resultId: "invalid", data: nil, edits: [
             .init(start: 0, deleteCount: 11, data: nil)

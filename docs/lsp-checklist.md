@@ -8,7 +8,7 @@ Checked November 25, 2026 against ZLS 0.17.0 and SourceKit-LSP bundled with Appl
 
 Edit ranks comparable [workspace symbol matches](features/lsp-symbol-navigation/spec.md#go-to-workspace-symbol) by their proximity to the active folder's root for both servers.
 
-Edit prefers full [semantic token results](features/lsp-highlighting/spec.md) and can also use a range-only provider or a server that advertises deltas.
+Edit uses full [semantic token results](features/lsp-highlighting/spec.md) for scrolling and a concurrent visible-range preview for large ZLS files. It also supports range-only providers and deltas.
 
 | Method                                                                       | ZLS   | SourceKit-LSP |
 | ---------------------------------------------------------------------------- | :---: | :-----------: |

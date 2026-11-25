@@ -10,4 +10,4 @@ Commands with an on/off state show a native switch at the trailing edge of the r
 
 Open Control from an editing surface. Search for `save` and `sva`, navigate and run a command. Verify that editor actions keep the document’s selection and that cancelled and unavailable actions follow their usual rules. With a query entered, switch modes in both directions by shortcut using ABC and Russian. Check that the query and field focus stay in the palette. Also switch from files to commands by typing `>`.
 
-Open Command Mode from a window with Search displayed. Verify that the sidebar, search options, and workspace highlighting each show their current state. Compare rows with and without shortcuts for trailing switch alignment. Click the highlighting switch, reopen Command Mode, and verify the new state.
+Open Command Mode from a window with Search displayed. Verify that the sidebar, search options, and both highlighting layers show their current state. Compare rows with and without shortcuts for trailing switch alignment. Click a highlighting switch, reopen Command Mode, and verify that its state changed independently.
