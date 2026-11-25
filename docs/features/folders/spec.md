@@ -6,7 +6,7 @@ Open the last file opened within the folder if it is readable. Otherwise show **
 
 ⌘W and the window’s close button close the current file, preview, or untitled document and show **No File Open** in the same folder window. Finish autosave and handle any unsaved changes through the usual [close rules](../files/spec.md#new-close-and-restore). Cancel leaves the current document open. From **No File Open**, the next close action closes the window and its folder context. Holding ⌘W performs at most one step.
 
-File → Open Recent shows the ten most recently opened folders before a separator and the ten most recently opened files. Choosing a folder follows the same rules as Open. A folder's remembered file persists across launches and is independent of the menu limit.
+File → Open Recent shows the ten most recently opened folders before a separator and up to ten files from the [active project's and shared histories](../recent-files/spec.md). Choosing a folder follows the same rules as Open. A folder's remembered file persists across launches and is independent of the menu limit.
 
 With a folder open, a nonempty ⌘P query searches recent files and regular files within the folder according to the [Control folder search rules](../control/spec.md). Clearing the query shows eligible pins followed by recent files, including [recent scratches associated with that folder](../scratch-files/spec.md#go-to-file).
 

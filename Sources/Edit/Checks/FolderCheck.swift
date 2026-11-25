@@ -178,7 +178,7 @@ enum FolderCheck {
         defer { document.window.close() }
         _ = try await app.openFile(project, in: document)
         for recent in [b, g, c, dotDirectory, generated, inherited, nestedIgnored, rustTarget, findCheck, dsStore, hiddenDSStore, outsideDSStore] {
-            await app.recentFiles.record(recent)
+            await app.recentFiles.record(recent, in: document.folderURL)
         }
         try await ControlPanel(app: app).checkFolderQueries(in: document, expectations: [
             ("", [c, findCheck]),
@@ -212,6 +212,7 @@ enum FolderCheck {
             _ = try write("Recent file", to: folder.appending(path: "Recent File \(index).txt"))
             await app.recentFiles.recordFolder(folder, opening: folder.appending(path: "Recent File \(index).txt"))
         }
+        let document = app.makeDocument()
         guard let fileMenu = NSApplication.shared.mainMenu?.item(withTitle: "File")?.submenu,
               let menu = fileMenu.item(withTitle: "Open Recent")?.submenu else { throw Failure("File → Open Recent menu") }
         app.menuWillOpen(fileMenu)
@@ -220,12 +221,11 @@ enum FolderCheck {
         let folderRows = folderItems.compactMap { $0.representedObject as? URL }
         let fileRows = menu.items[(separator + 1)...].compactMap { $0.representedObject as? URL }
         try expect(folderRows.count == 10 && folderRows.map(\.path) == app.recentFiles.folders.prefix(10).map(\.url.path)
-                   && fileRows.count == 10 && fileRows.map(\.path) == app.recentFiles.entries.prefix(10).map(\.url.path),
-                   "Open Recent shows ten folders before ten files, each newest first")
+                   && fileRows.map(\.path) == app.recentFiles.entries(in: nil).prefix(10).map(\.url.path),
+                   "Open Recent shows ten folders before up to ten eligible files, each newest first")
         guard let item = folderItems.first, let action = item.action, let folder = folderRows.first else {
             throw Failure("action on the first recent folder")
         }
-        let document = app.makeDocument()
         let windowCount = app.documents.count
         let canonical = FileBuffer.canonicalURL(folder)
         try expect(NSApplication.shared.sendAction(action, to: item.target, from: item), "Open Recent can select a folder")

@@ -6,6 +6,8 @@
 
 Checked November 25, 2026 against ZLS 0.17.0 and SourceKit-LSP bundled with Apple Swift 6.4 (swiftlang-6.4.0.33.1). Some methods depend on client capabilities, server settings or project indexing. The table covers [LSP 3.18][lsp] editor features and the messages that enable them. It is a catalog of options for Edit.
 
+Edit ranks comparable [workspace symbol matches](features/lsp-symbol-navigation/spec.md#go-to-workspace-symbol) by their proximity to the active folder's root for both servers.
+
 | Method | ZLS | SourceKit-LSP |
 | --- | :---: | :---: |
 | [`textDocument/definition`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_definition) | ✓ | ✓ |

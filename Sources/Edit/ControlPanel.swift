@@ -111,8 +111,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     func folderDidChange(in document: DocumentWindow) {
         guard self.document === document, mode == .files || mode.isSymbolMode else { return }
         configure(mode)
-        if mode.isSymbolMode { apply([], selected: nil, emptyMessage: nil) }
+        apply([], selected: nil, emptyMessage: nil)
         search()
+    }
+
+    func recentFilesDidChange(in document: DocumentWindow) {
+        guard self.document === document, mode == .files, !pinsChangedInPlace, !isHovering else { return }
+        search(preserving: selectedID)
     }
 
     func languageServerStateDidChange(in document: DocumentWindow) {
@@ -215,13 +220,13 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     private func refreshFiles(for document: DocumentWindow) {
         guard mode == .files else { return }
         let current = opening
-        let recent = app.recentFiles.entries
+        let recent = app.recentFiles.entries(in: document.folderURL)
         Task { [weak self] in
             guard let self else { return }
             await app.recentFiles.prune()
-            guard mode == .files, self.document === document, current == opening, !pinsChangedInPlace, !isHovering,
-                  app.recentFiles.entries != recent else { return }
-            search(preserving: selectedID)
+            guard current == opening,
+                  app.recentFiles.entries(in: document.folderURL) != recent else { return }
+            recentFilesDidChange(in: document)
         }
     }
 
@@ -472,7 +477,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     }
 
     private func fileEntries() -> [ControlEntry] {
-        app.recentFiles.entries.compactMap { fileEntry($0.url, canonical: $0.canonicalURL, recent: $0) }
+        app.recentFiles.entries(in: document?.folderURL)
+            .compactMap { fileEntry($0.url, canonical: $0.canonicalURL, recent: $0) }
     }
 
     private func fileEntry(_ url: URL, canonical: URL, recent: RecentFile? = nil,
@@ -485,7 +491,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let parent = relative ?? (url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath
         return ControlEntry(id: url.absoluteString, title: url.lastPathComponent,
                             detail: parent.isEmpty ? nil : parent, recent: recent,
-                            folderFileURL: recent == nil ? url : nil, folderFileIdentity: identity)
+                            folderFileURL: recent == nil ? url : nil, folderFileIdentity: identity,
+                            directoryDepth: relative.map(FolderFileSearch.directoryDepth))
     }
 
     private func pinnedFileEntries(reusing recent: [ControlEntry], scratches: [ControlEntry] = []) -> [ControlEntry] {
@@ -1357,6 +1364,31 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
     }
 
+    func checkFileOrder(in document: DocumentWindow, within fixture: URL, query: String, expected: [URL],
+                        openFirst: Bool = false, capture: ((NSView) throws -> Void)? = nil) async throws {
+        show(in: document)
+        defer { dismiss(restoreFocus: false) }
+        input.stringValue = query
+        search()
+        while pending { await request?.value }
+        let found = entries.compactMap { $0.entry.recent?.canonicalURL ?? $0.entry.folderFileURL }
+            .filter { FolderFileSearch.relativeDirectory(of: $0, in: fixture) != nil }
+        guard found.map(\.path) == expected.map(\.path) else {
+            throw CheckFailure.invalidFolderResults("order for \(String(reflecting: query)): \(found.map(\.path))")
+        }
+        if let capture, let view = panel.contentView { try capture(view) }
+        if openFirst {
+            guard table.selectedRow == 0, entries.first?.entry.fileURL?.path == expected.first?.path,
+                  let activation = activate(row: table.selectedRow) else {
+                throw CheckFailure.invalidFolderResults("the root match is selected by default")
+            }
+            await activation.value
+            guard document.fileURL?.path == expected.first?.path else {
+                throw CheckFailure.invalidFolderResults("open the default match in the current window")
+            }
+        }
+    }
+
     func checkHeaderLanguagePicker(in document: DocumentWindow) throws {
         guard app.isAgentCheck, self.document === document, mode == .languages,
               entries.prefix(2).map(\.entry.title) == ["Auto Detect", "Plain Text"],
@@ -1752,7 +1784,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         if let target = entry.navigation {
             return activateNavigation(target, entry: entry, in: document)
         }
-        if (entry.folderFileURL != nil || entry.scratch != nil) && document.folderURL != resultsFolder {
+        if mode == .files && document.folderURL != resultsFolder {
             configure(mode)
             search()
             return nil

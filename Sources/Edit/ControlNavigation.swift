@@ -19,7 +19,7 @@ enum ControlNavigation: Sendable {
     static func symbolResults(_ symbols: [LSPSymbol], query: String, workspace: Bool, folder: URL?,
                               alternateCharacters: [Character: Character]) -> [ControlMatch] {
         var knownIDs: Set<String> = []
-        var paths: [URL: String] = [:]
+        var paths: [URL: (label: String, depth: Int?)] = [:]
         let canonicalFolder = workspace ? folder.map(FileBuffer.canonicalURL) : nil
         let entries = symbols.compactMap { symbol -> ControlEntry? in
             guard !Task.isCancelled else { return nil }
@@ -29,23 +29,27 @@ enum ControlNavigation: Sendable {
             guard knownIDs.insert(id).inserted else { return nil }
             let container = symbol.detail.flatMap { $0.isEmpty ? nil : $0 }
             let detail: String?
+            let depth: Int?
             if workspace {
-                let path: String
+                let path: (label: String, depth: Int?)
                 if let cached = paths[url] {
                     path = cached
                 } else {
                     let relative = folder.flatMap { FolderFileSearch.relativeDirectory(of: url, in: $0) }
                         ?? canonicalFolder.flatMap { FolderFileSearch.relativeDirectory(of: FileBuffer.canonicalURL(url), in: $0) }
-                    path = relative.map { $0.isEmpty ? url.lastPathComponent : "\($0)/\(url.lastPathComponent)" }
+                    let label = relative.map { $0.isEmpty ? url.lastPathComponent : "\($0)/\(url.lastPathComponent)" }
                         ?? (url.path as NSString).abbreviatingWithTildeInPath
+                    path = (label, relative.map(FolderFileSearch.directoryDepth))
                     paths[url] = path
                 }
-                detail = [container, path].compactMap { $0 }.joined(separator: " · ")
+                detail = [container, path.label].compactMap { $0 }.joined(separator: " · ")
+                depth = path.depth
             } else {
                 detail = container
+                depth = nil
             }
             return ControlEntry(id: id, title: symbol.name, detail: detail,
-                                navigation: .symbol(symbol.location, kind: symbol.kind))
+                                navigation: .symbol(symbol.location, kind: symbol.kind), directoryDepth: depth)
         }
         let ranked = ControlMatching.rank(entries, query: query, alternateCharacters: alternateCharacters)
         guard workspace else { return ranked }

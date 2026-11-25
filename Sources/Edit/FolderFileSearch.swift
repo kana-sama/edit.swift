@@ -40,6 +40,7 @@ enum FolderFileSearch {
 
         fileprivate let files: [ControlEntry]
         fileprivate let recentScope: RecentScope
+        fileprivate let directoryDepth: Int
 
         func rank(_ recent: [ControlEntry], query: String, alternateCharacters: [Character: Character],
                   pinnedFiles: [ControlEntry], scratches: [ControlEntry]) -> [ControlMatch] {
@@ -51,7 +52,7 @@ enum FolderFileSearch {
                 eligible = recent.filter { $0.recent.map { paths.contains($0.canonicalURL.path) } == true }
             }
             return FolderFileSearch.rank(eligible, folderFiles: files, pinnedFiles: pinnedFiles, scratches: scratches,
-                                         query: query, alternateCharacters: alternateCharacters)
+                                         query: query, alternateCharacters: alternateCharacters, directoryDepth: directoryDepth)
         }
     }
 
@@ -71,9 +72,13 @@ enum FolderFileSearch {
         return String(relative[..<slash])
     }
 
+    static func directoryDepth(_ relativeDirectory: String) -> Int {
+        relativeDirectory.split(separator: "/").count
+    }
+
     static func index(in scope: Scope) -> Index {
         guard let (directory, insidePackage) = scope.directory else {
-            return Index(files: [], recentScope: .listedFiles([]))
+            return Index(files: [], recentScope: .listedFiles([]), directoryDepth: 0)
         }
         var exclusions = FolderSearchExclusions(root: scope.folder)
         let files: [ControlEntry]
@@ -86,10 +91,11 @@ enum FolderFileSearch {
             )
             files = fileEntries(children ?? [], relativeTo: scope.folder)
         }
-        if scope.components != nil {
-            return Index(files: files, recentScope: .listedFiles(Set(files.compactMap { $0.folderFileURL?.path })))
+        if let components = scope.components {
+            return Index(files: files, recentScope: .listedFiles(Set(files.compactMap { $0.folderFileURL?.path })),
+                         directoryDepth: components.count)
         }
-        return Index(files: files, recentScope: .project(exclusions))
+        return Index(files: files, recentScope: .project(exclusions), directoryDepth: 0)
     }
 
     private static func recursiveFiles(in directory: URL, relativeTo folder: URL,
@@ -132,26 +138,32 @@ enum FolderFileSearch {
               let parent = relativeDirectory(of: url, in: folder) else { return nil }
         let identity = (values.linkCount ?? 1) > 1 ? FileIdentity.at(url) : nil
         return ControlEntry(id: url.absoluteString, title: url.lastPathComponent,
-                            detail: parent.isEmpty ? nil : parent, folderFileURL: url, folderFileIdentity: identity)
+                            detail: parent.isEmpty ? nil : parent, folderFileURL: url, folderFileIdentity: identity,
+                            directoryDepth: directoryDepth(parent))
     }
 
     private static func rank(_ recent: [ControlEntry], folderFiles: [ControlEntry], pinnedFiles: [ControlEntry],
                              scratches: [ControlEntry], query: String,
-                             alternateCharacters: [Character: Character]) -> [ControlMatch] {
+                             alternateCharacters: [Character: Character], directoryDepth: Int) -> [ControlMatch] {
         let matches = ControlMatching.rank(recent + scratches + folderFiles + pinnedFiles, query: query,
-                                           alternateCharacters: alternateCharacters, preferRecentFiles: true)
+                                           alternateCharacters: alternateCharacters, preferRecentFiles: true,
+                                           preferredDirectoryDepth: directoryDepth)
 
-        // Rank both paths before merging. A recent may use an alias while the query matches the real name.
+        // Keep the best-ranked spelling, including when a recent alias ranks below its indexed path.
         let matchingRecents = matches.compactMap { $0.entry.recent }
-        let paths = Set(matchingRecents.map { $0.canonicalURL.path })
-        let identities = Set(matchingRecents.map(\.identity))
+        var identitiesByPath: [String: FileIdentity] = [:]
+        for recent in matchingRecents { identitiesByPath[recent.canonicalURL.path] = recent.identity }
+        let recentIdentities = Set(matchingRecents.map(\.identity))
+        var seenIdentities: Set<FileIdentity> = []
         var seen: Set<String> = []
         return matches.filter { match in
-            if let url = match.entry.folderFileURL,
-               paths.contains(url.path) || match.entry.folderFileIdentity.map(identities.contains) == true {
+            let entry = match.entry
+            let identity = entry.recent?.identity ?? entry.folderFileURL.flatMap { identitiesByPath[$0.path] }
+                ?? entry.folderFileIdentity
+            if let identity, recentIdentities.contains(identity), !seenIdentities.insert(identity).inserted {
                 return false
             }
-            return pinnedFiles.isEmpty || seen.insert(match.entry.id).inserted
+            return pinnedFiles.isEmpty || seen.insert(entry.id).inserted
         }
     }
 }

@@ -145,6 +145,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     let sample = try await FilesCheck.run(in: self)
                     try await ControlPanel(app: self).checkHidden(in: sample)
                     try await ControlPanel(app: self).checkPins(in: sample)
+                    try await ControlSearchCheck.run(in: self)
                     try await SyntaxCheck.run(in: self)
                     try await BracketCheck.run(in: self)
                     try await OccurrenceCheck.run(in: self)
@@ -300,6 +301,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     private func populateRecentMenu(_ menu: NSMenu) {
         menu.removeAllItems()
+        let files = recentFiles.entries(in: activeDocument?.folderURL)
         if !recentFiles.folders.isEmpty {
             menu.addItem(.sectionHeader(title: "Folders"))
             for recent in recentFiles.folders.prefix(10) {
@@ -309,12 +311,12 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 item.representedObject = recent.url
                 item.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
             }
-            if !recentFiles.entries.isEmpty { menu.addItem(.separator()) }
+            if !files.isEmpty { menu.addItem(.separator()) }
         }
-        if !recentFiles.entries.isEmpty {
+        if !files.isEmpty {
             menu.addItem(.sectionHeader(title: "Files"))
         }
-        for recent in recentFiles.entries.prefix(10) {
+        for recent in files.prefix(10) {
             let item = menu.addItem(withTitle: recent.displayPath, action: #selector(openRecentDocument(_:)),
                                     keyEquivalent: "")
             item.target = self
@@ -953,8 +955,11 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             document.restoreSidebar(record)
             document.restoreTerminal(record.terminal)
             document.restoreEditorPosition(record.editorPosition)
-            if let scratch = document.scratchFile { await recordScratchOpen(scratch) }
-            else if !isScratch, let url, record.path != nil { await recentFiles.record(url) }
+            if let scratch = document.scratchFile {
+                await recordScratchOpen(scratch)
+            } else if !isScratch, let url, record.path != nil {
+                await recentFiles.record(url, in: document.folderURL, rememberInFolder: false)
+            }
             if isQuitting { document.editor.isEditable = false }
             restored.append((index, document))
         }
@@ -1094,7 +1099,11 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         if previousFolder != folder {
             controlPanel?.folderDidChange(in: document)
         }
+        let recent = previousFolder == folder || controlPanel == nil ? [] : recentFiles.entries(in: folder)
         await recentFiles.recordFolder(url, opening: opened?.url)
+        if previousFolder != folder, document.folderURL == folder, recentFiles.entries(in: folder) != recent {
+            controlPanel?.recentFilesDidChange(in: document)
+        }
         return document
     }
 
@@ -1300,6 +1309,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case "files" where screenshot == nil:
             _ = try await FilesCheck.run(in: self)
             try await FilesCheck.checkFilePreview(in: self)
+        case "control":
+            try await ControlSearchCheck.run(in: self) { view in
+                try self.captureCheckView(view, screenshot: screenshot)
+            }
         case "jj":
             try await checkJJ(screenshot: screenshot)
         case "source-control":

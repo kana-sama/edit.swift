@@ -8,6 +8,10 @@ Swift Edit uses [autosave](../autosave/spec.md) when Control takes focus and whe
 
 Control supports [search in both keyboard layouts](../control-keyboard-layouts/spec.md).
 
+For nonempty queries, give results within the search folder a small relevance bonus, greatest at the root and decreasing with depth. The root of an explicit directory query is that directory. Prefer a closer result when text matches are comparable, before considering recency; a clearly better text match can still win. Apply the same ranking to indexed and recent files. Opening a recent alias must not hide a better-ranked path for the same file.
+
+The empty query and file searches use only the [recent files visible in the current project](../recent-files/spec.md), plus existing pins and eligible scratches. Without a folder, search the shared history instead.
+
 ## Folder search
 
 The recursive search skips directories whose names start with a dot, plus `node_modules`, `bower_components`, `venv`, `__pycache__`, `DerivedData`, and `zig-out`. Skip `target` next to a `Cargo.toml`. Package contents and symbolic directory links are skipped during the recursive walk.
@@ -24,3 +28,5 @@ Open documents, close one, and open Control. Filter by name and path, navigate i
 In a folder containing `a/b`, `a/e/g`, `c`, and `d`, put `a` and `c` in `.gitignore`. Only `c` and `d` are eligible in a recursive search. `a/` shows `b`, and `a/e/` shows `g`. Repeat with a dot directory and with a recent file in an excluded directory.
 
 Create `Sources/Edit/FindCheck.swift` and `Sources/.DS_Store`. Search for `Sources/` and confirm that it lists FindCheck with `Sources/Edit` as its directory. Open FindCheck, then repeat with the empty query and the filename query. The relative directory is the same each time.
+
+With `README.md` at the project root, under a dependency, in another project, and in shared history, open the dependency copy most recently within the project. Searching `readme.md` selects the project-root copy and does not list the other project's recent. Search an explicit directory to move the root of the ranking into it. A stronger exact match still beats a weaker match at the root.

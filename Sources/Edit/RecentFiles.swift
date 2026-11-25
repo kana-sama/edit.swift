@@ -50,6 +50,7 @@ struct RecentFile: Codable, Hashable, Sendable {
     let identity: FileIdentity
     let volume: URL?
     let opened: Date
+    fileprivate var project: URL? = nil
 
     static func read(_ url: URL) -> Self? {
         let url = url.standardizedFileURL
@@ -101,6 +102,21 @@ struct RecentFolder: Codable, Hashable, Sendable {
 
 @MainActor
 final class RecentFiles {
+    private struct FileKeys {
+        var paths: Set<URL> = []
+        var canonicalPaths: Set<URL> = []
+        var identities: Set<FileIdentity> = []
+
+        mutating func insert(_ entry: RecentFile) -> Bool {
+            guard !paths.contains(entry.url), !canonicalPaths.contains(entry.canonicalURL),
+                  !identities.contains(entry.identity) else { return false }
+            paths.insert(entry.url)
+            canonicalPaths.insert(entry.canonicalURL)
+            identities.insert(entry.identity)
+            return true
+        }
+    }
+
     private struct History: Codable, Sendable {
         var files: [RecentFile]
         var folders: [RecentFolder]
@@ -118,6 +134,7 @@ final class RecentFiles {
     }
 
     private static let positionLimit = 100
+    private nonisolated static let fileLimit = 500
     private let url: URL
     private let initialRead: Task<History, Never>
     private var loaded = false
@@ -134,10 +151,17 @@ final class RecentFiles {
             let decoder = JSONDecoder()
             let history = try? decoder.decode(History.self, from: bytes)
             let legacyFiles = history == nil ? try? decoder.decode([RecentFile].self, from: bytes) : nil
-            let files = history?.files ?? legacyFiles ?? []
-            return History(files: Array(files.prefix(500)), folders: history?.folders ?? [],
+            let folders = history?.folders ?? []
+            let files = Self.assignProjects(to: history?.files ?? legacyFiles ?? [], using: folders)
+            return History(files: files, folders: folders,
                            positions: history?.positions)
         }
+    }
+
+    func entries(in folder: URL?) -> [RecentFile] {
+        let project = folder?.path
+        var seen = FileKeys()
+        return entries.filter { ($0.project == nil || $0.project?.path == project) && seen.insert($0) }
     }
 
     func load() async {
@@ -151,7 +175,7 @@ final class RecentFiles {
         }
     }
 
-    func record(_ url: URL, in folder: URL? = nil) async {
+    func record(_ url: URL, in folder: URL? = nil, rememberInFolder: Bool = true) async {
         let metadata = Task.detached {
             let entry = RecentFile.read(url)
             let canonicalFolder = folder.map(FileBuffer.canonicalURL)
@@ -160,7 +184,7 @@ final class RecentFiles {
         await enqueueRecording {
             let (entry, canonicalFolder) = await metadata.value
             guard let entry else { return }
-            self.promote(entry, in: canonicalFolder)
+            self.promote(entry, in: canonicalFolder, rememberInFolder: rememberInFolder)
             self.persist()
         }.value
     }
@@ -174,8 +198,10 @@ final class RecentFiles {
                 $0.url.path == folder.url.path || $0.canonicalURL == folder.canonicalURL || $0.identity == folder.identity
             }
             folder.lastFileURL = self.folders.lazy.filter(matches).compactMap(\.lastFileURL).first(where: folder.contains)
+            let isNewRoot = !self.folders.contains { $0.canonicalURL.path == folder.canonicalURL.path }
             self.folders.removeAll(where: matches)
             self.folders.insert(folder, at: 0)
+            if isNewRoot { self.entries = Self.assignProjects(to: self.entries, using: self.folders) }
             if let openedFile { self.promote(openedFile, in: folder.canonicalURL) }
             self.persist()
         }.value
@@ -200,15 +226,54 @@ final class RecentFiles {
         return positions.first { $0.matches(target, identity: identity) }?.position
     }
 
-    private func promote(_ entry: RecentFile, in canonicalFolder: URL?) {
-        entries.removeAll {
-            $0.url == entry.url || $0.canonicalURL == entry.canonicalURL || $0.identity == entry.identity
+    private func promote(_ opened: RecentFile, in canonicalFolder: URL?, rememberInFolder: Bool = true) {
+        var entry = opened
+        let owner = folders.lazy.filter { $0.contains(entry.canonicalURL) }
+            .max { $0.canonicalURL.path.count < $1.canonicalURL.path.count }?.canonicalURL
+        // A known project owns files under its root, even when opened from a different window.
+        // For other paths, keep the context of the explicit open instead of promoting them globally.
+        if let canonicalFolder, FolderFileSearch.relativeDirectory(of: entry.canonicalURL, in: canonicalFolder) != nil,
+           canonicalFolder.path.count > (owner?.path.count ?? 0) {
+            entry.project = canonicalFolder
+        } else {
+            entry.project = owner ?? canonicalFolder
+        }
+        let bucket = entry.project?.path
+        var count = 0
+        entries.removeAll { previous in
+            guard previous.project?.path == bucket else { return false }
+            if previous.url == entry.url || previous.canonicalURL == entry.canonicalURL || previous.identity == entry.identity {
+                return true
+            }
+            count += 1
+            return count >= Self.fileLimit
         }
         entries.insert(entry, at: 0)
-        if entries.count > 500 { entries.removeLast(entries.count - 500) }
-        if let canonicalFolder, let index = folders.firstIndex(where: { $0.canonicalURL == canonicalFolder }),
+        if rememberInFolder, let canonicalFolder, let index = folders.firstIndex(where: { $0.canonicalURL == canonicalFolder }),
            folders[index].contains(entry.canonicalURL) {
             folders[index].lastFileURL = entry.canonicalURL
+        }
+    }
+
+    private nonisolated static func assignProjects(to files: [RecentFile], using folders: [RecentFolder]) -> [RecentFile] {
+        let roots = folders.sorted { $0.canonicalURL.path.count > $1.canonicalURL.path.count }
+        var buckets: [String?: FileKeys] = [:]
+        return files.compactMap { file in
+            var entry = file
+            // Old archives have no opening context. Recover it from previously opened roots where possible.
+            let recordedRootLength = file.project.flatMap { project in
+                FolderFileSearch.relativeDirectory(of: file.canonicalURL, in: project).map { _ in project.path.count }
+            } ?? 0
+            if let owner = roots.first(where: { $0.contains(file.canonicalURL) })?.canonicalURL,
+               owner.path.count > recordedRootLength {
+                entry.project = owner
+            }
+            let scope = entry.project?.path
+            return keep(entry, in: &buckets[scope, default: FileKeys()]) ? entry : nil
+        }
+
+        func keep(_ entry: RecentFile, in bucket: inout FileKeys) -> Bool {
+            bucket.paths.count < fileLimit && bucket.insert(entry)
         }
     }
 
@@ -233,7 +298,9 @@ final class RecentFiles {
     }
 
     func dismiss(_ entry: RecentFile) {
-        entries.removeAll { $0.identity == entry.identity || $0.canonicalURL == entry.canonicalURL }
+        entries.removeAll {
+            $0.project?.path == entry.project?.path && ($0.identity == entry.identity || $0.canonicalURL == entry.canonicalURL)
+        }
         persist()
     }
 
@@ -250,9 +317,12 @@ final class RecentFiles {
     }
 
     func removeIfMissing(_ url: URL) async {
-        if let entry = entries.first(where: { $0.url == url }),
-           await Task.detached(operation: { entry.isMissing }).value, entries.contains(entry) {
-            dismiss(entry)
+        let candidates = entries.filter { $0.url == url }
+        let missing = await Task.detached { Set(candidates.filter(\.isMissing)) }.value
+        let previousCount = entries.count
+        entries.removeAll { missing.contains($0) }
+        if entries.count != previousCount {
+            persist()
         }
         if let folder = folders.first(where: { $0.url.path == url.path }),
            await Task.detached(operation: { folder.isMissing }).value, folders.contains(folder) {

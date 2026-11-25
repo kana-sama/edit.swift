@@ -11,6 +11,7 @@ struct ControlEntry: Sendable {
     var iconLanguage: String? = nil
     var scratch: ScratchFile? = nil
     var navigation: ControlNavigation? = nil
+    var directoryDepth: Int? = nil
 
     var fileURL: URL? { recent?.url ?? folderFileURL }
     var openedAt: Date? { recent?.opened ?? scratch?.openedAt }
@@ -59,7 +60,7 @@ enum ControlMatching {
 
     static func rank(_ entries: [ControlEntry], query: String, alternateCharacters: [Character: Character] = [:],
                      preferShorterTitles: Bool = false,
-                     preferRecentFiles: Bool = false) -> [ControlMatch] {
+                     preferRecentFiles: Bool = false, preferredDirectoryDepth: Int = 0) -> [ControlMatch] {
         let parts = terms(in: query)
         if parts.isEmpty {
             return entries.map { ControlMatch(entry: $0, titleCharacters: [], detailCharacters: []) }
@@ -74,15 +75,17 @@ enum ControlMatching {
         var matches: [(score: Int, typedExact: Bool, titleLength: Int, index: Int, match: ControlMatch)] = []
         for (index, entry) in entries.enumerated() {
             if Task.isCancelled { return [] }
+            // Location breaks close matches without overriding much stronger text matches.
+            let locationBonus = entry.directoryDepth.map { 12 - min(8, max(0, $0 - preferredDirectoryDepth)) } ?? 0
             let candidate = Candidate(entry)
             let typed = candidate.match(typedQuery)
             let typedExact = typed?.exact == true
             if !typedExact, let alternateQuery, let alternate = candidate.match(alternateQuery),
                alternate.score - alternateLayoutPenalty > typed?.score ?? Int.min {
-                matches.append((alternate.score - alternateLayoutPenalty, false, candidate.title.count, index,
+                matches.append((alternate.score - alternateLayoutPenalty + locationBonus, false, candidate.title.count, index,
                                 alternate.result))
             } else if let typed {
-                matches.append((typed.score, typedExact, candidate.title.count, index, typed.result))
+                matches.append((typed.score + locationBonus, typedExact, candidate.title.count, index, typed.result))
             }
         }
         return matches.sorted {
