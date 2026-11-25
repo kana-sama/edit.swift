@@ -41,8 +41,8 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
 
     private unowned let document: DocumentWindow
     private unowned let app: Edit
-    private let zig = LanguageServerSession(server: .zig)
-    private let sourceKit = LanguageServerSession(server: .sourceKit)
+    private let zig: LanguageServerSession
+    private let sourceKit: LanguageServerSession
     private var sessions: [LanguageServerSession] { [zig, sourceKit] }
     var workspaceSessions: [LanguageServerSession] { sessions.filter(\.supportsWorkspaceSymbols) }
     var session: LanguageServerSession {
@@ -75,6 +75,8 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     init(document: DocumentWindow, app: Edit) {
         self.document = document
         self.app = app
+        zig = LanguageServerSession(server: .zig, workspacePreferences: app.workspaceLanguageServers)
+        sourceKit = LanguageServerSession(server: .sourceKit, workspacePreferences: app.workspaceLanguageServers)
         super.init()
     }
 
@@ -222,6 +224,12 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         case .start: target.start()
         case .stop: target.stop()
         case .restart: target.restart()
+        }
+        for peer in app.documents where peer !== document {
+            let features = peer.languageFeatures
+            guard !features.isClosed else { continue }
+            let peerSession = server == .zig ? features.zig : features.sourceKit
+            peerSession.workspacePreferenceDidChange()
         }
     }
 

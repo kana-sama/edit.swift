@@ -497,11 +497,9 @@ static bool runGrammar(Input input, const char *name, NSString *directory, uint3
         NSString *filename = isObjectiveC ? @"objective-c.scm" : [@(name) stringByAppendingString:@".scm"];
         NSString *queryPath = [directory stringByAppendingPathComponent:filename];
         NSArray<NSString *> *basePaths = nil;
-        if (isObjectiveC) {
+        if (isObjectiveC || strcmp(name, "cpp") == 0) {
             basePaths = @[[directory stringByAppendingPathComponent:@"c.scm"],
                           [directory stringByAppendingPathComponent:@"cpp-common.scm"]];
-        } else if (strcmp(name, "cpp") == 0) {
-            basePaths = @[[directory stringByAppendingPathComponent:@"cpp-common.scm"]];
         }
         query = loadQuery(language, queryPath, basePaths);
         if (!query && !input.bracket) return false;

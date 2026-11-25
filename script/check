@@ -1,14 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 usage() {
-    printf 'Usage: %s [--only editor|inline-diff|files|markdown|results|workspace-search|control|jj|source-control|lsp|lsp-progress|lsp-swift|lsp-c-family|worktree] [screenshot-path]\n' "$0" >&2
+    printf 'Usage: %s [--only editor|inline-diff|files|markdown|results|workspace-search|control|jj|source-control|lsp|lsp-progress|lsp-state|lsp-swift|lsp-c-family|worktree] [screenshot-path]\n' "$0" >&2
     exit 2
 }
 
 agent_args=(--agent-check)
 if [[ "${1:-}" == --only ]]; then
     case "${2:-}" in
-        editor|inline-diff|files|markdown|results|workspace-search|control|jj|source-control|lsp|lsp-progress|lsp-swift|lsp-c-family|worktree) agent_args+=(--only "$2") ;;
+        editor|inline-diff|files|markdown|results|workspace-search|control|jj|source-control|lsp|lsp-progress|lsp-state|lsp-swift|lsp-c-family|worktree) agent_args+=(--only "$2") ;;
         *) usage ;;
     esac
     shift 2
@@ -28,3 +28,6 @@ profile="$(mktemp -d)"
 trap 'rm -rf -- "$profile"' EXIT
 export JJ_CONFIG= JJ_USER="Edit Agent" JJ_EMAIL=edit-agent@example.invalid GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 TMPDIR="$profile/" "$agent_app/Contents/MacOS/Edit" "${agent_args[@]}"
+if [[ "${agent_args[2]:-}" == lsp-state ]]; then
+    TMPDIR="$profile/" "$agent_app/Contents/MacOS/Edit" "${agent_args[@]}"
+fi

@@ -11,7 +11,7 @@ Edit colors source code and markup with Tree-sitter. Highlighting and [bracket n
 
 C, C++, Clojure, CSS, Erlang, Go, HTML, JavaScript, JavaScript JSX, JSON, Lua, Markdown, Objective-C, Objective-C++, Python, Ruby, Rust, Shell Script, Solidity, Swift, TOML, TypeScript, TypeScript JSX, YAML, and Zig. JSON also recognizes comments in JSONC, Clojure covers EDN, and Zig covers ZON. Markdown uses inline and fenced-code grammars and HTML supports embedded JavaScript and CSS.
 
-Auto Detect uses Objective-C for `.m`, Objective-C++ for `.mm`, and C++ for ambiguous `.h` headers. Use the language picker to select a different mode for a header.
+Auto Detect uses Objective-C for `.m`, Objective-C++ for `.mm`, and C++ for ambiguous `.h` headers. C++ uses the shared C-family rules for directives, keywords, types, literals, and comments, including when no language server runs. Use the language picker to select a different mode for a header.
 
 In Markdown, apply inline code highlighting inside table cells and color heading markers with the heading. An HTML comment in Markdown keeps its comment color from its opener through its close, or through the end of the buffer while it is unclosed. Comment-like text inside code stays code.
 

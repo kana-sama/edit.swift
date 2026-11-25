@@ -67,6 +67,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     lazy var draftRecovery = DraftRecoveryStore(directory: storageFolder.appending(path: "DraftRecovery", directoryHint: .isDirectory))
     lazy var syntaxOverrides = SyntaxLanguageOverrides(defaults: isAgentCheck ? nil : .standard)
     lazy var fileWordWrap = FileWordWrap(defaults: isAgentCheck ? nil : .standard)
+    lazy var workspaceLanguageServers = WorkspaceLanguageServers(defaults: isAgentCheck ? nil : .standard)
     lazy var workspaceFindPreferences = WorkspaceFindPreferences(defaults: isAgentCheck ? nil : .standard)
     private weak var recentMenu: NSMenu?
     private weak var focusJujutsuItem: NSMenuItem?
@@ -1457,6 +1458,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 guard let screenshot else { return }
                 let file = URL(fileURLWithPath: screenshot).deletingPathExtension().path + "-" + suffix + ".png"
                 try self.captureCheckView(view, screenshot: file)
+            }
+        case "lsp-state":
+            try await LanguageServerStateCheck.run(in: self, replacing: document) { window in
+                try checkWindow(window, screenshot: screenshot)
             }
         case "lsp-swift":
             try await SourceKitLSPCheck.run(in: self, document: document) { view, suffix in

@@ -309,7 +309,7 @@ enum SyntaxCheck {
         }
     }
 
-    private static func waitForColor(at token: NSRange, in manager: NSTextLayoutManager) async throws {
+    static func waitForColor(at token: NSRange, in manager: NSTextLayoutManager) async throws {
         let deadline = ContinuousClock.now + .seconds(4)
         repeat {
             manager.textViewportLayoutController.layoutViewport()
@@ -331,6 +331,8 @@ enum SyntaxCheck {
         let fixtures: [(SyntaxLanguage, String, String, SyntaxColor)] = [
             (.c, "int main(void) { return 0; }", "return", .keyword),
             (.cpp, "namespace shapes { class Circle {}; }", "Circle", .type),
+            (.cpp, "#include <stdint.h>\n", "<stdint.h>", .string),
+            (.cpp, "typedef void (*FixtureCallback)(uint32_t value);", "typedef", .keyword),
             (.clojure, "{:deps {:lib \"1.2\"} :count 2}", ":deps", .keyword),
             (.css, ".card { color: red; }", "color", .property),
             (.erlang, "greet() -> \"hello\".", "greet", .function),

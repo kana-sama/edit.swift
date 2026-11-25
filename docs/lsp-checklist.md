@@ -110,6 +110,7 @@ ZLS 0.17.0 exposes these capabilities through standard methods and ZLS-specific 
 
 - [x] Discover SwiftPM, build-server and compilation-database projects and use a SourceKit-LSP toolchain from PATH or `xcrun`. [Edit specification](features/sourcekit-lsp/spec.md#discovery-and-controls)
 - [x] Route Swift, C, C++, Objective-C, and Objective-C++ buffers to SourceKit-LSP with their respective language IDs. Discover loose C-family sources and retain the server when switching modes in the same project. [Edit specification](features/sourcekit-lsp/spec.md#discovery-and-controls)
+- [x] Save explicit stops for each language server and workspace across app relaunch. [Edit specification](features/lsp/spec.md#server-discovery-and-session)
 - [x] Keep Swift function argument labels when renaming a function’s base name. [Edit specification](features/sourcekit-lsp/spec.md#commands)
 - [ ] Open virtual Swift module interfaces and macro expansions (`workspace/getReferenceDocument`). [Reference documents][swift-reference-documents]
 - [ ] Show Swift DocC documentation and its structured content (`textDocument/doccDocumentation`). [DocC request][swift-docc]

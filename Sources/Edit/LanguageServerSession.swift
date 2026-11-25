@@ -65,7 +65,12 @@ final class LanguageServerSession {
     private var monitor: FileSystemEvents?
     private var indexMonitor: FileSystemEvents?
     private var root: URL?
-    private var manuallyStopped: Set<URL> = []
+    private let workspacePreferences: WorkspaceLanguageServers
+    private var isManuallyStopped = false
+    private var preferenceWorkspace: URL? {
+        guard let root, let recognizedScope else { return nil }
+        return recognizedScope.searchesParentProjects ? root : recognizedScope.directory
+    }
     private var rootLookup: Task<Void, Never>?
     private var transition: Task<Void, Never>?
     private var sync: Task<Void, Never>?
@@ -73,8 +78,9 @@ final class LanguageServerSession {
     private var connection: LanguageServerConnection?
     private var capabilities: LSPCapabilities?
 
-    init(server: LanguageServer = .zig) {
+    init(server: LanguageServer, workspacePreferences: WorkspaceLanguageServers) {
         self.server = server
+        self.workspacePreferences = workspacePreferences
     }
 
     /// A non-nil URL denotes an eligible named buffer for this server.
@@ -151,21 +157,31 @@ final class LanguageServerSession {
     }
 
     func start() {
-        guard canStart, let root else { return }
-        manuallyStopped.remove(root)
-        replaceConnection(startingAt: root)
+        guard canStart else { return }
+        setManuallyStopped(false)
     }
 
     func stop() {
-        guard canStop, let root else { return }
-        manuallyStopped.insert(root)
-        replaceConnection(startingAt: nil)
+        guard canStop else { return }
+        setManuallyStopped(true)
     }
 
     func restart() {
-        guard canRestart, let root else { return }
-        manuallyStopped.remove(root)
-        replaceConnection(startingAt: root)
+        guard canRestart else { return }
+        setManuallyStopped(false)
+    }
+
+    private func setManuallyStopped(_ stopped: Bool) {
+        guard let root, let workspace = preferenceWorkspace else { return }
+        workspacePreferences.setStopped(stopped, for: server, in: workspace)
+        isManuallyStopped = stopped
+        replaceConnection(startingAt: stopped ? nil : root)
+    }
+
+    func workspacePreferenceDidChange() {
+        guard isEligible, let workspace = preferenceWorkspace,
+              isManuallyStopped != workspacePreferences.isStopped(server, in: workspace) else { return }
+        activate(root: root)
     }
 
     func close() {
@@ -258,13 +274,16 @@ final class LanguageServerSession {
     }
 
     private func activate(root: URL?) {
-        if self.root == root {
+        let previousRoot = self.root
+        self.root = root
+        let stopped = preferenceWorkspace.map { workspacePreferences.isStopped(server, in: $0) } ?? false
+        if previousRoot == root && stopped == isManuallyStopped {
             if phase == .ready { connection?.updateDocument(document) }
             onStateChange?()
             return
         }
-        self.root = root
-        replaceConnection(startingAt: root.flatMap { manuallyStopped.contains($0) ? nil : $0 })
+        isManuallyStopped = stopped
+        replaceConnection(startingAt: stopped ? nil : root)
     }
 
     private func replaceConnection(startingAt root: URL?) {
