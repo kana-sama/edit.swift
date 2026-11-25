@@ -1402,6 +1402,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             try EditorCheck.run(in: document)
             try checkWindow(document.window, screenshot: screenshot)
             try MultiCaretCheck.runComposition(in: document.editor)
+            try MultiCaretCheck.checkBlink()
             document.window.close()
             try await checkEditorViewport()
             try await WordWrapCheck.run(in: self) { window, suffix in

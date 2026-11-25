@@ -246,6 +246,22 @@ enum MultiCaretCheck {
                    && editor.insertionPointColor.alphaComponent == 0,
                    "returning to one caret keeps exactly the same geometry")
 
+        editor.insertText("X", replacementRange: NSRange(location: NSNotFound, length: 0))
+        try expect(editor.selectedRange().location == primary.location + 1
+                   && group.caretRects.count == 1 && group.caretRects[0].minX > bars[1].minX,
+                   "the first frame with an inserted character has the new single caret")
+        editor.deleteBackward(nil)
+        try expect(editor.selectedRange() == primary && group.caretRects == [bars[1]],
+                   "the first frame after deletion has the restored caret position")
+
+        editor.setCaretSelections([near, primary])
+        layoutCarets()
+        let beforeTyping = group.caretRects
+        editor.insertText("X", replacementRange: NSRange(location: NSNotFound, length: 0))
+        try expect(beforeTyping.count == 2 && group.caretRects.count == 2
+                   && zip(group.caretRects, beforeTyping).allSatisfy { $0.minX > $1.minX },
+                   "the first frame with simultaneous insertions has both new caret positions")
+
         editor.resetMultiCarets()
         editor.string = ""
         editor.setSelectedRange(NSRange(location: 0, length: 0))

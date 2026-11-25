@@ -13,10 +13,13 @@ final class SyntaxHighlighting {
     private weak var editor: EditorTextView?
     private var treeSpans: [SyntaxSpan] = []
     private var semanticSpans: [SyntaxSpan] = []
+    private var treeSpansAreStale = false
+    private var semanticSpansAreStale = false
     private var treeSitterEnabled = true
     private var treeLanguage: SyntaxLanguage?
     private var hasRenderingColors = false
     private var backedColorRange: NSRange?
+    private var editedRenderingColorRange: NSRange?
     private var task: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var activity: NSTitlebarAccessoryViewController?
@@ -251,14 +254,26 @@ final class SyntaxHighlighting {
 
     private func displayTree(_ spans: [SyntaxSpan]) {
         guard !treeSpans.isEmpty || !spans.isEmpty else { return }
+        treeSpansAreStale = false
+        if semanticSpansAreStale { discardPartialOverlaps(in: &semanticSpans, with: spans) }
         treeSpans = spans
         repaintLayers()
     }
 
     private func displaySemantic(_ spans: [SyntaxSpan]) {
         guard !semanticSpans.isEmpty || !spans.isEmpty else { return }
+        semanticSpansAreStale = false
+        if treeSpansAreStale { discardPartialOverlaps(in: &treeSpans, with: spans) }
         semanticSpans = spans
         repaintLayers()
+    }
+
+    private func discardPartialOverlaps(in cached: inout [SyntaxSpan], with fresh: [SyntaxSpan]) {
+        cached.removeAll { token in
+            spans(overlapping: token.range, from: fresh).contains { current in
+                token.color != current.color && token.range != current.range
+            }
+        }
     }
 
     private func repaintLayers() {
@@ -286,13 +301,10 @@ final class SyntaxHighlighting {
         editor.setNeedsDisplay(editor.visibleRect)
     }
 
-    func storageDidEdit(_ storage: NSTextStorage, replacements: [EditorTextEdit]?) {
+    func storageDidEdit(_ storage: NSTextStorage, replacements: [EditorTextEdit]?) -> NSRange? {
         lastSemanticColors = nil
-        guard let backed = backedColorRange else {
-            treeSpans = []
-            semanticSpans = []
-            return
-        }
+        treeSpansAreStale = true
+        semanticSpansAreStale = true
         let edit = storage.editedRange
         let delta = storage.changeInLength
         let replacedLength = edit.length - delta
@@ -301,17 +313,20 @@ final class SyntaxHighlighting {
             backedColorRange = NSRange(location: 0, length: storage.length)
             treeSpans = []
             semanticSpans = []
-            return
+            return backedColorRange
         }
 
-        // Conflict overlays can repaint existing syntax before the next parse. Keep the
-        // visible colors aligned with the surviving text without walking offscreen captures.
-        if !treeSpans.isEmpty || !semanticSpans.isEmpty {
-            let edits = replacements?.map { (range: $0.range, delta: $0.text.utf16.count - $0.range.length) }
-                ?? [(range: NSRange(location: edit.location, length: replacedLength), delta: delta)]
-            treeSpans = remappedSpans(treeSpans, in: backed, after: edits)
-            semanticSpans = remappedSpans(semanticSpans, in: backed, after: edits)
+        let edits = replacements?.map { (range: $0.range, delta: $0.lengthChange) }
+            ?? [(range: NSRange(location: edit.location, length: replacedLength), delta: delta)]
+        let invalidated = invalidatedColorRange(after: edits, lengthChange: delta)
+        if let visible = visibleRange() ?? backedColorRange {
+            treeSpans = remappedSpans(treeSpans, in: visible, after: edits)
+            semanticSpans = remappedSpans(semanticSpans, in: visible, after: edits)
+        } else {
+            treeSpans = []
+            semanticSpans = []
         }
+        guard let backed = backedColorRange else { return invalidated }
         let beforeEnd = edit.location + replacedLength
         if beforeEnd < backed.location {
             backedColorRange = NSRange(location: backed.location + delta, length: backed.length)
@@ -321,30 +336,66 @@ final class SyntaxHighlighting {
             let end = max(edit.upperBound, backed.upperBound + delta)
             backedColorRange = NSRange(location: start, length: end - start)
         }
+        return invalidated
+    }
+
+    private func invalidatedColorRange(after edits: [(range: NSRange, delta: Int)], lengthChange: Int) -> NSRange? {
+        var invalidated: NSRange?
+        for edit in edits {
+            // Include the neighbors of both boundaries. Deleting a separator can join two tokens.
+            let start = max(0, edit.range.location - 1)
+            let touching = NSRange(location: start, length: edit.range.upperBound + 1 - start)
+            let local = spans(overlapping: touching, from: treeSpans)
+            let semantic = spans(overlapping: touching, from: semanticSpans)
+            for layer in [local, semantic] {
+                guard let first = layer.first, let last = layer.last else { continue }
+                let wholeTokens = NSRange(location: first.start, length: last.end - first.start)
+                invalidated = invalidated.map { NSUnionRange($0, wholeTokens) } ?? wholeTokens
+            }
+        }
+        guard let invalidated, let first = edits.first, let last = edits.last else { return nil }
+        // Rebase the union once. Individual discarded ranges can contain several edits.
+        let start = min(invalidated.location, first.range.location)
+        let end = max(invalidated.upperBound, last.range.upperBound) + lengthChange
+        return NSRange(location: start, length: end - start)
     }
 
     private func remappedSpans(_ spans: [SyntaxSpan], in visible: NSRange,
-                              after edits: [(range: NSRange, delta: Int)]) -> [SyntaxSpan] {
+                               after edits: [(range: NSRange, delta: Int)]) -> [SyntaxSpan] {
         var mapped: [SyntaxSpan] = []
         var editIndex = 0
         var offset = 0
         for span in self.spans(overlapping: visible, from: spans) {
-            var start = span.start
-            while editIndex < edits.count, edits[editIndex].range.location < span.end {
-                let edit = edits[editIndex]
-                if start < edit.range.location {
-                    mapped.append(SyntaxSpan(start: start + offset, end: edit.range.location + offset, color: span.color))
-                }
-                start = max(start, edit.range.upperBound)
-                if edit.range.upperBound > span.end { break }
-                offset += edit.delta
+            while editIndex < edits.count, edits[editIndex].range.upperBound < span.start {
+                offset += edits[editIndex].delta
                 editIndex += 1
             }
-            if start < span.end {
-                mapped.append(SyntaxSpan(start: start + offset, end: span.end + offset, color: span.color))
-            }
+            guard editIndex == edits.count || edits[editIndex].range.location > span.end else { continue }
+            mapped.append(SyntaxSpan(start: span.start + offset, end: span.end + offset, color: span.color))
         }
         return mapped
+    }
+
+    func repaintEditedColors(in affected: NSRange, storage: NSTextStorage) {
+        let range = NSIntersectionRange(affected, NSRange(location: 0, length: storage.length))
+        guard range.length > 0 else { return }
+        if hasRenderingColors {
+            editedRenderingColorRange = editedRenderingColorRange.map { NSUnionRange($0, range) } ?? range
+        }
+        // Set only foregrounds during storage processing so inherited color is removed
+        // before TextKit lays out the edit. Keep any surviving colors in the same update.
+        applyForegroundColors(in: range, to: storage)
+    }
+
+    func clearEditedRenderingColors() {
+        guard let edited = editedRenderingColorRange, let editor, let storage = editor.textStorage,
+              let manager = editor.textLayoutManager else { return }
+        editedRenderingColorRange = nil
+        let range = NSIntersectionRange(edited, NSRange(location: 0, length: storage.length))
+        if range.length > 0, let target = editor.textRange(range, in: manager) {
+            // TextKit has rebased its rendering attributes into the new text by this point.
+            manager.removeRenderingAttribute(.foregroundColor, for: target)
+        }
     }
 
     private func updateBackingColors(in visible: NSRange?) {
@@ -353,37 +404,43 @@ final class SyntaxHighlighting {
         let document = NSRange(location: 0, length: storage.length)
         let previous = backedColorRange.map { NSIntersectionRange($0, document) }
         let visible = visible.map { NSIntersectionRange($0, document) }
-        let colors = visible.map { self.colors(in: $0) } ?? []
-        let conflictColors = visible.flatMap { editor.jjConflictDecorations?.foregrounds(in: $0) } ?? []
-        let link = visible.flatMap { visible in editor.languageDefinitionLinkRange.map { NSIntersectionRange(visible, $0) } }
         guard (previous?.length ?? 0) > 0 || (visible?.length ?? 0) > 0 else {
             backedColorRange = nil
             return
         }
         var typingAttributes = editor.typingAttributes
         typingAttributes[.foregroundColor] = NSColor.textColor
+        var hasColors = false
         content.performEditingTransaction {
             storage.beginEditing()
             if let previous, previous.length > 0, previous != visible {
                 storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: previous)
             }
             if let visible, visible.length > 0 {
-                storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: visible)
-                for span in colors {
-                    let range = NSIntersectionRange(visible, NSRange(location: span.start, length: span.end - span.start))
-                    storage.addAttribute(.foregroundColor, value: span.color.nativeColor, range: range)
-                }
-                for (range, color) in conflictColors {
-                    storage.addAttribute(.foregroundColor, value: color, range: range)
-                }
-                if let link, link.length > 0 {
-                    storage.addAttribute(.foregroundColor, value: NSColor.linkColor, range: link)
-                }
+                hasColors = applyForegroundColors(in: visible, to: storage)
             }
             storage.endEditing()
         }
         editor.typingAttributes = typingAttributes
-        backedColorRange = colors.isEmpty && conflictColors.isEmpty && (link?.length ?? 0) == 0 ? nil : visible
+        backedColorRange = hasColors ? visible : nil
+    }
+
+    @discardableResult
+    private func applyForegroundColors(in range: NSRange, to storage: NSTextStorage) -> Bool {
+        let colors = colors(in: range)
+        let conflictColors = editor?.jjConflictDecorations?.foregrounds(in: range) ?? []
+        let link = editor?.languageDefinitionLinkRange.map { NSIntersectionRange(range, $0) }
+        storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: range)
+        for span in colors {
+            storage.addAttribute(.foregroundColor, value: span.color.nativeColor, range: NSIntersectionRange(range, span.range))
+        }
+        for (part, color) in conflictColors {
+            storage.addAttribute(.foregroundColor, value: color, range: part)
+        }
+        if let link, link.length > 0 {
+            storage.addAttribute(.foregroundColor, value: NSColor.linkColor, range: link)
+        }
+        return !colors.isEmpty || !conflictColors.isEmpty || (link?.length ?? 0) > 0
     }
 
     private func visibleRange() -> NSRange? {
@@ -393,10 +450,12 @@ final class SyntaxHighlighting {
     }
 
     func prepareForDrawing(_ fragment: NSTextLayoutFragment, using manager: NSTextLayoutManager) {
+        clearEditedRenderingColors()
         paint(fragment.rangeInElement, using: manager)
     }
 
     private func clearColors() {
+        editedRenderingColorRange = nil
         guard hasRenderingColors else { return }
         hasRenderingColors = false
         if let manager = editor?.textLayoutManager {

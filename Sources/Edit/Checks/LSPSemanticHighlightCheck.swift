@@ -16,7 +16,8 @@ enum LSPSemanticHighlightCheck {
         try files.createDirectory(at: otherRoot, withIntermediateDirectories: true)
         let swiftWindow = app.makeDocument()
         let otherWindow = app.makeDocument()
-        let windows = [document, swiftWindow, otherWindow]
+        let typingWindow = app.makeDocument()
+        let windows = [document, swiftWindow, otherWindow, typingWindow]
         defer {
             for window in windows where app.documents.contains(where: { $0 === window }) { window.window.close() }
             try? files.removeItem(at: root)
@@ -159,6 +160,8 @@ enum LSPSemanticHighlightCheck {
         try require(document.window.title.hasSuffix("Other.rs") && !highlighting.usesLSPForCheck
                     && hasColor("marker", in: document, color: .function),
                     "show the incoming buffer, Tree-sitter colors and title together")
+        try await checkWholeTokens(in: app, document: typingWindow, folder: root.appending(path: "typing"),
+                                   capture: captureWindow)
         try await checkViewportPreview(in: app, document: document, folder: root, capture: captureWindow)
         for window in windows { window.window.close() }
         try await wait("stop fixture language servers before discarding the profile") {
@@ -187,12 +190,108 @@ enum LSPSemanticHighlightCheck {
         return editor.textStorage?.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? NSColor
     }
 
+    private static func checkWholeTokens(in app: Edit, document: DocumentWindow, folder: URL,
+                                         capture: (NSWindow, String) throws -> Void) async throws {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "Typing.zig")
+        let source = "pub const Stable = struct {};\ntest \"typing\" {\n"
+            + String(repeating: "    return error.Other;\n", count: 4) + "    return erro\n}\n"
+        try source.write(to: file, atomically: true, encoding: .utf8)
+        document.setFolder(folder)
+        let window = document.window
+        window.appearance = NSAppearance(named: .darkAqua)
+        try require(try await app.openFile(file, in: document) === document, "open a Zig typing fixture")
+        window.layoutIfNeeded()
+        let editor = document.editor
+        guard let highlighting = editor.syntaxHighlighting else { throw Failure(detail: "attach typing highlighting") }
+        let prefix = (source as NSString).range(of: "erro", options: .backwards)
+        try await wait("classify the incomplete identifier with ZLS") {
+            highlighting.semanticSpansForCheck.contains { $0.range == prefix && $0.color == .plain }
+                && hasSemanticColor("Stable", in: document)
+        }
+
+        var holdingResponse = true
+        var heldResponses = 0
+        highlighting.beforeInstallSemanticTokensForCheck = {
+            heldResponses += 1
+            defer { heldResponses -= 1 }
+            while holdingResponse && !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
+        }
+        defer {
+            holdingResponse = false
+            highlighting.beforeInstallSemanticTokensForCheck = nil
+        }
+        let title = window.title
+        editor.setSelectedRange(NSRange(location: prefix.upperBound, length: 0))
+        editor.insertText("r", replacementRange: NSRange(location: NSNotFound, length: 0))
+        let keyword = NSRange(location: prefix.location, length: 5)
+        try require(!highlighting.semanticSpansForCheck.contains { NSIntersectionRange($0.range, keyword).length > 0 },
+                    "discard the entire stale overlay on the first edited frame")
+        try require(hasSemanticColor("Other", in: document), "preserve an unaffected semantic token beside the edit")
+        try requireKeywordPixels(in: keyword, document: document, blue: false)
+        try await wait("hold the semantic update while Tree-sitter classifies the entire keyword") {
+            heldResponses > 0 && highlighting.treeSpansForCheck.contains { $0.range == keyword && $0.color == .keyword }
+        }
+        try require(window.title == title, "preserve the title while the response is held")
+        try requireKeywordPixels(in: keyword, document: document, blue: true)
+        try capture(window, "whole-token-pending")
+
+        holdingResponse = false
+        highlighting.beforeInstallSemanticTokensForCheck = nil
+        try await wait("finish installing the semantic response") { !highlighting.needsFullSemanticTokensForCheck }
+        try requireKeywordPixels(in: keyword, document: document, blue: true)
+        try capture(window, "whole-token-ready")
+
+        // Deleting the separator joins two colored keywords. Clear both in the first frame.
+        let separator = NSRange(location: prefix.location - 1, length: 1)
+        editor.setSelectedRange(separator)
+        editor.deleteBackward(nil)
+        let joined = NSRange(location: prefix.location - 7, length: 11)
+        try require((editor.string as NSString).substring(with: joined) == "returnerror", "join the two keywords")
+        try capture(window, "whole-token-joined")
+        try requireKeywordPixels(in: joined, document: document, blue: false)
+    }
+
+    private static func requireKeywordPixels(in range: NSRange, document: DocumentWindow, blue: Bool) throws {
+        let window = document.window
+        let editor = document.editor
+        let clip = document.scrollView.contentView
+        guard let manager = editor.textLayoutManager, let visible = manager.textViewportLayoutController.viewportRange,
+              NSIntersectionRange(editor.charRange(visible, in: manager), range) == range else {
+            throw Failure(detail: "show the entire edited token in the frame being sampled")
+        }
+        let columns = (range.location...range.upperBound).map { offset in
+            let position = NSRange(location: offset, length: 0)
+            return clip.convert(window.convertFromScreen(editor.firstRect(forCharacterRange: position, actualRange: nil)), from: nil)
+        }
+        let bounds = clip.bounds
+        guard let bitmap = clip.bitmapImageRepForCachingDisplay(in: bounds) else { throw Failure(detail: "capture typed glyphs") }
+        clip.cacheDisplay(in: bounds, to: bitmap)
+        let scale = CGFloat(bitmap.pixelsWide) / bounds.width
+        for (index, (left, right)) in zip(columns, columns.dropFirst()).enumerated() {
+            let x = Int(((left.minX - bounds.minX) * scale).rounded())..<Int(((right.minX - bounds.minX) * scale).rounded())
+            let y = Int(((left.minY - bounds.minY) * scale).rounded())..<Int(((left.maxY - bounds.minY) * scale).rounded())
+            var hasBlue = false
+            var hasWhite = false
+            for row in y where (0..<bitmap.pixelsHigh).contains(row) {
+                for column in x where (0..<bitmap.pixelsWide).contains(column) {
+                    guard let pixel = bitmap.colorAt(x: column, y: row)?.usingColorSpace(.sRGB) else { continue }
+                    if pixel.blueComponent > pixel.redComponent + 0.2 { hasBlue = true }
+                    if min(pixel.redComponent, pixel.greenComponent, pixel.blueComponent) > 0.7 { hasWhite = true }
+                }
+            }
+            try require(blue ? hasBlue && !hasWhite : hasWhite && !hasBlue,
+                        "glyph \(index + 1) of \(range.length) in the edited token is \(blue ? "blue" : "plain")")
+        }
+    }
+
     private static func checkViewportPreview(in app: Edit, document: DocumentWindow, folder: URL,
                                              capture: (NSWindow, String) throws -> Void) async throws {
         let target = folder.appending(path: "Large.zig")
         let source = "pub const Visible = struct {};\n"
             + (0..<2500).map { "pub fn sample\($0)(value: u64) u64 { return value + \($0); }\n" }.joined()
             + "pub const Offscreen = struct {};\n"
+            + String(repeating: "// spacer\n", count: 40)
         try source.write(to: target, atomically: true, encoding: .utf8)
         guard let drawing = document.editor.syntaxHighlighting else { throw Failure(detail: "prepare range preview") }
         let (pending, release) = AsyncStream<Void>.makeStream()
@@ -218,6 +317,19 @@ enum LSPSemanticHighlightCheck {
         try await wait("extend semantic colors offscreen after the full result") {
             !drawing.needsFullSemanticTokensForCheck && hasSemanticColor("Offscreen", in: document)
         }
+        let editor = document.editor
+        let keyword = (source as NSString).range(of: "struct", options: .backwards)
+        document.window.appearance = NSAppearance(named: .darkAqua)
+        editor.setSelectedRange(NSRange(location: keyword.upperBound, length: 0))
+        editor.revealNavigationSelection(editor.selectedRange())
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        try capture(document.window, "whole-token-scrolled-before")
+        try requireKeywordPixels(in: keyword, document: document, blue: true)
+        editor.insertText("s", replacementRange: NSRange(location: NSNotFound, length: 0))
+        let extended = NSRange(location: keyword.location, length: keyword.length + 1)
+        try require((editor.string as NSString).substring(with: extended) == "structs", "extend a token after scrolling")
+        try capture(document.window, "whole-token-scrolled")
+        try requireKeywordPixels(in: extended, document: document, blue: false)
     }
 
     private static func checkPreferences(root: URL, other: URL) throws {

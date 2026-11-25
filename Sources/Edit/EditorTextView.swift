@@ -1297,7 +1297,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     @objc private func storageDidEdit(_ notification: Notification) {
         guard let storage = notification.object as? NSTextStorage, storage.editedMask.contains(.editedCharacters) else { return }
-        syntaxHighlighting?.storageDidEdit(storage, replacements: applyingTextEdits)
+        let affectedColors = syntaxHighlighting?.storageDidEdit(storage, replacements: applyingTextEdits)
+        defer {
+            if let affectedColors { syntaxHighlighting?.repaintEditedColors(in: affectedColors, storage: storage) }
+        }
         if languageInteractionEnabled { languageInteraction.invalidate(afterTextEdit: true) }
         layoutSpacing.sourceDidEdit()
         if let draft = renameDraft {
@@ -1325,9 +1328,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func textDidChange(_ notification: Notification) {
+        syntaxHighlighting?.clearEditedRenderingColors()
         if renameDraft != nil {
             textLayoutManager?.textViewportLayoutController.layoutViewport()
             renameShade?.update()
+            refreshCaretDecorations()
             requestLineRefresh()
             return
         }
@@ -1347,6 +1352,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         multiCaret.restartBlink = true
         bracketNavigation.reset()
         occurrenceHighlighting.contentChanged()
+        // The text and the custom insertion indicators must reach the same display pass.
+        refreshCaretDecorations()
         requestLineRefresh()
         onTextChange?()
     }
