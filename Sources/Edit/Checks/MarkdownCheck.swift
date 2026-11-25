@@ -31,6 +31,7 @@ enum MarkdownCheck {
         </details>
 
         [Other](Other.md#target)
+        [Web](https://example.invalid/guide?q=preview#overview)
 
         ```swift
         func example() -> Int { 1 }
@@ -51,7 +52,8 @@ enum MarkdownCheck {
         let file = folder.appending(path: "Main.md")
         let other = folder.appending(path: "Other.md")
         try source.write(to: file, atomically: true, encoding: .utf8)
-        try "# Elsewhere\n\n## Target\n\nDestination\n".write(to: other, atomically: true, encoding: .utf8)
+        let otherText = "# Elsewhere\n\n## Target\n\nDestination\n\n" + String(repeating: "A paragraph after the destination.\n\n", count: 40)
+        try otherText.write(to: other, atomically: true, encoding: .utf8)
         let document = app.makeDocument()
         defer { document.window.close() }
         guard try await app.openFile(file, in: document) === document else { throw Failure("Could not open Markdown fixture.") }
@@ -95,15 +97,53 @@ enum MarkdownCheck {
             try await preview.evaluateForCheck("document.querySelector('[data-task]')?.checked === false") as? Bool == true
         }
         guard text.selectedRange() == originalPosition else { throw Failure("A preview edit moved the editor selection.") }
+        guard try await preview.evaluateForCheck("""
+            document.querySelector('a[data-target="Other.md#target"]').title === 'Other.md#target' &&
+            document.querySelector('a[data-target^="https://"]').title === 'https://example.invalid/guide?q=preview#overview' &&
+            document.querySelector('a[data-footnote-ref]').title === 'Footnote 1'
+            """) as? Bool == true else {
+            throw Failure("Markdown preview tooltips do not name their destinations.")
+        }
         if let screenshot { try await preview.captureForCheck(to: screenshot) }
-        await document.followMarkdownForCheck("Other.md#target")
-        guard document.fileURL == FileBuffer.canonicalURL(other), document.isShowingMarkdownPreview else {
-            throw Failure("A local preview link changed mode or opened the wrong file.")
+        var exposedEditor = false
+        text.observeEditorUnhideForCheck { exposedEditor = true }
+        let originTitle = document.window.title
+        let (presentation, release) = AsyncStream<Void>.makeStream()
+        var stagedPreview: MarkdownPreviewView?
+        document.beforePresentMarkdownForCheck = { incoming in
+            stagedPreview = incoming
+            for await _ in presentation { break }
+        }
+        defer { release.finish() }
+        _ = try await preview.evaluateForCheck("document.querySelector('a[data-target=\"Other.md#target\"]').click(); true")
+        try await wait("prepared destination frame behind current Markdown preview") { stagedPreview != nil }
+        guard document.window.title == originTitle, document.markdownPreviewForCheck === preview,
+              document.fileURL == FileBuffer.canonicalURL(file), document.scrollView.isHidden,
+              try await stagedPreview?.evaluateForCheck("Math.abs(document.querySelector('#target').getBoundingClientRect().top) < 2") as? Bool == true else {
+            throw Failure("The originating title and preview must stay together until the destination frame is ready at its fragment.")
+        }
+        if let screenshot {
+            let path = URL(fileURLWithPath: screenshot).deletingPathExtension().path
+            try await preview.captureForCheck(to: path + "-pending.png")
+            try await stagedPreview?.captureForCheck(to: path + "-destination.png")
+        }
+        document.beforePresentMarkdownForCheck = nil
+        release.finish()
+        try await wait("clicked local destination in preview") {
+            guard document.fileURL == FileBuffer.canonicalURL(other), let destination = document.markdownPreviewForCheck,
+                  destination === stagedPreview, destination.hasCurrentDocument else { return false }
+            return try await destination.evaluateForCheck("document.querySelector('#target')?.textContent === 'Target'") as? Bool == true
+        }
+        text.observeEditorUnhideForCheck(nil)
+        guard !exposedEditor, document.window.title == "Other.md", document.scrollView.isHidden else {
+            throw Failure("The destination title and preview did not replace the origin without exposing the editor.")
         }
         guard try await app.openFile(file, in: document) === document, document.isShowingMarkdownPreview,
               let reopened = document.markdownPreviewForCheck else { throw Failure("A reopened file lost its preview mode.") }
         try await wait("stored disclosure") { try await reopened.evaluateForCheck("document.querySelector('details')?.open === true") as? Bool == true }
         document.toggleMarkdownPreview()
+        text.scrollRangeToVisible((text.string as NSString).range(of: "[Other]"))
+        try await wait("native source link tooltip") { text.markdownToolTipsForCheck.contains("Other.md#target") }
         await document.followMarkdownForCheck("Other.md#target")
         guard !document.isShowingMarkdownPreview, document.fileURL == FileBuffer.canonicalURL(other),
               document.editor.selectedRange().location == 13 else { throw Failure("A source link did not reveal its heading in source mode.") }
@@ -150,10 +190,14 @@ enum MarkdownCheck {
         try await wait("disabled task in a recorded revision") {
             try await preview.evaluateForCheck("document.querySelector('[data-task]')?.disabled === true") as? Bool == true
         }
+        var exposedEditor = false
+        document.editor.observeEditorUnhideForCheck { exposedEditor = true }
         await document.followMarkdownForCheck("/Other.md")
+        document.editor.observeEditorUnhideForCheck(nil)
         guard document.editor.string.contains("Recorded destination"), document.isShowingMarkdownPreview,
+              !exposedEditor, document.markdownPreviewForCheck?.hasCurrentDocument == true,
               let recorded = document.sessionDocument().markdownRevision else {
-            throw Failure("A historical link opened the working copy or left preview.")
+            throw Failure("A historical link opened the working copy or exposed the editor between previews.")
         }
         let restored = app.makeDocument()
         defer { restored.window.close() }

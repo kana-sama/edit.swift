@@ -18,7 +18,10 @@ final class MarkdownPreviewView: NSView, WKNavigationDelegate, NSSearchFieldDele
     private var revision = 0
     private var hasMath = false
     private var hasDiagrams = false
+    private var presentationFailed = false
     private(set) var hasCurrentDocument = false
+    private(set) var presentedReading: MarkdownViewState.Reading?
+    private(set) var presentedFragment: (target: String, found: Bool)?
 
     var onState: ((MarkdownViewState.Reading) -> Void)?
     var onLink: ((String) -> Void)?
@@ -106,12 +109,15 @@ final class MarkdownPreviewView: NSView, WKNavigationDelegate, NSSearchFieldDele
         }
     }
 
-    func show(html: String, highlighted: [String], reading: MarkdownViewState.Reading, writable: Bool, fragment: String?) {
+    func show(html: String, highlighted: [String], reading: MarkdownViewState.Reading, writable: Bool,
+              fragment: String?, staged: Bool = false) {
         revision += 1
         hasCurrentDocument = false
+        presentedReading = nil
+        presentedFragment = nil
         let token = revision
         let arguments: [String: Any] = ["html": html, "highlighted": highlighted, "state": reading.arguments,
-                                        "writable": writable, "token": token, "fragment": fragment ?? ""]
+                                        "writable": writable, "token": token, "fragment": fragment ?? "", "staged": staged]
         let show = { [weak self] in
             guard let self else { return }
             Task {
@@ -125,19 +131,39 @@ final class MarkdownPreviewView: NSView, WKNavigationDelegate, NSSearchFieldDele
                     }
                 }
                 guard revision == token else { return }
-                let showDiagrams = html.contains("data-mermaid") && !hasDiagrams
-                let shown = try? await webView.callAsyncJavaScript("return EditPreview.show(payload)", arguments: ["payload": arguments],
+                if html.contains("data-mermaid"), !hasDiagrams { hasDiagrams = await install("diagrams.js") }
+                guard revision == token else { return }
+                let shown = try? await webView.callAsyncJavaScript("return await EditPreview.show(payload)", arguments: ["payload": arguments],
                                                                   in: nil, contentWorld: .page)
-                if revision == token { hasCurrentDocument = shown as? Bool == true }
-                if showDiagrams {
-                    hasDiagrams = await install("diagrams.js")
-                    if hasDiagrams, revision == token {
-                        _ = try? await webView.evaluateJavaScript("EditDiagrams.render(document.querySelector('article'))")
-                    }
+                guard revision == token else { return }
+                if let result = shown as? [String: Any], let reading = decodeReading(result["state"]) {
+                    presentedReading = reading
+                    hasCurrentDocument = true
+                    if let fragment, let found = result["fragmentFound"] as? Bool { presentedFragment = (fragment, found) }
+                } else {
+                    presentationFailed = true
                 }
             }
         }
         if isReady { show() } else { pending = show }
+    }
+
+    func waitForPreparedFrame(while isCurrent: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(10)
+        while !hasCurrentDocument {
+            guard isCurrent(), !Task.isCancelled else { throw CancellationError() }
+            guard !presentationFailed, ContinuousClock.now < deadline else { throw CocoaError(.fileReadCorruptFile) }
+            try await Task.sleep(for: .milliseconds(16))
+        }
+        // A DOM update can complete before WebKit has drawn the new document.
+        let configuration = WKSnapshotConfiguration()
+        configuration.afterScreenUpdates = true
+        _ = try await webView.takeSnapshot(configuration: configuration)
+        guard isCurrent(), !Task.isCancelled else { throw CancellationError() }
+    }
+
+    func activatePreparedFrame() {
+        webView.evaluateJavaScript("EditPreview.activate()", completionHandler: nil)
     }
 
     private func install(_ asset: String) async -> Bool {
@@ -168,6 +194,14 @@ final class MarkdownPreviewView: NSView, WKNavigationDelegate, NSSearchFieldDele
         isReady = true
         pending?()
         pending = nil
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: any Error) {
+        presentationFailed = true
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        presentationFailed = true
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {

@@ -51,6 +51,7 @@
         const article = document.querySelector('article');
         let revision = 0;
         let restoring = false;
+        let reporting = true;
         let timer;
         const post = (kind, payload = {}) => window.webkit.messageHandlers.markdown.postMessage({kind, revision, ...payload});
         const blocks = () => [...article.querySelectorAll('[data-offset]')];
@@ -66,7 +67,11 @@
         }
 
         function reportState() {
-            if (!restoring) post('state', {state: reading()});
+            if (reporting && !restoring) post('state', {state: reading()});
+        }
+
+        function requestImages() {
+            for (const image of article.querySelectorAll('[data-image]')) post('image', {index: Number(image.dataset.image)});
         }
 
         function scrollToSource(offset, adjustment) {
@@ -90,11 +95,17 @@
         }
 
         window.EditPreview = {
-            show({html, highlighted, state, writable, token, fragment}) {
+            async show({html, highlighted, state, writable, token, fragment, staged}) {
                 clearTimeout(timer);
                 restoring = true;
+                reporting = !staged;
                 revision = token;
                 article.innerHTML = html;
+                for (const link of article.querySelectorAll('a[data-target]')) {
+                    if (link.hasAttribute('data-footnote-ref')) link.title = `Footnote ${link.textContent}`;
+                    else if (link.hasAttribute('data-footnote-backref')) link.title = link.getAttribute('aria-label') || 'Back to reference';
+                    else link.title = link.dataset.target;
+                }
                 for (const table of article.querySelectorAll('table')) {
                     const wrapper = document.createElement('div');
                     wrapper.className = 'table-scroll';
@@ -111,14 +122,24 @@
                     if (typeof saved === 'boolean') element.open = saved;
                 }
                 if (window.EditMath) window.EditMath.render(article);
+                if (window.EditDiagrams) {
+                    const diagrams = window.EditDiagrams.render(article);
+                    if (staged) await diagrams;
+                }
                 scrollToSource(state.sourceOffset, state.offsetIntoBlock);
                 const destination = fragment ? jump(fragment) : null;
                 restoring = false;
                 reportState();
-                if (fragment) post('fragment', {target: fragment, found: destination !== null});
-                if (window.EditDiagrams) window.EditDiagrams.render(article);
-                for (const image of article.querySelectorAll('[data-image]')) post('image', {index: Number(image.dataset.image)});
-                return true;
+                if (reporting) {
+                    if (fragment) post('fragment', {target: fragment, found: destination !== null});
+                    requestImages();
+                }
+                return {state: reading(), fragmentFound: destination !== null};
+            },
+            activate() {
+                reporting = true;
+                reportState();
+                requestImages();
             },
             jump,
             restore(state) {

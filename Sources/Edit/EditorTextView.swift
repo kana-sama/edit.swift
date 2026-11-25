@@ -107,6 +107,13 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
     var markdownLink: ((Int, Bool) -> Bool)?
     private var pointsAtMarkdownLink = false
+    private var markdownToolTipLinks: [MarkdownDocument.Link] = []
+    private struct MarkdownToolTip: Equatable {
+        let rect: NSRect
+        let label: NSString
+    }
+    private var markdownToolTips: [MarkdownToolTip] = []
+    private var markdownToolTipTags: [NSView.ToolTipTag] = []
     var languageDefinitionLinkRange: NSRange? { languageInteractionEnabled ? languageInteraction.linkRange : nil }
     var preferredLineEnding = "\n"
     var syntaxLanguage: SyntaxLanguage = .plainText
@@ -1381,6 +1388,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             self.jjConflictDecorations?.layout()
             if let scroll = self.enclosingScrollView { self.jjDecorations?.layout(in: scroll) }
             self.renameShade?.update()
+            self.updateMarkdownToolTips()
             self.lineRefreshPending = false
             self.onFindViewportChange?()
         }
@@ -1463,7 +1471,38 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
 #if EDIT_AGENT_CHECKS
     var languageHoverWindowForCheck: NSWindow? { languageInteraction.hoverWindow }
+
+    func observeEditorUnhideForCheck(_ action: (() -> Void)?) {
+        (enclosingScrollView as? EditorScrollView)?.onUnhideForCheck = action
+    }
+
+    var markdownToolTipsForCheck: [String] { markdownToolTips.map { $0.label as String } }
 #endif
+
+    func setMarkdownToolTipLinks(_ links: [MarkdownDocument.Link]) {
+        markdownToolTipLinks = links
+        updateMarkdownToolTips()
+    }
+
+    private func updateMarkdownToolTips() {
+        var tips: [MarkdownToolTip] = []
+        if !markdownToolTipLinks.isEmpty, let manager = textLayoutManager,
+           let viewport = manager.textViewportLayoutController.viewportRange {
+            let visible = charRange(viewport, in: manager)
+            for link in markdownToolTipLinks {
+                let range = NSRange(location: link.start, length: link.end - link.start)
+                guard NSIntersectionRange(visible, range).length > 0, let label = link.toolTip, !label.isEmpty else { continue }
+                for frame in highlightRects(for: [range]) {
+                    let rect = frame.intersection(visibleRect)
+                    if !rect.isEmpty { tips.append(MarkdownToolTip(rect: rect, label: label as NSString)) }
+                }
+            }
+        }
+        guard tips != markdownToolTips else { return }
+        markdownToolTipTags.forEach(removeToolTip)
+        markdownToolTips = tips
+        markdownToolTipTags = tips.map { addToolTip($0.rect, owner: $0.label, userData: nil) }
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -1584,6 +1623,15 @@ private final class EditorScrollView: NSScrollView {
     private var preservingViewport = false
     private let leftOverscroll = EditorOverscrollBackground()
     private let rightOverscroll = EditorOverscrollBackground()
+
+    #if EDIT_AGENT_CHECKS
+    var onUnhideForCheck: (() -> Void)?
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        onUnhideForCheck?()
+    }
+    #endif
 
     override var contentInsets: NSEdgeInsets {
         get { super.contentInsets }

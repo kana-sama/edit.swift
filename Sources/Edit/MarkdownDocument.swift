@@ -1,6 +1,11 @@
 import Foundation
 import JavaScriptCore
 
+struct MarkdownLinkOpening {
+    let showsPreview: Bool
+    let fragment: String?
+}
+
 struct MarkdownViewState: Codable, Equatable, Sendable {
     struct Reading: Codable, Equatable, Sendable {
         var sourceOffset: Int
@@ -52,6 +57,12 @@ struct MarkdownDocument: Decodable, Sendable {
         let destination: Int?
         let references: [Int]?
         let note: String?
+
+        var toolTip: String? {
+            if let target { return target }
+            guard let note else { return nil }
+            return destination == nil ? "Back to reference for [^\(note)]" : "Footnote [^\(note)]"
+        }
     }
 
     struct Code: Decodable, Sendable {

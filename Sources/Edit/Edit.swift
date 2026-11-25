@@ -1067,10 +1067,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     @discardableResult
     func openFile(
         _ url: URL, allowMissing: Bool = false, in sourceDocument: DocumentWindow? = nil,
-        focusEditor: Bool = true, shouldOpen: @escaping () -> Bool = { true }
+        focusEditor: Bool = true, markdownLink: MarkdownLinkOpening? = nil, shouldOpen: @escaping () -> Bool = { true }
     ) async throws -> DocumentWindow? {
         guard let request = beginOpening(in: sourceDocument, while: shouldOpen) else { return nil }
-        return try await openFile(url, allowMissing: allowMissing, request: request, focusEditor: focusEditor)
+        return try await openFile(url, allowMissing: allowMissing, request: request, focusEditor: focusEditor, markdownLink: markdownLink)
     }
 
     private func beginOpening(in source: DocumentWindow?, while isWanted: @escaping () -> Bool) -> OpenRequest? {
@@ -1087,7 +1087,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     private func openFile(
-        _ url: URL, allowMissing: Bool, request: OpenRequest, focusEditor: Bool
+        _ url: URL, allowMissing: Bool, request: OpenRequest, focusEditor: Bool, markdownLink: MarkdownLinkOpening? = nil
     ) async throws -> DocumentWindow? {
         guard isCurrent(request, at: url) else { return nil }
         let document = request.document
@@ -1121,7 +1121,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             guard isCurrent(request, at: canonical) else { return nil }
             throw error
         }
-        guard await document.open(opened.destination(focusEditor: focusEditor, scratch: scratch), while: {
+        guard await document.open(opened.destination(focusEditor: focusEditor, scratch: scratch), markdownLink: markdownLink, while: {
             self.isCurrent(request, at: canonical)
         }) else { return nil }
         let folder = document.folderURL

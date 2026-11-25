@@ -64,6 +64,8 @@ struct SourceControlRevisionPreview: Sendable {
 
 @MainActor
 final class SourceControlRevisionBanner: NSView {
+    static let height: CGFloat = 28
+
     init(_ preview: SourceControlRevisionPreview) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
@@ -102,7 +104,7 @@ final class SourceControlRevisionBanner: NSView {
             separator.trailingAnchor.constraint(equalTo: trailingAnchor),
             separator.bottomAnchor.constraint(equalTo: bottomAnchor),
             lock.widthAnchor.constraint(equalToConstant: 11),
-            heightAnchor.constraint(equalToConstant: 28),
+            heightAnchor.constraint(equalToConstant: Self.height),
         ])
     }
 
