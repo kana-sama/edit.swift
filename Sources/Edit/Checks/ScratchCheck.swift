@@ -106,7 +106,7 @@ enum ScratchCheck {
         let rememberedFile = await app.recentFiles.lastFile(in: project)
         folderless.editor.insertText("Saved on close. ", replacementRange: NSRange(location: 0, length: 0))
         let textAtClose = folderless.editor.string
-        folderless.window.performClose(nil)
+        folderless.closeDocument()
         let deadline = ContinuousClock.now + .seconds(4)
         while (!folderless.showsEmptyFolder || folderless.isBusy) && ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(20))
@@ -114,7 +114,7 @@ enum ScratchCheck {
         try expect(folderless.showsEmptyFolder && !folderless.isBusy && folderless.scratchFile == nil
                    && folderless.window.representedURL == nil && folderless.sidebarMode == .scratches
                    && folderless.isSidebarVisible && app.documents.contains { $0 === folderless },
-                   "closing a scratch leaves its folder and Scratches sidebar open")
+                   "closing a scratch with the Close command leaves its folder and Scratches sidebar open")
         try expect(try FileBuffer.read(scratchPath).text == textAtClose, "closing a scratch flushes its edits")
         try expect(await app.recentFiles.lastFile(in: project) == rememberedFile,
                    "closing a scratch preserves the remembered project file")

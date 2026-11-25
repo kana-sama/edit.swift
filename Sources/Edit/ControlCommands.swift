@@ -32,6 +32,7 @@ struct ControlCommand {
         }
         if action == #selector(Edit.focusSelection(_:)) { return document.canFocusSelection }
         if action == #selector(Edit.exitFocus(_:)) { return document.canExitFocus }
+        if action == #selector(Edit.closeDocument(_:)) { return document.canCloseDocument }
         if action == #selector(DocumentWindow.performMarkdownTableCommand(_:)) { return document.currentMarkdownTable != nil }
         if documentOnly {
             guard document.hasTextDocument, !document.isShowingMarkdownPreview, document.window.attachedSheet == nil,
@@ -42,7 +43,6 @@ struct ControlCommand {
         if let target = item.target as? NSUserInterfaceValidations {
             return target.validateUserInterfaceItem(item)
         }
-        if action == #selector(NSWindow.performClose(_:)) { return document.canReplaceBuffer }
         if let focus = focus as? NSUserInterfaceValidations, (focus as? NSObject)?.responds(to: action) == true {
             return focus.validateUserInterfaceItem(item)
         }
@@ -67,6 +67,10 @@ struct ControlCommand {
         }
         if action == #selector(Edit.exitFocus(_:)) {
             document.exitFocus()
+            return
+        }
+        if action == #selector(Edit.closeDocument(_:)) {
+            document.closeDocument()
             return
         }
         if action == #selector(Edit.toggleMarkdownPreview(_:)) {

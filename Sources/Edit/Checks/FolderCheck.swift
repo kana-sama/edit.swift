@@ -67,15 +67,15 @@ enum FolderCheck {
         closing.editor.insertText("// autosaved while closing\n", replacementRange: NSRange(location: 0, length: 0))
         let savedText = closing.editor.string
         try expect(closing.window.isDocumentEdited, "the active document needs an autosave before closing")
-        closing.window.performClose(nil)
-        try await waitFor("the first native close shows the empty folder") { closing.showsEmptyFolder && !closing.isBusy }
+        closing.closeDocument()
+        try await waitFor("the first document close shows the empty folder") { closing.showsEmptyFolder && !closing.isBusy }
         try expect(app.documents.contains { $0 === closing } && closing.folderURL?.path == canonicalProject,
                    "closing an edited file keeps the project window open")
         let saved = try String(contentsOf: nested, encoding: .utf8)
         try expect(saved == savedText, "the first close writes the edited named document")
         let emptySession = closing.sessionDocument()
-        closing.window.performClose(nil)
-        try await waitFor("the second native close closes the folder window") { !app.documents.contains { $0 === closing } }
+        closing.closeDocument()
+        try await waitFor("the second document close closes the folder window") { !app.documents.contains { $0 === closing } }
 
         let scratch = app.makeDocument()
         _ = try await app.openFile(empty, in: scratch)

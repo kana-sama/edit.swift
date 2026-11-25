@@ -9,6 +9,7 @@ enum FilesCheck {
         let directory = temporaryRoot.appendingPathComponent("files-check-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try await checkReopeningClosedFiles(in: app, directory: directory)
+        try await checkWindowCloseButton(in: app, directory: directory)
         let file = directory.appendingPathComponent("Notes.txt")
         let other = directory.appendingPathComponent("Reference.txt")
         let initialText = "first line\r\nsecond line\r\n"
@@ -208,6 +209,10 @@ enum FilesCheck {
         let standalone = app.makeDocument()
         let menu = try resolve(NSApp.mainMenu)
         let fileMenu = try resolve(menu.item(withTitle: "File")?.submenu)
+        let closeCommand = try resolve(ControlCommand.fromMenu(menu).first { $0.title == "File: Close" })
+        let closeShortcut = try resolve(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+                                                         timestamp: 0, windowNumber: project.window.windowNumber, context: nil,
+                                                         characters: "w", charactersIgnoringModifiers: "w", isARepeat: false, keyCode: 13))
         let command = try resolve(ControlCommand.fromMenu(menu).first { $0.title == "File: Reopen Closed File" })
         try expect(command.result.shortcut == "⇧⌘T" && !command.isAvailable(in: project, focus: nil),
                    "Reopen Closed File appears in Command Mode and starts unavailable")
@@ -222,8 +227,8 @@ enum FilesCheck {
         try expect(!app.documents.contains { $0 === standalone }, "closing a standalone file closes its window")
         let selection = NSRange(location: 1, length: 3)
         project.editor.setSelectedRange(selection)
-        project.window.performClose(nil)
-        try await waitFor("closing a project file leaves the project window empty") { project.showsEmptyFolder && !project.isBusy }
+        try expect(fileMenu.performKeyEquivalent(with: closeShortcut), "Command-W invokes File → Close")
+        try await waitFor("Command-W leaves the project window empty") { project.showsEmptyFolder && !project.isBusy }
         let windowCount = app.documents.count
         try expect(fileMenu.performKeyEquivalent(with: shortcut), "Shift-Command-T invokes Reopen Closed File through the File menu")
         try await waitFor("the shortcut reopens the last closed file in its project and restores focus and selection") {
@@ -232,8 +237,10 @@ enum FilesCheck {
                 command.isAvailable(in: project, focus: nil)
         }
 
-        project.window.performClose(nil)
-        try await waitFor("the restored file can be closed again") { project.showsEmptyFolder && !project.isBusy }
+        closeCommand.run(in: project)
+        try await waitFor("File → Close from Command Mode also leaves the project window empty") {
+            project.showsEmptyFolder && !project.isBusy
+        }
         _ = try await app.openFile(replacement, in: project)
         command.run(in: project)
         try await waitFor("Command Mode reopens a project file in a separate window when its old window is occupied") {
@@ -246,6 +253,49 @@ enum FilesCheck {
             app.documents.count == windowCount + 2 && app.documents.last?.fileURL == standalonePath &&
                 app.documents.last?.folderURL == nil && !command.isAvailable(in: project, focus: nil)
         }
+    }
+
+    private static func checkWindowCloseButton(in app: Edit, directory: URL) async throws {
+        let folder = directory.appending(path: "Window Close", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let file = folder.appending(path: "Notes.txt")
+        try Data("Original\n".utf8).write(to: file)
+
+        let clean = app.makeDocument()
+        let other = app.makeDocument()
+        defer { other.window.close() }
+        clean.setFolder(folder)
+        _ = try await app.openFile(file, in: clean)
+        try resolve(clean.window.standardWindowButton(.closeButton)).performClick(nil)
+        try expect(!app.documents.contains { $0 === clean } && app.documents.contains { $0 === other },
+                   "the red close button closes the project window itself, not its file or another window")
+
+        let dirty = app.makeDocument()
+        dirty.setFolder(folder)
+        _ = try await app.openFile(file, in: dirty)
+        dirty.editor.insertText("Autosaved\n", replacementRange: NSRange(location: 0, length: 0))
+        let text = dirty.editor.string
+        let title = dirty.window.title
+        dirty.requestAutosave()
+        try resolve(dirty.window.standardWindowButton(.closeButton)).performClick(nil)
+        try expect(dirty.isBusy && dirty.window.title == title && dirty.editor.string == text && !dirty.showsEmptyFolder,
+                   "a window awaiting autosave still presents its file and title")
+        try await waitFor("the red close button closes the project window after autosave") {
+            !app.documents.contains { $0 === dirty }
+        }
+        try expect(try String(contentsOf: file, encoding: .utf8) == text && dirty.window.title == title &&
+                   !dirty.showsEmptyFolder, "close writes the file without switching to the empty folder")
+
+        let draft = app.makeDocument()
+        defer { draft.window.close() }
+        draft.setFolder(folder)
+        draft.editor.insertText("Keep this draft", replacementRange: NSRange(location: 0, length: 0))
+        try resolve(draft.window.standardWindowButton(.closeButton)).performClick(nil)
+        try expect(draft.isBusy, "the red close button runs draft protection")
+        try await waitFor("the draft close is canceled in the quiet check") { !draft.isBusy }
+        try expect(app.documents.contains { $0 === draft } && draft.editor.isEditable && draft.window.isDocumentEdited &&
+                   draft.editor.string == "Keep this draft" && draft.window.title == "Window Close — Untitled",
+                   "canceling preserves the whole project window and its unsaved draft")
     }
 
     static func checkFilePreview(in app: Edit) async throws {

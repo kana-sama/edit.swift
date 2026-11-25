@@ -410,6 +410,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         if !isAgentCheck { document.present() }
     }
 
+    @objc func closeDocument(_ sender: Any?) {
+        activeDocument?.closeDocument()
+    }
+
     @objc func openDocument(_ sender: Any?) {
         guard !isQuitting else { return }
         if let openFilePanel, openFilePanel.isOpening {
@@ -704,6 +708,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case #selector(goBack(_:)): return canNavigate(.back)
         case #selector(goForward(_:)): return canNavigate(.forward)
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
+        case #selector(closeDocument(_:)): return activeDocument?.canCloseDocument ?? false
         case #selector(showGoToFile(_:)), #selector(showCommandMode(_:)), #selector(showWorkspaceSymbols(_:)):
             return activeDocument.map { $0.window.attachedSheet == nil } ?? false
         case #selector(showLanguageModes(_:)), #selector(showDocumentSymbols(_:)):
@@ -1250,7 +1255,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         file.addCommand("Save", #selector(saveDocument(_:)), "s").target = self
         file.addCommand("Save As…", #selector(saveDocumentAs(_:)), "s", [.command, .shift]).target = self
         file.addCommand("Save as Scratch…", #selector(saveDocumentAsScratch(_:))).target = self
-        file.addCommand("Close", #selector(NSWindow.performClose(_:)), "w")
+        file.addCommand("Close", #selector(closeDocument(_:)), "w").target = self
         file.addCommand("Reopen Closed File", #selector(reopenClosedFile(_:)), "t", [.command, .shift]).target = self
 
         let edit = addMenu("Edit")

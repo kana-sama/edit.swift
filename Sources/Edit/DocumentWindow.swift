@@ -340,6 +340,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     var isBusy: Bool { activity.isBusy }
     var canReplaceBuffer: Bool { !isBusy && window.attachedSheet == nil }
+    var canCloseDocument: Bool { canReplaceBuffer && !app.isQuitting }
     var canRequestOpen: Bool { window.attachedSheet == nil && activity.acceptsOpenRequest }
     var canRestoreSession: Bool {
         folderURL == nil && displayedFileURL == nil && !sidebar.hasContent && terminalPanel == nil &&
@@ -1797,21 +1798,29 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard canReplaceBuffer, !app.isQuitting else { return false }
+        guard canCloseDocument else { return false }
+        guard window.isDocumentEdited || autosave.hasWorker || editor.hasMarkedText() else { return true }
+        requestClose(.window)
+        return false
+    }
+
+    func closeDocument() {
+        guard canCloseDocument else { return }
         if folderURL != nil {
             // Holding Command-W must not dispatch both steps of a project close.
             if let event = NSApp.currentEvent, event.type == .keyDown, event.isARepeat,
-               event.modifierFlags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "w" { return false }
+               event.modifierFlags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "w" { return }
             if !showsEmptyFolder {
-                activity.beginClose(invalidateOpenRequests: true)
-                Task { await closeBuffer(destination: .emptyFolder(focusContent: true)) }
-                return false
+                requestClose(.emptyFolder(focusContent: true))
+                return
             }
         }
-        guard window.isDocumentEdited || autosave.hasWorker else { return true }
-        activity.beginClose()
-        Task { await closeBuffer(destination: .window) }
-        return false
+        window.performClose(nil)
+    }
+
+    private func requestClose(_ destination: CloseDestination) {
+        activity.beginClose(invalidateOpenRequests: true)
+        Task { await closeBuffer(destination: destination) }
     }
 
     func newBuffer() async {
