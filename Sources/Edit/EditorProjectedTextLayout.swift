@@ -28,6 +28,10 @@ struct EditorTextRows {
         Self(range: NSRange(location: range.location + offset, length: range.length), starts: starts.map { $0 + offset })
     }
 
+    func expandingStarts(_ softBreaks: (NSRange) -> [Int]) -> Self {
+        Self(range: range, starts: starts.indices.flatMap { [starts[$0]] + softBreaks(self.range(at: $0)) })
+    }
+
     var count: Int { starts.count }
 
     func range(at row: Int) -> NSRange {
@@ -55,11 +59,13 @@ final class EditorProjectedTextLayout {
         let font: NSFont
         let paragraph: NSParagraphStyle
         let padding: CGFloat
+        let wrapWidth: CGFloat?
 
-        @MainActor init(editor: EditorTextView) {
+        @MainActor init(editor: EditorTextView, wrapsToEditor: Bool = false) {
             font = editor.font ?? EditorTextView.defaultFont
             paragraph = editor.defaultParagraphStyle ?? .default
             padding = editor.textContainer?.lineFragmentPadding ?? 0
+            wrapWidth = wrapsToEditor && editor.wrapsWords ? editor.textContainer?.size.width : nil
         }
 
         var lineHeight: CGFloat { max(1, paragraph.minimumLineHeight) }
@@ -79,13 +85,14 @@ final class EditorProjectedTextLayout {
     let manager = NSTextLayoutManager()
     let style: Style
     private let text: NSString
+    private var wrappedRows: [NSRange: EditorTextRows] = [:]
     private var lineHeight: CGFloat { style.lineHeight }
 
     init(text: String, style: Style) {
         self.text = text as NSString
         self.style = style
         let unbounded = CGFloat.greatestFiniteMagnitude
-        let container = NSTextContainer(size: NSSize(width: unbounded, height: unbounded))
+        let container = NSTextContainer(size: NSSize(width: style.wrapWidth ?? unbounded, height: unbounded))
         container.lineFragmentPadding = style.padding
         manager.textContainer = container
         content.addTextLayoutManager(manager)
@@ -95,6 +102,21 @@ final class EditorProjectedTextLayout {
                 .font: style.font, .paragraphStyle: style.paragraph, .foregroundColor: NSColor.textColor,
             ]))
         }
+    }
+
+    func displayRows(for rows: EditorTextRows) -> EditorTextRows {
+        guard style.wrapWidth != nil else { return rows }
+        if let cached = wrappedRows[rows.range] { return cached }
+        let wrapped = rows.expandingStarts { range in
+            guard let fragment = paragraphFragment(for: range) else { return [] }
+            let start = manager.offset(from: manager.documentRange.location, to: fragment.rangeInElement.location)
+            return fragment.textLineFragments.dropFirst().compactMap { line in
+                let offset = start + line.characterRange.location
+                return offset > range.location && offset < NSMaxRange(range) ? offset : nil
+            }
+        }
+        wrappedRows[rows.range] = wrapped
+        return wrapped
     }
 
     func draw(_ rows: EditorTextRows, at origin: NSPoint, dirtyRect: NSRect, in context: CGContext,
@@ -140,7 +162,7 @@ final class EditorProjectedTextLayout {
         )
         guard let insertion = selections.first?.textRanges.first?.location else { return row.range.location }
         let offset = manager.offset(from: documentStart, to: insertion)
-        let end = LineEditing.line(at: row.range.location, in: text).contentEnd
+        let end = min(NSMaxRange(row.range), LineEditing.line(at: row.range.location, in: text).contentEnd)
         return min(max(row.range.location, offset), end)
     }
 
@@ -179,12 +201,16 @@ final class EditorProjectedTextLayout {
 
     private func row(at index: Int, in rows: EditorTextRows) -> Row? {
         let range = rows.range(at: index)
-        guard range.length > 0 else { return nil }
-        guard let nativeRange = textRange(range) else { return nil }
-        manager.ensureLayout(for: nativeRange)
-        guard let fragment = manager.textLayoutFragment(for: nativeRange.location),
-              let line = fragment.textLineFragment(for: nativeRange.location, isUpstreamAffinity: false) else { return nil }
+        guard let fragment = paragraphFragment(for: range),
+              let location = manager.location(manager.documentRange.location, offsetBy: range.location),
+              let line = fragment.textLineFragment(for: location, isUpstreamAffinity: false) else { return nil }
         return Row(range: range, fragment: fragment, line: line, top: CGFloat(index) * lineHeight)
+    }
+
+    private func paragraphFragment(for range: NSRange) -> NSTextLayoutFragment? {
+        guard range.length > 0, let nativeRange = textRange(range) else { return nil }
+        manager.ensureLayout(for: nativeRange)
+        return manager.textLayoutFragment(for: nativeRange.location)
     }
 
     private func textRange(_ range: NSRange) -> NSTextRange? {

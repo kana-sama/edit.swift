@@ -47,7 +47,8 @@ final class JJInlineDiffLayout {
 
         let previousLayout = projectedLayout
         let projection = currentProjection()
-        let style = EditorProjectedTextLayout.Style(editor: editor)
+        let style = EditorProjectedTextLayout.Style(editor: editor, wrapsToEditor: true)
+        let wrappedLayout = style.wrapWidth == nil ? nil : textLayout(for: style)
         let blocks: [EditorLayoutSpacing.Block] = entries.compactMap { entry in
             let key = entry.hunk.baseRange
             guard let rows = projection?.removedRows(for: key) else { return nil }
@@ -57,7 +58,7 @@ final class JJInlineDiffLayout {
             let paragraph = source.lineRange(for: NSRange(location: offset, length: 0)).location
             return EditorLayoutSpacing.Block(id: .removed(key), paragraph: paragraph,
                                              edge: endsDocument && source.length > 0 ? .after : .before,
-                                             height: CGFloat(rows.count) * style.lineHeight)
+                                             height: CGFloat(wrappedLayout?.displayRows(for: rows).count ?? rows.count) * style.lineHeight)
         }
         editor.layoutSpacing.set(blocks, for: .diff)
         let viewport = scroll.documentVisibleRect
@@ -126,7 +127,7 @@ final class JJInlineDiffLayout {
                 let highlights = entry.hunk.removedHighlights.map {
                     NSRange(location: rows.range.location + $0.location, length: $0.length)
                 }
-                text.draw(rows, at: NSPoint(x: editor.textContainerOrigin.x, y: band.minY),
+                text.draw(text.displayRows(for: rows), at: NSPoint(x: editor.textContainerOrigin.x, y: band.minY),
                           dirtyRect: clipped, in: context, highlights: highlights,
                           highlightColor: JJDiffColors.removedDetail,
                           selection: removedSelections[key], selectionIsActive: selectionIsActive)
@@ -157,7 +158,8 @@ final class JJInlineDiffLayout {
                   let rows = currentProjection()?.removedRows(for: entry.hunk.baseRange),
                   let text = textLayout() else { continue }
             let local = NSPoint(x: point.x - editor.textContainerOrigin.x, y: point.y - rect.minY)
-            return .removed(key: entry.hunk.baseRange, offset: text.insertionOffset(at: local, in: rows) - rows.range.location)
+            return .removed(key: entry.hunk.baseRange,
+                            offset: text.insertionOffset(at: local, in: text.displayRows(for: rows)) - rows.range.location)
         }
         return nil
     }
@@ -165,7 +167,8 @@ final class JJInlineDiffLayout {
     func removedCaretRect(key: NSRange, offset: Int) -> NSRect? {
         guard let editor, let entry = entries.first(where: { $0.hunk.baseRange == key }),
               let row = entry.removedRect, let rows = currentProjection()?.removedRows(for: key),
-              let rect = textLayout()?.caretRect(at: rows.range.location + offset, in: rows) else { return nil }
+              let text = textLayout(),
+              let rect = text.caretRect(at: rows.range.location + offset, in: text.displayRows(for: rows)) else { return nil }
         return rect.offsetBy(dx: editor.textContainerOrigin.x, dy: row.minY)
     }
 
@@ -261,7 +264,7 @@ final class JJInlineDiffLayout {
 
     func textLayout(for style: EditorProjectedTextLayout.Style? = nil) -> EditorProjectedTextLayout? {
         guard let editor, let projection = currentProjection() else { return nil }
-        let style = style ?? .init(editor: editor)
+        let style = style ?? .init(editor: editor, wrapsToEditor: true)
         if let projectedLayout, projectedLayout.style == style { return projectedLayout }
         let layout = EditorProjectedTextLayout(text: projection.string, style: style)
         projectedLayout = layout

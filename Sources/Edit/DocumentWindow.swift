@@ -343,16 +343,20 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     var canReplaceBuffer: Bool { !isBusy && window.attachedSheet == nil }
     var canCloseDocument: Bool { canReplaceBuffer && !app.isQuitting }
     var canToggleWordWrap: Bool {
-        hasEditableTextDocument && !isShowingMarkdownPreview && canReplaceBuffer && !editor.hasMarkedText()
+        hasTextDocument && window.attachedSheet == nil && !app.isQuitting
+    }
+
+    private var wordWrapFileURL: URL? {
+        hasTextDocument ? fileURL ?? sourceControlRevision?.url : nil
     }
 
     func toggleWordWrap() {
         guard canToggleWordWrap else { return }
         let enabled = !editor.wrapsWords
-        editor.setWordWrap(enabled, preservingViewport: true)
-        if let fileURL {
-            app.fileWordWrap.set(enabled, for: fileURL)
-            for document in app.documents where document !== self && document.fileURL == fileURL {
+        editor.setWordWrap(enabled, preservingViewport: !scrollView.isHidden)
+        if let url = wordWrapFileURL {
+            app.fileWordWrap.set(enabled, for: url)
+            for document in app.documents where document !== self && document.wordWrapFileURL == url {
                 document.editor.setWordWrap(enabled, preservingViewport: !document.scrollView.isHidden)
             }
         }
@@ -1148,7 +1152,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             savedText = text as NSString
             self.format = format
             editor.isEditable = false
-            editor.setWordWrap(false)
+            editor.setWordWrap(app.fileWordWrap.isEnabled(for: wordWrapFileURL))
             installText(text, confirmedConflicts: analysis.conflicts)
             setConflictAnalysisMarks(analysis)
             editor.jjInlineDiff?.expandAll()

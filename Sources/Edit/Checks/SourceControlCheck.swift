@@ -19,10 +19,11 @@ enum SourceControlCheck {
         let liveFile = nested.appending(path: "Live.txt")
         let removed = folder.appending(path: "Removed.txt")
         let original = (1...18).map { "Line \($0)\n" }.joined()
+        let removedText = String(repeating: "Removed from the working change. ", count: 10) + "\n"
         try await command(executable, folder, ["git", "init", "--colocate"])
         try original.write(to: file, atomically: true, encoding: .utf8)
         try "Clean working file\n".write(to: liveFile, atomically: true, encoding: .utf8)
-        try "Removed from the working change\n".write(to: removed, atomically: true, encoding: .utf8)
+        try removedText.write(to: removed, atomically: true, encoding: .utf8)
         try await command(executable, folder, ["describe", "-m", "Base"])
         try await command(executable, folder, ["--config", #"debug.commit-timestamp="2020-01-02T03:04:05Z""#,
                                                "new", "-m", "Historical change"])
@@ -116,6 +117,24 @@ enum SourceControlCheck {
                 document.editor.jjInlineDiff?.hasExpandedHunks == true
         }
         try expect(row(named: "Removed.txt", in: tree) != nil, "keep a deleted row in the shared outline")
+        guard let wordWrap = viewMenu.item(withTitle: "Toggle Word Wrap"), let wrapAction = wordWrap.action,
+              let wrapCommand = ControlCommand.fromMenu(menu).first(where: { $0.item === wordWrap }),
+              let deletion = JJLineDiff.analyze(base: removedText, current: "", isConflicted: false, recordedConflict: nil).hunks.first,
+              let removedDiff = document.editor.jjInlineDiff else { throw Failure("find word wrap and the deleted text") }
+        try expect(app.validateUserInterfaceItem(wordWrap) && wordWrap.state == .off &&
+                   NSApp.sendAction(wrapAction, to: wordWrap.target, from: wordWrap),
+                   "toggle word wrap from View for a deleted revision file")
+        document.window.layoutIfNeeded()
+        removedDiff.layout()
+        guard let firstRemoved = removedDiff.removedCaretRect(key: deletion.baseRange, offset: 0),
+              let lastRemoved = removedDiff.removedCaretRect(key: deletion.baseRange, offset: removedText.utf16.count - 2) else {
+            throw Failure("lay out both ends of the removed line")
+        }
+        try expect(app.validateUserInterfaceItem(wordWrap) && wordWrap.state == .on &&
+                   !document.editor.isEditable && !document.scrollView.hasHorizontalScroller &&
+                   lastRemoved.minY > firstRemoved.minY,
+                   "the read-only removed line wraps into selectable rows")
+        try render(document.window)
 
         guard let historyRow = panel.graphView.revisions.firstIndex(where: { $0.subject == "Historical change" }) else {
             throw Failure("find the history row")
@@ -143,6 +162,11 @@ enum SourceControlCheck {
         try expect(viewport.width > 100 && viewport.height > 100 && !document.scrollView.isHiddenOrHasHiddenAncestor,
                    "give historical text a visible editor viewport (\(viewport), \(document.scrollView.frame))")
         try checkRevisionBanner(in: document, above: document.scrollView)
+        try expect(!document.editor.wrapsWords && wrapCommand.isAvailable(in: document, focus: document.editor),
+                   "the historical file has its own setting and offers wrap in Command Mode")
+        wrapCommand.run(in: document)
+        try expect(document.editor.wrapsWords && !document.editor.isEditable && document.editor.string == historical,
+                   "Command Mode changes the presentation of a historical file")
         if let historicalFileRow = row(named: "Tracked.txt", in: tree) {
             try expect(panel.fileTree.menu(at: historicalFileRow) == nil, "keep historical file rows free of working-copy mutations")
         }
@@ -154,9 +178,10 @@ enum SourceControlCheck {
                 } != nil
         }
         try checkRevisionBanner(in: document, above: document.contentResponder)
+        try expect(!app.validateUserInterfaceItem(wordWrap), "word wrap requires a text buffer")
         try open("Tracked.txt", in: panel.fileTree)
         try await waitFor("restore the historical text after a binary preview") {
-            !document.isShowingFilePreview && document.editor.string == historical
+            !document.isShowingFilePreview && document.editor.string == historical && document.editor.wrapsWords
         }
 
         try await command(executable, folder, ["describe", "-m", "Renamed at the terminal"])
@@ -176,7 +201,8 @@ enum SourceControlCheck {
         try await waitFor("activate a mutable change immediately and promote its open file with hunks expanded") {
             document.window.attachedSheet == nil && document.editor.isEditable &&
                 document.sourceControlRevisionBanner == nil && document.editor.string == historical &&
-                document.fileURL == FileBuffer.canonicalURL(file) && document.editor.jjInlineDiff?.hasExpandedHunks == true
+                document.fileURL == FileBuffer.canonicalURL(file) && document.editor.jjInlineDiff?.hasExpandedHunks == true &&
+                document.editor.wrapsWords
         }
         try await command(executable, folder, ["edit", previousWorking.changeID])
         try await waitFor("demote the open file to its historical revision after a terminal checkout") {
@@ -194,6 +220,8 @@ enum SourceControlCheck {
         try await waitFor("return from the revision preview to the live editor") {
             document.editor.isEditable && document.sourceControlRevisionBanner == nil && document.editor.string == working
         }
+        try expect(document.editor.wrapsWords, "working-copy and historical views use the same file setting")
+        wrapCommand.run(in: document)
         _ = try await app.openFile(liveFile, in: document)
         let beforeTyping = try await JJRepository.operation(in: workspace)
         let typedAt = ContinuousClock.now
