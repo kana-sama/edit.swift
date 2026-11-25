@@ -192,6 +192,19 @@ enum WorkspaceFindCheck {
                    peer.sessionDocument().findSettings?.scope == .workspace,
                    "workspace filters are shared by folder and the active scope belongs to the window session")
         try checkStoredFilters(root: root)
+
+        let metadataFolder = root.appending(path: "Metadata", directoryHint: .isDirectory)
+        let nested = metadataFolder.appending(path: "Nested", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        let query = "workspaceMetadataMatch"
+        try "\(query)\n".write(to: metadataFolder.appending(path: ".DS_Store"), atomically: true, encoding: .utf8)
+        try "\(query)\n\(query)\n".write(to: nested.appending(path: "Highlight.m"), atomically: true, encoding: .utf8)
+        set("", in: include)
+        set(query, in: finder)
+        try await waitFor("skip metadata without missing matches in a neighboring folder") {
+            rows(in: table).count == 2 && fieldValue("Highlight.m", in: window) && document.canPerformFind(.replaceAll)
+        }
+        try capture(window, "metadata")
     }
 
     private static func checkFields(in document: DocumentWindow, finder: FindFieldTextView, include: FindFieldTextView,

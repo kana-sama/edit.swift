@@ -225,7 +225,7 @@ enum WorkspaceFindSearch {
             if Task.isCancelled { break }
             let path = url.path
             guard path.hasPrefix(prefix), let values = try? url.resourceValues(forKeys: keys) else {
-                paths.skipDescendants()
+                if url.hasDirectoryPath { paths.skipDescendants() }
                 continue
             }
             let relative = String(path.dropFirst(prefix.count))
@@ -233,7 +233,8 @@ enum WorkspaceFindSearch {
             let inherited = rules[url.deletingLastPathComponent().path] ?? []
             let ignored = inherited.reversed().lazy.compactMap { $0.ignores(url, isDirectory: directory) }.first == true
             if metadata.contains(url.lastPathComponent) || values.isSymbolicLink == true || ignored || exclude.matches(relative) {
-                paths.skipDescendants()
+                // Calling skipDescendants on a file can skip a later directory's children.
+                if directory { paths.skipDescendants() }
                 continue
             }
             if directory {
