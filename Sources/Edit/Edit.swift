@@ -1404,6 +1404,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             try MultiCaretCheck.runComposition(in: document.editor)
             try MultiCaretCheck.checkBlink()
             document.window.close()
+            try await BracketCheck.run(in: self)
             try await checkEditorViewport()
             try await WordWrapCheck.run(in: self) { window, suffix in
                 let target = screenshot.map { URL(fileURLWithPath: $0).deletingPathExtension().path + "-\(suffix).png" }

@@ -40,6 +40,7 @@ final class JJEditorDecorations {
     private weak var nativeScroller: NSScroller?
     private var scrollerStyle: NSScroller.Style?
     private var lineStarts: [Int] = []
+    private var gutterEdits: [EditorTextChange] = []
     private var removedBlocks: [JJLineMark: EditorLayoutSpacing.ID] = [:]
     private var projectedConflictStarts: Set<Int> = []
     private(set) var marks: [JJLineMark] = []
@@ -77,8 +78,12 @@ final class JJEditorDecorations {
         trackExpiry?.cancel()
     }
 
-    func sourceDidEdit() {
+    func sourceDidEdit(_ changes: [EditorTextChange]) {
         marksMatchBuffer = false
+        if !marks.isEmpty {
+            // Changes within one batch use the same old coordinates.
+            gutterEdits.append(contentsOf: changes.reversed())
+        }
         resetWrapLayout()
     }
 
@@ -104,6 +109,7 @@ final class JJEditorDecorations {
             return $0.kind.drawingPriority < $1.kind.drawingPriority
         }
         self.lineStarts = lineStarts
+        gutterEdits.removeAll(keepingCapacity: true)
         var lastLine = 0
         lastMarkLines = self.marks.map {
             lastLine = max(lastLine, $0.lines.upperBound)
@@ -457,10 +463,19 @@ final class JJEditorDecorations {
         var high = lineStarts.count
         while low < high {
             let middle = (low + high) / 2
-            if lineStarts[middle] <= offset { low = middle + 1 }
+            if gutterOffset(for: middle) <= offset { low = middle + 1 }
             else { high = middle }
         }
         return max(0, low - 1)
+    }
+
+    private func gutterOffset(for line: Int) -> Int {
+        var offset = lineStarts[line]
+        for edit in gutterEdits {
+            if offset >= edit.range.upperBound { offset += edit.delta }
+            else if offset >= edit.range.location { offset = edit.range.location }
+        }
+        return offset
     }
 
     private func firstMarkEnding(atOrAfter line: Int) -> Int {
@@ -502,8 +517,13 @@ final class JJEditorDecorations {
     }
 
     private func laidOutLine(at line: Int, editor: EditorTextView) -> NSRect? {
-        guard lineStarts.indices.contains(line), let layout = editor.textLayoutManager,
-              let location = layout.location(layout.documentRange.location, offsetBy: lineStarts[line]),
+        guard lineStarts.indices.contains(line), let layout = editor.textLayoutManager else { return nil }
+        var offset = gutterOffset(for: line)
+        if !gutterEdits.isEmpty, let text = editor.textStorage?.mutableString {
+            // The cached mark still belongs to a source row, including when that row wraps.
+            offset = LineEditing.line(at: min(offset, text.length), in: text).start
+        }
+        guard let location = layout.location(layout.documentRange.location, offsetBy: offset),
               let fragment = layout.textLayoutFragment(for: location), fragment.state == .layoutAvailable else { return nil }
         let row = fragment.textLineFragment(for: location, isUpstreamAffinity: false)?.typographicBounds
         let frame = fragment.layoutFragmentFrame

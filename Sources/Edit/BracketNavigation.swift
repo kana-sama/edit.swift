@@ -4,14 +4,24 @@ import AppKit
 final class BracketNavigation {
     enum Command { case go, select }
 
+    private static let ordinaryText = CharacterSet.alphanumerics.union(.nonBaseCharacters)
+        .union(CharacterSet(charactersIn: "_ \t"))
+    private static let lexicalPunctuation = Set("\"'`\\/#*$<>".utf16)
+
     private weak var editor: EditorTextView?
     private var language = SyntaxLanguage.plainText
     private var scope: [NSRange]?
     private var model: BracketMatching?
     private var indexing: Task<Void, Never>?
     private var pending: (selections: [NSRange], commands: [Command])?
+    private var highlightedPairs: [Int: BracketMatching.Pair] = [:]
+    private var ordinaryRemovals: Set<NSRange> = []
     private(set) var highlightRanges: [NSRange] = []
     private(set) var highlightFrames: [NSRect] = []
+
+#if EDIT_AGENT_CHECKS
+    var beforeInstallIndexForCheck: (() async -> Void)?
+#endif
 
     init(editor: EditorTextView) { self.editor = editor }
 
@@ -26,16 +36,90 @@ final class BracketNavigation {
     }
 
     func reset() {
+        invalidateIndex()
+        ordinaryRemovals.removeAll()
+        clearHighlights()
+    }
+
+    private func invalidateIndex() {
         indexing?.cancel()
         indexing = nil
         model = nil
         pending = nil
-        clearHighlights()
     }
 
     func clearHighlights() {
+        highlightedPairs.removeAll()
         highlightRanges = []
         setHighlightFrames([])
+    }
+
+    func prepareForEdit(in ranges: [NSRange]) {
+        ordinaryRemovals.removeAll(keepingCapacity: true)
+        guard !highlightedPairs.isEmpty, let text = editor?.textStorage?.mutableString else { return }
+        for range in ranges where range.location != NSNotFound && range.length > 0 && range.upperBound <= text.length {
+            if isOrdinary(text.substring(with: range)) { ordinaryRemovals.insert(range) }
+        }
+    }
+
+    func sourceDidEdit(_ changes: [EditorTextChange], in text: NSString) {
+        invalidateIndex()
+        defer { ordinaryRemovals.removeAll(keepingCapacity: true) }
+        guard !highlightedPairs.isEmpty else { return }
+
+        // Keep the last painted pair only for edits that cannot introduce or remove
+        // a delimiter, quote or comment boundary. Navigation waits for the new index.
+        var offset = 0
+        for change in changes {
+            let range = NSRange(location: change.range.location + offset, length: change.replacementLength)
+            guard (change.range.length == 0 || ordinaryRemovals.contains(change.range)),
+                  range.length >= 0, range.location >= 0, range.upperBound <= text.length,
+                  isOrdinary(text.substring(with: range)),
+                  [range.location - 1, range.upperBound].allSatisfy({ neighbor in
+                      neighbor < 0 || neighbor >= text.length || !Self.lexicalPunctuation.contains(text.character(at: neighbor))
+                  }) else {
+                clearHighlights()
+                return
+            }
+            offset += change.delta
+        }
+        guard !changes.isEmpty else {
+            clearHighlights()
+            return
+        }
+
+        func rebaseDelimiter(_ range: NSRange) -> NSRange? {
+            var offset = 0
+            for change in changes {
+                if change.range.upperBound <= range.location { offset += change.delta }
+                else if change.range.location < range.upperBound { return nil }
+                else { break }
+            }
+            return NSRange(location: range.location + offset, length: range.length)
+        }
+
+        func rebaseCaret(_ caret: Int) -> Int {
+            var offset = 0
+            for change in changes {
+                if change.range.location > caret { break }
+                if change.range.upperBound >= caret { return change.range.location + offset + change.replacementLength }
+                offset += change.delta
+            }
+            return caret + offset
+        }
+
+        var rebased: [Int: BracketMatching.Pair] = [:]
+        for (caret, pair) in highlightedPairs {
+            if let opening = rebaseDelimiter(pair.opening), let closing = rebaseDelimiter(pair.closing) {
+                rebased[rebaseCaret(caret)] = .init(opening: opening, closing: closing)
+            }
+        }
+        highlightedPairs = rebased
+        if rebased.isEmpty { clearHighlights() }
+    }
+
+    private func isOrdinary(_ text: String) -> Bool {
+        text.unicodeScalars.allSatisfy { Self.ordinaryText.contains($0) || (language == .zig && $0 == ".") }
     }
 
     func refresh() {
@@ -47,13 +131,17 @@ final class BracketNavigation {
             clearHighlights()
             return
         }
-        guard let model else {
+        let carets = selections.filter { $0.length == 0 }.map(\.location)
+        if let model {
+            highlightedPairs.removeAll(keepingCapacity: true)
+            for caret in carets { highlightedPairs[caret] = model.pair(at: caret) }
+        } else {
+            let active = Set(carets)
+            highlightedPairs = highlightedPairs.filter { active.contains($0.key) }
             if (editor.textStorage?.length ?? 0) > 0 { indexText(in: editor, immediate: false) }
-            return
         }
         var ranges: Set<NSRange> = []
-        for selection in selections where selection.length == 0 {
-            guard let pair = model.pair(at: selection.location) else { continue }
+        for pair in highlightedPairs.values {
             ranges.insert(pair.opening)
             ranges.insert(pair.closing)
         }
@@ -115,6 +203,9 @@ final class BracketNavigation {
                                        embeddedLanguages: context.embeddedLanguages.map { ($0.range, $0.language) })
             }
             let result = await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
+#if EDIT_AGENT_CHECKS
+            await self?.beforeInstallIndexForCheck?()
+#endif
             guard !Task.isCancelled, let self, let editor else { return }
             self.indexing = nil
             guard editor.string == source, editor.focusRanges == scope else {

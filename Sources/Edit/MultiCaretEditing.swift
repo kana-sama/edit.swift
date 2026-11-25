@@ -1,5 +1,12 @@
 import Foundation
 
+struct EditorTextChange {
+    let range: NSRange
+    let delta: Int
+
+    var replacementLength: Int { range.length + delta }
+}
+
 struct EditorTextEdit {
     var range: NSRange
     var text: String

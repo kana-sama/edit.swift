@@ -289,7 +289,9 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         guard focusSession == nil || focusEditsAllowed || replacementString == nil else { return false }
         guard replacementString == nil || allowsProjectedChange(in: affectedCharRange) else { return false }
         if let replacementString, !allowsConflictEdit(in: affectedCharRange, replacement: replacementString) { return false }
-        return super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
+        let allowed = super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
+        if allowed && replacementString != nil { bracketNavigation.prepareForEdit(in: [affectedCharRange]) }
+        return allowed
     }
 
     override func shouldChangeText(inRanges affectedRanges: [NSValue], replacementStrings: [String]?) -> Bool {
@@ -308,7 +310,9 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
                       allowsConflictEdit(in: $0.0.rangeValue, replacement: $0.1)
                   }) else { return false }
         }
-        return super.shouldChangeText(inRanges: affectedRanges, replacementStrings: replacementStrings)
+        let allowed = super.shouldChangeText(inRanges: affectedRanges, replacementStrings: replacementStrings)
+        if allowed && replacementStrings != nil { bracketNavigation.prepareForEdit(in: affectedRanges.map(\.rangeValue)) }
+        return allowed
     }
 
     private func allowsConflictEdit(in range: NSRange, replacement: String) -> Bool {
@@ -1297,6 +1301,12 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     @objc private func storageDidEdit(_ notification: Notification) {
         guard let storage = notification.object as? NSTextStorage, storage.editedMask.contains(.editedCharacters) else { return }
+        let delta = storage.changeInLength
+        let edited = storage.editedRange
+        let changes = applyingTextEdits?.map { EditorTextChange(range: $0.range, delta: $0.lengthChange) }
+            ?? (edited.location != NSNotFound && edited.length >= delta
+                ? [EditorTextChange(range: NSRange(location: edited.location, length: edited.length - delta), delta: delta)] : [])
+        bracketNavigation.sourceDidEdit(changes, in: storage.mutableString)
         let affectedColors = syntaxHighlighting?.storageDidEdit(storage, replacements: applyingTextEdits)
         defer {
             if let affectedColors { syntaxHighlighting?.repaintEditedColors(in: affectedColors, storage: storage) }
@@ -1312,7 +1322,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             requestLineRefresh()
             return
         }
-        jjDecorations?.sourceDidEdit()
+        jjDecorations?.sourceDidEdit(changes)
         // Both preedit and its rollback are presentation. Subscribers still hold
         // the baseline onto which the real replacements will be applied.
         guard !updatingComposition else { return }
@@ -1350,10 +1360,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         }
         resetSelectionHistory()
         multiCaret.restartBlink = true
-        bracketNavigation.reset()
         occurrenceHighlighting.contentChanged()
         // The text and the custom insertion indicators must reach the same display pass.
         refreshCaretDecorations()
+        bracketNavigation.refresh()
         requestLineRefresh()
         onTextChange?()
     }

@@ -1820,7 +1820,6 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     @objc private func undoOrRedo(_ notification: Notification) {
         guard editor.renameRange == nil, let manager = notification.object as? UndoManager,
               manager === editor.undoManager else { return }
-        editor.bracketNavigation.reset()
         editor.occurrenceHighlighting.contentChanged()
         editor.requestLineRefresh()
         textDidChange()
