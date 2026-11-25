@@ -2,6 +2,8 @@ import AppKit
 
 @MainActor
 final class SyntaxHighlighting {
+    private static let bareWordSeparators = Set(" \t\n\r\u{0B}\u{0C}!%&()*+,-./:;<=>?[]^{|}~".utf16)
+
     private struct SemanticRequest: Equatable {
         let session: ObjectIdentifier
         let generation: Int
@@ -372,18 +374,23 @@ final class SyntaxHighlighting {
         var editIndex = 0
         var offset = 0
         for span in self.spans(overlapping: visible, from: spans) {
-            while editIndex < edits.count, edits[editIndex].range.upperBound < span.start {
-                offset += edits[editIndex].delta
+            var editedAtStart = false
+            while editIndex < edits.count, edits[editIndex].range.upperBound <= span.start {
+                let edit = edits[editIndex]
+                editedAtStart = edit.range.upperBound == span.start
+                offset += edit.delta
                 editIndex += 1
             }
+            let next = editIndex < edits.count ? edits[editIndex] : nil
+            if let next, next.range.location < span.end { continue }
             let shifted = SyntaxSpan(start: span.start + offset, end: span.end + offset,
                                      color: span.color, provisional: span.provisional)
-            if editIndex == edits.count || edits[editIndex].range.location > span.end {
+            let editedAtEnd = next?.range.location == span.end
+            if !editedAtStart && !editedAtEnd {
                 mapped.append(shifted)
-            } else {
-                let edit = edits[editIndex]
-                if edit.range.length == 0, edit.range.location == span.end, let typingText,
-                   let carried = colorAfterAppending(to: shifted, length: edit.delta, in: typingText) {
+            } else if let typingText {
+                let appended = if let next, editedAtEnd, next.range.length == 0 { next.delta } else { 0 }
+                if let carried = colorAfterBoundaryEdit(to: shifted, appended: appended, in: typingText) {
                     mapped.append(carried)
                 }
             }
@@ -391,7 +398,7 @@ final class SyntaxHighlighting {
         return mapped
     }
 
-    private func colorAfterAppending(to span: SyntaxSpan, length: Int, in text: NSString) -> SyntaxSpan? {
+    private func colorAfterBoundaryEdit(to span: SyntaxSpan, appended: Int, in text: NSString) -> SyntaxSpan? {
         switch span.color {
         case .plain, .keyword, .control, .type, .function, .property: break
         default: return nil
@@ -402,24 +409,23 @@ final class SyntaxHighlighting {
              .solidity, .swift, .typescript, .tsx, .zig: break
         default: return nil
         }
-        let end = span.end + length
-        guard length > 0, span.start < span.end, end <= text.length else { return nil }
+        guard span.start >= 0, span.start < span.end, span.end + appended <= text.length else { return nil }
 
         func isLetter(_ unit: UInt16) -> Bool { (65...90).contains(unit) || (97...122).contains(unit) || unit == 95 }
         func isWord(_ unit: UInt16) -> Bool { isLetter(unit) || (48...57).contains(unit) }
-        func mayContinueWord(at offset: Int) -> Bool {
-            guard offset >= 0, offset < text.length else { return false }
-            let unit = text.character(at: offset)
-            return isWord(unit) || unit >= 128 || unit == 36 || unit == 64
+        func isWordBoundary(at offset: Int) -> Bool {
+            guard offset >= 0, offset < text.length else { return true }
+            return Self.bareWordSeparators.contains(text.character(at: offset))
         }
 
-        guard isLetter(text.character(at: span.start)),
-              !mayContinueWord(at: span.start - 1), !mayContinueWord(at: end),
+        guard isLetter(text.character(at: span.start)), isWordBoundary(at: span.start - 1),
               (span.start..<span.end).allSatisfy({ isWord(text.character(at: $0)) }) else { return nil }
-        // A dot after a bare identifier is a new token. A digit can extend the word,
-        // but a dot after a numeric literal is outside this fast path.
-        if length == 1, text.character(at: span.end) == 46 { return span }
-        guard (span.end..<end).allSatisfy({ isWord(text.character(at: $0)) }) else { return nil }
+        if isWordBoundary(at: span.end) { return span }
+        // If deleting a separator joins words, the old ranges are no longer tokens.
+        // When typing an identifier continuation, carry its color on the new whole range.
+        let end = span.end + appended
+        guard appended > 0, isWordBoundary(at: end),
+              (span.end..<end).allSatisfy({ isWord(text.character(at: $0)) }) else { return nil }
         return SyntaxSpan(start: span.start, end: end, color: span.color, provisional: true)
     }
 

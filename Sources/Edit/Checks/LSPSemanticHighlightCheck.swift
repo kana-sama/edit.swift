@@ -310,6 +310,60 @@ enum LSPSemanticHighlightCheck {
         try require((editor.string as NSString).substring(with: joined) == "returnerror", "join the two keywords")
         try capture(window, "whole-token-joined")
         try requireGlyphColors(in: joined, document: document, expected: .plain)
+
+        let returnKeyword = NSRange(location: joined.location, length: 6)
+        document.toggleHighlighting(.lsp)
+
+        func setLine(_ content: String) async throws {
+            let text = editor.string as NSString
+            let line = LineEditing.line(at: returnKeyword.location, in: text)
+            let range = NSRange(location: returnKeyword.location, length: line.contentEnd - returnKeyword.location)
+            editor.insertText(content, replacementRange: range)
+            try await wait("prepare the separator fixture \(content)") {
+                !highlighting.needsFullSemanticTokensForCheck && highlighting.treeSpansForCheck.contains {
+                    $0.range == returnKeyword && $0.color == .keyword && !$0.provisional
+                }
+            }
+        }
+
+        func checkSeparatorEdit(_ name: String, result: String, words: [NSRange], edit: () -> Void) async throws {
+            holdTree = true
+            holdSemantic = true
+            edit()
+            let actual = (editor.string as NSString).substring(with: NSRange(location: returnKeyword.location,
+                                                                             length: result.utf16.count + 1))
+            try require(actual == result + "\n", "edit the expected line for \(name)")
+            func verify(_ phase: String) throws {
+                for word in words { try requireGlyphColors(in: word, document: document, expected: .keyword) }
+                try capture(window, "separator-\(name)-\(phase)")
+            }
+            try verify("first")
+            try await wait("hold both results after \(name)") { heldTree > 0 && heldSemantic > 0 }
+            try verify("held")
+            holdTree = false
+            try await wait("install Tree-sitter after \(name)") { heldTree == 0 }
+            try verify("tree")
+            holdSemantic = false
+            try await wait("install ZLS after \(name)") { !highlighting.needsFullSemanticTokensForCheck }
+            try verify("settled")
+        }
+
+        try await setLine("return")
+        try await checkSeparatorEdit("insert-space", result: "return ", words: [returnKeyword]) {
+            editor.insertText(" ", replacementRange: NSRange(location: NSNotFound, length: 0))
+        }
+        try await checkSeparatorEdit("delete-space", result: "return", words: [returnKeyword]) {
+            editor.deleteBackward(nil)
+        }
+        try await setLine("return error.")
+        try await checkSeparatorEdit("delete-dot", result: "return error", words: [returnKeyword, keyword]) {
+            editor.deleteBackward(nil)
+        }
+        try await setLine("return  error")
+        editor.setSelectedRange(NSRange(location: returnKeyword.upperBound + 2, length: 0))
+        try await checkSeparatorEdit("delete-leading-space", result: "return error", words: [returnKeyword, keyword]) {
+            editor.deleteBackward(nil)
+        }
     }
 
     private static func requireGlyphColors(in range: NSRange, document: DocumentWindow, expected: SyntaxColor) throws {
