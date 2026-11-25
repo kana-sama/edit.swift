@@ -18,7 +18,7 @@ let package = Package(
             dependencies: ["EditSyntaxABI", .product(name: "SwiftTerm", package: "SwiftTerm")],
             path: "Sources/Edit",
             exclude: agentChecks ? [] : ["Checks"],
-            resources: [.copy("Resources/Seti")],
+            resources: [.copy("Resources/Seti"), .copy("Resources/LanguageServerLogos")],
             swiftSettings: agentChecks ? [.define("EDIT_AGENT_CHECKS")] : []
         ),
     ]

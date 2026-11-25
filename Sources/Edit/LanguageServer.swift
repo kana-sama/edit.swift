@@ -17,13 +17,6 @@ enum LanguageServer: CaseIterable, Sendable {
         }
     }
 
-    var iconIdentifier: String {
-        switch self {
-        case .zig: "zig"
-        case .sourceKit: "swift"
-        }
-    }
-
     init?(language: SyntaxLanguage) {
         switch language {
         case .zig: self = .zig

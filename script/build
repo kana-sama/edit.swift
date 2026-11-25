@@ -42,6 +42,7 @@ build_fingerprint() {
         /usr/bin/stat -L -f '%i:%m:%c:%z' "$compiler" "$sdk/SDKSettings.plist" &&
         /usr/bin/shasum -a 256 "${sources[@]}" Package.swift Package.resolved resources/Info.plist resources/Edit.icns \
             script/build script/build-syntax script/app-bundle.sh script/publish-app.c Sources/Edit/Resources/Seti/* \
+            Sources/Edit/Resources/LanguageServerLogos/* \
             Sources/EditSyntax/Highlight.m Sources/EditSyntaxABI/* resources/syntax/sources.tar.gz \
             resources/syntax/queries/*.scm resources/syntax/licenses/* resources/syntax/README.md \
             resources/markdown/assets.tar.gz resources/markdown/preview.html
@@ -106,6 +107,7 @@ cp "$swiftpm_scratch/checkouts/SwiftTerm/LICENSE" "$app/Contents/Resources/Swift
 cp resources/Info.plist "$app/Contents/Info.plist"
 cp resources/Edit.icns "$app/Contents/Resources/"
 cp -R Sources/Edit/Resources/Seti "$app/Contents/Resources/"
+cp -R Sources/Edit/Resources/LanguageServerLogos "$app/Contents/Resources/"
 if [[ "$bundle_name" == 'Edit Agent' ]]; then
     /usr/libexec/PlistBuddy \
         -c 'Set :CFBundleIdentifier dev.edit-swift.Edit.agent' \

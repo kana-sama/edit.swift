@@ -75,7 +75,7 @@ final class LanguageServerStatusPopover: NSObject {
                 row = ServerPopoverRow(server: server) { [perform] in perform(server, $0) }
                 rows[server] = row
             }
-            return row.update(status, appearance: button.effectiveAppearance)
+            return row.update(status)
         }
         let summary = (["Language Servers"] + descriptions).joined(separator: ", ")
         button.setAccessibilityLabel(summary)
@@ -119,10 +119,32 @@ final class LanguageServerStatusPopover: NSObject {
 
 @MainActor
 private final class ServerPopoverRow: NSView {
+    private static let logos: [LanguageServer: NSImage] = {
+        let folder = "LanguageServerLogos"
+        let bundled = Bundle.main.resourceURL?.appending(path: folder, directoryHint: .isDirectory)
+        let directory: URL?
+        #if SWIFT_PACKAGE
+        if let bundled, FileManager.default.fileExists(atPath: bundled.path) {
+            directory = bundled
+        } else {
+            directory = Bundle.module.resourceURL?.appending(path: folder, directoryHint: .isDirectory)
+        }
+        #else
+        directory = bundled
+        #endif
+        guard let directory else { return [:] }
+        return Dictionary(uniqueKeysWithValues: LanguageServer.allCases.compactMap { server in
+            let file = directory.appending(path: "\(server.executable).svg", directoryHint: .notDirectory)
+            guard let image = NSImage(contentsOf: file), image.size.width > 0, image.size.height > 0 else { return nil }
+            return (server, image)
+        })
+    }()
+    private static let logoAspectRatio = logos[.zig].map { $0.size.width / $0.size.height } ?? 1
+
     private let server: LanguageServer
     private let name: NSTextField
     private let detail = NSTextField(labelWithString: "")
-    private let icon = NSImageView()
+    private let logo = NSImageView()
     private let toggleControl = ServerActionButton()
     private let restartControl = ServerActionButton()
     private let perform: (LanguageServerCommand) -> Void
@@ -142,7 +164,7 @@ private final class ServerPopoverRow: NSView {
 
     required init?(coder: NSCoder) { nil }
 
-    func update(_ status: LanguageServerStatusPopover.ServerStatus, appearance: NSAppearance) -> String {
+    func update(_ status: LanguageServerStatusPopover.ServerStatus) -> String {
         let state = status.state
         let progress = status.progress
         let work = progress.map { activity in
@@ -162,7 +184,6 @@ private final class ServerPopoverRow: NSView {
         name.toolTip = statusDescription
         detail.toolTip = statusDescription
         detail.setAccessibilityLabel(statusDescription)
-        icon.image = FileIcons.image(for: nil, appearance: appearance, language: server.iconIdentifier)
 
         let command: LanguageServerCommand = [.starting, .ready, .stopping].contains(state) ? .stop : .start
         if command != toggleCommand {
@@ -207,8 +228,15 @@ private final class ServerPopoverRow: NSView {
         identity.orientation = .vertical
         identity.alignment = .leading
         identity.spacing = 1
-        icon.imageScaling = .scaleProportionallyDown
-        icon.setAccessibilityElement(false)
+        logo.identifier = .init("Edit.LanguageServer.logo")
+        logo.image = Self.logos[server]
+        logo.imageAlignment = .alignCenter
+        logo.imageScaling = .scaleProportionallyUpOrDown
+        for orientation in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
+            logo.setContentHuggingPriority(.fittingSizeCompression, for: orientation)
+            logo.setContentCompressionResistancePriority(.fittingSizeCompression, for: orientation)
+        }
+        logo.setAccessibilityElement(false)
 
         setAccessibilityLabel(server.name)
         let actionBackground = NSBox()
@@ -218,17 +246,18 @@ private final class ServerPopoverRow: NSView {
         actionBackground.cornerRadius = 8
         actionBackground.fillColor = .labelColor.withAlphaComponent(0.08)
         actionBackground.setAccessibilityElement(false)
-        for view in [icon, identity, actionBackground, toggleControl, restartControl] {
+        for view in [logo, identity, actionBackground, toggleControl, restartControl] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 265),
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 16),
-            icon.heightAnchor.constraint(equalTo: icon.widthAnchor),
-            identity.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
+            // Keep the label and control space independent of the logo width.
+            widthAnchor.constraint(equalTo: logo.widthAnchor, constant: 249),
+            logo.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            logo.centerYAnchor.constraint(equalTo: identity.centerYAnchor),
+            logo.heightAnchor.constraint(equalTo: identity.heightAnchor),
+            logo.widthAnchor.constraint(equalTo: logo.heightAnchor, multiplier: Self.logoAspectRatio),
+            identity.leadingAnchor.constraint(equalTo: logo.trailingAnchor, constant: 6),
             identity.centerYAnchor.constraint(equalTo: centerYAnchor),
             identity.trailingAnchor.constraint(lessThanOrEqualTo: toggleControl.leadingAnchor, constant: -12),
             toggleControl.centerYAnchor.constraint(equalTo: restartControl.centerYAnchor),
