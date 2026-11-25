@@ -256,13 +256,17 @@ enum SourceKitLSPCheck {
             row.subviews.first(where: { $0.identifier?.rawValue == "Edit.LanguageServer.logo" }) as? NSImageView
         }
         let identities = rows.compactMap { $0.subviews.compactMap { $0 as? NSStackView }.first }
-        guard logos.count == 2, identities.count == 2, let zigLogo = logos[0].image, logos[1].image != nil else {
+        guard logos.count == 2, identities.count == 2, let zigLogo = logos[0].image, let sourceKitLogo = logos[1].image else {
             throw Failure(detail: "load the ZLS wordmark and the paired SourceKit-LSP artwork")
         }
         let slot = logos[0].frame
+        let pairSlot = logos[1].frame
         let logoHeight = slot.width * zigLogo.size.height / zigLogo.size.width
-        try require(slot.size == logos[1].frame.size && abs(slot.height - logoHeight) < 1 &&
+        let pairHeight = pairSlot.width * sourceKitLogo.size.height / sourceKitLogo.size.width
+        try require(slot.width == pairSlot.width && abs(slot.height - logoHeight) < 1 &&
+                    abs(pairSlot.height - pairHeight) < 1 && pairSlot.height > slot.height &&
                     abs(slot.midY - identities[0].frame.midY) < 0.5 &&
+                    abs(pairSlot.midY - identities[1].frame.midY) < 0.5 &&
                     identities[0].frame.minX == identities[1].frame.minX,
                     "preserve logo proportions and align both server labels (logos \(logos.map(\.frame)), labels \(identities.map(\.frame)))")
         guard let toggle = rows[1].subviews.first(where: { $0.identifier?.rawValue == "Edit.LanguageServer.toggle" }) as? NSButton,

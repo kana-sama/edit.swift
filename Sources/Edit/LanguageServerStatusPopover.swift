@@ -156,8 +156,6 @@ private final class ServerPopoverRow: NSView {
         }
         return logos
     }()
-    private static let logoAspectRatio = logos[.zig].map { $0.size.width / $0.size.height } ?? 1
-
     private let server: LanguageServer
     private let name: NSTextField
     private let detail = NSTextField(labelWithString: "")
@@ -247,6 +245,7 @@ private final class ServerPopoverRow: NSView {
         identity.spacing = 1
         logo.identifier = .init("Edit.LanguageServer.logo")
         logo.image = Self.logos[server]
+        let logoAspectRatio = (logo.image ?? Self.logos[.zig]).map { $0.size.width / $0.size.height } ?? 1
         logo.imageAlignment = .alignCenter
         logo.imageScaling = .scaleProportionallyUpOrDown
         for orientation in [NSLayoutConstraint.Orientation.horizontal, .vertical] {
@@ -273,7 +272,7 @@ private final class ServerPopoverRow: NSView {
             logo.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             logo.centerYAnchor.constraint(equalTo: identity.centerYAnchor),
             logo.widthAnchor.constraint(equalToConstant: 48),
-            logo.heightAnchor.constraint(equalTo: logo.widthAnchor, multiplier: 1 / Self.logoAspectRatio),
+            logo.heightAnchor.constraint(equalTo: logo.widthAnchor, multiplier: 1 / logoAspectRatio),
             identity.leadingAnchor.constraint(equalTo: logo.trailingAnchor, constant: 6),
             identity.centerYAnchor.constraint(equalTo: centerYAnchor),
             identity.trailingAnchor.constraint(lessThanOrEqualTo: toggleControl.leadingAnchor, constant: -12),
