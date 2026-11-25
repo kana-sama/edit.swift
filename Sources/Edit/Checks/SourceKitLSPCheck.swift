@@ -256,17 +256,15 @@ enum SourceKitLSPCheck {
             row.subviews.first(where: { $0.identifier?.rawValue == "Edit.LanguageServer.logo" }) as? NSImageView
         }
         let identities = rows.compactMap { $0.subviews.compactMap { $0 as? NSStackView }.first }
-        guard logos.count == 2, identities.count == 2, let zigLogo = logos[0].image, let sourceKitLogo = logos[1].image else {
+        guard logos.count == 2, identities.count == 2, let zigLogo = logos[0].image, logos[1].image != nil else {
             throw Failure(detail: "load the ZLS wordmark and the paired SourceKit-LSP artwork")
         }
         let slot = logos[0].frame
-        let logoHeight = 48 * zigLogo.size.height / zigLogo.size.width
-        try require(slot.size == logos[1].frame.size && abs(slot.width - 48) < 0.5 && abs(slot.height - logoHeight) < 1 &&
+        let logoHeight = slot.width * zigLogo.size.height / zigLogo.size.width
+        try require(slot.size == logos[1].frame.size && abs(slot.height - logoHeight) < 1 &&
                     abs(slot.midY - identities[0].frame.midY) < 0.5 &&
-                    identities[0].frame.minX == identities[1].frame.minX &&
-                    logos.allSatisfy { $0.imageAlignment == .alignCenter && $0.imageScaling == .scaleProportionallyUpOrDown } &&
-                    sourceKitLogo.size.width > 2 * sourceKitLogo.size.height,
-                    "fit both logos in the 48-point column (logos \(logos.map(\.frame)), labels \(identities.map(\.frame)))")
+                    identities[0].frame.minX == identities[1].frame.minX,
+                    "preserve logo proportions and align both server labels (logos \(logos.map(\.frame)), labels \(identities.map(\.frame)))")
         guard let toggle = rows[1].subviews.first(where: { $0.identifier?.rawValue == "Edit.LanguageServer.toggle" }) as? NSButton,
               let restart = rows[1].subviews.first(where: { $0.identifier?.rawValue == "Edit.LanguageServer.restart" }) as? NSButton
         else { throw Failure(detail: "find the Swift controls") }

@@ -6,4 +6,6 @@ Use AppKit and Foundation APIs for platform behavior. Keep AppKit state and view
 
 Validate external data and fallible operations at their boundaries. Use Swift types, `throws`, and explicit invariants to keep the rest of the code simple. Route errors to the caller or UI that can act on them. Explain non-obvious constraints or tradeoffs in comments near the relevant code.
 
-Use SwiftPM test targets under `Tests/`. Include focused tests when a behavior contract, boundary case, or regression needs coverage. Prefer assertions on observable behavior over snapshots of internal state. Control completion and time explicitly in asynchronous tests. Run native checks for behavior that depends on AppKit events or rendering.
+Add a test when a requirement or concrete regression needs lasting coverage and existing checks would miss the failure. Exercise the cheapest boundary that exhibits it. Put SwiftPM tests under `Tests/`. Use the native checks for AppKit input or rendering, and control completion and time explicitly in asynchronous tests.
+
+Keep ordinary styling values in the view. Remove assertions that only repeat an icon width, inset, color, or AppKit setter when touching that case. A geometry check earns its place when it catches a failure such as clipped text at the minimum window width, an inaccessible click target, or a title jumping during a transition. Assert the observable outcome across the relevant states.

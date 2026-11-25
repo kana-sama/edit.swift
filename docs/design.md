@@ -62,7 +62,7 @@ File Preview keeps the current document and title together until the next previe
 
 ## Verifying native interactions
 
-Before implementing or changing an interaction, identify the closest system app and the equivalent view on the supported macOS release. Use Finder list view for a file tree. Follow the system app for layout, controls, feedback, keyboard access, and state transitions. Record any owner-requested exception in the feature specification.
+When an interaction introduces an unresolved question about macOS behavior, identify the closest system app and equivalent view on the supported release. Reuse the documented behavior for established interactions. Use Finder list view for a file tree. Follow the system app for layout, controls, feedback, keyboard access, and state transitions. Record any owner-requested exception in the feature specification.
 
 1. Start with Apple’s user guide for the actual commands, then consult the Human Interface Guidelines and the framework documentation for the matching controls. Use an existing system control wherever it supplies the behavior.
 2. Reproduce the action in the system app with disposable data. Exercise the keyboard, the relevant mouse or context-menu path, and the sequence immediately after the action. For selection and focus, record where focus starts and ends, which rows are selected, and what the next key does. Include relevant boundaries such as the first and last row, an empty list, multiple selection, cancellation, and undo or redo. For scrolling, resizing, and animation, observe intermediate frames as well as the settled state.

@@ -6,7 +6,7 @@ Read this before building or launching for agent checks or changing the build an
 
 - `./script/build` builds the development app incrementally. Use `./script/build release` for an optimized build.
 - `./script/run` launches the interactive app for owner use and review.
-- `./script/check [screenshot-path]` checks that the native window renders without activating the app. Pass a path to capture the window.
+- `./script/check [screenshot-path]` runs the general native suite without activating the app. Pass a path to capture the window. Live language-server scenarios have separate `--only` commands below.
 - `./script/install [directory]` installs the release app bundle and leaves bundles with unrelated identifiers untouched.
 
 SwiftPM builds and links the Edit executable and the pinned SwiftTerm dependency. The build script packages the resulting product and resources in the signed application bundle. The pinned Tree-sitter runtime and grammars build into a native library cached per SDK, compiler and target. The same C header defines the entry point used by the library and the editor. The build reuses SwiftPM checkouts and products and the syntax library in `.local/swift-sdk`, and reuses the signed bundle when its inputs match. Use the default debug build during development and an optimized build when measuring runtime or launch performance.
@@ -36,7 +36,7 @@ Use separate fresh directories via `EDIT_BUILD_DIR` and `EDIT_SDK_CACHE_DIR` to 
 - `./script/check --only lsp-c-family [screenshot-path]` uses SourceKit-LSP and a compilation database to check definitions, hover, and symbols in C, C++, Objective-C, and Objective-C++. It also checks inline C rename and changing an open file’s language mode within the same server session. The optional PNG shows the first Objective-C++ frame, and `-pending.png` shows the Objective-C file while the transition is held.
 - `./script/check --only worktree` checks the outline and its file operations, including Undo and Redo.
 
-These commands use the same hidden agent app and disposable profile as the full check. Reuse the build directory so repeated checks of the same code launch the existing bundle. On a timing-sensitive regression, capture the failing state during the focused run. Run the full suite on the final patch.
+Select a command using [verification and completion](workflow.md#verification-and-completion). Each command builds or reuses the hidden agent app and runs with a disposable profile. Reuse the build directory across runs. On a timing-sensitive regression, capture the failing state during the relevant check.
 
 ## Quiet agent checks
 

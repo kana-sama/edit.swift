@@ -4,9 +4,9 @@ A direct request to implement a defined change authorizes specification updates,
 
 ## Focused corrections
 
-Apply an explicitly requested, clear correction directly and check the affected scenario. Update the feature specification or shared design when the correction changes a documented decision. Review and verify the affected behavior before recording the correction. See [Correcting a feature](jj-workflow.md#correcting-a-feature).
+Apply a clear correction in the current checkout. Update the existing specification or shared design if the request changes a decision recorded there. Reuse the agreed design and context on follow-up iterations. See [Correcting a feature](jj-workflow.md#correcting-a-feature).
 
-For a narrow fix, start with the failing interaction and the code that owns it. Run the smallest relevant check first. For drawing and geometry bugs, verify that the test reaches the failing state and inspect one native capture or measurement before choosing a rendering change. If a check fails, determine whether the fixture reached the intended state before revising the implementation.
+For a reported bug, start with the failing interaction and the code that owns it. For clipping, flicker, or another rendering defect, inspect the failing frame or measure the affected view. If a check fails, establish that its fixture reached the intended state before revising the implementation.
 
 Reuse the checkout, build directory, and test bundle across iterations. Keep the first feedback loop to a few minutes. If two attempts leave the cause unclear, isolate the failing interaction or gather a diagnostic that distinguishes the remaining explanations before trying another implementation. See [focused checks](agent-testing.md#focused-checks).
 
@@ -40,19 +40,29 @@ If repeated attempts uncover a concrete blocker or the implementation calls for 
 
 Update the [LSP checklist](lsp-checklist.md) in the same change when adding or changing an LSP capability or updating a supported language server.
 
-Review the diff against the request and the specification. Choose checks for the actual change. Review text and links for documentation, exercise affected scenarios for behavior, inspect the native UI for visual changes, and measure the reported workload for performance changes. Run the focused check during iteration and the full `./script/check` on the final code before recording the change. Build the review bundle once the last code change has passed. Each completed revision must build, run, and satisfy the specifications it contains.
+Review the diff against the request. Select the smallest check that could expose a plausible failure in the affected path. The acceptance scenarios in feature specifications describe available coverage. Choose the ones the change can affect.
+
+| Change | Sufficient verification |
+| --- | --- |
+| Documentation only | Read the changed text and verify affected references or commands. |
+| Local appearance value, such as an icon width or inset | Confirm the value reaches the intended view and build the review app once. Inspect the affected view if its rendered result is uncertain or the owner asks to see it. |
+| A specific interaction, bug, or performance issue | Exercise the affected path and its relevant boundary. Use an isolated native view for rendering or input and measure the reported workload for performance. Run a live service when its behavior is part of the change. |
+| A new feature | Exercise its acceptance scenario through the normal entry point, including the relevant failure or recovery path. Apply the broader checks below if it changes shared behavior. |
+| Shared changes with broad or uncertain impact, or high-risk changes such as save/recovery, shared async state, or build infrastructure | Exercise the failure modes directly and run the full `./script/check` on the final code. Include any relevant scenario the suite does not exercise. |
+
+Expand verification if inspection reveals additional affected callers or a failure the chosen check cannot explain. Honor explicit requests for checks or captures. Reuse a passing result while its inputs remain the same. If a failure is confirmed unrelated, report it and finish the relevant verification. Retry when there is a specific cause to test.
 
 Check the final history and current working state after any amend or squash. Verify affected descendants when rewriting a mutable ancestor. Report the changed behavior, relevant commit or change ID, checks completed, and any specific limitation that remains.
 
 ## Launch command
 
-When reporting a completed feature or change to the runnable app, handing off an implementation for review, or asking the owner to test, build the app first. Retain the concrete `Edit.app` bundle in a revision-specific or review-specific location so later builds leave it available. The bundle may live outside the current checkout. Verify that it contains the intended revision.
+For runnable changes, retain a normal `Edit.app` built from the intended sources. To build directly into the handoff location, set `EDIT_BUILD_DIR` to a review-specific directory and reuse the SDK cache. An existing signed review bundle can serve again when its build inputs match. Keep it available after subsequent builds.
 
 Give a copy-paste `open` command that launches the retained bundle directly. Use a `bash` code block with an absolute, quoted `.app` path and no prompt or placeholders. Give a separate command for each review target. When asking the owner to test, state what to check.
 
 ## README maintenance
 
-Keep the README focused on setup and the build, launch, check, and install commands. Update it when those instructions change. Document feature behavior in the owning specification.
+Keep the README focused on setup and the build, launch, check, and install commands. Update it when those instructions change. Document feature behavior in the owning specification. Keep screenshots and feature lists out of the README and project documentation.
 
 ## Maintaining these instructions
 

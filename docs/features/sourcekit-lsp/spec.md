@@ -17,7 +17,7 @@ Use [SourceKit-LSP](https://github.com/swiftlang/sourcekit-lsp) in Edit for Swif
 
 ## Acceptance
 
-Run `./script/check --only lsp-swift [screenshot-path]` against the installed Swift toolchain. A disposable Swift package exercises server discovery, indexing progress, cross-file navigation and references, hover, semantic highlights, both symbol searches, and a rename across open and closed files. The mixed-language fixture checks the two popover rows and independent Swift stop, start, and restart with unsaved text. Run the Zig LSP and progress checks for regressions.
+`./script/check --only lsp-swift [screenshot-path]` exercises server discovery, indexing progress, cross-file navigation and references, hover, semantic highlights, both symbol searches, and rename across open and closed files in a disposable Swift package. The mixed-language fixture checks the two popover rows and independent Swift stop, start, and restart with unsaved text. The Zig and progress checks cover changes to shared session behavior and progress reporting respectively.
 
 Run `./script/check --only lsp-c-family [screenshot-path]` for a C-family folder with a compilation database. Check that all four modes use the same server and resolve real definitions, hover, and document symbols. The check also covers loose-source discovery, C rename, and synchronization after a manual mode change.
 
