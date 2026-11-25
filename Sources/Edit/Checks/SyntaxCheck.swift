@@ -430,6 +430,7 @@ enum SyntaxCheck {
         }
         let source = zigSource as NSString
         let coloredTokens: [(String, SyntaxColor)] = [
+            ("@import", .function),
             ("Record", .type), ("KnownTuple", .type), ("Explicit", .type), ("Options", .type), ("Variant", .type), ("Faults", .type),
             ("Declared", .type), ("Missing", .type), ("f80", .type), ("c_char", .type), ("ByteSlice", .type),
             ("TypeParam", .type), ("u0", .type), ("...", .type),
@@ -448,7 +449,7 @@ enum SyntaxCheck {
         guard zigSpans.contains(where: { $0.start == standaloneFrame.location && $0.end == standaloneFrame.upperBound && $0.color == .type }) else {
             throw Failure("Expected the standalone Zig anyframe type color.")
         }
-        for name in ["std", "@import", "MAX_SIZE", "Counter", "Member", "size", "looseTag", "obj.c_char", "Tuple", "TupleItem",
+        for name in ["std", "MAX_SIZE", "Counter", "Member", "size", "looseTag", "obj.c_char", "Tuple", "TupleItem",
                      #"@"quoted\nname""#, "usingnamespace", "async", "await", "declare", "obj", "InputType", "callee",
                      "callback", "unresolved", "UnknownType", "unknownSlice", "claimedType"] {
             let token = source.range(of: name)

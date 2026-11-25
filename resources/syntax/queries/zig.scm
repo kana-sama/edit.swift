@@ -11,6 +11,9 @@
 
 (parameter "..." @type.builtin)
 
+; Built-in function names use the same color as ZLS builtin tokens.
+(builtin_identifier) @function.builtin
+
 ; Color a single const binding whose initializer has a syntactically known type role.
 ((variable_declaration
    . "const" . (identifier) @type type: (_)?
