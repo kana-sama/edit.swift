@@ -5,6 +5,7 @@ import Synchronization
 
 struct LSPDocument: Sendable {
     let url: URL?
+    let language: SyntaxLanguage?
     let text: String
     let revision: Int
 }
@@ -337,7 +338,7 @@ final class LanguageServerConnection: @unchecked Sendable {
             guard location.url.isFileURL, location.range.start.line >= 0, location.range.start.character >= 0,
                   location.range.start <= location.range.end else { return nil }
             let url: URL
-            if server == .swift {
+            if server == .sourceKit {
                 if let cached = canonicalURLs[location.url] {
                     url = cached
                 } else {
@@ -442,13 +443,13 @@ final class LanguageServerConnection: @unchecked Sendable {
             return
         }
         let previous = document
-        if previous?.url != snapshot.url, capabilities.openClose {
+        if previous?.url != snapshot.url || previous?.language != snapshot.language, capabilities.openClose {
             if let previousURL = previous?.url {
                 try notify("textDocument/didClose", ["textDocument": ["uri": previousURL.absoluteString]])
                 if dropsClosedFilesFromWorkspace { workspaceSymbolsNeedRefresh = true }
             }
-            if let url = snapshot.url {
-                try notify("textDocument/didOpen", ["textDocument": ["uri": url.absoluteString, "languageId": server.languageID,
+            if let url = snapshot.url, let language = snapshot.language {
+                try notify("textDocument/didOpen", ["textDocument": ["uri": url.absoluteString, "languageId": language.rawValue,
                                                                    "version": snapshot.revision, "text": snapshot.text]])
             }
         } else if let url = snapshot.url, let previous, capabilities.change != .none,

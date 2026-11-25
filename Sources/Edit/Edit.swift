@@ -1464,6 +1464,13 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 let file = URL(fileURLWithPath: screenshot).deletingPathExtension().path + "-" + suffix + ".png"
                 try self.captureCheckView(view, screenshot: file)
             }
+        case "lsp-c-family":
+            try await SourceKitLSPCheck.checkCFamily(in: self, document: document) { window, suffix in
+                let target = screenshot.flatMap { path in
+                    suffix.map { URL(fileURLWithPath: path).deletingPathExtension().path + "-\($0).png" } ?? path
+                }
+                try checkWindow(window, screenshot: target)
+            }
         case "worktree" where screenshot == nil:
             try await WorktreeCheck.run(in: self)
         default:

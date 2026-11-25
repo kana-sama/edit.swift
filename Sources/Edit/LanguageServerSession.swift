@@ -55,7 +55,7 @@ final class LanguageServerSession {
     private var isServerReady: Bool { canControl && phase == .ready }
     private var isReady: Bool { isServerReady && document.url != nil }
     private var phase = State.stopped
-    private var document = LSPDocument(url: nil, text: "", revision: 0)
+    private var document = LSPDocument(url: nil, language: nil, text: "", revision: 0)
     private struct Scope: Equatable, Sendable {
         let directory: URL
         let searchesParentProjects: Bool
@@ -78,16 +78,17 @@ final class LanguageServerSession {
     }
 
     /// A non-nil URL denotes an eligible named buffer for this server.
-    func setDocument(url: URL?, folder: URL?, searchesParentProjects: Bool, text: String) {
+    func setDocument(url: URL?, language: SyntaxLanguage?, folder: URL?, searchesParentProjects: Bool, text: String) {
         let url = url?.standardizedFileURL
         let scope = folder.map { Scope(directory: $0.standardizedFileURL, searchesParentProjects: searchesParentProjects) }
         let scopeChanged = scope != self.scope
-        guard url != document.url || scopeChanged else {
+        let urlChanged = url != document.url
+        guard urlChanged || language != document.language || scopeChanged else {
             updateText(text)
             return
         }
         self.scope = scope
-        document = LSPDocument(url: url, text: url == nil ? "" : text, revision: revision + 1)
+        document = LSPDocument(url: url, language: language, text: url == nil ? "" : text, revision: revision + 1)
         sync?.cancel()
         sync = nil
         if scopeChanged {
@@ -99,7 +100,7 @@ final class LanguageServerSession {
                 }
             }
         }
-        if !scopeChanged, url == nil, recognizedScope == scope, rootLookup == nil {
+        if !scopeChanged, (!urlChanged || url == nil), recognizedScope == scope, rootLookup == nil {
             connection?.updateDocument(document)
             onStateChange?()
             return
@@ -138,7 +139,7 @@ final class LanguageServerSession {
 
     func updateText(_ text: String) {
         guard let url = document.url, !text.utf8.elementsEqual(document.text.utf8) else { return }
-        document = LSPDocument(url: url, text: text, revision: revision + 1)
+        document = LSPDocument(url: url, language: document.language, text: text, revision: revision + 1)
         guard isReady, sync == nil else { return }
         sync = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(35)) } catch { return }
@@ -173,7 +174,7 @@ final class LanguageServerSession {
         monitor = nil
         sync?.cancel()
         sync = nil
-        document = LSPDocument(url: nil, text: "", revision: revision + 1)
+        document = LSPDocument(url: nil, language: nil, text: "", revision: revision + 1)
         root = nil
         replaceConnection(startingAt: nil)
     }
@@ -324,9 +325,9 @@ final class LanguageServerSession {
             let capabilities = try await connection.start()
             guard !Task.isCancelled, self.generation == generation, self.connection === connection else { return }
             self.capabilities = capabilities
-            if server == .swift {
+            if server == .sourceKit {
                 indexMonitor = FileSystemEvents(directory: root) { [weak connection] events in
-                    connection?.updateWatchedFiles(LanguageServer.swift.indexChanges(events, in: root))
+                    connection?.updateWatchedFiles(LanguageServer.sourceKit.indexChanges(events, in: root))
                 }
             }
             if rootLookup == nil { connection.updateDocument(document) }
@@ -365,10 +366,10 @@ final class LanguageServerSession {
         if getppid() == 1, let loginPath = await loginShellPATH() { environment["PATH"] = loginPath }
         guard !Task.isCancelled else { return nil }
         if let path = environment["PATH"], let executable = executable(in: path, named: server.executable),
-           server != .swift || executable.path != "/usr/bin/sourcekit-lsp" {
+           server != .sourceKit || executable.path != "/usr/bin/sourcekit-lsp" {
             return Launch(executable: executable, environment: environment)
         }
-        if server == .swift,
+        if server == .sourceKit,
            let result = try? await JJCommand.run(URL(fileURLWithPath: "/usr/bin/xcrun"),
                                                 arguments: ["--find", server.executable], in: root,
                                                 limit: 8_192, timeout: 3),

@@ -5,21 +5,21 @@ extension LanguageServer {
     private var manifests: [String] {
         switch self {
         case .zig: ["build.zig", "build.zig.zon"]
-        case .swift: ["Package.swift", "buildServer.json", "compile_commands.json", "compile_flags.txt"]
+        case .sourceKit: ["Package.swift", "buildServer.json", "compile_commands.json", "compile_flags.txt"]
         }
     }
 
     func projectRoot(in directory: URL, activeFile: URL?, previousRoot: URL?, searchesParents: Bool) -> URL? {
-        let folder = if self == .swift {
+        let folder = if self == .sourceKit {
             URL(filePath: FileBuffer.canonicalURL(directory).path, directoryHint: .isDirectory)
         } else {
             directory.resolvingSymlinksInPath().standardizedFileURL
         }
         let active = activeFile.map { file in
-            self == .swift ? FileBuffer.canonicalURL(file) : file.resolvingSymlinksInPath().standardizedFileURL
+            self == .sourceKit ? FileBuffer.canonicalURL(file) : file.resolvingSymlinksInPath().standardizedFileURL
         }
         if let file = active,
-           isSource(file), contains(file, in: folder), FileManager.default.fileExists(atPath: file.path) {
+           contains(file, in: folder), FileManager.default.fileExists(atPath: file.path) {
             return nearestManifest(from: file.deletingLastPathComponent(), within: searchesParents ? nil : folder) ?? folder
         }
         if searchesParents, let parent = nearestManifest(from: folder, within: nil) { return parent }
@@ -100,11 +100,7 @@ extension LanguageServer {
     }
 
     private func isSource(_ file: URL) -> Bool {
-        let suffix = file.pathExtension.lowercased()
-        switch self {
-        case .zig: return suffix == "zig" || suffix == "zon"
-        case .swift: return suffix == "swift"
-        }
+        LanguageServer(language: .detected(at: file)) == self
     }
 
     private func contains(_ url: URL, in folder: URL) -> Bool {

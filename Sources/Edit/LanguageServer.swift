@@ -1,33 +1,33 @@
 import Foundation
 
 enum LanguageServer: CaseIterable, Sendable {
-    case zig, swift
+    case zig, sourceKit
 
     var name: String {
         switch self {
         case .zig: "ZLS"
-        case .swift: "SourceKit-LSP"
+        case .sourceKit: "SourceKit-LSP"
         }
     }
 
     var executable: String {
         switch self {
         case .zig: "zls"
-        case .swift: "sourcekit-lsp"
+        case .sourceKit: "sourcekit-lsp"
         }
     }
 
-    var languageID: String {
+    var iconIdentifier: String {
         switch self {
         case .zig: "zig"
-        case .swift: "swift"
+        case .sourceKit: "swift"
         }
     }
 
-    init?(language: SyntaxLanguage?) {
+    init?(language: SyntaxLanguage) {
         switch language {
         case .zig: self = .zig
-        case .swift: self = .swift
+        case .swift, .c, .cpp, .objectiveC, .objectiveCPP: self = .sourceKit
         default: return nil
         }
     }

@@ -25,6 +25,7 @@ DECLARE(json);
 DECLARE(lua);
 DECLARE(markdown);
 DECLARE(markdown_inline);
+DECLARE(objcpp);
 DECLARE(python);
 DECLARE(ruby);
 DECLARE(rust);
@@ -49,7 +50,8 @@ static const struct Grammar grammars[] = {
     {"css", tree_sitter_css}, {"erlang", tree_sitter_erlang}, {"go", tree_sitter_go},
     {"html", tree_sitter_html}, {"javascript", tree_sitter_tsx}, {"javascript-jsx", tree_sitter_tsx},
     {"json", tree_sitter_json}, {"lua", tree_sitter_lua}, {"markdown", tree_sitter_markdown},
-    {"markdown-inline", tree_sitter_markdown_inline}, {"python", tree_sitter_python},
+    {"markdown-inline", tree_sitter_markdown_inline}, {"objective-c", tree_sitter_objcpp},
+    {"objective-cpp", tree_sitter_objcpp}, {"python", tree_sitter_python},
     {"ruby", tree_sitter_ruby}, {"rust", tree_sitter_rust}, {"shell", tree_sitter_bash},
     {"solidity", tree_sitter_solidity}, {"swift", tree_sitter_swift}, {"toml", tree_sitter_toml},
     {"typescript", tree_sitter_typescript}, {"tsx", tree_sitter_tsx}, {"yaml", tree_sitter_yaml},
@@ -65,6 +67,8 @@ static const char *grammarName(NSString *name) {
     NSDictionary<NSString *, NSString *> *aliases = @{
         @"js": @"javascript", @"cjs": @"javascript", @"mjs": @"javascript", @"jsx": @"javascript-jsx",
         @"cpp": @"cpp", @"c++": @"cpp", @"cc": @"cpp", @"cxx": @"cpp",
+        @"objc": @"objective-c", @"m": @"objective-c", @"objective-c++": @"objective-cpp",
+        @"objcpp": @"objective-cpp", @"mm": @"objective-cpp",
         @"rs": @"rust", @"py": @"python", @"rb": @"ruby", @"md": @"markdown",
         @"sh": @"shell", @"bash": @"shell", @"zsh": @"shell", @"shell-script": @"shell",
         @"ts": @"typescript", @"cts": @"typescript", @"mts": @"typescript", @"yml": @"yaml",
@@ -203,7 +207,7 @@ static NSString *injectedLanguage(Input *input, const TSQuery *query, TSQueryMat
 
 static bool runGrammar(Input input, const char *name, NSString *directory, uint32_t offset, int depth, const Preview *preview);
 
-static const TSQuery *loadQuery(const TSLanguage *language, NSString *path) {
+static const TSQuery *loadQuery(const TSLanguage *language, NSString *path, NSArray<NSString *> *basePaths) {
     static NSMutableDictionary<NSString *, id> *queries;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ queries = [NSMutableDictionary dictionary]; });
@@ -211,6 +215,17 @@ static const TSQuery *loadQuery(const TSLanguage *language, NSString *path) {
         id cached = queries[path];
         if (cached) return cached == NSNull.null ? NULL : [cached pointerValue];
         NSData *data = [NSData dataWithContentsOfFile:path];
+        if (data && basePaths.count) {
+            NSMutableData *combined = [NSMutableData data];
+            for (NSString *basePath in basePaths) {
+                NSData *base = [NSData dataWithContentsOfFile:basePath];
+                if (!base) { combined = nil; break; }
+                [combined appendData:base];
+                [combined appendBytes:"\n" length:1];
+            }
+            [combined appendData:data];
+            data = combined;
+        }
         TSQuery *query = NULL;
         if (data && data.length <= UINT32_MAX) {
             uint32_t errorOffset;
@@ -229,7 +244,7 @@ static bool bracketTextNode(const char *type, bool interpolation) {
     if (strcmp(type, "string") == 0) return !interpolation;
     static const char *const ignored[] = {
         "comment", "line_comment", "block_comment", "multiline_comment", "js_comment", "html_comment", "shebang",
-        "string_literal", "interpreted_string_literal", "raw_string_literal", "char_literal", "rune_literal",
+        "string_literal", "objc_string_literal", "interpreted_string_literal", "raw_string_literal", "char_literal", "rune_literal",
         "char_lit", "character", "system_lib_string", "hex_string_literal", "unicode_string_literal",
         "yul_string_literal", "yul_hex_string_literal", "string_value", "single_quote_scalar", "double_quote_scalar",
         "block_scalar", "multi_string", "raw_string", "ansi_c_string", "multiline_string",
@@ -478,8 +493,17 @@ static bool runGrammar(Input input, const char *name, NSString *directory, uint3
     if (!language || cancelled(&input)) return false;
     const TSQuery *query = NULL;
     if (input.highlight) {
-        NSString *queryPath = [directory stringByAppendingPathComponent:[@(name) stringByAppendingString:@".scm"]];
-        query = loadQuery(language, queryPath);
+        bool isObjectiveC = language == tree_sitter_objcpp();
+        NSString *filename = isObjectiveC ? @"objective-c.scm" : [@(name) stringByAppendingString:@".scm"];
+        NSString *queryPath = [directory stringByAppendingPathComponent:filename];
+        NSArray<NSString *> *basePaths = nil;
+        if (isObjectiveC) {
+            basePaths = @[[directory stringByAppendingPathComponent:@"c.scm"],
+                          [directory stringByAppendingPathComponent:@"cpp-common.scm"]];
+        } else if (strcmp(name, "cpp") == 0) {
+            basePaths = @[[directory stringByAppendingPathComponent:@"cpp-common.scm"]];
+        }
+        query = loadQuery(language, queryPath, basePaths);
         if (!query && !input.bracket) return false;
     }
     // Only preview and full highlighting can revisit the same injection within an analysis.
@@ -512,7 +536,7 @@ static bool runGrammar(Input input, const char *name, NSString *directory, uint3
         if (depth < 4 && !cancelled(&input) &&
             (strcmp(name, "markdown") == 0 || strcmp(name, "markdown-inline") == 0 || strcmp(name, "html") == 0)) {
             NSString *injectionPath = [directory stringByAppendingPathComponent:[@(name) stringByAppendingString:@"-injections.scm"]];
-            injections = loadQuery(language, injectionPath);
+            injections = loadQuery(language, injectionPath, nil);
         }
         if (query) {
             if (preview && !cancelled(&input)) {

@@ -42,13 +42,13 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     private unowned let document: DocumentWindow
     private unowned let app: Edit
     private let zig = LanguageServerSession(server: .zig)
-    private let swift = LanguageServerSession(server: .swift)
-    private var sessions: [LanguageServerSession] { [zig, swift] }
+    private let sourceKit = LanguageServerSession(server: .sourceKit)
+    private var sessions: [LanguageServerSession] { [zig, sourceKit] }
     var workspaceSessions: [LanguageServerSession] { sessions.filter(\.supportsWorkspaceSymbols) }
     var session: LanguageServerSession {
         switch sourceServer {
         case .zig: zig
-        case .swift: swift
+        case .sourceKit: sourceKit
         case nil: workspaceSessions.first ?? sessions.first(where: \.isEligible) ?? zig
         }
     }
@@ -62,7 +62,8 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     var statusIndicatorForCheck: LanguageServerStatusPopover.Indicator? { status.indicator }
 #endif
     private var sourceURL: URL?
-    private var sourceServer: LanguageServer?
+    private var sourceLanguage: SyntaxLanguage?
+    private var sourceServer: LanguageServer? { sourceLanguage.flatMap(LanguageServer.init(language:)) }
     private var sourceFolder: URL?
     private var searchesParentProjects = false
     private var navigationTask: Task<Void, Never>?
@@ -97,18 +98,20 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
 
     func updateDocument() {
         guard !isClosed, !app.isQuitting else { return }
-        let server = document.hasEditableTextDocument && document.fileURL != nil
-            ? LanguageServer(language: document.resolvedSyntaxLanguage) : nil
-        let url = server == nil ? nil : document.fileURL
+        let language = document.resolvedSyntaxLanguage
+        let server = LanguageServer(language: language)
+        let url = document.hasEditableTextDocument && server != nil ? document.fileURL : nil
+        let sourceLanguage = url == nil ? nil : language
         let folder = document.folderURL ?? document.displayedFileURL?.deletingLastPathComponent()
         let inferRoot = document.folderURL == nil
-        guard sourceURL != url || sourceServer != server || sourceFolder != folder || searchesParentProjects != inferRoot else {
+        guard sourceURL != url || self.sourceLanguage != sourceLanguage || sourceFolder != folder
+            || searchesParentProjects != inferRoot else {
             documentTextChanged()
             return
         }
         symbolRename.cancel()
         sourceURL = url
-        sourceServer = server
+        self.sourceLanguage = sourceLanguage
         sourceFolder = folder
         searchesParentProjects = inferRoot
         cancelLookup()
@@ -116,6 +119,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         let text = url == nil ? "" : document.textWithConflictPrefixes
         for session in sessions {
             session.setDocument(url: session.server == sourceServer ? url : nil,
+                                language: session.server == sourceServer ? sourceLanguage : nil,
                                 folder: folder, searchesParentProjects: inferRoot, text: text)
         }
         stateChanged()
@@ -134,8 +138,8 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
 
     func workspaceSymbols(query: String) async throws -> [LSPSymbol] {
         async let zigResult = workspaceSymbolResult(in: zig, query: query)
-        async let swiftResult = workspaceSymbolResult(in: swift, query: query)
-        let results = await [zigResult, swiftResult].compactMap { $0 }
+        async let sourceKitResult = workspaceSymbolResult(in: sourceKit, query: query)
+        let results = await [zigResult, sourceKitResult].compactMap { $0 }
         try Task.checkCancellation()
         var matches: [[LSPSymbol]] = []
         var firstError: Error?
@@ -207,7 +211,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     }
 
     private func perform(_ command: LanguageServerCommand, for server: LanguageServer) {
-        let target = server == .zig ? zig : swift
+        let target = server == .zig ? zig : sourceKit
         guard canPerform(command, in: target) else { return }
         if command != .start, target === session {
             navigationID &+= 1

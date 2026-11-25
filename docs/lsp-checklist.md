@@ -2,7 +2,7 @@
 
 ## Support by Language Server
 
-✓ works in Edit. A blank cell means the server supports the method and Edit could add it. ✗ means the server does not support the method for Zig or Swift, respectively. Implemented methods come first, then implementation candidates, then methods unavailable on both servers.
+✓ works in Edit. A blank cell means the server supports the method and Edit could add it. ✗ means the server does not support the method. The SourceKit-LSP column describes Swift. C-family support uses clangd and can expose different methods. Implemented methods come first, then implementation candidates, then methods unavailable on both servers.
 
 Checked November 25, 2026 against ZLS 0.17.0 and SourceKit-LSP bundled with Apple Swift 6.4 (swiftlang-6.4.0.33.1). Some methods depend on client capabilities, server settings or project indexing. The table covers [LSP 3.18][lsp] editor features and the messages that enable them. It is a catalog of options for Edit.
 
@@ -109,6 +109,7 @@ ZLS 0.17.0 exposes these capabilities through standard methods and ZLS-specific 
 ## SourceKit-LSP
 
 - [x] Discover SwiftPM, build-server and compilation-database projects and use a SourceKit-LSP toolchain from PATH or `xcrun`. [Edit specification](features/sourcekit-lsp/spec.md#discovery-and-controls)
+- [x] Route Swift, C, C++, Objective-C, and Objective-C++ buffers to SourceKit-LSP with their respective language IDs. Discover loose C-family sources and retain the server when switching modes in the same project. [Edit specification](features/sourcekit-lsp/spec.md#discovery-and-controls)
 - [x] Keep Swift function argument labels when renaming a function’s base name. [Edit specification](features/sourcekit-lsp/spec.md#commands)
 - [ ] Open virtual Swift module interfaces and macro expansions (`workspace/getReferenceDocument`). [Reference documents][swift-reference-documents]
 - [ ] Show Swift DocC documentation and its structured content (`textDocument/doccDocumentation`). [DocC request][swift-docc]

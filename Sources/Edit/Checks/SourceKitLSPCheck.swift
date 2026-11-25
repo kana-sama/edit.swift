@@ -7,6 +7,121 @@ enum SourceKitLSPCheck {
         var errorDescription: String? { "SourceKit-LSP check: \(detail)" }
     }
 
+    static func checkCFamily(in app: Edit, document: DocumentWindow, capture: (NSWindow, String?) throws -> Void) async throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "C family \(UUID().uuidString)", directoryHint: .isDirectory)
+        let root = FileBuffer.canonicalURL(folder)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {
+            document.window.close()
+            try? FileManager.default.removeItem(at: root)
+        }
+        let samples: [(String, SyntaxLanguage, String)] = [
+            ("Sample.c", .c, "int entry(void) { int fixtureValue = 7; return fixtureValue; }\n"),
+            ("Sample.cpp", .cpp, "namespace demo { constexpr int fixtureValue = 7; }\nint entry() { return demo::fixtureValue; }\n"),
+            ("Sample.m", .objectiveC, """
+                __attribute__((objc_root_class))
+                @interface Widget
+                + (int)fixtureValue;
+                @end
+                int entry(void) { return [Widget fixtureValue]; }
+                """),
+            ("Sample.mm", .objectiveCPP, """
+                __attribute__((objc_root_class))
+                @interface Widget
+                + (int)value;
+                @end
+                namespace demo {
+                    template <typename T> T fixtureValue(T value) { return value; }
+                }
+                int entry() { return demo::fixtureValue([Widget value]); }
+                """),
+        ]
+        var commands: [[String: Any]] = []
+        for (name, _, text) in samples {
+            let file = root.appending(path: name)
+            try text.write(to: file, atomically: true, encoding: .utf8)
+            commands.append(["file": file.path, "directory": root.path, "arguments": ["/usr/bin/clang", "-c", file.path]])
+        }
+        let looseRoot = LanguageServer.sourceKit.projectRoot(in: root, activeFile: nil, previousRoot: nil, searchesParents: false)
+        try require(looseRoot?.path == root.path,
+                    "discover loose C-family sources without a Swift file or build manifest")
+        try JSONSerialization.data(withJSONObject: commands).write(to: root.appending(path: "compile_commands.json"))
+        document.setFolder(root)
+
+        let lsp = document.languageFeatures
+        var generation: Int?
+        for (name, mode, text) in samples {
+            let file = root.appending(path: name)
+            if mode == .objectiveCPP {
+                let window = document.window
+                let outgoingTitle = window.title
+                let outgoingText = document.editor.string
+                let (pending, release) = AsyncStream<Void>.makeStream()
+                var staged = false
+                document.beforeInstallFileForCheck = { incoming in
+                    guard incoming.url == file else { return }
+                    staged = true
+                    for await _ in pending { break }
+                }
+                let opening = Task { try await app.openFile(file, in: document) }
+                defer {
+                    document.beforeInstallFileForCheck = nil
+                    release.finish()
+                    opening.cancel()
+                }
+                try await wait("hold the Objective-C++ source before installation") { staged }
+                try require(window.title == outgoingTitle && document.editor.string == outgoingText,
+                            "keep the previous Objective-C file and title while Objective-C++ is pending")
+                try capture(window, "pending")
+                release.finish()
+                try require(try await opening.value === document, "open \(name)")
+                try require(window.title.hasSuffix(name) && document.editor.string == text,
+                            "show the Objective-C++ text and title together in the first frame")
+                try capture(window, nil)
+            } else {
+                try require(try await app.openFile(file, in: document) === document, "open \(name)")
+            }
+            let session = lsp.session
+            try require(document.resolvedSyntaxLanguage == mode && session.server == .sourceKit, "route \(name) to SourceKit-LSP")
+            try await wait("initialize SourceKit-LSP for \(name)") { session.supportsDefinition }
+            try require(session.workspaceRoot?.path == root.path, "use the compilation database for \(name)")
+            try require(generation == nil || generation == session.generation, "reuse SourceKit-LSP across C-family modes")
+            generation = session.generation
+
+            let use = (text as NSString).range(of: "fixtureValue", options: .backwards)
+            let declaration = (text as NSString).range(of: "fixtureValue")
+            let offset = use.location + 2
+            let index = LSPTextIndex(text)
+            try await wait("find the \(name) definition") {
+                let results = try? await session.definition(at: offset)
+                return results?.contains { $0.url == file && index.nsRange($0.range)?.location == declaration.location } == true
+            }
+            let hover = await lsp.hover(at: offset, word: use)
+            try require(hover?.text.contains("fixtureValue") == true, "show the \(name) hover")
+            let symbols = try await session.documentSymbols()
+            try require(symbols.contains(where: { $0.name == "entry" }), "show the \(name) document symbols")
+            if mode == .c {
+                let editor = document.editor
+                document.window.makeFirstResponder(editor)
+                editor.setCaretSelections([NSRange(location: offset, length: 0)], record: false)
+                try require(editor.onRenameSymbol?() == true, "start inline C rename")
+                try await wait("select the C identifier") { editor.renameRange == use }
+                editor.insertText("newValue", replacementRange: editor.selectedRange())
+                editor.onSubmitSymbolRename?()
+                try await wait("rename both C occurrences") {
+                    editor.renameRange == nil && editor.string == text.replacingOccurrences(of: "fixtureValue", with: "newValue")
+                }
+                let revision = session.revision
+                document.setSyntaxLanguage(.cpp)
+                try require(session.revision != revision && session.generation == generation,
+                            "resynchronize the same file when its language mode changes")
+                let renamed = (editor.string as NSString).range(of: "newValue", options: .backwards)
+                let updatedHover = await lsp.hover(at: renamed.location + 2, word: renamed)
+                try require(updatedHover?.text.contains("newValue") == true, "synchronize unsaved text after changing mode")
+            }
+        }
+    }
+
     static func run(in app: Edit, document: DocumentWindow, capture: (NSView, String) throws -> Void) async throws {
         let folder = FileManager.default.temporaryDirectory.appending(path: "Swift fixture \(UUID().uuidString)", directoryHint: .isDirectory)
         let root = FileBuffer.canonicalURL(folder)
@@ -51,7 +166,7 @@ enum SourceKitLSPCheck {
         document.setFolder(root)
         try require(try await app.openFile(main, in: document) === document, "open the Swift source")
         let swift = lsp.session
-        try require(swift.server == .swift, "route Swift buffers to SourceKit-LSP")
+        try require(swift.server == .sourceKit, "route Swift buffers to SourceKit-LSP")
         var sawProgress = false
         let updateProgress = swift.onProgressChange
         swift.onProgressChange = {

@@ -349,6 +349,11 @@ enum SyntaxCheck {
             (.markdown, "Text <!-- closed -->\n\n# Visible\n", "# Visible", .markup),
             (.markdown, "Code `<!-- literal`\n\n# Visible\n", "# Visible", .markup),
             (.markdown, "```text\n<!-- literal\n```\n\n# Visible\n", "# Visible", .markup),
+            (.markdown, "```objective-c++\n@interface Widget\n@end\n```\n", "@interface", .keyword),
+            (.objectiveC, "@interface Widget\n- (void)update:(id)value;\n@end\n", "update", .function),
+            (.objectiveC, "id title(void) { return @\"Edit\"; }", "@\"Edit\"", .string),
+            (.objectiveCPP, "namespace ui { template <typename T> class Box {}; }\n@interface Widget\n@end\n", "template", .keyword),
+            (.objectiveCPP, "namespace ui { int run() { return [Widget count]; } }", "count", .function),
             (.python, "def greet():\n    return 1\n", "greet", .function),
             (.ruby, "def greet\n  'hello'\nend", "greet", .function),
             (.rust, "fn main() { let café = \"🦜\"; }", "\"🦜\"", .string),
@@ -372,6 +377,7 @@ enum SyntaxCheck {
             ("main.RS", .rust), ("widget.test.ts", .typescript), ("widget.tsx", .tsx),
             ("tsconfig.json", .json), (".zshrc", .shell), ("Cargo.lock", .toml),
             ("Gemfile", .ruby), ("library.h", .cpp), ("Counter.t.sol", .solidity),
+            ("widget.c", .c), ("widget.cc", .cpp), ("widget.M", .objectiveC), ("widget.mm", .objectiveCPP),
             ("build.zig.zon", .zig), ("app.app.src", .erlang), ("rebar.config", .erlang),
             ("deps.edn", .clojure), ("extensionless", .plainText)
         ]

@@ -17,6 +17,7 @@ The source archive contains Tree-sitter 0.25.10 and the generated parser and sca
 | JSON | 0.24.8 |
 | Lua | 0.5.0 |
 | Markdown and inline Markdown | `9a23c1a96c0513d8fc6520972beedd419a973539` |
+| Objective-C and Objective-C++ | [tree-sitter-objcpp `f744aa49e05971a2177f9b993f81a494744df7f5`](https://tangled.org/dunkirk.sh/dots/commit/f744aa49e05971a2177f9b993f81a494744df7f5) |
 | Python | 0.25.0 |
 | Ruby | 0.23.1 |
 | Rust | 0.24.0 |
@@ -28,6 +29,6 @@ The source archive contains Tree-sitter 0.25.10 and the generated parser and sca
 | YAML | `baff0b51c64ef6a1fb1f8390f3ad6015b83ec13a` |
 | Zig | `6479aa13f32f701c383083d8b28360ebd682fb7d` with Edit's ZON extension |
 
-JavaScript and JSX use the TSX grammar. Queries start from the grammar distributions for supported capture names. Edit supplies its own JavaScript queries and retains the original Edit queries for Clojure, Erlang, Solidity, TOML, and Zig. TSX and TypeScript share the JavaScript rules and add TypeScript-specific rules.
+JavaScript and JSX use the TSX grammar. Queries start from the grammar distributions for supported capture names. Edit supplies its own JavaScript queries and retains the original Edit queries for Clojure, Erlang, Solidity, TOML, and Zig. TSX and TypeScript share the JavaScript rules and add TypeScript-specific rules. Objective-C and Objective-C++ share a grammar and use the C and C++ captures with additional Objective-C rules.
 
 Tree-sitter is distributed under the [MIT License](https://github.com/tree-sitter/tree-sitter/blob/v0.25.10/LICENSE). Each parser retains its respective license.

@@ -1209,7 +1209,8 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         configure(.languages)
         let choices = sourceEntries()
         guard leadingIcon.image === Self.searchImage,
-              choices.count == 25, choices.first?.id == "auto", choices[1].id == SyntaxLanguage.plainText.rawValue else {
+              choices.count == SyntaxLanguage.allCases.count + 1,
+              choices.first?.id == "auto", choices[1].id == SyntaxLanguage.plainText.rawValue else {
             throw CheckFailure.invalidPanel
         }
         configure(.files)

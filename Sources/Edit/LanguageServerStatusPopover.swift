@@ -162,7 +162,7 @@ private final class ServerPopoverRow: NSView {
         name.toolTip = statusDescription
         detail.toolTip = statusDescription
         detail.setAccessibilityLabel(statusDescription)
-        icon.image = FileIcons.image(for: nil, appearance: appearance, language: server.languageID)
+        icon.image = FileIcons.image(for: nil, appearance: appearance, language: server.iconIdentifier)
 
         let command: LanguageServerCommand = [.starting, .ready, .stopping].contains(state) ? .stop : .start
         if command != toggleCommand {

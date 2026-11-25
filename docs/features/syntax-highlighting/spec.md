@@ -9,7 +9,9 @@ Edit colors source code and markup with Tree-sitter. Highlighting and [bracket n
 
 ## Bundled languages
 
-C, C++, Clojure, CSS, Erlang, Go, HTML, JavaScript, JavaScript JSX, JSON, Lua, Markdown, Python, Ruby, Rust, Shell Script, Solidity, Swift, TOML, TypeScript, TypeScript JSX, YAML, and Zig. JSON also recognizes comments in JSONC, Clojure covers EDN, and Zig covers ZON. Markdown uses inline and fenced-code grammars and HTML supports embedded JavaScript and CSS.
+C, C++, Clojure, CSS, Erlang, Go, HTML, JavaScript, JavaScript JSX, JSON, Lua, Markdown, Objective-C, Objective-C++, Python, Ruby, Rust, Shell Script, Solidity, Swift, TOML, TypeScript, TypeScript JSX, YAML, and Zig. JSON also recognizes comments in JSONC, Clojure covers EDN, and Zig covers ZON. Markdown uses inline and fenced-code grammars and HTML supports embedded JavaScript and CSS.
+
+Auto Detect uses Objective-C for `.m`, Objective-C++ for `.mm`, and C++ for ambiguous `.h` headers. Use the language picker to select a different mode for a header.
 
 In Markdown, apply inline code highlighting inside table cells and color heading markers with the heading. An HTML comment in Markdown keeps its comment color from its opener through its close, or through the end of the buffer while it is unclosed. Comment-like text inside code stays code.
 
@@ -17,7 +19,7 @@ In Markdown, apply inline code highlighting inside table cells and color heading
 
 ## Acceptance
 
-- Open `main.RS`, `widget.test.ts`, `widget.tsx`, `data.jsonc`, `.zshrc`, `Cargo.lock`, `Gemfile`, `library.h`, `build.zig.zon`, `app.app.src`, and `deps.edn`. Check that their resolved languages and syntax colors match the file modes.
+- Open `main.RS`, `widget.test.ts`, `widget.tsx`, `data.jsonc`, `.zshrc`, `Cargo.lock`, `Gemfile`, `library.h`, `widget.m`, `widget.mm`, `build.zig.zon`, `app.app.src`, and `deps.edn`. Check that their resolved languages and syntax colors match the file modes. In a `.mm` file check Objective-C selectors and C++ templates together.
 - Select Rust on an untitled buffer, save to a different extension, and verify the manual mode follows the buffer. Select Plain Text, and then Auto Detect to restore path-based colors. Quit and reopen named and untitled drafts to check persistent choices.
 - Change a highlighted buffer containing Unicode and incomplete code. Undo and redo, and switch modes while highlighting runs. Verify that no obsolete syntax result overlays the document and that the caret, selections, scroll, and dirty state behave normally.
 - Open a Markdown table with inline code and a heading with leading and trailing `#` markers. Check both table header and body cells, and compare the heading markers with its text. Type `<!--` above a heading and a fence and check that the comment color runs to the end. Close the comment before the heading and check that ordinary highlighting resumes. Repeat with a literal comment opener inside inline code or a fenced block.
