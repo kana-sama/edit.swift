@@ -260,15 +260,13 @@ enum SourceKitLSPCheck {
             throw Failure(detail: "load the ZLS wordmark and the paired SourceKit-LSP artwork")
         }
         let slot = logos[0].frame
-        let logoHeight = identities[0].frame.height / 2
-        let scaledLogoWidth = logoHeight * zigLogo.size.width / zigLogo.size.height
-        try require(slot.size == logos[1].frame.size && slot.width > 3 * slot.height &&
-                    abs(slot.height - logoHeight) < 1 && abs(slot.width - scaledLogoWidth) < 1 &&
+        let logoHeight = 48 * zigLogo.size.height / zigLogo.size.width
+        try require(slot.size == logos[1].frame.size && abs(slot.width - 48) < 0.5 && abs(slot.height - logoHeight) < 1 &&
                     abs(slot.midY - identities[0].frame.midY) < 0.5 &&
                     identities[0].frame.minX == identities[1].frame.minX &&
                     logos.allSatisfy { $0.imageAlignment == .alignCenter && $0.imageScaling == .scaleProportionallyUpOrDown } &&
                     sourceKitLogo.size.width > 2 * sourceKitLogo.size.height,
-                    "size both logo slots to half the two-line label (logos \(logos.map(\.frame)), labels \(identities.map(\.frame)))")
+                    "fit both logos in the 48-point column (logos \(logos.map(\.frame)), labels \(identities.map(\.frame)))")
         guard let toggle = rows[1].subviews.first(where: { $0.identifier?.rawValue == "Edit.LanguageServer.toggle" }) as? NSButton,
               let restart = rows[1].subviews.first(where: { $0.identifier?.rawValue == "Edit.LanguageServer.restart" }) as? NSButton
         else { throw Failure(detail: "find the Swift controls") }
