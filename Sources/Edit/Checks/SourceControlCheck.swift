@@ -355,7 +355,7 @@ enum SourceControlCheck {
         }
         try expect(await document.open(.buffer(buffer)) { true }, "open the working-copy conflict through the editor")
         guard let panel = document.conflictPanel,
-              let format: NSSegmentedControl = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictFormat" }),
+              let format: ModeSelector = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictFormat" }),
               let sidebar = document.sourceControlSidebar else {
             throw Failure("install the conflict controls before presenting the opened buffer")
         }
@@ -535,7 +535,7 @@ enum SourceControlCheck {
             try expect(editor.applyMultiEdits([EditorTextEdit(range: range, text: text)], selections: [caret], actionName: actionName),
                        "edit conflict fixture text for \(actionName)")
         }
-        try expect(format.segmentCount == 2 && format.label(forSegment: 0) == "Diff" && format.label(forSegment: 1) == "Snapshot",
+        try expect(format.buttonForCheck(at: 0).title == "Diff" && format.buttonForCheck(at: 1).title == "Snapshot",
                    "keep two direct format choices in the top panel")
         guard let firstDiff = originalBlocks[0].segments.first(where: { if case .diff = $0.kind { true } else { false } }),
               let firstResult = originalBlocks[0].resultRange else { throw Failure("find the first diff and result rows") }
@@ -766,15 +766,20 @@ enum SourceControlCheck {
             editor.string == original && format.isEnabled
         }
         reveal(originalBlocks[0].range)
-        format.selectedSegment = 1
-        if let action = format.action { format.sendAction(action, to: format.target) }
+        let diffFrame = format.segmentFrame(at: 0)
+        let diffPoint = format.convert(NSPoint(x: diffFrame.midX, y: diffFrame.midY), to: nil)
+        try expect(EditApplication.clickCursor(in: document.window, at: diffPoint) === NSCursor.pointingHand,
+                   "show the pointing hand over a conflict format")
+        format.buttonForCheck(at: 1).performClick(nil)
+        try expect(format.selectedSegment == 0, "keep Diff selected until the Snapshot text is ready")
         try await waitFor("switch all open conflict blocks to Snapshot") {
             let current = document.displayedConflicts
             return current.count == 2 && current.allSatisfy { $0.style == .snapshot }
         }
         let snapshotBlocks = document.displayedConflicts
         document.window.layoutIfNeeded()
-        try expect(format.isEnabled, "install the new conflict presentation in the same update as the Snapshot text")
+        try expect(format.isEnabled && format.selectedSegment == 1 && format.hasLocalSlideForCheck(from: 0, to: 1),
+                   "slide the selection from Diff to Snapshot within the control when the text updates")
         try expect(!pending.isEnabled && pending.isHidden, "limit the dim toggle to Diff")
         try checkConflictColors(snapshotBlocks[0], in: editor)
         try expect(zip(snapshotBlocks, originalBlocks).allSatisfy { $0.sides == $1.sides },
@@ -848,6 +853,19 @@ enum SourceControlCheck {
         try checkDocumentHeader([banner, conflictPanel], over: document.scrollView, in: document)
         try checkHeaderCompaction(banner, conflict: conflictPanel, in: document)
         try checkStatusWithDetachedToolbar([banner, conflictPanel], in: document)
+        guard let historicalFormat: ModeSelector = descendant(of: conflictPanel, where: { $0.identifier?.rawValue == "JujutsuConflictFormat" }) else {
+            throw Failure("find the historical format selector")
+        }
+        historicalFormat.buttonForCheck(at: 0).performClick(nil)
+        try expect(historicalFormat.selectedSegment == 1, "hold Snapshot while preparing historical Diff")
+        try await waitFor("commit Diff within the existing historical selector") {
+            document.conflictPanel === conflictPanel && historicalFormat.selectedSegment == 0 &&
+                document.displayedConflicts.first?.style == .diff
+        }
+        document.window.layoutIfNeeded()
+        let unchangedDisk = try Data(contentsOf: file) == disk
+        try expect(historicalFormat.hasLocalSlideForCheck(from: 1, to: 0) && !editor.isEditable &&
+                   unchangedDisk, "slide from Snapshot inside the same read-only control and keep disk contents")
 
         let oneLine = back.split(separator: "\n", omittingEmptySubsequences: false).filter { $0.first != "\\" }.joined(separator: "\n")
         try oneLine.write(to: finalLine, atomically: true, encoding: .utf8)

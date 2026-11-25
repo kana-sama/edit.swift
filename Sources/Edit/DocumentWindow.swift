@@ -2254,7 +2254,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func installText(
         _ text: String, preparedSyntax: SyntaxSnapshot? = nil, openingConflicts: JJOpeningConflicts? = nil,
-        confirmedConflicts: [JJConflict] = [], restoredConflicts: [JJConflictEdit] = [], revealInWorktree: Bool = true
+        confirmedConflicts: [JJConflict] = [], restoredConflicts: [JJConflictEdit] = [], revealInWorktree: Bool = true,
+        preservingConflictPresentation: Bool = false
     ) {
         if editor.renameRange != nil { _ = editor.onCancelSymbolRename?() }
         navigationSelectionAnchor = nil
@@ -2264,7 +2265,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         conflictStyleTask?.cancel()
         editor.conflictEdits.removeAll()
         failedConflictDiffs.removeAll()
-        showEditorConflicts([])
+        if !preservingConflictPresentation { showEditorConflicts([]) }
         pendingSourceControlDiffFile = nil
         discardDraftCheckpoint()
         editor.exitFocus(notify: false)
@@ -2279,7 +2280,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.setSelectedRange(NSRange(location: 0, length: 0))
         editor.requestLineRefresh()
         editor.undoManager?.removeAllActions()
-        if !projection.edits.isEmpty { showEditorConflicts([]) }
+        if preservingConflictPresentation || !projection.edits.isEmpty { showEditorConflicts([]) }
         updateTitle(revealInWorktree: revealInWorktree)
         updateEditedState()
         sidebar.editorBufferReplaced()
@@ -2623,7 +2624,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 let position = editor.capturePosition()
                 PanelLayout.withoutAnimation {
                     savedText = rawText as NSString
-                    installText(projected.text, restoredConflicts: projected.edits, revealInWorktree: false)
+                    installText(projected.text, restoredConflicts: projected.edits, revealInWorktree: false,
+                                preservingConflictPresentation: true)
                     setConflictAnalysisMarks(analysis)
                     editor.jjInlineDiff?.expandAll()
                     editor.restorePosition(position)

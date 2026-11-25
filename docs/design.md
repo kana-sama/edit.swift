@@ -30,9 +30,13 @@ Every rich tooltip or hover card has a pointer. Its tip meets the edge of the el
 
 Reuse the same card for the same object wherever it is described. The Jujutsu graph and the Read-only status in the document header use the same revision hover card.
 
+## Mode selectors
+
+Use the shared mode selector for related, mutually exclusive text options in the document header and in sidebars. Give the options a single rounded-rectangle track and slide the selection within it, from the previously selected option to the new one. Keep the selection paired with the visible content while a mode is preparing. Move the highlight immediately when Reduce Motion is enabled. Keep pointer, keyboard, and accessibility behavior consistent across placements. Match adjacent toggles to the track's compact corner radius.
+
 ## Sidebar results
 
-Use one content grid for controls and results. Align both edges of the control stack with the first-level file and folder gutter and the trailing count column. For two exclusive modes, use the small native segmented control with equal segments spanning the stack. Give independent text inputs a full row each, with short visible labels and full accessible names. Keep contextual options inside the field they affect. Check the full stack at the sidebar’s minimum width.
+Use one content grid for controls and results. Align both edges of the control stack with the first-level file and folder gutter and the trailing count column. Give the [mode selector](#mode-selectors) equal segments spanning the stack. Give independent text inputs a full row each, with short visible labels and full accessible names. Keep contextual options inside the field they affect. Check the full stack at the sidebar’s minimum width.
 
 Reuse the editor’s existing result component and interaction patterns for new lists of document locations. Match Search’s row spacing, excerpts, highlight treatment, and focus behavior. Align top-level file icons and folder chevrons with the Search controls and Worktree's first level. Indent excerpts slightly past the filename and give separate file groups 8 points of additional space. Keep the full path in the heading tooltip and align subdued count badges 10 points from the trailing edge. When file groups are always open, treat each file heading as a label and skip it in mouse and keyboard selection.
 

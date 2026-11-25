@@ -30,9 +30,9 @@ enum WorkspaceFindCheck {
         let window = document.window
         let table = try require(descendant(in: window.contentView, of: WorkspaceFindTable.self), "a native workspace results table")
         let finder = try require(window.firstResponder as? FindFieldTextView, "Find in Workspace focuses Find")
-        let scope = try require(descendant(in: window.contentView, of: NSSegmentedControl.self) {
+        let scope = try require(descendant(in: window.contentView, of: ModeSelector.self) {
             $0.accessibilityLabel() == "Search scope"
-        }, "the scope is a native segmented control")
+        }, "Search uses the shared mode selector")
         let include = try require(field("Include", in: window), "the Include field is available")
         let exclude = try require(field("Exclude", in: window), "the Exclude field is available")
         let ignore = try require(descendant(in: window.contentView, of: NSButton.self) {
@@ -83,6 +83,12 @@ enum WorkspaceFindCheck {
         try expect(abs(inFrame.frame.width - scope.frame.width) < 1 &&
                    abs(exFrame.frame.width - scope.frame.width) < 1 && scope.frame.width >= 188,
                    "equal-width fields and scope fill the minimum sidebar width")
+        for index in 0..<2 {
+            let segment = scope.segmentFrame(at: index)
+            let point = scope.convert(NSPoint(x: segment.midX, y: segment.midY), to: nil)
+            try expect(EditApplication.clickCursor(in: window, at: point) === NSCursor.pointingHand,
+                       "show the pointing hand on each search scope")
+        }
         try capture(window, "workspace")
 
         let toolbar = window.toolbar?.items.compactMap { $0 as? SidebarMenuItem }.first?.options?.menu
@@ -165,8 +171,12 @@ enum WorkspaceFindCheck {
         try expect(document.findScope == .buffer && scope.selectedSegment == 0 &&
                    include.isHiddenOrHasHiddenAncestor && exclude.isHiddenOrHasHiddenAncestor,
                    "Command-F chooses Current Buffer and hides the filters")
+        try expect(scope.hasLocalSlideForCheck(from: 1, to: 0), "slide from Workspace to Current Buffer")
+        try await Task.sleep(for: .milliseconds(220))
         finder.insertText("live", replacementRange: NSRange(location: 0, length: finder.string.utf16.count))
-        document.performFind(.findWorkspace)
+        scope.moveRight(nil)
+        try expect(scope.selectedSegment == 1 && scope.hasLocalSlideForCheck(from: 0, to: 1),
+                   "use the right arrow and slide from Current Buffer to Workspace")
         try await waitFor("a query changed in Current Buffer also refreshes Workspace") {
             rows(in: table).count == 1 && document.canPerformFind(.replaceAll)
         }

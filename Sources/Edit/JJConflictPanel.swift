@@ -14,7 +14,7 @@ final class JJConflictPanel: NSView {
         }
     }
 
-    private static let height: CGFloat = 22
+    private static let height = ModeSelector.height
     private static let spacing: CGFloat = 4
     private static let controlFont = NSFont.systemFont(ofSize: 11, weight: .medium)
 
@@ -30,10 +30,10 @@ final class JJConflictPanel: NSView {
     private let previous = NSButton()
     private let next = NSButton()
     private let status = NSTextField(labelWithString: "")
-    private let format = NSSegmentedControl(labels: ["Diff", "Snapshot"], trackingMode: .selectOne, target: nil, action: nil)
+    private let format = ModeSelector(["Diff", "Snapshot"])
     private let formatMenu = NSPopUpButton(frame: .zero, pullsDown: false)
     private let formatDisplay = NSMenuItem(title: "Format", action: nil, keyEquivalent: "")
-    private let pending = NSButton()
+    private let pending = ConflictDimmingButton()
     private var selectedFormat: JJConflict.Style?
     private var showsDim = false
     private var current = false
@@ -46,7 +46,7 @@ final class JJConflictPanel: NSView {
         navigation.boxType = .custom
         navigation.titlePosition = .noTitle
         navigation.borderWidth = 0
-        navigation.cornerRadius = 6
+        navigation.cornerRadius = ModeSelector.cornerRadius
         navigation.fillColor = .labelColor.withAlphaComponent(0.10)
         navigation.contentViewMargins = .zero
         navigation.setAccessibilityLabel("Navigate conflicts")
@@ -59,12 +59,11 @@ final class JJConflictPanel: NSView {
         navigation.addSubview(status)
 
         format.identifier = .init("JujutsuConflictFormat")
-        format.controlSize = .small
         format.setAccessibilityLabel("Conflict format")
-        format.target = self
-        format.action = #selector(changeStyleFromSegments)
+        format.onSelect = { [weak self] in self?.changeStyle(at: $0) }
         formatMenu.identifier = .init("JujutsuConflictFormatMenu")
         formatMenu.controlSize = .small
+        formatMenu.borderShape = .roundedRectangle
         formatMenu.font = Self.controlFont
         formatMenu.usesItemFromMenu = false
         formatMenu.addItems(withTitles: ["Diff", "Snapshot"])
@@ -75,7 +74,7 @@ final class JJConflictPanel: NSView {
 
         pending.identifier = .init("JujutsuPendingChanges")
         pending.setButtonType(.pushOnPushOff)
-        pending.bezelStyle = .accessoryBar
+        pending.isBordered = false
         pending.controlSize = .small
         pending.font = Self.controlFont
         pending.image = Self.symbol("circle.lefthalf.filled")
@@ -173,7 +172,7 @@ final class JJConflictPanel: NSView {
     }
 
     private func updateFormatSelection() {
-        format.selectedSegment = selectedFormat?.rawValue ?? -1
+        format.setSelection(selectedFormat?.rawValue ?? -1)
         formatMenu.select(selectedFormat.flatMap { formatMenu.item(at: $0.rawValue) })
         let title = formatMenu.titleOfSelectedItem ?? "Format"
         formatDisplay.title = title
@@ -237,11 +236,6 @@ final class JJConflictPanel: NSView {
         onNavigate?(sender.tag)
     }
 
-    @objc private func changeStyleFromSegments() {
-        guard format.isEnabled else { return }
-        changeStyle(at: format.selectedSegment)
-    }
-
     @objc private func changeStyleFromMenu() {
         guard formatMenu.isEnabled else { return }
         changeStyle(at: formatMenu.indexOfSelectedItem)
@@ -264,6 +258,18 @@ final class JJConflictPanel: NSView {
         guard current, pending.isEnabled else { return }
         updatePendingHelp()
         onShowPendingChanges?(pending.state == .on)
+    }
+}
+
+@MainActor
+private final class ConflictDimmingButton: NSButton {
+    override func draw(_ dirtyRect: NSRect) {
+        let emphasis = state == .on || isHighlighted
+        let opacity = ModeSelector.trackOpacity + (emphasis ? 0.12 : 0)
+        NSColor.labelColor.withAlphaComponent(isEnabled ? opacity : opacity * 0.5).setFill()
+        let radius = ModeSelector.cornerRadius
+        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+        super.draw(dirtyRect)
     }
 }
 

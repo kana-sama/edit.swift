@@ -32,8 +32,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private lazy var workspace = WorkspaceFindSidebar(document: document, app: app, onReturnFocus: onReturnFocus,
         focusFind: { [weak self] in self?.focusFindInput() },
         availabilityChanged: { [weak self] in self?.updateReplaceAvailability() })
-    private let scopePicker = NSSegmentedControl(labels: ["Current Buffer", "Workspace"], trackingMode: .selectOne,
-                                                  target: nil, action: nil)
+    private let scopePicker = ModeSelector(["Current Buffer", "Workspace"], equalWidths: true)
     private var searchesWorkspace: Bool { document.findScope == .workspace }
     private var decorations: FindDecorations { document.resultDecorations }
 
@@ -263,11 +262,10 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
         resultHeader.heightAnchor.constraint(equalToConstant: SidebarResults.rowHeight).isActive = true
         setupResults()
-        scopePicker.controlSize = .small
-        scopePicker.segmentDistribution = .fillEqually
         scopePicker.setAccessibilityLabel("Search scope")
-        scopePicker.target = self
-        scopePicker.action = #selector(changeScope)
+        scopePicker.onSelect = { [weak self] index in
+            _ = self?.selectScope(index == 1 ? .workspace : .buffer)
+        }
 
         let content = searchContent
         for control in [findRow, replaceRow, scopePicker] + workspace.filterViews + [resultHeader, resultScroll, workspace.resultView] {
@@ -336,7 +334,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
     private func updateScopeVisibility() {
         scopePicker.isHidden = document.folderURL == nil
-        scopePicker.selectedSegment = searchesWorkspace ? 1 : 0
+        scopePicker.setSelection(searchesWorkspace ? 1 : 0)
         searchContent.setCustomSpacing(scopePicker.isHidden ? 10 : 5, after: replaceRow)
         for field in workspace.filterViews { field.isHidden = !searchesWorkspace }
         resultHeader.isHidden = searchesWorkspace
@@ -363,10 +361,6 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             results.nextKeyView = nil
             document.window.recalculateKeyViewLoop()
         }
-    }
-
-    @objc private func changeScope() {
-        _ = selectScope(scopePicker.selectedSegment == 1 ? .workspace : .buffer)
     }
 
     private func focusFindInput() { document.window.makeFirstResponder(findInput.input) }
