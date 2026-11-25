@@ -7,7 +7,7 @@ enum JJEditorCheck {
         init(_ message: String) { errorDescription = "JJ editor: " + message }
     }
 
-    static func run(in document: DocumentWindow) throws {
+    static func run(in document: DocumentWindow, captureWrappedTrack: ((NSWindow) throws -> Void)? = nil) async throws {
         let window = document.window
         let editor = document.editor
         let scroll = document.scrollView
@@ -120,9 +120,130 @@ enum JJEditorCheck {
         editor.insertText("edited ", replacementRange: NSRange(location: 0, length: 0))
         guard try gutterPixel() == painted else { throw Failure("keep the gutter painted before a new diff arrives") }
 
+        try await checkWrappedTrack(captureWindow: captureWrappedTrack)
         try checkTrackAfterResize(in: document)
         try checkGutterUnderTitlebar(in: document)
         try checkGutterTransparency()
+    }
+
+    private static func checkWrappedTrack(captureWindow: ((NSWindow) throws -> Void)?) async throws {
+        let bounds = NSRect(x: 0, y: 0, width: 680, height: 480)
+        let window = EditorFocusCheckWindow(contentRect: bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        let (scroll, editor) = EditorTextView.scrollingEditor(in: bounds)
+        scroll.scrollerStyle = .overlay
+        window.contentView = scroll
+        defer { window.close() }
+        let long = String(repeating: "long words ", count: 22)
+        let changedLine = 120
+        let lines = (0..<200).map { $0 < 60 || $0 == changedLine ? long : "short" }
+        editor.string = lines.joined(separator: "\n")
+        editor.isEditable = false
+        let starts = EditorTextRows(in: editor.string as NSString, range: NSRange(location: 0, length: editor.string.utf16.count)).starts
+        let selection = NSRange(location: 2, length: 4)
+        editor.setSelectedRange(selection)
+        window.makeFirstResponder(editor)
+        let mark = JJLineMark(kind: .insertion, lines: changedLine..<(changedLine + 1))
+        editor.setJJLineMarks([mark], lineStarts: starts)
+        var previousFraction: CGFloat?
+
+        func layoutText(wrap: Bool, width: CGFloat) throws -> Int {
+            window.setContentSize(NSSize(width: width, height: bounds.height))
+            editor.setWordWrap(wrap)
+            scroll.scrollToVisibleContentOrigin(.zero)
+            window.layoutIfNeeded()
+            guard let manager = editor.textLayoutManager else { throw Failure("find native wrapped text") }
+            manager.textViewportLayoutController.layoutViewport()
+            let first = manager.textLayoutFragment(for: manager.documentRange.location)
+            guard let rows = first?.textLineFragments.count, wrap == (rows > 1) else {
+                throw Failure("exercise the requested wrap mode before checking the track")
+            }
+            return rows
+        }
+
+        func clickMark(at fraction: CGFloat, centering: Bool = true, targetY: () -> CGFloat?) async throws {
+            guard let scroller = scroll.verticalScroller, let parent = scroll.superview else {
+                throw Failure("find the native scrollbar")
+            }
+            let slot = scroller.rect(for: .knobSlot)
+            let y = scroller.isFlipped ? slot.minY + slot.height * fraction : slot.maxY - slot.height * fraction
+            let destination = scroller.convert(NSPoint(x: slot.midX, y: y), to: nil)
+            func markerHit() -> NSView? {
+                let view = scroll.hitTest(parent.convert(destination, from: nil))
+                return view is any ClickTarget ? view : nil
+            }
+            for _ in 0..<100 where markerHit() == nil { try await Task.sleep(for: .milliseconds(10)) }
+            guard let marker = markerHit(),
+                  let click = NSEvent.mouseEvent(with: .leftMouseDown, location: destination, modifierFlags: [],
+                                                 timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                                 eventNumber: 0, clickCount: 1, pressure: 1) else {
+                throw Failure("hit the change mark at the native visual fraction \(fraction)")
+            }
+            let strip = NSRect(x: marker.bounds.midX - 1, y: 0, width: 2, height: marker.bounds.height)
+            let beforeClick = try capture(marker, in: strip).tiffRepresentation
+            marker.mouseDown(with: click)
+            let visible = scroll.documentVisibleRect
+            guard let target = targetY(), centering ? abs(target - visible.midY) <= 1 : (visible.minY...visible.maxY).contains(target),
+                  editor.selectedRange() == selection, window.firstResponder === editor else {
+                throw Failure("center the start of the clicked change without disturbing selection or focus")
+            }
+            window.layoutIfNeeded()
+            guard try capture(marker, in: strip).tiffRepresentation == beforeClick else {
+                throw Failure("preserve the painted mark when its source line enters the viewport")
+            }
+        }
+
+        for (wrap, width) in [(false, CGFloat(680)), (true, 680), (true, 480), (false, 480)] {
+            let rows = try layoutText(wrap: wrap, width: width)
+            let before = 60 * rows + changedLine - 60
+            let total = 61 * rows + lines.count - 61
+            let fraction = (CGFloat(before) + CGFloat(rows) / 2) / CGFloat(total)
+            if wrap, let previousFraction, abs(fraction - previousFraction) < 0.01 {
+                throw Failure("resize the test enough to change the mark's vertical position")
+            }
+            previousFraction = fraction
+            try await clickMark(at: fraction) { editor.laidOutLineBounds(at: starts[changedLine])?.minY }
+        }
+
+        let rows = try layoutText(wrap: true, width: 480)
+        var base = lines
+        base[changedLine] = String(repeating: "past words ", count: 22)
+        let analysis = JJLineDiff.analyze(base: base.joined(separator: "\n"), current: editor.string,
+                                          isConflicted: false, recordedConflict: nil)
+        guard let change = analysis.hunks.first, change.mark.kind == .replacement else {
+            throw Failure("prepare a wrapped replacement in a read-only revision")
+        }
+        editor.setJJLineMarks(analysis.marks, lineStarts: analysis.lineStarts, hunks: analysis.hunks)
+        guard editor.jjInlineDiff?.expandAll() == true else { throw Failure("expand the wrapped replacement") }
+        let before = 60 * rows + changedLine - 60
+        let total = 62 * rows + lines.count - 61
+        // Hit the removed edge and the live edge of the same mark. Either click lands at the removed row.
+        for position in [CGFloat(before) + CGFloat(rows) * 0.25, CGFloat(before) + CGFloat(rows) * 1.75] {
+            scroll.scrollToVisibleContentOrigin(.zero)
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            try await clickMark(at: position / CGFloat(total)) { editor.jjInlineDiff?.expandedRegion(for: change.mark)?.minY }
+        }
+        try captureWindow?(window)
+
+        let current = editor.string + "\n"
+        editor.string = current
+        editor.setSelectedRange(selection)
+        scroll.scrollToVisibleContentOrigin(.zero)
+        let deletion = JJLineDiff.analyze(base: current + long + "\n", current: current,
+                                          isConflicted: false, recordedConflict: nil)
+        editor.setJJLineMarks(deletion.marks, lineStarts: deletion.lineStarts, hunks: deletion.hunks)
+        guard let lastChange = deletion.hunks.first, lastChange.mark.lines == lines.count..<lines.count,
+              editor.jjInlineDiff?.expandAll() == true else { throw Failure("expand a wrapped deletion at EOF") }
+        let liveRows = total - rows
+        let layout = EditorProjectedTextLayout(text: current, style: .init(editor: editor, wrapsToEditor: true))
+        guard let height = await layout.lineBoundaryOffsets(deletion.lineStarts)?.last,
+              abs(height - CGFloat(liveRows) * layout.style.lineHeight) <= 0.5 else {
+            throw Failure("exclude the trailing insertion row from the scrollbar's document height")
+        }
+        let endFraction = (CGFloat(liveRows) + CGFloat(rows) / 2) / CGFloat(total)
+        try await clickMark(at: endFraction, centering: false) { editor.jjInlineDiff?.expandedRegion(for: lastChange.mark)?.minY }
     }
 
     private static func checkGutterTransparency() throws {

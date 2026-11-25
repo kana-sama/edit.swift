@@ -322,7 +322,10 @@ enum JJInlineDiffCheck {
         guard editor.string == repeated + blank + tail else { throw Failure("insert a blank line after the copies") }
         let refreshed = try refresh()
         guard refreshed == original else { throw Failure("keep the repeated-line ranges after inserting a separate blank line") }
-        guard controller.revealExpanded(refreshed.mark), controller.expandedRegion(for: refreshed.mark) != nil else {
+        editor.scrollRangeToVisible(refreshed.currentRange)
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        controller.layout()
+        guard controller.expandedRegion(for: refreshed.mark) != nil else {
             throw Failure("keep the repeated-line hunk expanded after a refresh")
         }
 

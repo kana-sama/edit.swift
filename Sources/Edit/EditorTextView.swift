@@ -1309,6 +1309,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             requestLineRefresh()
             return
         }
+        jjDecorations?.sourceDidEdit()
         // Both preedit and its rollback are presentation. Subscribers still hold
         // the baseline onto which the real replacements will be applied.
         guard !updatingComposition else { return }
@@ -1369,7 +1370,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         if jjDecorations == nil, !marks.isEmpty { jjDecorations = JJEditorDecorations(editor: self) }
         if jjInlineDiff == nil, !hunks.isEmpty { jjInlineDiff = JJInlineDiff(editor: self) }
         jjInlineDiff?.update(hunks, normalizeCRLF: normalizeCRLF)
-        jjDecorations?.setMarks(marks, lineStarts: lineStarts)
+        jjDecorations?.setMarks(marks, lineStarts: lineStarts, hunks: hunks)
     }
 
     var jjLineMarks: [JJLineMark] { jjDecorations?.marks ?? [] }

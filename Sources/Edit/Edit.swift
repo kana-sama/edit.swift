@@ -1407,7 +1407,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             } else {
                 try JJInlineDiffCheck.run(in: document)
             }
-            try JJEditorCheck.run(in: makeDocument())
+            try await JJEditorCheck.run(in: makeDocument()) { window in
+                let target = screenshot.map { URL(fileURLWithPath: $0).deletingPathExtension().path + "-wrapped-track.png" }
+                try self.checkWindow(window, screenshot: target)
+            }
         case "files":
             _ = try await FilesCheck.run(in: self)
             try await FilesCheck.checkFilePreview(in: self)
@@ -1476,7 +1479,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     private func checkJJ(screenshot: String? = nil) async throws {
-        try JJEditorCheck.run(in: makeDocument())
+        try await JJEditorCheck.run(in: makeDocument())
         try JJInlineDiffCheck.run(in: makeDocument())
         try await JJIndicatorCheck.run(in: self) { window in
             for name: NSAppearance.Name in [.aqua, .darkAqua] {

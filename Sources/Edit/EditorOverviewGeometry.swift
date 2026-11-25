@@ -9,58 +9,57 @@ struct EditorOverviewGeometry {
         let height: CGFloat
     }
 
-    private let editor: EditorTextView
-    private let starts: [Int]
     private let reservations: [Reservation]
+    private let reservedRanges: [EditorLayoutSpacing.ID: Range<CGFloat>]
     private let origin: CGFloat
     private let lineHeight: CGFloat
-    private let viewport: NSRange?
+    private let wrappedOffsets: [CGFloat]?
     let height: CGFloat
 
-    init(editor: EditorTextView, lineStarts: [Int]) {
-        self.editor = editor
-        starts = lineStarts
+    init(editor: EditorTextView, lineStarts: [Int], wrappedOffsets: [CGFloat]? = nil) {
+        self.wrappedOffsets = wrappedOffsets
         let spacing = editor.layoutSpacing
-        origin = spacing.unspacedOriginY ?? editor.textContainerOrigin.y
-        lineHeight = editor.defaultParagraphStyle?.minimumLineHeight ?? 18
-        viewport = editor.textLayoutManager.flatMap { manager in
-            manager.textViewportLayoutController.viewportRange.map { editor.charRange($0, in: manager) }
-        }
-        var gaps: [Int: CGFloat] = [:]
+        let origin = spacing.unspacedOriginY ?? editor.textContainerOrigin.y
+        let lineHeight = editor.defaultParagraphStyle?.minimumLineHeight ?? 18
+        self.origin = origin
+        self.lineHeight = lineHeight
+        var gaps: [Int: [EditorLayoutSpacing.Block]] = [:]
         for block in spacing.reservedBlocks {
             let line = Self.line(containing: block.paragraph, starts: lineStarts)
-            let boundary = block.edge == .before ? line : line + 1
-            gaps[min(boundary, lineStarts.count), default: 0] += block.height
+            let boundary = min(block.edge == .before ? line : line + 1, lineStarts.count)
+            gaps[boundary, default: []].append(block)
         }
         var total: CGFloat = 0
+        var ranges: [EditorLayoutSpacing.ID: Range<CGFloat>] = [:]
         reservations = gaps.keys.sorted().map { line in
-            let height = gaps[line, default: 0]
-            let reservation = Reservation(line: line, totalBefore: total, height: height)
-            total += height
-            return reservation
+            let before = total
+            let base = origin + (wrappedOffsets?[line] ?? CGFloat(line) * lineHeight)
+            let blocks = gaps[line, default: []]
+            // Space after the previous paragraph precedes space before the next paragraph.
+            for block in blocks.sorted(by: { $0.edge == .after && $1.edge == .before }) {
+                let top = base + total
+                total += block.height
+                ranges[block.id] = top..<(base + total)
+            }
+            return Reservation(line: line, totalBefore: before, height: total - before)
         }
-        height = max(1, CGFloat(max(1, lineStarts.count)) * lineHeight + total)
+        reservedRanges = ranges
+        let textHeight = wrappedOffsets?.last ?? CGFloat(lineStarts.count) * lineHeight
+        height = max(lineHeight, textHeight) + total
     }
 
     func position(at line: Int, afterReservation: Bool = false) -> CGFloat {
         let reservationIndex = lowerBound(reservations.count) { reservations[$0].line >= line }
         let current = reservationIndex < reservations.count ? reservations[reservationIndex] : nil
         let ownHeight = current?.line == line ? current?.height ?? 0 : 0
-        if starts.indices.contains(line), let viewport, NSLocationInRange(starts[line], viewport),
-           let bounds = editor.laidOutLineBounds(at: starts[line]) {
-            return bounds.minY - (afterReservation ? 0 : ownHeight)
-        }
         let totalBefore = current?.totalBefore ?? reservations.last.map { $0.totalBefore + $0.height } ?? 0
-        return origin + CGFloat(line) * lineHeight + totalBefore + (afterReservation ? ownHeight : 0)
+        let offset = wrappedOffsets?[line] ?? CGFloat(line) * lineHeight
+        return origin + offset + totalBefore + (afterReservation ? ownHeight : 0)
     }
 
     func fraction(at position: CGFloat) -> CGFloat { min(1, max(0, (position - origin) / height)) }
 
-    func nativeBoundary(at line: Int) -> CGFloat? {
-        if starts.isEmpty { return line == 0 ? origin : nil }
-        if starts.indices.contains(line) { return editor.laidOutLineBounds(at: starts[line])?.minY }
-        return line == starts.count ? starts.last.flatMap { editor.laidOutLineBounds(at: $0)?.maxY } : nil
-    }
+    func range(for reservation: EditorLayoutSpacing.ID) -> Range<CGFloat>? { reservedRanges[reservation] }
 
     private static func line(containing offset: Int, starts: [Int]) -> Int {
         var lower = 0

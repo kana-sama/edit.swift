@@ -119,6 +119,51 @@ final class EditorProjectedTextLayout {
         return wrapped
     }
 
+    /// Measure the source on a detached layout, in short slices so the live viewport stays responsive.
+    func lineBoundaryOffsets(_ starts: [Int]) async -> [CGFloat]? {
+        guard !starts.isEmpty else { return [0] }
+        let documentStart = manager.documentRange.location
+        var next = documentStart
+        var offsets: [CGFloat] = []
+        offsets.reserveCapacity(starts.count + 1)
+        var height: CGFloat = 0
+        var end = 0
+        while end < text.length {
+            let previousEnd = end
+            let deadline = ContinuousClock.now + .milliseconds(4)
+            manager.enumerateTextLayoutFragments(from: next, options: [.ensuresLayout]) { fragment in
+                let range = fragment.rangeInElement
+                let lower = manager.offset(from: documentStart, to: range.location)
+                let upper = manager.offset(from: documentStart, to: range.endLocation)
+                guard upper > end else { return false }
+                while offsets.count < starts.count, starts[offsets.count] < upper {
+                    let start = starts[offsets.count]
+                    let location = start == lower ? range.location : manager.location(documentStart, offsetBy: start)
+                    guard let location,
+                          let row = fragment.textLineFragment(for: location, isUpstreamAffinity: false) else { return false }
+                    offsets.append(height + row.typographicBounds.minY)
+                }
+                if upper == text.length, let last = fragment.textLineFragments.last(where: { $0.characterRange.length > 0 }) {
+                    // TextKit can append an insertion row to the last fragment after a final newline.
+                    height += last.typographicBounds.maxY
+                } else {
+                    height += fragment.layoutFragmentFrame.height
+                }
+                next = range.endLocation
+                end = upper
+                return end < text.length && ContinuousClock.now < deadline
+            }
+            guard end > previousEnd, !Task.isCancelled else { return nil }
+            if end < text.length {
+                do { try await Task.sleep(for: .milliseconds(1)) }
+                catch { return nil }
+            }
+        }
+        guard offsets.count == starts.count else { return nil }
+        offsets.append(height)
+        return offsets
+    }
+
     func draw(_ rows: EditorTextRows, at origin: NSPoint, dirtyRect: NSRect, in context: CGContext,
               highlights: [NSRange], highlightColor: NSColor, selection: NSRange? = nil,
               selectionIsActive: Bool = false) {

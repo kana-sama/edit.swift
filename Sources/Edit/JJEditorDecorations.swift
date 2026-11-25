@@ -26,6 +26,7 @@ final class JJEditorDecorations {
         let mark: JJLineMark
         let rect: NSRect
         let documentY: CGFloat
+        let reservation: EditorLayoutSpacing.ID?
     }
 
     private struct GutterMark {
@@ -39,13 +40,19 @@ final class JJEditorDecorations {
     private weak var nativeScroller: NSScroller?
     private var scrollerStyle: NSScroller.Style?
     private var lineStarts: [Int] = []
+    private var removedBlocks: [JJLineMark: EditorLayoutSpacing.ID] = [:]
     private var projectedConflictStarts: Set<Int> = []
     private(set) var marks: [JJLineMark] = []
     var allowsNavigation = true
     private var lastMarkLines: [Int] = []
     private var trackSize = NSSize.zero
     private var trackOverviewRevision: UInt = 0
-    private var trackFont: NSFont?
+    private var trackStyle: EditorProjectedTextLayout.Style?
+    private var wrapLayout: (style: EditorProjectedTextLayout.Style, offsets: [CGFloat])?
+    private var pendingWrap: (style: EditorProjectedTextLayout.Style, task: Task<Void, Never>)?
+    private var trackExpiry: Task<Void, Never>?
+    private var marksMatchBuffer = true
+    private var trackNeedsUpdate = true
     private var trackMarks: [PositionedMark] = []
     private static var restingOverlaySlots: [NSControl.ControlSize: NSRect] = [:]
     private let gutterWidth: CGFloat = 7
@@ -65,11 +72,33 @@ final class JJEditorDecorations {
         track.onClick = { [weak self] event in self?.clickTrack(event) }
     }
 
-    func setMarks(_ marks: [JJLineMark], lineStarts: [Int]) {
+    isolated deinit {
+        pendingWrap?.task.cancel()
+        trackExpiry?.cancel()
+    }
+
+    func sourceDidEdit() {
+        marksMatchBuffer = false
+        resetWrapLayout()
+    }
+
+    private func resetWrapLayout() {
+        pendingWrap?.task.cancel()
+        pendingWrap = nil
+        wrapLayout = nil
+    }
+
+    func setMarks(_ marks: [JJLineMark], lineStarts: [Int], hunks: [JJDiffHunk]) {
         allowsNavigation = true
+        let sourceChanged = !marksMatchBuffer || lineStarts != self.lineStarts
+        marksMatchBuffer = true
         let projectedStarts = Set(editor?.conflictEdits.map(\.block.location) ?? [])
-        guard marks != self.marks || lineStarts != self.lineStarts || projectedStarts != projectedConflictStarts else { return }
+        let removedBlocks = Dictionary(hunks.filter { !$0.removedText.isEmpty }.map { ($0.mark, EditorLayoutSpacing.ID.removed($0.baseRange)) },
+                                       uniquingKeysWith: { first, _ in first })
+        guard sourceChanged || marks != self.marks || projectedStarts != projectedConflictStarts || removedBlocks != self.removedBlocks else { return }
+        if sourceChanged { resetWrapLayout() }
         projectedConflictStarts = projectedStarts
+        self.removedBlocks = removedBlocks
         self.marks = marks.sorted {
             if $0.lines.lowerBound != $1.lines.lowerBound { return $0.lines.lowerBound < $1.lines.lowerBound }
             return $0.kind.drawingPriority < $1.kind.drawingPriority
@@ -83,11 +112,10 @@ final class JJEditorDecorations {
         if marks.isEmpty {
             track.removeFromSuperview()
             trackMarks.removeAll()
+            cancelTrackExpiry()
         }
-        if let scroll = editor?.enclosingScrollView {
-            layout(in: scroll)
-            if !marks.isEmpty { updateTrackMarks() }
-        }
+        trackNeedsUpdate = true
+        if let scroll = editor?.enclosingScrollView { layout(in: scroll) }
     }
 
     func layout(in scroll: NSScrollView) {
@@ -126,10 +154,8 @@ final class JJEditorDecorations {
         }
         let frame = trackFrame(in: scroll, scroller: scroller)
         if track.frame != frame { track.frame = frame }
-        if styleChanged || frame.size != trackSize || trackFont != editor.font ||
-            trackOverviewRevision != editor.layoutSpacing.overviewRevision {
-            updateTrackMarks()
-        }
+        if styleChanged || frame.size != trackSize { trackNeedsUpdate = true }
+        if marksMatchBuffer, editor.renameRange == nil { updateTrackMarks(for: editor) }
         if style != .overlay { track.needsDisplay = true }
     }
 
@@ -145,7 +171,7 @@ final class JJEditorDecorations {
             }
             return gutter
         }
-        guard allowsNavigation, track.superview === scroll, hasVerticalScrollRange(in: scroll),
+        guard let editor, trackIsCurrent(for: editor), track.superview === scroll, hasVerticalScrollRange(in: scroll),
               trackMark(at: track.convert(point, from: scroll)) != nil else { return nil }
         if let scroller = nativeScroller,
            nativeHit === scroller || nativeHit.isDescendant(of: scroller),
@@ -193,28 +219,87 @@ final class JJEditorDecorations {
         scroll.contentView.bounds.height < (scroll.documentView?.frame.height ?? 0)
     }
 
-    private func updateTrackMarks() {
+    private func trackIsCurrent(for editor: EditorTextView) -> Bool {
+        allowsNavigation && marksMatchBuffer && editor.renameRange == nil && !trackNeedsUpdate &&
+            trackOverviewRevision == editor.layoutSpacing.overviewRevision &&
+            trackStyle == .init(editor: editor, wrapsToEditor: true)
+    }
+
+    private func updateTrackMarks(for editor: EditorTextView) {
+        let style = EditorProjectedTextLayout.Style(editor: editor, wrapsToEditor: true)
+        let offsets: [CGFloat]?
+        if style.wrapWidth != nil {
+            guard let wrapLayout, wrapLayout.style == style else {
+                prepareWrapLayout(for: editor, style: style)
+                return
+            }
+            pendingWrap?.task.cancel()
+            pendingWrap = nil
+            offsets = wrapLayout.offsets
+        } else {
+            resetWrapLayout()
+            offsets = nil
+        }
+        cancelTrackExpiry()
+        guard trackNeedsUpdate || trackStyle != style || trackOverviewRevision != editor.layoutSpacing.overviewRevision else { return }
+        trackNeedsUpdate = false
         trackSize = track.bounds.size
-        guard let editor else { return }
         trackOverviewRevision = editor.layoutSpacing.overviewRevision
-        trackFont = editor.font
-        let geometry = EditorOverviewGeometry(editor: editor, lineStarts: lineStarts)
+        trackStyle = style
+        let geometry = EditorOverviewGeometry(editor: editor, lineStarts: lineStarts, wrappedOffsets: offsets)
         let height = trackSize.height
         let sideClearance: CGFloat = scrollerStyle == .overlay ? 2 : 0
         let width = min(4, max(0, trackSize.width - sideClearance))
         let minimumHeight = min(3, height)
         trackMarks = marks.map { mark in
-            let position = geometry.position(at: mark.lines.lowerBound)
-            let end = geometry.position(at: mark.lines.upperBound, afterReservation: mark.lines.isEmpty)
+            let reservation = removedBlocks[mark]
+            let removed = reservation.flatMap { geometry.range(for: $0) }
+            let position = removed?.lowerBound ?? geometry.position(at: mark.lines.lowerBound, afterReservation: true)
+            let end = mark.lines.isEmpty ? removed?.upperBound ?? position : geometry.position(at: mark.lines.upperBound)
             let top = height * geometry.fraction(at: position)
             let bottom = height * geometry.fraction(at: max(end, position))
             let markHeight = min(height, max(minimumHeight, bottom - top))
             let centered = (top + bottom - markHeight) / 2
             let rect = NSRect(x: (trackSize.width - width) / 2, y: max(0, min(height - markHeight, centered)),
                               width: width, height: markHeight)
-            return PositionedMark(mark: mark, rect: rect, documentY: position)
+            return PositionedMark(mark: mark, rect: rect, documentY: position, reservation: removed == nil ? nil : reservation)
         }.sorted { $0.mark.kind.drawingPriority < $1.mark.kind.drawingPriority }
         track.needsDisplay = true
+    }
+
+    private func prepareWrapLayout(for editor: EditorTextView, style: EditorProjectedTextLayout.Style) {
+        guard pendingWrap?.style != style else { return }
+        pendingWrap?.task.cancel()
+        if trackExpiry == nil, !trackMarks.isEmpty {
+            trackExpiry = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .milliseconds(750)) }
+                catch { return }
+                guard let self else { return }
+                trackExpiry = nil
+                trackNeedsUpdate = true
+                trackMarks.removeAll()
+                track.needsDisplay = true
+            }
+        }
+        let starts = lineStarts
+        let text = editor.string
+        let task = Task { @MainActor [weak self] in
+            guard !Task.isCancelled else { return }
+            let layout = EditorProjectedTextLayout(text: text, style: style)
+            let offsets = await layout.lineBoundaryOffsets(starts)
+            guard !Task.isCancelled, let self else { return }
+            if let offsets, let scroll = self.editor?.enclosingScrollView {
+                pendingWrap = nil
+                wrapLayout = (style, offsets)
+                self.layout(in: scroll)
+            }
+        }
+        pendingWrap = (style, task)
+    }
+
+    private func cancelTrackExpiry() {
+        trackExpiry?.cancel()
+        trackExpiry = nil
     }
 
     private func trackMark(at point: NSPoint) -> PositionedMark? {
@@ -233,12 +318,12 @@ final class JJEditorDecorations {
             nativeScroller?.mouseDown(with: event)
             return
         }
-        guard allowsNavigation, let editor, let scroll = editor.enclosingScrollView,
+        guard let editor, trackIsCurrent(for: editor), let scroll = editor.enclosingScrollView,
               let positioned = trackMark(at: track.convert(event.locationInWindow, from: nil)) else { return }
-        let mark = positioned.mark
-        if editor.jjInlineDiff?.revealExpanded(mark) == true { return }
-        let line = mark.lines.lowerBound
-        let geometry = EditorOverviewGeometry(editor: editor, lineStarts: lineStarts)
+        let line = positioned.mark.lines.lowerBound
+        let length = editor.textStorage?.length ?? 0
+        let atEnd = !lineStarts.indices.contains(line)
+        let offset = atEnd ? max(0, length - 1) : lineStarts[line]
         let visibleHeight = max(0, scroll.documentVisibleRect.height - scroll.contentInsets.top - scroll.contentInsets.bottom)
         let horizontal = scroll.visibleContentOrigin.x
         func center(_ y: CGFloat) {
@@ -248,23 +333,25 @@ final class JJEditorDecorations {
                 editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
             }
         }
-        let first = geometry.nativeBoundary(at: line) ?? positioned.documentY
-        center(first)
-        // TextKit lays out the destination after scrolling and may refine its original estimate.
-        if let settled = geometry.nativeBoundary(at: line) {
-            if abs(settled - first) > 0.5 { center(settled) }
-        } else {
-            let offset = lineStarts.indices.contains(line) ? lineStarts[line] : (editor.textStorage?.length ?? 0)
+        func nativeTarget() -> CGFloat? {
+            if let reservation = positioned.reservation { return editor.layoutSpacing.rect(for: reservation)?.minY }
+            if length == 0 { return editor.textContainerOrigin.y }
+            guard let row = editor.laidOutLineBounds(at: offset) else { return nil }
+            return atEnd ? row.maxY : row.minY
+        }
+        center(positioned.documentY)
+        if let target = nativeTarget() { center(target) }
+        let visible = scroll.documentVisibleRect
+        let exposedTop = visible.minY + scroll.contentInsets.top
+        let exposedBottom = visible.maxY - scroll.contentInsets.bottom
+        // A large jump can expose live coordinates that TextKit was still estimating.
+        if nativeTarget().map({ $0 < exposedTop - 1 || $0 > exposedBottom + 1 }) ?? true {
             editor.scrollRangeToVisible(NSRange(location: offset, length: 0))
             editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
-            if let settled = geometry.nativeBoundary(at: line) {
-                center(settled)
-            } else {
-                var origin = scroll.visibleContentOrigin
-                origin.x = horizontal
-                scroll.scrollToVisibleContentOrigin(origin)
-            }
+            if let target = nativeTarget() { center(target) }
+            else { scroll.scrollToVisibleContentOrigin(NSPoint(x: horizontal, y: scroll.visibleContentOrigin.y)) }
         }
+        editor.jjInlineDiff?.layout()
     }
 
     private func drawTrack(in dirtyRect: NSRect) {

@@ -131,13 +131,6 @@ final class JJInlineDiff: NSResponder {
         display.removedCaretRect(key: key, offset: offset)
     }
 
-    func revealExpanded(_ mark: JJLineMark) -> Bool {
-        guard let hunk = visibleHunks.first(where: { $0.mark == mark }) else { return false }
-        display.reveal(hunk)
-        layout()
-        return true
-    }
-
     override func mouseEntered(with event: NSEvent) { mouseMoved(with: event) }
 
     override func mouseMoved(with event: NSEvent) {
