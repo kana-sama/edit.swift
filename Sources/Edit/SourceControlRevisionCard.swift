@@ -2,9 +2,8 @@ import AppKit
 
 @MainActor
 final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
-    private static let cardWidth: CGFloat = 332
+    private static let minimumWidth: CGFloat = 332
     private static let inset: CGFloat = 14
-    private static let textWidth = cardWidth - 2 * inset
     private static let descriptionColor = NSColor(name: nil) { appearance in
         var color = NSColor.secondaryLabelColor
         appearance.performAsCurrentDrawingAppearance {
@@ -21,9 +20,9 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
     init(revision: JJSourceControlRevision, onOpenURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {
         openURL = onOpenURL
         super.init(frame: .zero)
-        let subject = textView(RevisionCardMessage.subject(revision.subject), id: "Subject")
         let description = RevisionCardMessage.parts(revision.description)
-        let metadata = makeMetadata(revision, trailers: description.trailers)
+        let (metadata, textWidth) = makeMetadata(revision, trailers: description.trailers)
+        let subject = textView(RevisionCardMessage.subject(revision.subject), id: "Subject", width: textWidth)
 
         let identity = SourceControlRevisionIdentity()
         identity.identifier = NSUserInterfaceItemIdentifier("JujutsuRevisionCardID")
@@ -44,7 +43,7 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
         let footer = NSStackView(views: [identity, NSView(), commitButton])
         footer.spacing = 8
         footer.alignment = .centerY
-        footer.widthAnchor.constraint(equalToConstant: Self.textWidth).isActive = true
+        footer.widthAnchor.constraint(equalToConstant: textWidth).isActive = true
 
         let content = Self.stack()
         content.spacing = 10
@@ -52,20 +51,20 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
         content.setCustomSpacing(5, after: subject)
         content.addArrangedSubview(metadata)
         if let body = description.body {
-            let formatted = RevisionCardMessage.body(body, width: Self.textWidth, color: Self.descriptionColor)
-            content.addArrangedSubview(textView(formatted, id: "Description"))
+            let formatted = RevisionCardMessage.body(body, width: textWidth, color: Self.descriptionColor)
+            content.addArrangedSubview(textView(formatted, id: "Description", width: textWidth))
         }
 
         let separator = NSBox()
         separator.boxType = .separator
         content.addArrangedSubview(separator)
-        separator.widthAnchor.constraint(equalToConstant: Self.textWidth).isActive = true
+        separator.widthAnchor.constraint(equalToConstant: textWidth).isActive = true
         separator.heightAnchor.constraint(equalToConstant: 1).isActive = true
         content.setCustomSpacing(8, after: separator)
         if !revision.bookmarks.isEmpty {
             let bookmarks = Self.label(revision.bookmarks.joined(separator: "  ·  "), id: "Bookmarks",
                                        font: .systemFont(ofSize: 11, weight: .medium), color: .linkColor,
-                                       lines: 3, width: Self.textWidth - 18)
+                                       lines: 3, width: textWidth - 18)
             let bookmarkRow = NSStackView(views: [Self.icon("bookmark", color: .linkColor), bookmarks])
             bookmarkRow.spacing = 5
             bookmarkRow.alignment = .top
@@ -77,7 +76,7 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
         content.translatesAutoresizingMaskIntoConstraints = false
         addSubview(content)
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: Self.cardWidth),
+            widthAnchor.constraint(equalToConstant: textWidth + 2 * Self.inset),
             content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
             content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.inset),
             content.topAnchor.constraint(equalTo: topAnchor, constant: 12),
@@ -107,23 +106,24 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
     }
 
     static func creationDates(for revision: JJSourceControlRevision) -> [String] {
-        dateRows(for: revision).map { "\($0.label) · \($0.value)" }
+        dateRows(for: revision).map { "\($0.label) · \($0.absolute)" }
     }
 
-    private static func dateRows(for revision: JJSourceControlRevision) -> [(label: String, value: String)] {
+    private static func dateRows(for revision: JJSourceControlRevision) -> [(label: String, date: Date, absolute: String)] {
         let style = Date.FormatStyle.dateTime.year().month(.abbreviated).day().hour().minute().second()
         let author = revision.authorDate.formatted(style)
-        if revision.authorDate == revision.committerDate { return [("Created", author)] }
+        if revision.authorDate == revision.committerDate { return [("Created", revision.authorDate, author)] }
 
         let committer = revision.committerDate.formatted(style)
         if author == committer {
             let precise = style.secondFraction(.fractional(3))
-            return [("Created", revision.authorDate.formatted(precise)), ("Modified", revision.committerDate.formatted(precise))]
+            return [("Created", revision.authorDate, revision.authorDate.formatted(precise)),
+                    ("Modified", revision.committerDate, revision.committerDate.formatted(precise))]
         }
-        return [("Created", author), ("Modified", committer)]
+        return [("Created", revision.authorDate, author), ("Modified", revision.committerDate, committer)]
     }
 
-    private func makeMetadata(_ revision: JJSourceControlRevision, trailers: [RevisionCardMessage.Trailer]) -> NSGridView {
+    private func makeMetadata(_ revision: JJSourceControlRevision, trailers: [RevisionCardMessage.Trailer]) -> (NSGridView, CGFloat) {
         var rows: [(label: String, value: String)] = []
         let name = revision.author
         let email = revision.authorEmail
@@ -132,7 +132,12 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
             rows.append(("Author", author))
         }
         rows += trailers.filter(\.isCoauthor).map { ("Co-author", $0.value) }
-        rows += Self.dateRows(for: revision)
+        let now = Date.now
+        let relative = RelativeDateTimeFormatter()
+        let dates = Self.dateRows(for: revision).map { row in
+            (label: row.label, value: "\(relative.localizedString(for: row.date, relativeTo: now)) (\(row.absolute))")
+        }
+        rows += dates
         rows += trailers.filter { !$0.isCoauthor }.map { ($0.label, $0.value) }
 
         let labels = rows.map { row in
@@ -146,14 +151,17 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
         }
         let labelWidth = min(112, ceil(labels.map { $0.intrinsicContentSize.width }.max() ?? 0))
         let spacing: CGFloat = 12
-        let valueWidth = Self.textWidth - labelWidth - spacing
+        let valueFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+        let dateWidth = dates.map { ($0.value as NSString).size(withAttributes: [.font: valueFont]).width }.max() ?? 0
+        let textWidth = max(Self.minimumWidth - 2 * Self.inset, labelWidth + spacing + ceil(dateWidth))
+        let valueWidth = textWidth - labelWidth - spacing
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .right
         paragraph.lineBreakMode = .byTruncatingTail
         let fields: [[NSView]] = zip(labels, rows).map { label, row in
             let singleLine = row.value.split(whereSeparator: \.isNewline).joined(separator: " ")
             let formatted = NSMutableAttributedString(string: singleLine, attributes: [
-                .font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: NSColor.labelColor,
+                .font: valueFont, .foregroundColor: NSColor.labelColor,
                 .paragraphStyle: paragraph,
             ])
             RevisionCardMessage.addLinks(to: formatted)
@@ -169,7 +177,7 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
         grid.column(at: 0).width = labelWidth
         grid.column(at: 1).xPlacement = .fill
         grid.column(at: 1).width = valueWidth
-        return grid
+        return (grid, textWidth)
     }
 
     private static func formattedAuthor(_ name: String, email: String) -> String {
@@ -185,7 +193,7 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
     }
 
     private static func label(_ text: String, id: String, font: NSFont, color: NSColor = .labelColor,
-                              lines: Int, width: CGFloat = textWidth) -> NSTextField {
+                              lines: Int, width: CGFloat) -> NSTextField {
         let label = NSTextField(wrappingLabelWithString: text)
         label.identifier = NSUserInterfaceItemIdentifier("JujutsuRevisionCard\(id)")
         label.font = font
@@ -202,7 +210,7 @@ final class SourceControlRevisionCard: NSView, NSTextViewDelegate {
         return label
     }
 
-    private func textView(_ text: NSAttributedString, id: String, width: CGFloat = textWidth, singleLine: Bool = false) -> NSTextView {
+    private func textView(_ text: NSAttributedString, id: String, width: CGFloat, singleLine: Bool = false) -> NSTextView {
         let view = SourceControlRevisionCardText(text, width: width, singleLine: singleLine)
         view.identifier = NSUserInterfaceItemIdentifier("JujutsuRevisionCard\(id)")
         view.delegate = self

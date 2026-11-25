@@ -25,8 +25,10 @@ enum SourceControlCheck {
         try "Clean working file\n".write(to: liveFile, atomically: true, encoding: .utf8)
         try removedText.write(to: removed, atomically: true, encoding: .utf8)
         try await command(executable, folder, ["describe", "-m", "Base"])
-        try await command(executable, folder, ["--config", #"debug.commit-timestamp="2020-01-02T03:04:05Z""#,
-                                               "new", "-m", "Historical change"])
+        let now = Date.now
+        let historicalCreated = now.addingTimeInterval(-50 * 3600).ISO8601Format()
+        try await command(executable, folder, ["--config", #"debug.commit-timestamp="\#(historicalCreated)""#,
+                                               "new", "-m", "Historical change\n\nAcknowledgement-For-Historical-Revision: Accepted"])
         let historical = original.replacingOccurrences(of: "Line 8\n", with: "Historical line\n")
         try historical.write(to: file, atomically: true, encoding: .utf8)
         try Data([3, 2, 35, 7, 0, 255, 0, 0]).write(to: binary)
@@ -39,7 +41,9 @@ enum SourceControlCheck {
             + "Co-authored-by: Ada Finch <ada@example.com>\nSigned-off-by: Reviewer <reviewer@example.com>\n"
             + "Reviewed-on: \(reviewURL)\n  Review continued.\n"
             + "co-authored-by: Casey Chen <casey@example.com>\n"
-        try await command(executable, folder, ["new", "-m", description])
+        let historicalModified = now.addingTimeInterval(-(2 * 3600 + 5 * 60)).ISO8601Format()
+        try await command(executable, folder, ["--config", #"debug.commit-timestamp="\#(historicalModified)""#,
+                                               "new", "-m", description])
         try await command(executable, folder, ["bookmark", "create", "review/jj-sidebar-layout-with-a-long-bookmark", "-r", "@"])
         try await command(executable, folder, ["bookmark", "create", "zz-review", "-r", "@"])
         try await command(executable, folder, ["new", "--no-edit", "-m", "Side branch", "@--"])
@@ -2066,6 +2070,20 @@ enum SourceControlCheck {
             let subject = card()?.contentView.flatMap { text("Subject", in: $0)?.string } ?? "none"
             let row = graph.table.rect(ofRow: historical)
             throw Failure("show both historical creation dates (card \(subject), row \(row), viewport \(graph.table.visibleRect), key \(window.isKeyWindow))")
+        }
+        guard let historicalCard = card()?.contentView else { throw Failure("find the historical revision card") }
+        let historicalRevision = revisions[historical]
+        let referenceDate = Date.now
+        let relative = RelativeDateTimeFormatter()
+        let absolute = Date.FormatStyle.dateTime.year().month(.abbreviated).day().hour().minute().second()
+        for (label, date) in [("Created", historicalRevision.authorDate), ("Modified", historicalRevision.committerDate)] {
+            guard let value = text(label, in: historicalCard), let layout = value.layoutManager else {
+                throw Failure("find the historical \(label) timestamp")
+            }
+            let age = relative.localizedString(for: date, relativeTo: referenceDate)
+            try expect(value.string == "\(age) (\(date.formatted(absolute)))" &&
+                       layout.truncatedGlyphRange(inLineFragmentForGlyphAt: 0).length == 0,
+                       "show the relative \(label) time and the full local timestamp in parentheses on one line")
         }
         graph.table.mouseExited(with: try pointer(at: working))
         try await waitFor("dismiss the card after leaving the row and its corridor") { card() == nil }
