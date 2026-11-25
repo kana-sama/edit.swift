@@ -34,6 +34,7 @@ final class SyntaxHighlighting {
     var treeSpansForCheck: [SyntaxSpan] { treeSpans }
     var semanticSpansForCheck: [SyntaxSpan] { semanticSpans }
     var needsFullSemanticTokensForCheck: Bool { lastSemanticColors == nil }
+    var beforeInstallTreeTokensForCheck: (() async -> Void)?
     var beforeInstallSemanticTokensForCheck: (() async -> Void)?
 #endif
 
@@ -188,6 +189,9 @@ final class SyntaxHighlighting {
             }
             guard !Task.isCancelled else { return }
             let result = await job.task.value
+#if EDIT_AGENT_CHECKS
+            if result != nil { await self?.beforeInstallTreeTokensForCheck?() }
+#endif
             guard !Task.isCancelled, let self, self.generation == request else { return }
             if let result {
                 self.displayTree(result.spans)
@@ -255,7 +259,7 @@ final class SyntaxHighlighting {
     private func displayTree(_ spans: [SyntaxSpan]) {
         guard !treeSpans.isEmpty || !spans.isEmpty else { return }
         treeSpansAreStale = false
-        if semanticSpansAreStale { discardPartialOverlaps(in: &semanticSpans, with: spans) }
+        if semanticSpansAreStale { discardOverriddenColors(in: &semanticSpans, with: spans) }
         treeSpans = spans
         repaintLayers()
     }
@@ -263,15 +267,15 @@ final class SyntaxHighlighting {
     private func displaySemantic(_ spans: [SyntaxSpan]) {
         guard !semanticSpans.isEmpty || !spans.isEmpty else { return }
         semanticSpansAreStale = false
-        if treeSpansAreStale { discardPartialOverlaps(in: &treeSpans, with: spans) }
+        if treeSpansAreStale { discardOverriddenColors(in: &treeSpans, with: spans) }
         semanticSpans = spans
         repaintLayers()
     }
 
-    private func discardPartialOverlaps(in cached: inout [SyntaxSpan], with fresh: [SyntaxSpan]) {
+    private func discardOverriddenColors(in cached: inout [SyntaxSpan], with fresh: [SyntaxSpan]) {
         cached.removeAll { token in
             spans(overlapping: token.range, from: fresh).contains { current in
-                token.color != current.color && token.range != current.range
+                token.provisional || (token.color != current.color && token.range != current.range)
             }
         }
     }
@@ -320,8 +324,10 @@ final class SyntaxHighlighting {
             ?? [(range: NSRange(location: edit.location, length: replacedLength), delta: delta)]
         let invalidated = invalidatedColorRange(after: edits, lengthChange: delta)
         if let visible = visibleRange() ?? backedColorRange {
-            treeSpans = remappedSpans(treeSpans, in: visible, after: edits)
-            semanticSpans = remappedSpans(semanticSpans, in: visible, after: edits)
+            let typingText = editor?.hasMarkedText() == false && editor?.isRenamingSymbol == false
+                ? storage.mutableString : nil
+            treeSpans = remappedSpans(treeSpans, in: visible, after: edits, typingText: typingText)
+            semanticSpans = remappedSpans(semanticSpans, in: visible, after: edits, typingText: typingText)
         } else {
             treeSpans = []
             semanticSpans = []
@@ -361,7 +367,7 @@ final class SyntaxHighlighting {
     }
 
     private func remappedSpans(_ spans: [SyntaxSpan], in visible: NSRange,
-                               after edits: [(range: NSRange, delta: Int)]) -> [SyntaxSpan] {
+                               after edits: [(range: NSRange, delta: Int)], typingText: NSString?) -> [SyntaxSpan] {
         var mapped: [SyntaxSpan] = []
         var editIndex = 0
         var offset = 0
@@ -370,10 +376,51 @@ final class SyntaxHighlighting {
                 offset += edits[editIndex].delta
                 editIndex += 1
             }
-            guard editIndex == edits.count || edits[editIndex].range.location > span.end else { continue }
-            mapped.append(SyntaxSpan(start: span.start + offset, end: span.end + offset, color: span.color))
+            let shifted = SyntaxSpan(start: span.start + offset, end: span.end + offset,
+                                     color: span.color, provisional: span.provisional)
+            if editIndex == edits.count || edits[editIndex].range.location > span.end {
+                mapped.append(shifted)
+            } else {
+                let edit = edits[editIndex]
+                if edit.range.length == 0, edit.range.location == span.end, let typingText,
+                   let carried = colorAfterAppending(to: shifted, length: edit.delta, in: typingText) {
+                    mapped.append(carried)
+                }
+            }
         }
         return mapped
+    }
+
+    private func colorAfterAppending(to span: SyntaxSpan, length: Int, in text: NSString) -> SyntaxSpan? {
+        switch span.color {
+        case .plain, .keyword, .control, .type, .function, .property: break
+        default: return nil
+        }
+        guard let language = editor?.syntaxLanguage else { return nil }
+        switch language {
+        case .c, .cpp, .go, .javascript, .javascriptJSX, .lua, .objectiveC, .objectiveCPP, .python, .rust,
+             .solidity, .swift, .typescript, .tsx, .zig: break
+        default: return nil
+        }
+        let end = span.end + length
+        guard length > 0, span.start < span.end, end <= text.length else { return nil }
+
+        func isLetter(_ unit: UInt16) -> Bool { (65...90).contains(unit) || (97...122).contains(unit) || unit == 95 }
+        func isWord(_ unit: UInt16) -> Bool { isLetter(unit) || (48...57).contains(unit) }
+        func mayContinueWord(at offset: Int) -> Bool {
+            guard offset >= 0, offset < text.length else { return false }
+            let unit = text.character(at: offset)
+            return isWord(unit) || unit >= 128 || unit == 36 || unit == 64
+        }
+
+        guard isLetter(text.character(at: span.start)),
+              !mayContinueWord(at: span.start - 1), !mayContinueWord(at: end),
+              (span.start..<span.end).allSatisfy({ isWord(text.character(at: $0)) }) else { return nil }
+        // A dot after a bare identifier is a new token. A digit can extend the word,
+        // but a dot after a numeric literal is outside this fast path.
+        if length == 1, text.character(at: span.end) == 46 { return span }
+        guard (span.end..<end).allSatisfy({ isWord(text.character(at: $0)) }) else { return nil }
+        return SyntaxSpan(start: span.start, end: end, color: span.color, provisional: true)
     }
 
     func repaintEditedColors(in affected: NSRange, storage: NSTextStorage) {

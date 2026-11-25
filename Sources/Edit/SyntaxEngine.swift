@@ -55,6 +55,7 @@ struct SyntaxSpan: Sendable {
     let start: Int
     let end: Int
     let color: SyntaxColor
+    var provisional = false
 
     var range: NSRange { NSRange(location: start, length: end - start) }
 }

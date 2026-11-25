@@ -195,7 +195,7 @@ enum LSPSemanticHighlightCheck {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let file = folder.appending(path: "Typing.zig")
         let source = "pub const Stable = struct {};\ntest \"typing\" {\n"
-            + String(repeating: "    return error.Other;\n", count: 4) + "    return erro\n}\n"
+            + String(repeating: "    return error.Other;\n", count: 4) + "    return erro;\n}\n"
         try source.write(to: file, atomically: true, encoding: .utf8)
         document.setFolder(folder)
         let window = document.window
@@ -210,37 +210,97 @@ enum LSPSemanticHighlightCheck {
                 && hasSemanticColor("Stable", in: document)
         }
 
-        var holdingResponse = true
-        var heldResponses = 0
+        var holdTree = true
+        var holdSemantic = true
+        var heldTree = 0
+        var heldSemantic = 0
+        highlighting.beforeInstallTreeTokensForCheck = {
+            heldTree += 1
+            defer { heldTree -= 1 }
+            while holdTree && !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
+        }
         highlighting.beforeInstallSemanticTokensForCheck = {
-            heldResponses += 1
-            defer { heldResponses -= 1 }
-            while holdingResponse && !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
+            heldSemantic += 1
+            defer { heldSemantic -= 1 }
+            while holdSemantic && !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
         }
         defer {
-            holdingResponse = false
+            holdTree = false
+            holdSemantic = false
+            highlighting.beforeInstallTreeTokensForCheck = nil
             highlighting.beforeInstallSemanticTokensForCheck = nil
         }
         let title = window.title
         editor.setSelectedRange(NSRange(location: prefix.upperBound, length: 0))
         editor.insertText("r", replacementRange: NSRange(location: NSNotFound, length: 0))
         let keyword = NSRange(location: prefix.location, length: 5)
-        try require(!highlighting.semanticSpansForCheck.contains { NSIntersectionRange($0.range, keyword).length > 0 },
-                    "discard the entire stale overlay on the first edited frame")
+        try require(highlighting.semanticSpansForCheck.contains { $0.range == keyword && $0.color == .plain && $0.provisional },
+                    "keep the old variable color over all five glyphs while both results are pending")
         try require(hasSemanticColor("Other", in: document), "preserve an unaffected semantic token beside the edit")
-        try requireKeywordPixels(in: keyword, document: document, blue: false)
-        try await wait("hold the semantic update while Tree-sitter classifies the entire keyword") {
-            heldResponses > 0 && highlighting.treeSpansForCheck.contains { $0.range == keyword && $0.color == .keyword }
+        try requireGlyphColors(in: keyword, document: document, expected: .plain)
+        try capture(window, "keyword-first")
+        try await wait("hold both results for the new keyword") { heldTree > 0 && heldSemantic > 0 }
+        try requireGlyphColors(in: keyword, document: document, expected: .plain)
+        holdTree = false
+        try await wait("use Tree-sitter's keyword color while the semantic update is held") {
+            highlighting.treeSpansForCheck.contains { $0.range == keyword && $0.color == .keyword }
         }
         try require(window.title == title, "preserve the title while the response is held")
-        try requireKeywordPixels(in: keyword, document: document, blue: true)
-        try capture(window, "whole-token-pending")
+        try require(!highlighting.semanticSpansForCheck.contains { NSIntersectionRange($0.range, keyword).length > 0 },
+                    "replace the provisional semantic color even when the ranges match")
+        try requireGlyphColors(in: keyword, document: document, expected: .keyword)
+        try capture(window, "keyword-tree")
 
-        holdingResponse = false
-        highlighting.beforeInstallSemanticTokensForCheck = nil
+        holdSemantic = false
         try await wait("finish installing the semantic response") { !highlighting.needsFullSemanticTokensForCheck }
-        try requireKeywordPixels(in: keyword, document: document, blue: true)
-        try capture(window, "whole-token-ready")
+        try requireGlyphColors(in: keyword, document: document, expected: .keyword)
+        try capture(window, "keyword-settled")
+
+        let dot = NSRange(location: keyword.upperBound, length: 1)
+        for (index, character) in ".Hello".enumerated() {
+            holdTree = true
+            holdSemantic = true
+            editor.insertText(String(character), replacementRange: NSRange(location: NSNotFound, length: 0))
+            let tag = NSRange(location: dot.upperBound, length: index)
+            let suffix = String(".Hello".prefix(index + 1))
+            let typed = NSRange(location: dot.location, length: suffix.utf16.count)
+            try require((editor.string as NSString).substring(with: typed) == suffix, "type \(suffix) at the end of the keyword")
+
+            func verifyFrame(tagColor: SyntaxColor, phase: String) throws {
+                try requireGlyphColors(in: keyword, document: document, expected: .keyword)
+                try requireGlyphColors(in: dot, document: document, expected: .plain)
+                if tag.length > 0 { try requireGlyphColors(in: tag, document: document, expected: tagColor) }
+                try capture(window, "typing-\(index + 1)-\(phase)")
+            }
+            let firstColor: SyntaxColor = index > 1 ? .type : .plain
+            try verifyFrame(tagColor: firstColor, phase: "first")
+            try await wait("hold both results for \(suffix)") { heldTree > 0 && heldSemantic > 0 }
+            try verifyFrame(tagColor: firstColor, phase: "held")
+
+            holdTree = false
+            try await wait("show the current Tree-sitter colors for \(suffix)") {
+                heldTree == 0 && (tag.length == 0 || highlighting.treeSpansForCheck.contains {
+                    $0.range == tag && $0.color == .type && !$0.provisional
+                })
+            }
+            try verifyFrame(tagColor: .type, phase: "tree")
+
+            holdSemantic = false
+            try await wait("finish applying the semantic response for \(suffix)") { !highlighting.needsFullSemanticTokensForCheck }
+            try verifyFrame(tagColor: .type, phase: "settled")
+        }
+
+        document.toggleHighlighting(.lsp)
+        holdTree = true
+        for (index, character) in "Ab".enumerated() {
+            editor.insertText(String(character), replacementRange: NSRange(location: NSNotFound, length: 0))
+            let tag = NSRange(location: dot.upperBound, length: "Hello".utf16.count + index + 1)
+            try requireGlyphColors(in: keyword, document: document, expected: .keyword)
+            try requireGlyphColors(in: tag, document: document, expected: .type)
+        }
+        try await wait("hold the Tree-sitter result after successive keystrokes") { heldTree > 0 }
+        holdTree = false
+        try await wait("finish the Tree-sitter update with semantic colors off") { heldTree == 0 }
 
         // Deleting the separator joins two colored keywords. Clear both in the first frame.
         let separator = NSRange(location: prefix.location - 1, length: 1)
@@ -249,10 +309,10 @@ enum LSPSemanticHighlightCheck {
         let joined = NSRange(location: prefix.location - 7, length: 11)
         try require((editor.string as NSString).substring(with: joined) == "returnerror", "join the two keywords")
         try capture(window, "whole-token-joined")
-        try requireKeywordPixels(in: joined, document: document, blue: false)
+        try requireGlyphColors(in: joined, document: document, expected: .plain)
     }
 
-    private static func requireKeywordPixels(in range: NSRange, document: DocumentWindow, blue: Bool) throws {
+    private static func requireGlyphColors(in range: NSRange, document: DocumentWindow, expected: SyntaxColor) throws {
         let window = document.window
         let editor = document.editor
         let clip = document.scrollView.contentView
@@ -271,17 +331,18 @@ enum LSPSemanticHighlightCheck {
         for (index, (left, right)) in zip(columns, columns.dropFirst()).enumerated() {
             let x = Int(((left.minX - bounds.minX) * scale).rounded())..<Int(((right.minX - bounds.minX) * scale).rounded())
             let y = Int(((left.minY - bounds.minY) * scale).rounded())..<Int(((left.maxY - bounds.minY) * scale).rounded())
-            var hasBlue = false
-            var hasWhite = false
+            var colors = Set<SyntaxColor>()
             for row in y where (0..<bitmap.pixelsHigh).contains(row) {
                 for column in x where (0..<bitmap.pixelsWide).contains(column) {
                     guard let pixel = bitmap.colorAt(x: column, y: row)?.usingColorSpace(.sRGB) else { continue }
-                    if pixel.blueComponent > pixel.redComponent + 0.2 { hasBlue = true }
-                    if min(pixel.redComponent, pixel.greenComponent, pixel.blueComponent) > 0.7 { hasWhite = true }
+                    let (red, green, blue) = (pixel.redComponent, pixel.greenComponent, pixel.blueComponent)
+                    if blue > red + 0.2 && blue > green + 0.1 { colors.insert(.keyword) }
+                    if green > red + 0.2 && green > blue + 0.03 { colors.insert(.type) }
+                    if min(red, green, blue) > 0.7 { colors.insert(.plain) }
                 }
             }
-            try require(blue ? hasBlue && !hasWhite : hasWhite && !hasBlue,
-                        "glyph \(index + 1) of \(range.length) in the edited token is \(blue ? "blue" : "plain")")
+            try require(colors == [expected],
+                        "glyph \(index + 1) of \(range.length) has \(expected) paint: found \(colors)")
         }
     }
 
@@ -324,12 +385,12 @@ enum LSPSemanticHighlightCheck {
         editor.revealNavigationSelection(editor.selectedRange())
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         try capture(document.window, "whole-token-scrolled-before")
-        try requireKeywordPixels(in: keyword, document: document, blue: true)
+        try requireGlyphColors(in: keyword, document: document, expected: .keyword)
         editor.insertText("s", replacementRange: NSRange(location: NSNotFound, length: 0))
         let extended = NSRange(location: keyword.location, length: keyword.length + 1)
         try require((editor.string as NSString).substring(with: extended) == "structs", "extend a token after scrolling")
         try capture(document.window, "whole-token-scrolled")
-        try requireKeywordPixels(in: extended, document: document, blue: false)
+        try requireGlyphColors(in: extended, document: document, expected: .keyword)
     }
 
     private static func checkPreferences(root: URL, other: URL) throws {
