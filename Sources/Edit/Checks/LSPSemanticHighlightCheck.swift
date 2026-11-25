@@ -308,8 +308,10 @@ enum LSPSemanticHighlightCheck {
             try require((editor.string as NSString).substring(with: tag) == shortened,
                         "shorten the error tag to \(shortened)")
             try requireGlyphColors(in: tag, document: document, expected: .type)
-            try require(highlighting.semanticSpansForCheck.contains { $0.range == tag && $0.color == .type && $0.provisional },
-                        "keep the ZLS color across the whole shortened tag \(shortened)")
+            try require(highlighting.treeSpansForCheck.contains { $0.range == tag && $0.color == .type && !$0.provisional },
+                        "classify the whole shortened tag \(shortened) locally before either response")
+            try require(!highlighting.semanticSpansForCheck.contains { NSIntersectionRange($0.range, tag).length > 0 },
+                        "clear the old semantic range for the locally classified tag \(shortened)")
             try capture(window, "backspace-\(shortened)-first")
             try await wait("hold both results for \(shortened)") { heldTree > 0 && heldSemantic > 0 }
             try requireGlyphColors(in: tag, document: document, expected: .type)
@@ -321,6 +323,7 @@ enum LSPSemanticHighlightCheck {
                 }
             }
             try requireGlyphColors(in: tag, document: document, expected: .type)
+            try capture(window, "backspace-\(shortened)-tree")
             holdSemantic = false
             try await wait("apply the ZLS color for \(shortened)") {
                 !highlighting.needsFullSemanticTokensForCheck && highlighting.semanticSpansForCheck.contains {
@@ -328,6 +331,7 @@ enum LSPSemanticHighlightCheck {
                 }
             }
             try requireGlyphColors(in: tag, document: document, expected: .type)
+            try capture(window, "backspace-\(shortened)-settled")
         }
         let shortenedTagAndExtraSemicolons = NSRange(location: hello.location, length: 2 + extraSemicolons.utf16.count)
         editor.insertText("Hello", replacementRange: shortenedTagAndExtraSemicolons)
@@ -411,6 +415,34 @@ enum LSPSemanticHighlightCheck {
         try await checkSeparatorEdit("delete-leading-space", result: "return error", words: [returnKeyword, keyword]) {
             editor.deleteBackward(nil)
         }
+
+        try await setLine("return error.Hello;")
+        try require(highlighting.semanticSpansForCheck.contains { $0.range == returnKeyword && $0.color == .keyword },
+                    "start with a ZLS keyword that could mask the local update")
+        try requireGlyphColors(in: returnKeyword, document: document, expected: .keyword)
+        holdTree = true
+        holdSemantic = true
+        editor.setSelectedRange(NSRange(location: returnKeyword.upperBound, length: 0))
+        editor.deleteBackward(nil)
+        let shortenedReturn = NSRange(location: returnKeyword.location, length: returnKeyword.length - 1)
+        try require((editor.string as NSString).substring(with: shortenedReturn) == "retur", "shorten the return keyword")
+        try requireGlyphColors(in: shortenedReturn, document: document, expected: .plain)
+        try require(!highlighting.semanticSpansForCheck.contains { NSIntersectionRange($0.range, shortenedReturn).length > 0 },
+                    "drop the stale semantic keyword on the first frame")
+        try require(window.title == title, "preserve the document title during local highlighting")
+        try capture(window, "backspace-retur-first")
+        try await wait("hold both responses for retur") { heldTree > 0 && heldSemantic > 0 }
+        try requireGlyphColors(in: shortenedReturn, document: document, expected: .plain)
+        try capture(window, "backspace-retur-held")
+        // Exercise the opposite completion order to the error-tag checks above.
+        holdSemantic = false
+        try await wait("install ZLS while Tree-sitter is held for retur") { !highlighting.needsFullSemanticTokensForCheck }
+        try requireGlyphColors(in: shortenedReturn, document: document, expected: .plain)
+        try capture(window, "backspace-retur-zls")
+        holdTree = false
+        try await wait("install Tree-sitter for retur") { heldTree == 0 }
+        try requireGlyphColors(in: shortenedReturn, document: document, expected: .plain)
+        try capture(window, "backspace-retur-settled")
     }
 
     private static func requireGlyphColors(in range: NSRange, document: DocumentWindow, expected: SyntaxColor) throws {

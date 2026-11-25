@@ -342,8 +342,17 @@ final class SyntaxHighlighting {
         if let visible = visibleRange() ?? backedColorRange {
             let typingText = editor?.hasMarkedText() == false && editor?.isRenamingSymbol == false
                 ? storage.mutableString : nil
+            let localWord: SyntaxSpan? = if let typingText, edits.count == 1, let edit = edits.first,
+                                            edit.delta == -edit.range.length {
+                classifyZigWord(afterDeleting: edit.range, in: typingText)
+            } else { nil }
             treeSpans = remappedSpans(treeSpans, in: visible, after: edits, typingText: typingText)
             semanticSpans = remappedSpans(semanticSpans, in: visible, after: edits, typingText: typingText)
+            if let localWord, let index = treeSpans.firstIndex(where: { $0.range == localWord.range }) {
+                treeSpans[index] = localWord
+                // An old semantic span must not cover any part of a word already reclassified for this edit.
+                semanticSpans.removeAll { NSIntersectionRange($0.range, localWord.range).length > 0 }
+            }
         } else {
             treeSpans = []
             semanticSpans = []
@@ -359,6 +368,47 @@ final class SyntaxHighlighting {
             backedColorRange = NSRange(location: start, length: end - start)
         }
         return invalidated
+    }
+
+    private func classifyZigWord(afterDeleting deletion: NSRange, in text: NSString) -> SyntaxSpan? {
+        guard treeSitterEnabled, treeLanguage == .zig, editor?.syntaxLanguage == .zig,
+              wordDeletions.contains(deletion),
+              let previous = spans(overlapping: deletion, from: treeSpans).first,
+              deletion.location >= previous.start, deletion.upperBound <= previous.end else { return nil }
+        // The control color also paints labels whose syntax can depend on another line.
+        let wasKeyword = previous.color == .keyword
+        guard wasKeyword || previous.color == .type else { return nil }
+        let shortened = SyntaxSpan(start: previous.start, end: previous.end - deletion.length, color: previous.color)
+        guard shortened.start < shortened.end else { return nil }
+
+        let line = LineEditing.line(at: shortened.start, in: text)
+        // Restrict the synchronous parse to one short line and roles with enough context on that line.
+        guard line.contentRange.length <= 2_048, shortened.end <= line.contentEnd else { return nil }
+        let errorPrefix = "error."
+        let prefixStart = shortened.start - errorPrefix.utf16.count
+        let wasErrorTag = previous.color == .type && prefixStart >= line.start
+            && text.substring(with: NSRange(location: prefixStart, length: errorPrefix.utf16.count)) == errorPrefix
+        guard (wasKeyword || wasErrorTag),
+              colorAfterBoundaryEdit(to: shortened, appended: 0, in: text) != nil,
+              let result = SyntaxEngine.analysis(in: text.substring(with: line.contentRange), language: .zig,
+                                                 includesBrackets: false) else { return nil }
+
+        let word = NSRange(location: shortened.start - line.start, length: shortened.range.length)
+        let local = spans(overlapping: word, from: result.spans)
+        let color: SyntaxColor
+        if let span = local.first {
+            guard local.count == 1, span.range == word else { return nil }
+            if wasErrorTag {
+                guard span.color == .type else { return nil }
+            } else {
+                guard span.color == .keyword || span.color == .control else { return nil }
+            }
+            color = span.color
+        } else {
+            guard wasKeyword else { return nil }
+            color = .plain
+        }
+        return SyntaxSpan(start: shortened.start, end: shortened.end, color: color)
     }
 
     private func invalidatedColorRange(after edits: [(range: NSRange, delta: Int)], lengthChange: Int) -> NSRange? {
