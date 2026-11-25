@@ -130,17 +130,40 @@ enum SyntaxEngine {
 
     // The signed library is loaded only when the first supported file needs highlighting.
     // The handle is intentionally kept for the process lifetime with the function pointer.
-    private static let analyze: EditSyntaxAnalyze? = {
+    nonisolated(unsafe) private static let library: UnsafeMutableRawPointer? = {
         guard let directory = Bundle.main.privateFrameworksURL,
               let handle = dlopen(directory.appending(path: "libEditSyntax.dylib").path, RTLD_LOCAL | RTLD_NOW) else {
             return nil
         }
-        guard let entry = dlsym(handle, "edit_syntax_analyze_v1") else {
-            dlclose(handle)
-            return nil
-        }
+        return handle
+    }()
+
+    private static let analyze: EditSyntaxAnalyze? = {
+        guard let library, let entry = dlsym(library, "edit_syntax_analyze_v1") else { return nil }
         return unsafeBitCast(entry, to: EditSyntaxAnalyze.self)
     }()
+
+    private static let markdownTable: EditMarkdownTable? = {
+        guard let library, let entry = dlsym(library, "edit_markdown_table_v1") else { return nil }
+        return unsafeBitCast(entry, to: EditMarkdownTable.self)
+    }()
+
+    static func markdownTableRows(in source: String, caret: Int) -> [NSRange] {
+        guard let markdownTable, let caret = UInt32(exactly: caret), !source.isEmpty else { return [] }
+        let units = Array(source.utf16)
+        guard let count = UInt32(exactly: units.count) else { return [] }
+        var rows: [NSRange] = []
+        let found = withUnsafeMutablePointer(to: &rows) { rows in
+            units.withUnsafeBufferPointer { buffer in
+                markdownTable(buffer.baseAddress!, count, caret, { context, start, end, _ in
+                    context?.assumingMemoryBound(to: [NSRange].self).pointee.append(
+                        NSRange(location: Int(start), length: Int(end - start))
+                    )
+                }, rows)
+            }
+        }
+        return found ? rows : []
+    }
 
     private static let queries = Bundle.main.resourceURL?.appending(path: "syntax/queries").path
 

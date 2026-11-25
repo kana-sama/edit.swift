@@ -19,4 +19,10 @@ typedef bool EditSyntaxAnalysisFunction(const char * _Nonnull language, const ch
 typedef EditSyntaxAnalysisFunction *EditSyntaxAnalyze;
 extern EditSyntaxAnalysisFunction edit_syntax_analyze_v1;
 
+typedef bool EditMarkdownTableFunction(const uint16_t * _Nonnull units, uint32_t count, uint32_t caret,
+                                       EditSyntaxCapture _Nonnull row, void * _Null_unspecified context);
+
+typedef EditMarkdownTableFunction *EditMarkdownTable;
+extern EditMarkdownTableFunction edit_markdown_table_v1;
+
 #endif

@@ -560,6 +560,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
         let available = (ControlCommand.fromMenu(menu) + ControlCommand.editorCommands(for: document)
                          + ControlCommand.searchCommands(for: app)
+                         + ControlCommand.markdownTableCommands(for: document)
                          + ControlCommand.languageServerCommands(for: document)).filter {
             $0.isAvailable(in: document, focus: originalFocus)
         }

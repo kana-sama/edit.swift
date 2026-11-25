@@ -553,6 +553,45 @@ EDIT_VISIBLE bool edit_syntax_analyze_v1(const char *language, const char *query
     }
 }
 
+EDIT_VISIBLE bool edit_markdown_table_v1(const uint16_t *units, uint32_t count, uint32_t caret,
+                                         EditSyntaxCapture row, void *context) {
+    if (count > UINT32_MAX / 2u || caret > count) return false;
+    TSParser *parser = ts_parser_new();
+    if (!parser) return false;
+    Input input = {.units = units, .bytes = count * 2u};
+    ts_parser_set_language(parser, tree_sitter_markdown());
+    TSInput text = {.payload = &input, .read = readInput, .encoding = TSInputEncodingUTF16LE};
+    TSTree *tree = ts_parser_parse(parser, NULL, text);
+    ts_parser_delete(parser);
+    if (!tree) return false;
+
+    TSNode root = ts_tree_root_node(tree);
+    const uint32_t comment = unclosedMarkdownComment(&input, root);
+    if (comment < count && caret >= comment) {
+        ts_tree_delete(tree);
+        return false;
+    }
+    uint32_t start = caret;
+    if (start > 0 && units[start - 1] != '\n' && units[start - 1] != '\r') --start;
+    TSNode table = ts_node_named_descendant_for_byte_range(root, start * 2u, caret * 2u);
+    while (!ts_node_is_null(table) && strcmp(ts_node_type(table), "pipe_table") != 0) {
+        table = ts_node_parent(table);
+    }
+    const bool found = !ts_node_is_null(table);
+    if (found) {
+        for (uint32_t index = 0; index < ts_node_named_child_count(table); ++index) {
+            TSNode child = ts_node_named_child(table, index);
+            const char *type = ts_node_type(child);
+            if (strcmp(type, "pipe_table_header") == 0 || strcmp(type, "pipe_table_delimiter_row") == 0 ||
+                strcmp(type, "pipe_table_row") == 0) {
+                row(context, ts_node_start_byte(child) / 2u, ts_node_end_byte(child) / 2u, NULL);
+            }
+        }
+    }
+    ts_tree_delete(tree);
+    return found;
+}
+
 /* Running editors can load this library after a development rebuild. Keep prior entry points. */
 EDIT_VISIBLE bool edit_syntax_highlight_with_viewport(const char *language, const char *queryDirectory,
                                                      const uint16_t *units, uint32_t count,

@@ -148,6 +148,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private(set) var folderURL: URL?
     private var filePreview: OpenFilePreview?
     private var filePreviewView: FilePreviewView?
+    private var markdownTableContext: (source: String, caret: Int, table: MarkdownTable?)?
     private var emptyFolderView: EmptyFolderView?
     private var sourceControlRevision: SourceControlRevisionPreview?
     private struct SourceControlFile: Equatable {
@@ -1987,6 +1988,30 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     var canFocusSelection: Bool { canReplaceBuffer && hasEditableTextDocument && editor.canFocusSelection }
     var canExitFocus: Bool { canReplaceBuffer && editor.focusRanges != nil }
+
+    var currentMarkdownTable: MarkdownTable? {
+        guard hasEditableTextDocument, canReplaceBuffer, editor.isEditable,
+              resolvedSyntaxLanguage == .markdown, !editor.hasMarkedText() else { return nil }
+        let source = editor.string
+        let caret = editor.selectedRange().location
+        if markdownTableContext?.caret != caret || markdownTableContext?.source != source {
+            markdownTableContext = (source, caret, MarkdownTable(source: source, caret: caret))
+        }
+        guard let table = markdownTableContext?.table, editor.focusAllowsEdits([table.range]) else { return nil }
+        return table
+    }
+
+    @objc func performMarkdownTableCommand(_ sender: NSMenuItem) {
+        guard let command = sender.representedObject as? MarkdownTableCommand, let table = currentMarkdownTable else { return }
+        let edit = table.edit(command)
+        let source = editor.string as NSString
+        guard source.substring(with: table.range) != edit.text else { return }
+        if editor.applyMultiEdits([EditorTextEdit(range: table.range, text: edit.text)],
+                                  selections: [NSRange(location: edit.caret, length: 0)], actionName: command.title) {
+            focusContent()
+            editor.scrollRangeToVisible(NSRange(location: edit.caret, length: 0))
+        }
+    }
 
     func focusSelection() {
         guard canFocusSelection else { return }

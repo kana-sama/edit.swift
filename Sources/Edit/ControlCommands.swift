@@ -32,6 +32,7 @@ struct ControlCommand {
         }
         if action == #selector(Edit.focusSelection(_:)) { return document.canFocusSelection }
         if action == #selector(Edit.exitFocus(_:)) { return document.canExitFocus }
+        if action == #selector(DocumentWindow.performMarkdownTableCommand(_:)) { return document.currentMarkdownTable != nil }
         if documentOnly {
             guard document.hasTextDocument, document.window.attachedSheet == nil,
                   document.editor.responds(to: action) else { return false }
@@ -138,6 +139,16 @@ struct ControlCommand {
             item.target = app
             item.representedObject = action
             return ControlCommand(id: "find.\(action)", title: title, item: item)
+        }
+    }
+
+    static func markdownTableCommands(for document: DocumentWindow) -> [ControlCommand] {
+        MarkdownTableCommand.allCases.map { command in
+            let title = "Markdown: \(command.title.lowercased())"
+            let item = NSMenuItem(title: title, action: #selector(DocumentWindow.performMarkdownTableCommand(_:)), keyEquivalent: "")
+            item.target = document
+            item.representedObject = command
+            return ControlCommand(id: "markdown.table.\(command.rawValue)", title: title, item: item)
         }
     }
 
