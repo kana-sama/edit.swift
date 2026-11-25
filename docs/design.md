@@ -14,6 +14,8 @@ Use one compact unified AppKit toolbar with native glass and a fixed icon-only d
 
 Place document-wide status and actions in the existing header row. This includes Read-only, Deleted File, revision details, and conflict controls. Fit essential status and actions in the available width and put secondary details or overflow in a popover anchored to the header. Never add a second row, strip, or panel beneath the header, or a status bar. Preserve vertical space for document content.
 
+Keep the filename whole while any lower-priority element can yield space. Compact the header in this order: collapse Diff / Snapshot to its format menu, shorten Read-only, then shorten the project name, and only then truncate the filename. Keep the Pending Changes control immediately to the left of the format control in Diff mode. Its icon and tooltip indicate that it dims resolved diff fragments.
+
 Present the new document, title, header status, and restored scroll position together on the first rendered frame. Keep the current header and content paired while a replacement is pending. Verify the glass with content visibly passing beneath it, including when entering and leaving preview, and verify that status changes do not change the header height or reduce the document viewport.
 
 Use system appearance, semantic colors, text styles, control metrics, and SF Symbols for interface chrome. Respect platform preferences for contrast and reduced transparency. Keep persistent controls focused on actions the owner needs.
