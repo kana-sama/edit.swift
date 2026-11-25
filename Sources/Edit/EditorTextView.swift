@@ -291,7 +291,6 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         if let replacementString, !allowsConflictEdit(in: affectedCharRange, replacement: replacementString) { return false }
         let allowed = super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
         if allowed, let replacementString {
-            bracketNavigation.prepareForEdit(in: [affectedCharRange])
             syntaxHighlighting?.prepareForDeletions(in: replacementString.isEmpty ? [affectedCharRange] : [])
         }
         return allowed
@@ -315,10 +314,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         }
         let allowed = super.shouldChangeText(inRanges: affectedRanges, replacementStrings: replacementStrings)
         if allowed, let replacementStrings {
-            let ranges = affectedRanges.map(\.rangeValue)
-            bracketNavigation.prepareForEdit(in: ranges)
-            syntaxHighlighting?.prepareForDeletions(in: zip(ranges, replacementStrings).compactMap { range, replacement in
-                replacement.isEmpty ? range : nil
+            syntaxHighlighting?.prepareForDeletions(in: zip(affectedRanges, replacementStrings).compactMap { range, replacement in
+                replacement.isEmpty ? range.rangeValue : nil
             })
         }
         return allowed
@@ -1315,7 +1312,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         let changes = applyingTextEdits?.map { EditorTextChange(range: $0.range, delta: $0.lengthChange) }
             ?? (edited.location != NSNotFound && edited.length >= delta
                 ? [EditorTextChange(range: NSRange(location: edited.location, length: edited.length - delta), delta: delta)] : [])
-        bracketNavigation.sourceDidEdit(changes, in: storage.mutableString)
+        bracketNavigation.sourceDidEdit(changes)
         let affectedColors = syntaxHighlighting?.storageDidEdit(storage, replacements: applyingTextEdits)
         defer {
             if let affectedColors { syntaxHighlighting?.repaintEditedColors(in: affectedColors, storage: storage) }
@@ -1388,6 +1385,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     override func textViewportLayoutControllerDidLayout(_ controller: NSTextViewportLayoutController) {
         super.textViewportLayoutControllerDidLayout(controller)
+        bracketNavigation.layoutHighlights()
         if let range = renameRange, range.length > 0 { renameShade?.update() }
         requestLineRefresh()
     }

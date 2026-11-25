@@ -148,10 +148,19 @@ enum BracketCheck {
             return result.marks
         }
         let marks = showCurrentMarks()
-        let brackets = editor.bracketNavigation.highlightFrames
         let gutterX = editor.convert(NSPoint(x: scroll.contentView.frame.minX + 3, y: 0), from: scroll).x
-        let stripe = NSRect(x: gutterX, y: brackets[1].midY, width: 1, height: 1)
-        let areas = brackets + [stripe]
+        func decorationAreas(closing: NSRange, phase: String) throws -> [NSRect] {
+            let brackets = editor.highlightRects(for: [opening, closing])
+            guard brackets.count == 2 else {
+                let manager = editor.textLayoutManager
+                let viewport = manager?.textViewportLayoutController.viewportRange.flatMap { viewport in
+                    manager.map { editor.charRange(viewport, in: $0) }
+                }
+                throw Failure("Lay out both delimiters \(phase). Closing \(closing), frames \(brackets), viewport \(String(describing: viewport)).")
+            }
+            // A fallback font can move the closing row, so sample its current position.
+            return brackets + [NSRect(x: gutterX, y: brackets[1].midY, width: 1, height: 1)]
+        }
 
         func capture(_ area: NSRect) throws -> NSBitmapImageRep {
             guard let bitmap = editor.bitmapImageRepForCachingDisplay(in: area) else {
@@ -160,7 +169,9 @@ enum BracketCheck {
             editor.cacheDisplay(in: area, to: bitmap)
             return bitmap
         }
+        let areas = try decorationAreas(closing: closing, phase: "before any edit")
         let painted = try areas.map { try capture($0).tiffRepresentation }
+        let stripe = areas[2]
         guard let green = try capture(stripe).colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB),
               green.greenComponent > green.redComponent + 0.2,
               marks.contains(.init(kind: .insertion, lines: 0..<5)), !window.isVisible, !NSApp.isActive else {
@@ -181,6 +192,9 @@ enum BracketCheck {
                      (" ", secondReturn.location + "return".utf16.count),
                      (".", secondReturn.upperBound - 1),
                      (";", text.range(of: "Hello", options: .backwards).upperBound),
+                     ("+", secondReturn.upperBound - 1),
+                     (",", secondReturn.upperBound - 1),
+                     ("🦊", secondReturn.upperBound - 1),
                      (";", text.range(of: ";").upperBound)]
         for (character, position) in edits {
             editor.setCaretSelections([caret(position)])
@@ -192,10 +206,16 @@ enum BracketCheck {
                 } else {
                     editor.deleteBackward(nil)
                 }
-                let moved = NSRange(location: closing.location + (insert ? 1 : 0), length: closing.length)
+                let moved = NSRange(location: closing.location + (insert ? character.utf16.count : 0), length: closing.length)
                 func checkFrame(_ phase: String) throws {
-                    let pixels = try areas.map { try capture($0).tiffRepresentation }
-                    guard editor.bracketNavigation.highlightRanges == [opening, moved], pixels == painted else {
+                    editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+                    let actual = editor.bracketNavigation.highlightRanges
+                    guard actual == [opening, moved] else {
+                        throw Failure("Match \([opening, moved]) \(phase) when editing \(character.debugDescription). Found \(actual) at \(editor.selectedRange()).")
+                    }
+                    let pixels = try decorationAreas(closing: moved, phase: "\(phase) for \(character.debugDescription)")
+                        .map { try capture($0).tiffRepresentation }
+                    guard pixels == painted else {
                         throw Failure("Keep both bracket outlines and the closing row's gutter painted \(phase) when editing \(character.debugDescription).")
                     }
                 }
@@ -211,9 +231,68 @@ enum BracketCheck {
         }
 
         editor.setCaretSelections([caret(closing.upperBound)])
+        editor.bracketNavigation.refresh()
+        editor.insertText("+", replacementRange: NSRange(location: NSNotFound, length: 0))
+        guard editor.bracketNavigation.highlightRanges.isEmpty else {
+            throw Failure("Typing beyond the closing delimiter moves the caret outside the previous pair.")
+        }
+        editor.deleteBackward(nil)
+        try await waitFor("the brace pair after returning to the closing delimiter") {
+            editor.bracketNavigation.highlightRanges == [opening, closing]
+        }
         editor.deleteBackward(nil)
         guard editor.bracketNavigation.highlightRanges.isEmpty else {
             throw Failure("Deleting the closing delimiter removes the previous highlight immediately.")
+        }
+
+        let commentSource = "test \"typing\" { / }\n" as NSString
+        editor.string = commentSource as String
+        let commentOpener = commentSource.range(of: "{")
+        let commentCloser = commentSource.range(of: "}")
+        editor.setCaretSelections([caret(commentSource.range(of: "/").upperBound)])
+        editor.bracketNavigation.refresh()
+        try await waitFor("the brace pair before starting a comment") {
+            editor.bracketNavigation.highlightRanges == [commentOpener, commentCloser]
+        }
+
+        hold = true
+        editor.insertText("/", replacementRange: NSRange(location: NSNotFound, length: 0))
+        let commentedCloser = NSRange(location: commentCloser.location + 1, length: commentCloser.length)
+        try await waitFor("the held index after starting a comment") { waiting }
+        guard editor.bracketNavigation.highlightRanges == [commentOpener, commentedCloser] else {
+            throw Failure("Keep the existing pair until analysis sees the closing brace inside a comment.")
+        }
+        hold = false
+        try await waitFor("the comment to invalidate that pair") { editor.bracketNavigation.highlightRanges.isEmpty }
+
+        // Focus draws a viewport overlay and needs a live clip rect.
+        window.setFrameOrigin(NSPoint(x: -10_000, y: -10_000))
+        window.orderBack(nil)
+        defer { editor.exitFocus(); window.orderOut(nil) }
+        guard window.isVisible, !NSApp.isActive, window.alphaValue == 0, !editor.visibleRect.isInfinite else {
+            throw Failure("Use a quiet offscreen viewport for the Focus check.")
+        }
+        editor.string = source
+        editor.setCaretSelections([NSRange(location: 0, length: closing.upperBound)])
+        editor.beginFocus()
+        editor.setCaretSelections([caret(secondReturn.upperBound - 1)])
+        editor.bracketNavigation.refresh()
+        try await waitFor("the brace pair before an indexing delay") {
+            editor.bracketNavigation.highlightRanges == [opening, closing]
+        }
+        hold = true
+        editor.insertText("+", replacementRange: NSRange(location: NSNotFound, length: 0))
+        let focusedClosing = NSRange(location: closing.location + 1, length: closing.length)
+        guard editor.focusRanges?.first?.upperBound == focusedClosing.upperBound,
+              editor.bracketNavigation.highlightRanges == [opening, focusedClosing] else {
+            throw Failure("Keep the outlines when an edit resizes their Focus block.")
+        }
+        try await waitFor("the held index before the retention deadline") { waiting }
+        guard !editor.bracketNavigation.highlightRanges.isEmpty else {
+            throw Failure("Keep the outlines at the start of an indexing delay.")
+        }
+        try await waitFor("the last valid pair to expire while its replacement is still pending") {
+            waiting && editor.bracketNavigation.highlightRanges.isEmpty
         }
     }
 

@@ -4,10 +4,6 @@ import AppKit
 final class BracketNavigation {
     enum Command { case go, select }
 
-    private static let ordinaryText = CharacterSet.alphanumerics.union(.nonBaseCharacters)
-        .union(CharacterSet(charactersIn: "_ \t"))
-    private static let lexicalPunctuation = Set("\"'`\\/#*$<>".utf16)
-
     private weak var editor: EditorTextView?
     private var language = SyntaxLanguage.plainText
     private var scope: [NSRange]?
@@ -15,7 +11,8 @@ final class BracketNavigation {
     private var indexing: Task<Void, Never>?
     private var pending: (selections: [NSRange], commands: [Command])?
     private var highlightedPairs: [Int: BracketMatching.Pair] = [:]
-    private var ordinaryRemovals: Set<NSRange> = []
+    private var highlightExpiry: Task<Void, Never>?
+    private var layingOutHighlights = false
     private(set) var highlightRanges: [NSRange] = []
     private(set) var highlightFrames: [NSRect] = []
 
@@ -25,7 +22,10 @@ final class BracketNavigation {
 
     init(editor: EditorTextView) { self.editor = editor }
 
-    deinit { indexing?.cancel() }
+    deinit {
+        indexing?.cancel()
+        highlightExpiry?.cancel()
+    }
 
     func setLanguage(_ language: SyntaxLanguage) {
         guard self.language != language else { return }
@@ -37,7 +37,6 @@ final class BracketNavigation {
 
     func reset() {
         invalidateIndex()
-        ordinaryRemovals.removeAll()
         clearHighlights()
     }
 
@@ -49,44 +48,26 @@ final class BracketNavigation {
     }
 
     func clearHighlights() {
+        cancelHighlightExpiry()
         highlightedPairs.removeAll()
         highlightRanges = []
         setHighlightFrames([])
     }
 
-    func prepareForEdit(in ranges: [NSRange]) {
-        ordinaryRemovals.removeAll(keepingCapacity: true)
-        guard !highlightedPairs.isEmpty, let text = editor?.textStorage?.mutableString else { return }
-        for range in ranges where range.location != NSNotFound && range.length > 0 && range.upperBound <= text.length {
-            if isOrdinary(text.substring(with: range)) { ordinaryRemovals.insert(range) }
-        }
+    private func cancelHighlightExpiry() {
+        highlightExpiry?.cancel()
+        highlightExpiry = nil
     }
 
-    func sourceDidEdit(_ changes: [EditorTextChange], in text: NSString) {
+    func sourceDidEdit(_ changes: [EditorTextChange]) {
         invalidateIndex()
-        defer { ordinaryRemovals.removeAll(keepingCapacity: true) }
         guard !highlightedPairs.isEmpty else { return }
-
-        // Keep the last painted pair only for edits that cannot introduce or remove
-        // a delimiter, quote or comment boundary. Navigation waits for the new index.
-        var offset = 0
-        for change in changes {
-            let range = NSRange(location: change.range.location + offset, length: change.replacementLength)
-            guard (change.range.length == 0 || ordinaryRemovals.contains(change.range)),
-                  range.length >= 0, range.location >= 0, range.upperBound <= text.length,
-                  isOrdinary(text.substring(with: range)),
-                  [range.location - 1, range.upperBound].allSatisfy({ neighbor in
-                      neighbor < 0 || neighbor >= text.length || !Self.lexicalPunctuation.contains(text.character(at: neighbor))
-                  }) else {
-                clearHighlights()
-                return
-            }
-            offset += change.delta
-        }
-        guard !changes.isEmpty else {
+        let scopeAfterEdit = editor?.focusRanges
+        guard !changes.isEmpty, (scope == nil) == (scopeAfterEdit == nil) else {
             clearHighlights()
             return
         }
+        scope = scopeAfterEdit
 
         func rebaseDelimiter(_ range: NSRange) -> NSRange? {
             var offset = 0
@@ -110,17 +91,27 @@ final class BracketNavigation {
 
         var rebased: [Int: BracketMatching.Pair] = [:]
         for (caret, pair) in highlightedPairs {
-            if let opening = rebaseDelimiter(pair.opening), let closing = rebaseDelimiter(pair.closing) {
-                rebased[rebaseCaret(caret)] = .init(opening: opening, closing: closing)
+            guard let opening = rebaseDelimiter(pair.opening), let closing = rebaseDelimiter(pair.closing) else { continue }
+            let position = rebaseCaret(caret)
+            guard opening.location <= position, position <= closing.upperBound else { continue }
+            if let scope, !scope.contains(where: { $0.location <= opening.location && closing.upperBound <= $0.upperBound }) {
+                continue
             }
+            rebased[position] = .init(opening: opening, closing: closing)
+        }
+        guard !rebased.isEmpty else {
+            clearHighlights()
+            return
         }
         highlightedPairs = rebased
-        if rebased.isEmpty { clearHighlights() }
-    }
 
-    private func isOrdinary(_ text: String) -> Bool {
-        text.unicodeScalars.allSatisfy {
-            Self.ordinaryText.contains($0) || (language == .zig && ($0 == "." || $0 == ";"))
+        // The next index resolves lexical changes. Later edits cannot extend the deadline
+        // for displaying the last complete result.
+        if highlightExpiry == nil {
+            highlightExpiry = Task { [weak self] in
+                do { try await Task.sleep(for: .milliseconds(750)) } catch { return }
+                self?.clearHighlights()
+            }
         }
     }
 
@@ -148,6 +139,13 @@ final class BracketNavigation {
             ranges.insert(pair.closing)
         }
         highlightRanges = MultiCaretEditing.ordered(Array(ranges))
+        layoutHighlights()
+    }
+
+    func layoutHighlights() {
+        guard let editor, !layingOutHighlights else { return }
+        layingOutHighlights = true
+        defer { layingOutHighlights = false }
         setHighlightFrames(editor.highlightRects(for: highlightRanges))
     }
 
@@ -216,6 +214,7 @@ final class BracketNavigation {
                 return
             }
             self.model = result
+            self.cancelHighlightExpiry()
             let pending = self.pending
             self.pending = nil
             if let pending, pending.selections == self.selections(in: editor),
