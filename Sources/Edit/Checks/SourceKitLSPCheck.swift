@@ -187,6 +187,9 @@ enum SourceKitLSPCheck {
             return symbols?.contains(where: { $0.name == "SwiftFixtureType" }) == true
         }
         try require(sawProgress, "show SourceKit-LSP indexing progress in the header")
+        let tokens = try await swift.semanticTokens()
+        try require(tokens?.contains { $0.start == use.location && $0.end == use.upperBound && $0.color == .function } == true,
+                    "decode a Swift function reference from semantic tokens")
         try require(await lsp.probe(at: offset, word: use) == use, "underline a Swift definition link across a UTF-16 offset")
         let hover = await lsp.hover(at: offset, word: use)
         try require(hover?.text.contains("Returns the supplied value.") == true, "show Swift hover documentation")

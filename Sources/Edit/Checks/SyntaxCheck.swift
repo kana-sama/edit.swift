@@ -8,6 +8,11 @@ enum SyntaxCheck {
     }
 
     static func run(in app: Edit) async throws {
+        // These pixel checks exercise Tree-sitter even when a server handles loose Swift files.
+        let wasEnabled = app.workspaceLSPHighlighting.isEnabled(in: nil)
+        app.workspaceLSPHighlighting.setEnabled(false, in: nil)
+        defer { app.workspaceLSPHighlighting.setEnabled(wasEnabled, in: nil) }
+
         try await checkFirstDraw(in: app, appearance: .aqua)
         try await checkFirstDraw(in: app, appearance: .darkAqua)
         try await checkSwiftDrawing(in: app, requiresFirstFrame: true)

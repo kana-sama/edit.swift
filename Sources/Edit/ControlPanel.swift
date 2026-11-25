@@ -571,6 +571,53 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     }
 
     #if EDIT_AGENT_CHECKS
+    func checkToggleSwitches(in document: DocumentWindow, enabled: Bool, clickLSP: Bool,
+                             capture: (NSView) throws -> Void) throws {
+        show(in: document, mode: .commands)
+        defer { dismiss(restoreFocus: false) }
+        let expected: [String: Bool] = [
+            "Toggle LSP Highlight": enabled, "View: Toggle Word Wrap": false,
+            "View: Toggle Sidebar": true, "View: Toggle Terminal": false,
+            "Toggle Match Case": true, "Toggle Match Whole Word": false,
+            "Toggle Regular Expression": false, "Toggle Replace Section": false
+        ]
+        let matches = ControlMatching.rank(sourceEntries().filter { expected[$0.title] != nil }, query: "")
+        guard matches.count == expected.count else { throw CheckFailure.invalidSwitch("catalog") }
+        apply(matches, selected: matches.first?.entry.id)
+        panel.layoutIfNeeded()
+        panel.contentView?.layoutSubtreeIfNeeded()
+        var lsp: NSSwitch?
+        var trailing: CGFloat?
+        for (row, match) in matches.enumerated() {
+            let title = match.entry.title
+            guard let stack = table.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSStackView,
+                  let control = stack.arrangedSubviews.last as? NSSwitch,
+                  control.state == (expected[title] == true ? .on : .off) else {
+                throw CheckFailure.invalidSwitch(title)
+            }
+            stack.layoutSubtreeIfNeeded()
+            let edge = control.convert(control.bounds, to: table).maxX
+            guard edge > table.bounds.midX, abs(edge - (trailing ?? edge)) < 1 else {
+                throw CheckFailure.invalidSwitch("trailing alignment of \(title)")
+            }
+            trailing = edge
+            if let shortcut = match.entry.shortcut {
+                guard let label = stack.arrangedSubviews.dropLast().last as? NSTextField,
+                      label.stringValue == shortcut, label.frame.maxX < control.frame.minX else {
+                    throw CheckFailure.invalidSwitch("shortcut placement in \(title)")
+                }
+            }
+            if title == "Toggle LSP Highlight" { lsp = control }
+        }
+        if let view = panel.contentView { try capture(view) }
+        if clickLSP {
+            guard let lsp, let action = lsp.action, NSApp.sendAction(action, to: lsp.target, from: lsp),
+                  document.isLSPHighlightEnabled != enabled else {
+                throw CheckFailure.invalidSwitch("activation")
+            }
+        }
+    }
+
     func checkTerminalCommands(in document: DocumentWindow, expected: Bool) throws {
         show(in: document, mode: .commands)
         defer { dismiss(restoreFocus: false) }
@@ -847,6 +894,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             return nil
         case ("b", .command):
             document.performFind(.toggleSidebar)
+            if mode == .commands { search(preserving: selectedID) }
             return nil
         case ("g", [.command, .shift]) where document.canFocusSidebar(.sourceControl):
             dismiss(restoreFocus: true)
@@ -1752,6 +1800,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         case invalidPins(String)
         case invalidScratches(String)
         case invalidSymbols(String)
+        case invalidSwitch(String)
         case shortcutEscaped
 
         var errorDescription: String? {
@@ -1763,6 +1812,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             case .invalidPins(let stage): "Control pins could not \(stage)."
             case .invalidScratches(let stage): "Control could not \(stage)."
             case .invalidSymbols(let stage): "Control could not \(stage)."
+            case .invalidSwitch(let stage): "Control switch failed for \(stage)."
             }
         }
     }
@@ -1882,6 +1932,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
         if command.item.action == #selector(Edit.toggleSidebar(_:)) {
             command.run(in: document)
+            search(preserving: entry.id)
             return
         }
         if command.item.action == #selector(Edit.showLanguageModes(_:)) {
@@ -1898,6 +1949,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
         dismiss(restoreFocus: true)
         command.run(in: document)
+    }
+
+    @objc private func activateCommandSwitch(_ sender: NSSwitch) {
+        guard let document, let id = sender.identifier?.rawValue,
+              let entry = entries.first(where: { $0.entry.id == id })?.entry else { return }
+        runCommand(entry, in: document)
     }
 
     @objc private func dismissRecent(_ button: NSButton) {
@@ -1953,6 +2010,18 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         if mode == .commands { views.append(pinMarker(for: row)) }
         if let shortcut = match.entry.shortcut {
             views.append(makeLabel(shortcut, highlights: [], secondary: true))
+        }
+        if mode == .commands, let document, let command = commands[match.entry.id],
+           let state = command.toggleState(in: document) {
+            let control = NSSwitch()
+            control.controlSize = .mini
+            control.state = state ? .on : .off
+            control.identifier = NSUserInterfaceItemIdentifier(command.id)
+            control.setAccessibilityLabel(command.title)
+            control.target = self
+            control.action = #selector(activateCommandSwitch(_:))
+            control.setContentCompressionResistancePriority(.required, for: .horizontal)
+            views.append(control)
         }
         if mode == .files { views.append(fileAccessory(for: match.entry, row: row)) }
         let stack = NSStackView(views: views)

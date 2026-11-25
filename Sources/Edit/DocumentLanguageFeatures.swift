@@ -45,6 +45,12 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     private let sourceKit: LanguageServerSession
     private var sessions: [LanguageServerSession] { [zig, sourceKit] }
     var workspaceSessions: [LanguageServerSession] { sessions.filter(\.supportsWorkspaceSymbols) }
+    var highlightingSession: LanguageServerSession? {
+        guard !isClosed, document.isLSPHighlightEnabled, document.editor.conflictEdits.isEmpty,
+              sourceURL != nil, sourceURL == document.fileURL, sourceLanguage == document.resolvedSyntaxLanguage,
+              session.supportsSemanticTokens else { return nil }
+        return session
+    }
     var session: LanguageServerSession {
         switch sourceServer {
         case .zig: zig
@@ -60,6 +66,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
 #if EDIT_AGENT_CHECKS
     var statusPopoverForCheck: NSView? { status.contentForCheck }
     var statusIndicatorForCheck: LanguageServerStatusPopover.Indicator? { status.indicator }
+    var serversStoppedForCheck: Bool { sessions.allSatisfy { $0.state == .stopped } }
 #endif
     private var sourceURL: URL?
     private var sourceLanguage: SyntaxLanguage?
@@ -84,6 +91,10 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         for session in sessions {
             session.onStateChange = { [weak self] in self?.stateChanged() }
             session.onProgressChange = { [weak self] in self?.updateServerStatus() }
+            session.onSemanticTokensRefresh = { [weak self, weak session] in
+                guard let self, let session, self.highlightingSession === session else { return }
+                self.document.updateLSPHighlighting(immediate: false)
+            }
         }
         document.editor.languageProbe = { [weak self] offset, word in await self?.probe(at: offset, word: word) }
         document.editor.languageHover = { [weak self] offset, word in await self?.hover(at: offset, word: word) }
@@ -109,6 +120,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         guard sourceURL != url || self.sourceLanguage != sourceLanguage || sourceFolder != folder
             || searchesParentProjects != inferRoot else {
             documentTextChanged()
+            document.updateLSPHighlighting()
             return
         }
         symbolRename.cancel()
@@ -172,11 +184,13 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         for session in sessions {
             session.onStateChange = nil
             session.onProgressChange = nil
+            session.onSemanticTokensRefresh = nil
             session.close()
         }
     }
 
     private func stateChanged() {
+        document.updateLSPHighlighting()
         if sourceURL == nil || session.state != .ready { symbolRename.cancel() }
         let canInteract = sourceURL != nil && (session.supportsDefinition || session.supportsHover
             || session.supportsReferences || session.supportsRename)

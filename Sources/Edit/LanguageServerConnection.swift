@@ -29,6 +29,7 @@ struct LSPCapabilities: Decodable, Sendable {
     let references: Bool
     let hover: Bool
     let documentHighlight: Bool
+    let semanticTokens: LSPSemanticTokenOptions?
     let documentSymbols: Bool
     let workspaceSymbols: Bool
     let rename: Bool
@@ -39,7 +40,7 @@ struct LSPCapabilities: Decodable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case definitionProvider, referencesProvider, hoverProvider, textDocumentSync, positionEncoding
-        case documentHighlightProvider, documentSymbolProvider, workspaceSymbolProvider, renameProvider
+        case documentHighlightProvider, documentSymbolProvider, workspaceSymbolProvider, renameProvider, semanticTokensProvider
     }
 
     private struct SyncOptions: Decodable {
@@ -59,6 +60,7 @@ struct LSPCapabilities: Decodable, Sendable {
         references = supports(.referencesProvider)
         hover = supports(.hoverProvider)
         documentHighlight = supports(.documentHighlightProvider)
+        semanticTokens = try? values.decode(LSPSemanticTokenOptions.self, forKey: .semanticTokensProvider)
         documentSymbols = supports(.documentSymbolProvider)
         workspaceSymbols = supports(.workspaceSymbolProvider)
         rename = supports(.renameProvider)
@@ -95,6 +97,7 @@ final class LanguageServerConnection: @unchecked Sendable {
     private enum Request: Sendable {
         case initialize, definition(Int), references(Int, Bool), hover(Int)
         case documentHighlight(Int), documentSymbols, workspaceSymbols(String)
+        case semanticTokensFull, semanticTokensDelta(String), semanticTokensRange
         case prepareRename(Int), rename(Int, String)
 
         var method: String {
@@ -104,6 +107,9 @@ final class LanguageServerConnection: @unchecked Sendable {
             case .references: "textDocument/references"
             case .hover: "textDocument/hover"
             case .documentHighlight: "textDocument/documentHighlight"
+            case .semanticTokensFull: "textDocument/semanticTokens/full"
+            case .semanticTokensDelta: "textDocument/semanticTokens/full/delta"
+            case .semanticTokensRange: "textDocument/semanticTokens/range"
             case .documentSymbols: "textDocument/documentSymbol"
             case .workspaceSymbols: "workspace/symbol"
             case .prepareRename: "textDocument/prepareRename"
@@ -202,6 +208,7 @@ final class LanguageServerConnection: @unchecked Sendable {
     private let root: URL
     private let environment: [String: String]
     private let onFailure: @Sendable (String) -> Void
+    private let onSemanticTokensRefresh: @Sendable () -> Void
     let progress: AsyncStream<[LSPWorkDoneActivity]>
     private let progressUpdates: AsyncStream<[LSPWorkDoneActivity]>.Continuation
     private let decoder = JSONDecoder()
@@ -225,12 +232,14 @@ final class LanguageServerConnection: @unchecked Sendable {
     private var index: LSPTextIndex?
 
     init(server: LanguageServer, executable: URL, root: URL, environment: [String: String],
+         onSemanticTokensRefresh: @escaping @Sendable () -> Void = {},
          onFailure: @escaping @Sendable (String) -> Void) {
         self.server = server
         self.executable = executable
         self.root = root
         self.environment = environment
         self.onFailure = onFailure
+        self.onSemanticTokensRefresh = onSemanticTokensRefresh
         (progress, progressUpdates) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
     }
 
@@ -313,6 +322,33 @@ final class LanguageServerConnection: @unchecked Sendable {
         let response = try await request(.documentSymbols, document: snapshot)
         let result = try JSONDecoder().decode(Reply<LSPDocumentSymbols>.self, from: response).result
         return result?.symbols(in: url).filter { $0.location.url.standardizedFileURL == url } ?? []
+    }
+
+    @concurrent func semanticTokens(in snapshot: LSPDocument, options: LSPSemanticTokenOptions,
+                                    previous: LSPSemanticTokens?) async throws -> (LSPSemanticTokens, [SyntaxSpan])? {
+        let full: Request = options.full ? .semanticTokensFull : .semanticTokensRange
+        let priorID = options.delta ? previous?.resultID : nil
+
+        func load(_ method: Request, previous: LSPSemanticTokens?) async throws -> (LSPSemanticTokens, [SyntaxSpan])? {
+            let reply = try await request(method, document: snapshot)
+            try Task.checkCancellation()
+            guard let result = try JSONDecoder().decode(Reply<LSPSemanticTokens.Response>.self, from: reply).result else {
+                return nil
+            }
+            let tokens = try result.tokens(updating: previous)
+            let index = try await onQueue {
+                guard let index = self.index, self.document?.revision == snapshot.revision else { throw CancellationError() }
+                return index
+            }
+            return (tokens, try tokens.spans(in: index, legend: options.legend))
+        }
+
+        if let priorID {
+            do { return try await load(.semanticTokensDelta(priorID), previous: previous) }
+            catch is CancellationError { throw CancellationError() }
+            catch { try Task.checkCancellation() }
+        }
+        return try await load(full, previous: nil)
     }
 
     func workspaceSymbols(query: String, synchronizing snapshot: LSPDocument) async throws -> [LSPSymbol] {
@@ -409,15 +445,24 @@ final class LanguageServerConnection: @unchecked Sendable {
 
     private func parameters(for request: Request) throws -> [String: Any] {
         if case .initialize = request {
-            return ["processId": ProcessInfo.processInfo.processIdentifier, "rootUri": root.absoluteString,
+            var params: [String: Any] = ["processId": ProcessInfo.processInfo.processIdentifier, "rootUri": root.absoluteString,
                     "workspaceFolders": [workspace], "clientInfo": ["name": "Edit"],
                     "capabilities": ["general": ["positionEncodings": ["utf-16"]],
                                      "window": ["workDoneProgress": true],
-                                     "workspace": ["workspaceFolders": true, "workspaceEdit": ["documentChanges": true]],
+                                     "workspace": ["workspaceFolders": true, "workspaceEdit": ["documentChanges": true],
+                                                   "semanticTokens": ["refreshSupport": true]],
                                      "textDocument": ["definition": ["linkSupport": true],
                                                       "hover": ["contentFormat": ["markdown", "plaintext"]],
                                                       "documentSymbol": ["hierarchicalDocumentSymbolSupport": true],
+                                                      "semanticTokens": [
+                                                          "requests": ["full": ["delta": true], "range": true],
+                                                          "tokenTypes": LSPSemanticTokens.tokenTypes,
+                                                          "tokenModifiers": LSPSemanticTokens.tokenModifiers,
+                                                          "formats": ["relative"], "augmentsSyntaxTokens": false
+                                                      ],
                                                       "rename": ["prepareSupport": true]]]]
+            if server == .sourceKit { params["initializationOptions"] = ["reportSyntacticHighlightInSemanticTokens": true] }
+            return params
         }
         if case .workspaceSymbols(let query) = request { return ["query": query] }
         guard let url = document?.url else { throw LSPFailure.invalidPosition }
@@ -425,7 +470,14 @@ final class LanguageServerConnection: @unchecked Sendable {
         let offset: Int
         switch request {
         case .initialize, .workspaceSymbols: return [:]
-        case .documentSymbols: return params
+        case .documentSymbols, .semanticTokensFull: return params
+        case .semanticTokensDelta(let id):
+            params["previousResultId"] = id
+            return params
+        case .semanticTokensRange:
+            guard let index else { throw LSPFailure.invalidPosition }
+            params["range"] = index.fullRange.parameters
+            return params
         case .definition(let value), .references(let value, _), .hover(let value), .documentHighlight(let value),
              .prepareRename(let value), .rename(let value, _): offset = value
         }
@@ -589,6 +641,9 @@ final class LanguageServerConnection: @unchecked Sendable {
             }
             if method == "workspace/workspaceFolders" {
                 try send(["id": id, "result": [workspace]])
+            } else if method == "workspace/semanticTokens/refresh" {
+                try send(["id": id, "result": NSNull()])
+                if !stopping { onSemanticTokensRefresh() }
             } else if method == "window/workDoneProgress/create" {
                 if let request = try? decoder.decode(Parameters<ProgressToken>.self, from: data) {
                     if !stopping, !workDone.contains(where: { $0.token == request.params.token }) {

@@ -8,11 +8,16 @@ Checked November 25, 2026 against ZLS 0.17.0 and SourceKit-LSP bundled with Appl
 
 Edit ranks comparable [workspace symbol matches](features/lsp-symbol-navigation/spec.md#go-to-workspace-symbol) by their proximity to the active folder's root for both servers.
 
+Edit prefers full [semantic token results](features/lsp-highlighting/spec.md) and can also use a range-only provider or a server that advertises deltas.
+
 | Method                                                                       | ZLS   | SourceKit-LSP |
 | ---------------------------------------------------------------------------- | :---: | :-----------: |
 | [`textDocument/definition`][lsp-definition]                                  | ✓     | ✓             |
 | [`textDocument/references`][lsp-references]                                  | ✓     | ✓             |
 | [`textDocument/documentHighlight`][lsp-documenthighlight]                    | ✓     | ✓             |
+| [`textDocument/semanticTokens/full`][lsp-semantictokens-fullrequest]         | ✓     | ✓             |
+| [`textDocument/semanticTokens/range`][lsp-semantictokens-rangerequest]       | ✓     | ✓             |
+| [`workspace/semanticTokens/refresh`][lsp-semantictokens-refreshrequest]      | ✓     | ✓             |
 | [`textDocument/documentSymbol`][lsp-documentsymbol]                          | ✓     | ✓             |
 | [`workspace/symbol`][lsp-ws-symbol]                                          | ✓     | ✓             |
 | [`textDocument/hover`][lsp-hover]                                            | ✓     | ✓             |
@@ -38,9 +43,6 @@ Edit ranks comparable [workspace symbol matches](features/lsp-symbol-navigation/
 | [`inlayHint/resolve`][lsp-inlayhint-resolve]                                 | ✗     |               |
 | [`workspace/inlayHint/refresh`][lsp-ws-inlayhint-refresh]                    |       | ✗             |
 | [`textDocument/codeLens`][lsp-codelens]                                      | ✗     |               |
-| [`textDocument/semanticTokens/full`][lsp-semantictokens-fullrequest]         |       |               |
-| [`textDocument/semanticTokens/range`][lsp-semantictokens-rangerequest]       |       |               |
-| [`workspace/semanticTokens/refresh`][lsp-semantictokens-refreshrequest]      |       |               |
 | [`textDocument/foldingRange`][lsp-foldingrange]                              |       |               |
 | [`textDocument/selectionRange`][lsp-selectionrange]                          |       |               |
 | [`textDocument/documentColor`][lsp-documentcolor]                            | ✗     |               |

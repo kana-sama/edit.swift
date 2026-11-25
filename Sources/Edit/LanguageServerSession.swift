@@ -27,6 +27,8 @@ final class LanguageServerSession {
     let server: LanguageServer
     var onStateChange: (() -> Void)?
     var onProgressChange: (() -> Void)?
+    var onSemanticTokensRefresh: (() -> Void)?
+    private(set) var semanticTokensRefresh = 0
     private(set) var progress: [LSPWorkDoneActivity] = []
     private(set) var generation = 0
     var revision: Int { document.revision }
@@ -46,6 +48,10 @@ final class LanguageServerSession {
     var supportsReferences: Bool { isReady && capabilities?.references == true }
     var supportsHover: Bool { isReady && capabilities?.hover == true }
     var supportsDocumentHighlight: Bool { isReady && capabilities?.documentHighlight == true }
+    var supportsSemanticTokens: Bool {
+        guard isReady, let options = capabilities?.semanticTokens else { return false }
+        return options.full || options.range
+    }
     var supportsDocumentSymbols: Bool { isReady && capabilities?.documentSymbols == true }
     var supportsWorkspaceSymbols: Bool { isServerReady && capabilities?.workspaceSymbols == true }
     var supportsRename: Bool { isReady && capabilities?.rename == true }
@@ -77,6 +83,7 @@ final class LanguageServerSession {
     private var progressTask: Task<Void, Never>?
     private var connection: LanguageServerConnection?
     private var capabilities: LSPCapabilities?
+    private var semanticTokenResult: LSPSemanticTokens?
 
     init(server: LanguageServer, workspacePreferences: WorkspaceLanguageServers) {
         self.server = server
@@ -94,6 +101,7 @@ final class LanguageServerSession {
             return
         }
         self.scope = scope
+        semanticTokenResult = nil
         document = LSPDocument(url: url, language: language, text: url == nil ? "" : text, revision: revision + 1)
         sync?.cancel()
         sync = nil
@@ -231,6 +239,18 @@ final class LanguageServerSession {
         return result
     }
 
+    func semanticTokens() async throws -> [SyntaxSpan]? {
+        guard supportsSemanticTokens, let connection, let options = capabilities?.semanticTokens else {
+            throw LSPFailure.unavailable
+        }
+        let snapshot = document
+        let generation = generation
+        let result = try await connection.semanticTokens(in: snapshot, options: options, previous: semanticTokenResult)
+        try validate(revision: snapshot.revision, generation: generation)
+        semanticTokenResult = options.delta && result?.0.resultID != nil ? result?.0 : nil
+        return result?.1
+    }
+
     func documentSymbols() async throws -> [LSPSymbol] {
         guard supportsDocumentSymbols, let connection else { throw LSPFailure.unavailable }
         let snapshot = document
@@ -297,6 +317,7 @@ final class LanguageServerSession {
         connection = nil
         indexMonitor = nil
         capabilities = nil
+        semanticTokenResult = nil
         clearProgress()
         phase = previous != nil || previousTransition != nil ? .stopping : root == nil ? .stopped : .starting
         onStateChange?()
@@ -322,12 +343,19 @@ final class LanguageServerSession {
             return
         }
         let connection = LanguageServerConnection(server: server, executable: launch.executable, root: root,
-                                                  environment: launch.environment) { [weak self] reason in
+                                                  environment: launch.environment, onSemanticTokensRefresh: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.generation == generation else { return }
+                self.semanticTokensRefresh &+= 1
+                self.onSemanticTokensRefresh?()
+            }
+        }) { [weak self] reason in
             Task { @MainActor [weak self] in
                 guard let self, self.generation == generation else { return }
                 self.connection = nil
                 self.indexMonitor = nil
                 self.capabilities = nil
+                self.semanticTokenResult = nil
                 self.clearProgress()
                 self.setPhase(.failed(reason))
             }

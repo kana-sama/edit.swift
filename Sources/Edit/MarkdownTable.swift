@@ -174,8 +174,10 @@ struct MarkdownTable {
         return (lines.joined(), caret)
     }
 
+    var hasBorders: Bool { rows.allSatisfy { $0.leadingPipe && $0.trailingPipe } }
+
     private func toggleBorders() -> (text: String, caret: Int) {
-        let remove = rows.allSatisfy { $0.leadingPipe && $0.trailingPipe }
+        let remove = hasBorders
         let singleColumn = rows[0].cells.count == 1
         var text = ""
         var caret = range.location

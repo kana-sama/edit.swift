@@ -353,6 +353,23 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         hasTextDocument && window.attachedSheet == nil && !app.isQuitting
     }
 
+    var canToggleLSPHighlight: Bool { window.attachedSheet == nil && !app.isQuitting }
+    var isLSPHighlightEnabled: Bool { app.workspaceLSPHighlighting.isEnabled(in: folderURL) }
+
+    func toggleLSPHighlight() {
+        guard canToggleLSPHighlight else { return }
+        let folder = folderURL?.standardizedFileURL
+        app.workspaceLSPHighlighting.setEnabled(!isLSPHighlightEnabled, in: folder)
+        for document in app.documents where document.folderURL?.standardizedFileURL == folder {
+            document.updateLSPHighlighting()
+        }
+    }
+
+    func updateLSPHighlighting(immediate: Bool = true) {
+        syntaxHighlighting?.updateSemanticSource(languageFeatures.highlightingSession,
+                                                 language: resolvedSyntaxLanguage, immediate: immediate)
+    }
+
     private var wordWrapFileURL: URL? {
         hasTextDocument ? fileURL ?? sourceControlRevision?.url : nil
     }
@@ -1807,13 +1824,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         updateEditedState()
         scheduleDraftCheckpoint()
         autosave.scheduleIdle()
+        languageFeatures.documentTextChanged()
         refreshSyntax(immediate: false)
         jjDocumentChanges?.bufferChanged()
-        languageFeatures.documentTextChanged()
         if !isBusy, window.firstResponder === editor { app.recordNavigation(in: self, reason: .edit) }
     }
 
-    private func refreshSyntax(immediate: Bool, preparedSyntax: SyntaxSnapshot? = nil) {
+    private func refreshSyntax(immediate: Bool, preparedSyntax: SyntaxSnapshot? = nil, allowsLSP: Bool = true) {
         let language = resolvedSyntaxLanguage
         refreshMarkdown(immediate: immediate)
         editor.syntaxLanguage = language
@@ -1829,7 +1846,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if let preparedSyntax, preparedSyntax.language == language {
             syntaxHighlighting?.install(preparedSyntax)
         } else {
-            syntaxHighlighting?.update(language: language, immediate: immediate)
+            syntaxHighlighting?.update(language: language, immediate: immediate,
+                                       session: allowsLSP ? languageFeatures.highlightingSession : nil)
         }
     }
 
@@ -2277,7 +2295,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.occurrenceHighlighting.reset()
         editor.string = projection.text
         editor.conflictEdits = projection.edits
-        refreshSyntax(immediate: true, preparedSyntax: projection.text.utf8.elementsEqual(text.utf8) ? preparedSyntax : nil)
+        refreshSyntax(immediate: true, preparedSyntax: projection.text.utf8.elementsEqual(text.utf8) ? preparedSyntax : nil,
+                      allowsLSP: false)
         editor.setSelectedRange(NSRange(location: 0, length: 0))
         editor.requestLineRefresh()
         editor.undoManager?.removeAllActions()

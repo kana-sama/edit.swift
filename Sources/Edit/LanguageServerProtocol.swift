@@ -30,7 +30,8 @@ extension LSPPosition: Hashable {}
 
 /// Maps protocol positions to the UTF-16 offsets used by AppKit. A position cannot split
 /// a surrogate pair or the CRLF separator between two lines.
-struct LSPTextIndex {
+struct LSPTextIndex: @unchecked Sendable {
+    // The bridged Swift string is immutable and shared only for reads.
     private let text: NSString
     private let lineStarts: [Int]
     private let lineEnds: [Int]
@@ -78,6 +79,14 @@ struct LSPTextIndex {
     func nsRange(_ range: LSPRange, clampingColumns: Bool = true) -> NSRange? {
         guard range.start <= range.end, let start = offset(of: range.start, clampingColumns: clampingColumns),
               let end = offset(of: range.end, clampingColumns: clampingColumns), start <= end else { return nil }
+        return NSRange(location: start, length: end - start)
+    }
+
+    func semanticTokenRange(line: Int, column: Int, length: Int) -> NSRange? {
+        guard lineStarts.indices.contains(line), column < lineEnds[line] - lineStarts[line] else { return nil }
+        let start = lineStarts[line] + column
+        let end = start + min(length, lineEnds[line] - start)
+        guard start < end, isScalarBoundary(start), isScalarBoundary(end) else { return nil }
         return NSRange(location: start, length: end - start)
     }
 

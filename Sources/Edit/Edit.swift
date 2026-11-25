@@ -68,6 +68,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     lazy var syntaxOverrides = SyntaxLanguageOverrides(defaults: isAgentCheck ? nil : .standard)
     lazy var fileWordWrap = FileWordWrap(defaults: isAgentCheck ? nil : .standard)
     lazy var workspaceLanguageServers = WorkspaceLanguageServers(defaults: isAgentCheck ? nil : .standard)
+    lazy var workspaceLSPHighlighting = WorkspaceLSPHighlighting(defaults: isAgentCheck ? nil : .standard)
     lazy var workspaceFindPreferences = WorkspaceFindPreferences(defaults: isAgentCheck ? nil : .standard)
     private weak var recentMenu: NSMenu?
     private weak var focusJujutsuItem: NSMenuItem?
@@ -611,6 +612,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     @objc func exitFocus(_ sender: Any?) { activeDocument?.exitFocus() }
     @objc func toggleMarkdownPreview(_ sender: Any?) { activeDocument?.toggleMarkdownPreview() }
     @objc func toggleWordWrap(_ sender: Any?) { activeDocument?.toggleWordWrap() }
+    @objc func toggleLSPHighlight(_ sender: Any?) { activeDocument?.toggleLSPHighlight() }
 
     @objc func goBack(_ sender: Any?) { Task { await navigate(.back) } }
     @objc func goForward(_ sender: Any?) { Task { await navigate(.forward) } }
@@ -729,6 +731,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case #selector(toggleWordWrap(_:)):
             (item as? NSMenuItem)?.state = activeDocument?.editor.wrapsWords == true ? .on : .off
             return activeDocument?.canToggleWordWrap ?? false
+        case #selector(toggleLSPHighlight(_:)):
+            (item as? NSMenuItem)?.state = activeDocument?.isLSPHighlightEnabled == true ? .on : .off
+            return activeDocument?.canToggleLSPHighlight ?? false
         case #selector(goBack(_:)): return canNavigate(.back)
         case #selector(goForward(_:)): return canNavigate(.forward)
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
@@ -1361,6 +1366,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         view.addCommand("Change Language Mode…", #selector(showLanguageModes(_:))).target = self
         view.addItem(.separator())
         view.addCommand("Toggle Word Wrap", #selector(toggleWordWrap(_:))).target = self
+        view.addCommand("Toggle LSP Highlight", #selector(toggleLSPHighlight(_:))).target = self
         view.addCommand("Increase Text Size", #selector(EditorTextView.increaseTextSize(_:)), "=")
         view.addCommand("Decrease Text Size", #selector(EditorTextView.decreaseTextSize(_:)), "-")
         view.addCommand("Reset Text Size", #selector(EditorTextView.resetTextSize(_:)), "0")
@@ -1462,6 +1468,15 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case "lsp-state":
             try await LanguageServerStateCheck.run(in: self, replacing: document) { window in
                 try checkWindow(window, screenshot: screenshot)
+            }
+        case "lsp-highlight":
+            func target(_ suffix: String) -> String? {
+                screenshot.map { URL(fileURLWithPath: $0).deletingPathExtension().path + "-\(suffix).png" }
+            }
+            try await LSPSemanticHighlightCheck.run(in: self, document: document) { window, suffix in
+                try self.checkWindow(window, screenshot: target(suffix))
+            } captureControl: { view, suffix in
+                try self.captureCheckView(view, screenshot: target(suffix))
             }
         case "lsp-swift":
             try await SourceKitLSPCheck.run(in: self, document: document) { view, suffix in

@@ -2,6 +2,13 @@ import AppKit
 
 @MainActor
 final class SyntaxHighlighting {
+    private struct SemanticRequest: Equatable {
+        let session: ObjectIdentifier
+        let generation: Int
+        let revision: Int
+        let refresh: Int
+    }
+
     private weak var editor: EditorTextView?
     private var spans: [SyntaxSpan] = []
     private var hasRenderingColors = false
@@ -10,15 +17,128 @@ final class SyntaxHighlighting {
     private var progressTask: Task<Void, Never>?
     private var activity: NSTitlebarAccessoryViewController?
     private var generation = 0
+    private var semanticRequest: SemanticRequest?
+    private var lastSemanticColors: (request: SemanticRequest, spans: [SyntaxSpan])?
+    private var semanticTask: Task<Void, Never>?
+    private var fallbackTask: Task<Void, Never>?
+    private var usesTreeSitterWhileWaiting = true
+#if EDIT_AGENT_CHECKS
+    private(set) var usesLSPForCheck = false
+    var spansForCheck: [SyntaxSpan] { spans }
+    var beforeInstallSemanticTokensForCheck: (() async -> Void)?
+#endif
 
     init(editor: EditorTextView) {
         self.editor = editor
         editor.syntaxHighlighting = self
     }
 
-    func update(language: SyntaxLanguage, immediate: Bool, keepingColors: Bool = false) {
-        cancelPending()
+    deinit {
+        semanticTask?.cancel()
+        fallbackTask?.cancel()
+    }
+
+    func update(language: SyntaxLanguage, immediate: Bool, session: LanguageServerSession?) {
         if let editor { editor.syntaxAnalysis.cancelIfChanged(to: editor.string, language: language) }
+        if let session {
+            if usesTreeSitterWhileWaiting {
+                updateTreeSitter(language: language, immediate: immediate, keepingColors: true)
+            }
+            requestSemanticTokens(from: session, language: language, immediate: immediate)
+        } else {
+            let keepingColors = semanticRequest != nil
+            cancelSemanticTokens()
+            if !immediate { lastSemanticColors = nil }
+            updateTreeSitter(language: language, immediate: immediate, keepingColors: keepingColors)
+        }
+    }
+
+    func updateSemanticSource(_ session: LanguageServerSession?, language: SyntaxLanguage, immediate: Bool = true) {
+        if let session {
+            requestSemanticTokens(from: session, language: language, immediate: immediate)
+        } else if semanticRequest != nil {
+            update(language: language, immediate: immediate, session: nil)
+        }
+    }
+
+    private func requestSemanticTokens(from session: LanguageServerSession, language: SyntaxLanguage, immediate: Bool) {
+        let request = SemanticRequest(session: ObjectIdentifier(session), generation: session.generation,
+                                      revision: session.revision, refresh: session.semanticTokensRefresh)
+        guard request != semanticRequest else { return }
+        semanticRequest = request
+        semanticTask?.cancel()
+        if let cached = lastSemanticColors, cached.request == request {
+            semanticTask = nil
+            installSemanticColors(cached.spans, request: request)
+            return
+        }
+        lastSemanticColors = nil
+
+        if !usesTreeSitterWhileWaiting && fallbackTask == nil {
+            // Start the deadline once, so continued typing cannot leave stale colors indefinitely.
+            fallbackTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(350))
+                guard !Task.isCancelled else { return }
+                self?.useTreeSitterWhileWaiting(language: language)
+            }
+        }
+
+        semanticTask = Task { [weak self, weak session] in
+            if !immediate { try? await Task.sleep(for: .milliseconds(100)) }
+            guard !Task.isCancelled, let session else { return }
+            let spans = try? await session.semanticTokens()
+#if EDIT_AGENT_CHECKS
+            if spans != nil { await self?.beforeInstallSemanticTokensForCheck?() }
+#endif
+            guard !Task.isCancelled, self?.semanticRequest == request else { return }
+            guard let spans else {
+                self?.semanticTask = nil
+                if self?.usesTreeSitterWhileWaiting == false { self?.useTreeSitterWhileWaiting(language: language) }
+                return
+            }
+            self?.installSemanticColors(spans, request: request)
+            // SourceKit can answer the first Swift request with syntax alone while
+            // loading build settings, without sending a refresh when they arrive.
+            if immediate && language == .swift && !spans.contains(where: {
+                $0.color == .type || $0.color == .function || $0.color == .property
+            }) {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, self?.semanticRequest == request else { return }
+                let settled = try? await session.semanticTokens()
+                guard !Task.isCancelled, self?.semanticRequest == request else { return }
+                if let settled { self?.installSemanticColors(settled, request: request) }
+            }
+            self?.semanticTask = nil
+        }
+    }
+
+    private func installSemanticColors(_ spans: [SyntaxSpan], request: SemanticRequest) {
+        lastSemanticColors = (request, spans)
+        fallbackTask?.cancel()
+        fallbackTask = nil
+        cancelPending()
+        usesTreeSitterWhileWaiting = false
+        display(spans, semantic: true)
+    }
+
+    private func useTreeSitterWhileWaiting(language: SyntaxLanguage) {
+        fallbackTask?.cancel()
+        fallbackTask = nil
+        usesTreeSitterWhileWaiting = true
+        updateTreeSitter(language: language, immediate: true, keepingColors: true)
+    }
+
+    private func cancelSemanticTokens() {
+        semanticTask?.cancel()
+        semanticTask = nil
+        semanticRequest = nil
+        fallbackTask?.cancel()
+        fallbackTask = nil
+        usesTreeSitterWhileWaiting = true
+    }
+
+    private func updateTreeSitter(language: SyntaxLanguage, immediate: Bool, keepingColors: Bool) {
+        cancelPending()
         let request = generation
         if immediate && !keepingColors { display([]) }
         guard language != .plainText else { return }
@@ -42,7 +162,7 @@ final class SyntaxHighlighting {
             guard !Task.isCancelled, let self, self.generation == request else { return }
             if let result {
                 self.display(result.spans)
-            } else if !keepingColors {
+            } else {
                 self.display([])
             }
             self.stopProgress()
@@ -58,24 +178,33 @@ final class SyntaxHighlighting {
     }
 
     func prepareForBufferReplacement() {
+        cancelSemanticTokens()
+        lastSemanticColors = nil
         cancelPending()
         editor?.syntaxAnalysis.cancel()
         spans = []
+#if EDIT_AGENT_CHECKS
+        usesLSPForCheck = false
+#endif
         clearColors()
         updateBackingColors(in: nil)
     }
 
     func install(_ snapshot: SyntaxSnapshot) {
+        cancelSemanticTokens()
+        lastSemanticColors = nil
         cancelPending()
         display(snapshot.analysis.spans)
         if snapshot.coversDocument, let editor {
             editor.syntaxAnalysis.install(snapshot.analysis, in: editor.string, language: snapshot.language)
         } else {
-            update(language: snapshot.language, immediate: true, keepingColors: true)
+            updateTreeSitter(language: snapshot.language, immediate: true, keepingColors: true)
         }
     }
 
     func cancel(clearingColors: Bool = true) {
+        cancelSemanticTokens()
+        lastSemanticColors = nil
         cancelPending()
         editor?.syntaxAnalysis.cancel()
         if clearingColors { display([]) }
@@ -88,7 +217,10 @@ final class SyntaxHighlighting {
         stopProgress()
     }
 
-    private func display(_ result: [SyntaxSpan]) {
+    private func display(_ result: [SyntaxSpan], semantic: Bool = false) {
+#if EDIT_AGENT_CHECKS
+        usesLSPForCheck = semantic
+#endif
         let needsRedraw = hasRenderingColors || backedColorRange != nil || !result.isEmpty
         spans = result
         if needsRedraw { refreshColors() }

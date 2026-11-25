@@ -35,6 +35,10 @@ struct ControlCommand {
         if action == #selector(Edit.closeDocument(_:)) { return document.canCloseDocument }
         if action == #selector(Edit.closeWorkspace(_:)) { return document.canCloseWorkspace }
         if action == #selector(Edit.toggleWordWrap(_:)) { return document.canToggleWordWrap }
+        if action == #selector(Edit.toggleLSPHighlight(_:)) { return document.canToggleLSPHighlight }
+        if action == #selector(Edit.performFindControlAction(_:)), let command = item.representedObject as? FindCommand {
+            return document.canPerformFind(command)
+        }
         if action == #selector(DocumentWindow.performMarkdownTableCommand(_:)) { return document.currentMarkdownTable != nil }
         if documentOnly {
             guard document.hasTextDocument, !document.isShowingMarkdownPreview, document.window.attachedSheet == nil,
@@ -55,6 +59,29 @@ struct ControlCommand {
             return (focus ?? document.editor).undoManager?.canRedo == true
         }
         return true
+    }
+
+    func toggleState(in document: DocumentWindow) -> Bool? {
+        switch item.action {
+        case #selector(Edit.toggleLSPHighlight(_:)): return document.isLSPHighlightEnabled
+        case #selector(Edit.toggleWordWrap(_:)): return document.editor.wrapsWords
+        case #selector(Edit.toggleMarkdownPreview(_:)): return document.isShowingMarkdownPreview
+        case #selector(Edit.toggleSidebar(_:)): return document.isSidebarVisible
+        case #selector(Edit.toggleTerminal(_:)): return document.isTerminalVisible
+        case #selector(NSWindow.toggleFullScreen(_:)): return document.window.styleMask.contains(.fullScreen)
+        case #selector(Edit.performFindControlAction(_:)):
+            switch item.representedObject as? FindCommand {
+            case .toggleReplace: return document.findSettings.showsReplacement
+            case .toggleCase: return document.findSettings.options.caseSensitive
+            case .toggleWholeWord: return document.findSettings.options.wholeWord
+            case .toggleRegex: return document.findSettings.options.regularExpression
+            default: return nil
+            }
+        case #selector(DocumentWindow.performMarkdownTableCommand(_:)):
+            guard item.representedObject as? MarkdownTableCommand == .toggleBorders else { return nil }
+            return document.currentMarkdownTable?.hasBorders
+        default: return nil
+        }
     }
 
     func run(in document: DocumentWindow) {
@@ -85,6 +112,26 @@ struct ControlCommand {
         }
         if action == #selector(Edit.toggleWordWrap(_:)) {
             document.toggleWordWrap()
+            return
+        }
+        if action == #selector(Edit.toggleLSPHighlight(_:)) {
+            document.toggleLSPHighlight()
+            return
+        }
+        if action == #selector(Edit.toggleSidebar(_:)) {
+            document.performFind(.toggleSidebar)
+            return
+        }
+        if action == #selector(Edit.toggleTerminal(_:)) {
+            document.toggleTerminal()
+            return
+        }
+        if action == #selector(NSWindow.toggleFullScreen(_:)) {
+            document.window.toggleFullScreen(item)
+            return
+        }
+        if action == #selector(Edit.performFindControlAction(_:)), let command = item.representedObject as? FindCommand {
+            document.performFind(command)
             return
         }
         if documentOnly {
@@ -203,6 +250,7 @@ struct ControlCommand {
                action != #selector(NSWindow.performZoom(_:)) { return [] }
             let title = action == #selector(Edit.goBack(_:)) || action == #selector(Edit.goForward(_:))
                 || action == #selector(Edit.toggleMarkdownPreview(_:))
+                || action == #selector(Edit.toggleLSPHighlight(_:))
                 ? item.title : "\(prefix): \(item.title)"
             return [ControlCommand(id: NSStringFromSelector(action), title: title, item: item,
                                    documentOnly: isBracketCommand(action) || isCaseCommand(action))]
