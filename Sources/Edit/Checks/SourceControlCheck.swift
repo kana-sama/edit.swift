@@ -166,7 +166,7 @@ enum SourceControlCheck {
         let viewport = document.scrollView.contentView.bounds
         try expect(viewport.width > 100 && viewport.height > 100 && !document.scrollView.isHiddenOrHasHiddenAncestor,
                    "give historical text a visible editor viewport (\(viewport), \(document.scrollView.frame))")
-        try checkRevisionBanner(in: document, above: document.scrollView)
+        try checkReadOnlyStatus(in: document, over: document.scrollView)
         try expect(!document.editor.wrapsWords && wrapCommand.isAvailable(in: document, focus: document.editor),
                    "the historical file has its own setting and offers wrap in Command Mode")
         wrapCommand.run(in: document)
@@ -182,7 +182,7 @@ enum SourceControlCheck {
                     label.stringValue == "A text diff is unavailable for this file."
                 } != nil
         }
-        try checkRevisionBanner(in: document, above: document.contentResponder)
+        try checkReadOnlyStatus(in: document, over: document.contentResponder)
         try expect(!app.validateUserInterfaceItem(wordWrap), "word wrap requires a text buffer")
         try open("Tracked.txt", in: panel.fileTree)
         try await waitFor("restore the historical text after a binary preview") {
@@ -337,12 +337,15 @@ enum SourceControlCheck {
 
         let document = app.makeDocument()
         defer { document.window.close() }
+        var wideFrame = document.window.frame
+        wideFrame.size.width = 1040
+        document.window.setFrame(wideFrame, display: false)
         _ = try await app.openFile(folder, in: document)
         document.toggleSidebarFocus(.sourceControl)
         _ = try await app.openFile(literal, in: document)
         try expect(document.editor.string == example && document.conflictPanel == nil &&
                    document.scrollView.additionalSafeAreaInsets.top == 0,
-                   "open a regular jj file containing literal markers without a conflict strip")
+                   "open a regular jj file containing literal markers without conflict controls")
         document.editor.insertText("x", replacementRange: NSRange(location: 0, length: 1))
         try expect(document.editor.string == "x" + String(example.dropFirst()), "allow edits to literal markers in an ordinary file")
         document.editor.undoManager?.undo()
@@ -354,9 +357,9 @@ enum SourceControlCheck {
         guard let panel = document.conflictPanel,
               let format: NSSegmentedControl = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictFormat" }),
               let sidebar = document.sourceControlSidebar else {
-            throw Failure("install the conflict strip before presenting the opened buffer")
+            throw Failure("install the conflict controls before presenting the opened buffer")
         }
-        try checkEditorPanelLayout([panel], above: document.scrollView, in: document)
+        try checkDocumentHeader([panel], over: document.scrollView, in: document)
         func firstLineY() -> CGFloat? {
             guard let firstLine = document.editor.laidOutLineBounds(at: 0) else { return nil }
             return document.editor.convert(firstLine, to: document.editorContentView).midY
@@ -366,7 +369,7 @@ enum SourceControlCheck {
             document.editor.isEditable && document.editor.jjLineMarks.contains { $0.kind == .conflict }
         }
         try expect(document.conflictPanel === panel && firstLineY().map { abs($0 - openingLineY) < 1 } == true,
-                   "keep the original conflict strip and line position when the live analysis arrives")
+                   "keep the original conflict controls and line position when the live analysis arrives")
         try await waitFor("show the conflict cross next to the selected change ID") {
             guard let identity = changeBadge(in: sidebar),
                   let icon: NSImageView = descendant(of: identity, where: { $0.identifier?.rawValue == "JujutsuConflictIcon" }) else {
@@ -432,13 +435,34 @@ enum SourceControlCheck {
         try expect(try gutterIsAligned(), "keep the purple gutter aligned on Undo before reanalysis")
         undo.removeAllActions()
         scroll.scrollToVisibleContentOrigin(originBeforeGutterCheck)
-        guard let navigation: NSSegmentedControl = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictNavigation" }) else {
+        guard let navigation: NSView = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictNavigation" }),
+              let next: NSButton = descendant(of: navigation, where: { $0.identifier?.rawValue == "JujutsuNextConflict" }),
+              let menu: NSPopUpButton = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictFormatMenu" }) else {
             throw Failure("find the conflict navigation")
         }
         guard let pending: NSButton = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuPendingChanges" }) else {
             throw Failure("find Pending Changes beside the format control")
         }
         try expect(pending.state == .off && pending.isEnabled, "offer Pending Changes as an optional diff view")
+        try expect(format.isHidden == false && menu.isHidden && menu.itemTitles == ["Diff", "Snapshot"],
+                   "show the wide segments and keep only the two format choices in the compact menu")
+        var narrowFrame = wideFrame
+        narrowFrame.size.width = 580
+        document.window.setFrame(narrowFrame, display: false)
+        document.titleBar.resize()
+        try checkDocumentHeader([panel], over: scroll, in: document)
+        try expect(format.isHidden && !menu.isHidden && menu.titleOfSelectedItem == "Diff" &&
+                   next.isEnabled && !next.isHiddenOrHasHiddenAncestor,
+                   "keep navigation inline beside the selected format in a narrow header")
+        try expect(panel.convert(pending.bounds, from: pending).maxX <= panel.convert(menu.bounds, from: menu).minX,
+                   "place the dim toggle immediately before the active format control")
+        try render(document.window)
+        document.window.setFrame(wideFrame, display: false)
+        document.titleBar.resize()
+        document.window.layoutIfNeeded()
+        try expect(!format.isHidden && menu.isHidden && format.selectedSegment == 0,
+                   "restore the segments and keep the selected format when room returns")
+        try render(document.window)
         func actionBars() -> [JJConflictActions] { editor.subviews.compactMap { $0 as? JJConflictActions } }
         func headerBounds(_ anchor: NSRange) -> NSRect? {
             guard let first = editor.laidOutLineBounds(at: anchor.location),
@@ -541,13 +565,13 @@ enum SourceControlCheck {
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             document.window.appearance = NSAppearance(named: appearance)
             document.window.layoutIfNeeded()
-            try checkEditorPanelLayout([panel], above: scroll, in: document)
-            try expect(panel.convert(format.bounds, from: format).maxX <= panel.bounds.maxX - 11 &&
-                       panel.convert(navigation.bounds, from: navigation).minX >= panel.bounds.minX + 11,
-                       "inset the top bar controls from both edges")
+            try checkDocumentHeader([panel], over: scroll, in: document)
+            try expect(panel.convert(navigation.bounds, from: navigation).maxX <= panel.convert(pending.bounds, from: pending).minX &&
+                       panel.convert(pending.bounds, from: pending).maxX <= panel.convert(format.bounds, from: format).minX,
+                       "follow inline navigation with the dim toggle and format segments")
             try checkConflictColors(originalBlocks[0], in: editor)
         }
-        panel.onNavigate?(1)
+        next.performClick(nil)
         try expect(editor.selectedRange().location == originalBlocks[1].range.location, "navigate to the next conflict")
         reveal(firstDiff.anchor)
         try await waitFor("show the overlapping diff action") { button("Apply Diff", on: firstDiff.anchor)?.isEnabled == true }
@@ -751,7 +775,7 @@ enum SourceControlCheck {
         let snapshotBlocks = document.displayedConflicts
         document.window.layoutIfNeeded()
         try expect(format.isEnabled, "install the new conflict presentation in the same update as the Snapshot text")
-        try expect(!pending.isEnabled, "limit Pending Changes to diffs")
+        try expect(!pending.isEnabled && pending.isHidden, "limit the dim toggle to Diff")
         try checkConflictColors(snapshotBlocks[0], in: editor)
         try expect(zip(snapshotBlocks, originalBlocks).allSatisfy { $0.sides == $1.sides },
                    "retain each side when changing the editable representation")
@@ -800,16 +824,30 @@ enum SourceControlCheck {
         try expect(await document.openSourceControlFile(path, in: historical, workspace: workspace, operationID: history.operationID) { true },
                    "open the historical conflict as a read-only file")
         let disk = try Data(contentsOf: file)
-        document.conflictPanel?.onChangeStyle?(.snapshot)
+        var compactHistoryFrame = wideFrame
+        compactHistoryFrame.size.width = 580
+        document.window.setFrame(compactHistoryFrame, display: false)
+        document.titleBar.resize()
+        document.window.layoutIfNeeded()
+        guard let historyControls = document.conflictPanel,
+              let historyMenu: NSPopUpButton = descendant(of: historyControls, where: { $0.identifier?.rawValue == "JujutsuConflictFormatMenu" }),
+              let action = historyMenu.action, !historyMenu.isHidden, historyMenu.isEnabled else {
+            throw Failure("offer the format menu for a narrow historical conflict")
+        }
+        historyMenu.selectItem(at: 1)
+        historyMenu.sendAction(action, to: historyMenu.target)
         try await waitFor("show Snapshot in a read-only revision") {
             !editor.isEditable && actionBars().isEmpty && document.displayedConflicts.first?.style == .snapshot
         }
+        document.window.setFrame(wideFrame, display: false)
+        document.titleBar.resize()
         try expect(try Data(contentsOf: file) == disk, "leave the working file untouched when switching a historical preview")
         guard let banner = document.sourceControlRevisionBanner, let conflictPanel = document.conflictPanel else {
-            throw Failure("keep both editor panels in a historical conflict")
+            throw Failure("keep both status and navigation in a historical conflict header")
         }
-        try checkEditorPanelLayout([banner, conflictPanel], above: document.scrollView, in: document)
-        try checkPanelsWithDetachedToolbar([banner, conflictPanel], in: document)
+        try checkDocumentHeader([banner, conflictPanel], over: document.scrollView, in: document)
+        try checkHeaderCompaction(banner, conflict: conflictPanel, in: document)
+        try checkStatusWithDetachedToolbar([banner, conflictPanel], in: document)
 
         let oneLine = back.split(separator: "\n", omittingEmptySubsequences: false).filter { $0.first != "\\" }.joined(separator: "\n")
         try oneLine.write(to: finalLine, atomically: true, encoding: .utf8)
@@ -1857,6 +1895,21 @@ enum SourceControlCheck {
                    !crossing.isApproach(NSPoint(x: 120, y: 170), from: start) &&
                    !crossing.contains(NSPoint(x: 242, y: 270)),
                    "allow diagonal approaches to both ends while distinguishing vertical browsing and leaving the card")
+        let screenFrame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let badge = NSRect(x: 900, y: 650, width: 80, height: 23)
+        guard let rowPlacement = SourceControlRevisionHoverPlacement(size: exampleCard.size, anchor: exampleRow, screen: screenFrame),
+              let badgePlacement = SourceControlRevisionHoverPlacement(size: exampleCard.size, anchor: badge,
+                                                                   screen: screenFrame, prefersVertical: true) else {
+            throw Failure("place a revision card beside a row and below a badge")
+        }
+        try expect(rowPlacement.tip == NSPoint(x: exampleRow.maxX, y: exampleRow.midY) &&
+                   rowPlacement.frame.minX == exampleRow.maxX && rowPlacement.body.minX > rowPlacement.tip.x &&
+                   badgePlacement.tip == NSPoint(x: badge.midX, y: badge.minY) && badgePlacement.frame.maxY == badge.minY &&
+                   badgePlacement.body.maxY < badgePlacement.tip.y && screenFrame.contains(badgePlacement.frame),
+                   "keep the arrow between the revision card body and its anchor when the card shifts to fit the screen")
+        let cardBody: NSView? = descendant(of: content, where: { $0.identifier?.rawValue == "JujutsuRevisionHoverBody" })
+        try expect(cardBody != nil && cardBody?.bounds.size != content.bounds.size,
+                   "give the native card arrow its own space outside the rounded body")
 
         let anchor = window.convertToScreen(graph.table.convert(graph.table.rect(ofRow: working), to: nil))
         let gap = NSPoint(x: (anchor.maxX + preview.frame.minX) / 2, y: (anchor.midY + preview.frame.midY) / 2)
@@ -1926,62 +1979,102 @@ enum SourceControlCheck {
         window.simulatedKeyStatus = false
         try await Task.sleep(for: .milliseconds(500))
         try expect(card() == nil && !NSApp.isActive, "cancel a pending card when the editor window loses key status")
+
+        window.simulatedKeyStatus = true
+        let analysis = JJLineDiff.analyze(base: nil, current: "", isConflicted: false, recordedConflict: nil)
+        let revision = SourceControlRevisionPreview(url: URL(fileURLWithPath: "/Revision.txt"), revision: author,
+            isDeleted: false, content: .text("", FileFormat(), analysis, baseline: nil))
+        let status = SourceControlRevisionBanner(revision, ownerWindow: window)
+        let host = NSView(frame: graph.view.bounds)
+        window.contentView = host
+        host.addSubview(status)
+        status.frame = NSRect(origin: NSPoint(x: 24, y: 48), size: status.intrinsicContentSize)
+        window.layoutIfNeeded()
+        guard let enter = NSEvent.mouseEvent(with: .mouseMoved,
+            location: status.convert(NSPoint(x: status.bounds.midX, y: status.bounds.midY), to: nil), modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0) else {
+            throw Failure("create the read-only badge hover event")
+        }
+        status.mouseEntered(with: enter)
+        try await waitFor("show the same full revision card on the passive read-only badge") {
+            guard let content = card()?.contentView else { return false }
+            return text("Subject", in: content)?.string == author.subject && text("Author", in: content)?.string == authorValue.string &&
+                text("Description", in: content)?.string == description.string
+        }
+        status.presentation = .icon
+        try expect(card() == nil, "dismiss an anchored revision card when its badge is compacted")
     }
 
-    private static func checkRevisionBanner(in document: DocumentWindow, above body: NSView) throws {
-        let content = document.editorContentView
-        guard let banner = document.sourceControlRevisionBanner else { throw Failure("find the revision banner") }
-        try checkEditorPanelLayout([banner], above: body, in: document)
-        let bounds = content.bounds
-        func capture() throws -> NSBitmapImageRep {
-            guard let bitmap = content.bitmapImageRepForCachingDisplay(in: bounds) else {
-                throw Failure("capture the revision preview")
-            }
-            content.cacheDisplay(in: bounds, to: bitmap)
-            return bitmap
-        }
-        let visible = try capture()
-        banner.isHidden = true
-        defer { banner.isHidden = false }
-        let uncovered = try capture()
-        let bannerFrame = content.convert(banner.bounds, from: banner)
-        let exposedBody = NSRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: bannerFrame.minY - bounds.minY)
-        let area = content.convert(body.bounds, from: body).intersection(exposedBody).insetBy(dx: 8, dy: 8)
-        try expect(!area.isEmpty, "give the selected revision a visible body below the strip")
-        let xScale = CGFloat(visible.pixelsWide) / bounds.width
-        let yScale = CGFloat(visible.pixelsHigh) / bounds.height
-        let top = content.isFlipped ? area.minY : bounds.maxY - area.maxY
-        for x in stride(from: Int(area.minX * xScale), to: Int(area.maxX * xScale), by: 4) {
-            for y in stride(from: Int(top * yScale), to: Int((top + area.height) * yScale), by: 4) {
-                try expect(visible.colorAt(x: x, y: y) == uncovered.colorAt(x: x, y: y),
-                           "keep all banner drawing above the revision body")
-            }
-        }
+    private static func checkReadOnlyStatus(in document: DocumentWindow, over body: NSView) throws {
+        guard let status = document.sourceControlRevisionBanner else { throw Failure("find the read-only status") }
+        try checkDocumentHeader([status], over: body, in: document)
+        try expect(status.accessibilityRole() == .staticText && status.accessibilityLabel()?.contains("Read-only") == true,
+                   "expose the read-only badge as a passive status")
     }
 
-    private static func checkEditorPanelLayout(_ panels: [NSView], above body: NSView, in document: DocumentWindow) throws {
+    private static func checkDocumentHeader(_ controls: [NSView], over body: NSView, in document: DocumentWindow) throws {
         document.window.layoutIfNeeded()
         let content = document.editorContentView
-        guard let scroll = body as? NSScrollView ?? descendant(of: body, where: { (_: NSScrollView) in true }) else {
+        let toolbar = document.titleBar.toolbar
+        guard let title = toolbar.items.first(where: { $0.itemIdentifier == DocumentTitleBar.fileItemIdentifier })?.view,
+              let scroll = body as? NSScrollView ?? descendant(of: body, where: { (_: NSScrollView) in true }) else {
             throw Failure("find the revision scroll surface")
         }
         let scrollFrame = content.convert(scroll.bounds, from: scroll)
-        var edge = content.safeAreaRect.maxY
-        var height: CGFloat = 0
-        for panel in panels {
-            let frame = content.convert(panel.bounds, from: panel)
-            try expect(abs(frame.maxY - edge) < 1, "stack editor panels below the native toolbar")
-            edge = frame.minY
-            height += frame.height
+        for control in controls {
+            let item = toolbar.visibleItems?.first { item in
+                guard let view = item.view else { return false }
+                return view === control || control.isDescendant(of: view)
+            }
+            let frame = control.convert(control.bounds, to: nil)
+            let titleFrame = title.convert(title.bounds, to: nil)
+            try expect(item != nil && control.window === document.titleBar.toolbarWindow && !control.isHiddenOrHasHiddenAncestor &&
+                       abs(frame.midY - titleFrame.midY) < 2 && control.visibleRect.width + 0.5 >= control.bounds.width,
+                       "place \(control.identifier?.rawValue ?? "document controls") within the visible native header row (\(frame), title \(titleFrame))")
         }
         try expect(scroll.automaticallyAdjustsContentInsets && abs(scrollFrame.maxY - content.bounds.maxY) < 1,
                    "keep the scroll surface extending behind the native toolbar")
-        try expect(abs(body.additionalSafeAreaInsets.top - height) < 1 &&
-                   abs(scrollFrame.maxY - scroll.contentInsets.top - edge) < 1,
-                   "reserve the editor panels in the automatic scroll inset")
+        try expect(body.additionalSafeAreaInsets.top == 0 &&
+                   abs(scrollFrame.maxY - scroll.contentInsets.top - content.safeAreaRect.maxY) < 1,
+                   "use only the native toolbar inset for the scrolling document")
     }
 
-    private static func checkPanelsWithDetachedToolbar(_ panels: [NSView], in document: DocumentWindow) throws {
+    private static func checkHeaderCompaction(_ status: SourceControlRevisionBanner, conflict: JJConflictPanel,
+                                              in document: DocumentWindow) throws {
+        let window = document.window
+        let wideFrame = window.frame
+        defer {
+            window.setFrame(wideFrame, display: false)
+            document.titleBar.resize()
+            window.layoutIfNeeded()
+        }
+        guard let title = window.toolbar?.items.first(where: { $0.itemIdentifier == DocumentTitleBar.fileItemIdentifier })?.view,
+              let file: NSTextField = descendant(of: title, where: { $0.stringValue == document.displayName }),
+              let folderItem = window.toolbar?.items.first(where: { $0.itemIdentifier == DocumentTitleBar.folderItemIdentifier }),
+              let project: NSTextField = folderItem.view.flatMap({ descendant(of: $0, where: { _ in true }) }) else {
+            throw Failure("find the document names for header compaction")
+        }
+        var observed: [Int] = []
+        for width in stride(from: wideFrame.width, through: 440, by: -8) {
+            var frame = wideFrame
+            frame.size.width = width
+            window.setFrame(frame, display: false)
+            document.titleBar.resize()
+            window.layoutIfNeeded()
+            let fileCompacted = file.frame.width + 0.5 < file.intrinsicContentSize.width
+            let projectCompacted = folderItem.isHidden || project.frame.width + 0.5 < project.intrinsicContentSize.width
+            let compactStatus = status.presentation != .full
+            let compactFormat = conflict.presentation != .segments
+            if fileCompacted { try expect(folderItem.isHidden, "hide the project before truncating the filename") }
+            if projectCompacted { try expect(status.presentation == .icon, "compact Read-only before shortening the project") }
+            if compactStatus { try expect(compactFormat, "use the format menu before compacting Read-only") }
+            observed.append([compactFormat, compactStatus, projectCompacted, fileCompacted].filter { $0 }.count)
+        }
+        try expect(observed.first == 0 && observed.contains(2) && observed.contains(3),
+                   "exercise the full, format menu, read-only, and project presentations (\(Set(observed)))")
+    }
+
+    private static func checkStatusWithDetachedToolbar(_ controls: [NSView], in document: DocumentWindow) throws {
         let window = document.window
         guard let toolbar = window.toolbar else { throw Failure("find the native editor toolbar") }
         let frame = NSRect(x: -10_000, y: -10_000, width: window.frame.width, height: 180)
@@ -2005,8 +2098,8 @@ enum SourceControlCheck {
         companion.layoutIfNeeded()
         document.titleBar.fullScreenTransitionDidFinish()
         try expect(document.titleBar.toolbarWindow === companion && !NSApp.isActive,
-                   "test the panels with the toolbar in an inactive full-screen companion")
-        try checkEditorPanelLayout(panels, above: document.scrollView, in: document)
+                   "test the header with the toolbar in an inactive full-screen companion")
+        try checkDocumentHeader(controls, over: document.scrollView, in: document)
     }
 
     private static func button(in view: NSView, where test: (NSButton) -> Bool) -> NSButton? {

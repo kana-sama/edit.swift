@@ -2,129 +2,267 @@ import AppKit
 
 @MainActor
 final class JJConflictPanel: NSView {
-    private static let inset: CGFloat = 12
+    enum Presentation {
+        case segments, menu, compactMenu
+
+        var dimTitle: String {
+            switch self {
+            case .segments: "Dim resolved"
+            case .menu: "Dim"
+            case .compactMenu: ""
+            }
+        }
+    }
+
+    private static let height: CGFloat = 22
+    private static let spacing: CGFloat = 4
+    private static let controlFont = NSFont.systemFont(ofSize: 11, weight: .medium)
 
     var onNavigate: ((Int) -> Void)?
     var onChangeStyle: ((JJConflict.Style) -> Void)?
     var onShowPendingChanges: ((Bool) -> Void)?
+    var onPreferredSizeChange: (() -> Void)?
+    var presentation: Presentation = .segments {
+        didSet { if presentation != oldValue { updatePresentation() } }
+    }
 
+    private let navigation = NSBox()
+    private let previous = NSButton()
+    private let next = NSButton()
     private let status = NSTextField(labelWithString: "")
-    private let navigation = NSSegmentedControl(
-        images: ["chevron.up", "chevron.down"].map { NSImage(systemSymbolName: $0, accessibilityDescription: nil) ?? NSImage() },
-        trackingMode: .momentary, target: nil, action: nil
-    )
     private let format = NSSegmentedControl(labels: ["Diff", "Snapshot"], trackingMode: .selectOne, target: nil, action: nil)
-    private let pending = NSButton(checkboxWithTitle: "Pending Changes", target: nil, action: nil)
-    private let spacer = NSView()
+    private let formatMenu = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let formatDisplay = NSMenuItem(title: "Format", action: nil, keyEquivalent: "")
+    private let pending = NSButton()
+    private var selectedFormat: JJConflict.Style?
+    private var showsDim = false
     private var current = false
 
     init() {
         super.init(frame: .zero)
         identifier = .init("JujutsuConflictPanel")
         translatesAutoresizingMaskIntoConstraints = false
-        status.font = .systemFont(ofSize: 11, weight: .semibold)
-        status.textColor = .secondaryLabelColor
-        status.lineBreakMode = .byTruncatingTail
-        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         navigation.identifier = .init("JujutsuConflictNavigation")
-        navigation.controlSize = .small
-        navigation.setToolTip("Previous Conflict", forSegment: 0)
-        navigation.setToolTip("Next Conflict", forSegment: 1)
+        navigation.boxType = .custom
+        navigation.titlePosition = .noTitle
+        navigation.borderWidth = 0
+        navigation.cornerRadius = 6
+        navigation.fillColor = .labelColor.withAlphaComponent(0.10)
+        navigation.contentViewMargins = .zero
         navigation.setAccessibilityLabel("Navigate conflicts")
-        navigation.target = self
-        navigation.action = #selector(navigate)
+        configureNavigation(previous, symbol: "chevron.up", name: "Previous Conflict", identifier: "JujutsuPreviousConflict", offset: -1)
+        configureNavigation(next, symbol: "chevron.down", name: "Next Conflict", identifier: "JujutsuNextConflict", offset: 1)
+        status.identifier = .init("JujutsuConflictCount")
+        status.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        status.textColor = .secondaryLabelColor
+        status.alignment = .center
+        navigation.addSubview(status)
+
         format.identifier = .init("JujutsuConflictFormat")
         format.controlSize = .small
         format.setAccessibilityLabel("Conflict format")
         format.target = self
-        format.action = #selector(changeStyle)
+        format.action = #selector(changeStyleFromSegments)
+        formatMenu.identifier = .init("JujutsuConflictFormatMenu")
+        formatMenu.controlSize = .small
+        formatMenu.font = Self.controlFont
+        formatMenu.usesItemFromMenu = false
+        formatMenu.addItems(withTitles: ["Diff", "Snapshot"])
+        (formatMenu.cell as? NSPopUpButtonCell)?.menuItem = formatDisplay
+        formatMenu.setAccessibilityLabel("Conflict format")
+        formatMenu.target = self
+        formatMenu.action = #selector(changeStyleFromMenu)
+
         pending.identifier = .init("JujutsuPendingChanges")
+        pending.setButtonType(.pushOnPushOff)
+        pending.bezelStyle = .accessoryBar
         pending.controlSize = .small
-        pending.font = .systemFont(ofSize: 11)
-        pending.toolTip = "Emphasize diff fragments still pending in the snapshot"
-        pending.setAccessibilityLabel("Pending Changes")
+        pending.font = Self.controlFont
+        pending.image = Self.symbol("circle.lefthalf.filled")
+        pending.setAccessibilityLabel("Dim resolved diff fragments")
         pending.target = self
         pending.action = #selector(changePending)
 
-        let controls = NSStackView(views: [status, navigation, spacer, pending, format])
-        controls.spacing = 4
-        controls.alignment = .centerY
-        controls.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(controls)
-        let separator = NSBox()
-        separator.boxType = .separator
-        separator.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(separator)
-        NSLayoutConstraint.activate([
-            controls.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
-            controls.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.inset),
-            controls.centerYAnchor.constraint(equalTo: centerYAnchor),
-            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
-            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
-            separator.bottomAnchor.constraint(equalTo: bottomAnchor),
-            heightAnchor.constraint(equalToConstant: 32),
-        ])
+        for control in [navigation as NSView, pending, format, formatMenu] { addSubview(control) }
+        updatePresentation()
+        suspend()
     }
 
     required init?(coder: NSCoder) { fatalError("Conflict panels are created in code.") }
 
-    override func layout() {
-        let narrow = bounds.width < 360
-        if status.isHidden != narrow { status.isHidden = narrow }
-        let title = bounds.width < 240 ? "" : "Pending Changes"
-        if pending.title != title { pending.title = title }
-        let compact = bounds.width < 205
-        if (format.controlSize == .mini) != compact {
-            navigation.controlSize = compact ? .mini : .small
-            format.controlSize = compact ? .mini : .small
-            for segment in 0..<navigation.segmentCount {
-                navigation.setWidth(compact ? 18 : 0, forSegment: segment)
-            }
-            format.setWidth(compact ? 25 : 0, forSegment: 0)
-            format.setWidth(compact ? 45 : 0, forSegment: 1)
-        }
-        super.layout()
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: width(for: presentation), height: Self.height)
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        NSColor.windowBackgroundColor.setFill()
-        bounds.fill()
+    func width(for presentation: Presentation) -> CGFloat {
+        navigationWidth(for: presentation) + Self.spacing + formatWidth(for: presentation)
+            + (showsDim ? Self.spacing + dimWidth(for: presentation) : 0)
+    }
+
+    override func layout() {
+        super.layout()
+        let y = (bounds.height - Self.height) / 2
+        let navWidth = navigationWidth(for: presentation)
+        let arrow = arrowWidth(for: presentation)
+        navigation.frame = NSRect(x: 0, y: y, width: navWidth, height: Self.height)
+        previous.frame = NSRect(x: 0, y: 0, width: arrow, height: Self.height)
+        status.frame = NSRect(x: arrow, y: (Self.height - status.intrinsicContentSize.height) / 2,
+                              width: navWidth - arrow * 2, height: status.intrinsicContentSize.height)
+        next.frame = NSRect(x: navWidth - arrow, y: 0, width: arrow, height: Self.height)
+
+        var x = navWidth + Self.spacing
+        if showsDim {
+            let dimWidth = dimWidth(for: presentation)
+            pending.frame = NSRect(x: x, y: y, width: dimWidth, height: Self.height)
+            x += dimWidth + Self.spacing
+        }
+        let formatControl: NSControl = presentation == .segments ? format : formatMenu
+        formatControl.frame = NSRect(x: x, y: y, width: formatWidth(for: presentation), height: Self.height)
+    }
+
+    private func arrowWidth(for presentation: Presentation) -> CGFloat {
+        presentation == .compactMenu ? 19 : 22
+    }
+
+    private func navigationWidth(for presentation: Presentation) -> CGFloat {
+        2 * arrowWidth(for: presentation) + ceil(status.intrinsicContentSize.width) + 2
+    }
+
+    private func dimWidth(for presentation: Presentation) -> CGFloat {
+        if presentation == .compactMenu { return 22 }
+        let titleWidth = (presentation.dimTitle as NSString).size(withAttributes: [.font: Self.controlFont]).width
+        return ceil(titleWidth) + 28
+    }
+
+    private func formatWidth(for presentation: Presentation) -> CGFloat {
+        switch presentation {
+        case .segments: ceil(format.intrinsicContentSize.width)
+        case .menu: ceil(("Snapshot" as NSString).size(withAttributes: [.font: Self.controlFont]).width) + 30
+        case .compactMenu: 31
+        }
+    }
+
+    private static func symbol(_ name: String, size: CGFloat = 11) -> NSImage? {
+        NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: size, weight: .semibold))
+    }
+
+    private func configureNavigation(_ button: NSButton, symbol: String, name: String, identifier: String, offset: Int) {
+        button.identifier = .init(identifier)
+        button.isBordered = false
+        button.image = Self.symbol(symbol, size: 9)
+        button.imagePosition = .imageOnly
+        button.toolTip = name
+        button.setAccessibilityLabel(name)
+        button.tag = offset
+        button.target = self
+        button.action = #selector(navigate(_:))
+        navigation.addSubview(button)
+    }
+
+    private func updatePresentation() {
+        format.isHidden = presentation != .segments
+        formatMenu.isHidden = presentation == .segments
+        formatMenu.imagePosition = presentation == .compactMenu ? .imageOnly : .noImage
+        pending.isHidden = !showsDim
+        pending.title = presentation.dimTitle
+        pending.imagePosition = presentation == .compactMenu ? .imageOnly : .imageLeading
+        updateFormatSelection()
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
+    private func updateFormatSelection() {
+        format.selectedSegment = selectedFormat?.rawValue ?? -1
+        formatMenu.select(selectedFormat.flatMap { formatMenu.item(at: $0.rawValue) })
+        let title = formatMenu.titleOfSelectedItem ?? "Format"
+        formatDisplay.title = title
+        let symbol = switch selectedFormat {
+        case .diff: "plusminus"
+        case .snapshot: "doc.text"
+        default: "arrow.left.arrow.right"
+        }
+        formatDisplay.image = presentation == .compactMenu ? Self.symbol(symbol) : nil
+        formatMenu.setAccessibilityValue(title)
+        formatMenu.needsDisplay = true
     }
 
     func update(_ conflicts: [JJConflict], selected index: Int, hasDraft: Bool, pendingChanges: Bool, canShowPending: Bool) {
         guard conflicts.indices.contains(index) else { return }
-        status.stringValue = "Conflict \(index + 1) of \(conflicts.count)"
+        let oldWidth = width(for: presentation)
+        let count = "\(index + 1)/\(conflicts.count)"
+        if status.stringValue != count {
+            status.stringValue = count
+            status.setAccessibilityLabel("Conflict \(index + 1) of \(conflicts.count)")
+        }
         let style = conflicts[index].style
-        format.selectedSegment = style != .git && conflicts.allSatisfy { $0.style == style } ? style.rawValue : -1
-        format.isEnabled = !hasDraft && conflicts.allSatisfy(\.canChangeStyle)
+        let newFormat = style != .git && conflicts.allSatisfy { $0.style == style } ? style : nil
+        if selectedFormat != newFormat {
+            selectedFormat = newFormat
+            updateFormatSelection()
+        }
+        showsDim = style == .diff
+        pending.isHidden = !showsDim
+        let canChangeFormat = !hasDraft && conflicts.allSatisfy(\.canChangeStyle)
         let formatHelp = hasDraft ? "Resolve or undo the snapshot edits to switch conflict format." : nil
-        format.toolTip = formatHelp
-        format.setAccessibilityHelp(formatHelp)
-        navigation.isEnabled = conflicts.count > 1
+        for control in [format as NSControl, formatMenu] {
+            control.isEnabled = canChangeFormat
+            control.toolTip = formatHelp
+            control.setAccessibilityHelp(formatHelp)
+        }
+        previous.isEnabled = conflicts.count > 1
+        next.isEnabled = conflicts.count > 1
         pending.state = pendingChanges ? .on : .off
         pending.isEnabled = canShowPending
+        updatePendingHelp()
         current = true
+        if oldWidth != width(for: presentation) {
+            invalidateIntrinsicContentSize()
+            needsLayout = true
+            onPreferredSizeChange?()
+        }
     }
 
     func suspend() {
         current = false
         format.isEnabled = false
-        navigation.isEnabled = false
+        formatMenu.isEnabled = false
+        previous.isEnabled = false
+        next.isEnabled = false
         pending.isEnabled = false
     }
 
-    @objc private func navigate() {
+    @objc private func navigate(_ sender: NSButton) {
         guard current else { return }
-        onNavigate?(navigation.selectedSegment == 0 ? -1 : 1)
+        onNavigate?(sender.tag)
     }
 
-    @objc private func changeStyle() {
-        guard current, format.isEnabled, let selected = JJConflict.Style(rawValue: format.selectedSegment) else { return }
+    @objc private func changeStyleFromSegments() {
+        guard format.isEnabled else { return }
+        changeStyle(at: format.selectedSegment)
+    }
+
+    @objc private func changeStyleFromMenu() {
+        guard formatMenu.isEnabled else { return }
+        changeStyle(at: formatMenu.indexOfSelectedItem)
+    }
+
+    private func changeStyle(at index: Int) {
+        guard current, let selected = JJConflict.Style(rawValue: index), selected != selectedFormat else { return }
+        // The header keeps showing the current format while preparing the replacement text.
+        updateFormatSelection()
         onChangeStyle?(selected)
+    }
+
+    private func updatePendingHelp() {
+        let help = pending.state == .on ? "Show resolved diff fragments at full intensity" : "Dim resolved diff fragments"
+        pending.toolTip = help
+        pending.setAccessibilityHelp(help)
     }
 
     @objc private func changePending() {
         guard current, pending.isEnabled else { return }
+        updatePendingHelp()
         onShowPendingChanges?(pending.state == .on)
     }
 }

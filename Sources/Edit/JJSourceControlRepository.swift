@@ -253,7 +253,7 @@ enum JJSourceControlRepository {
     static func departedFile(
         _ file: JJSourceControlFile, from revision: JJSourceControlRevision, lastCommitID: String,
         lastOperationID: String, in workspace: JJWorkspace, at operationID: String
-    ) async throws -> (JJSourceControlFile, JJSourceControlRevision, JJSourceControlFileContents) {
+    ) async throws -> (JJSourceControlFile, JJSourceControlRevision, JJSourceControlFileContents, operationID: String) {
         guard isChangeID(revision.changeID), JJRepository.isHexID(lastCommitID) else { throw Failure.invalidResponse }
         let exact = "present(\(lastCommitID)) & visible()"
         let expression = revision.isDivergent ? exact : "coalesce(\(exact), present(\(revision.changeID)) & visible())"
@@ -267,7 +267,7 @@ enum JJSourceControlRepository {
         }
         let files = try await changedFiles(target.id, in: workspace, at: snapshot)
         if let changed = files.first(where: { $0.path == file.path }) {
-            return (changed, target, try await self.file(changed, in: target, workspace: workspace, at: snapshot))
+            return (changed, target, try await self.file(changed, in: target, workspace: workspace, at: snapshot), snapshot)
         }
         // The path can become clean before leaving the change. Its recorded contents still belong to that change.
         let path = JJRepository.literalFileset(file.path)
@@ -278,7 +278,7 @@ enum JJSourceControlRepository {
             ? try await JJRepository.readCommand(["file", "show", "-r", target.id, path], in: workspace, at: snapshot,
                                                  limit: previewLimit) : nil
         let unchanged = JJSourceControlFile(path: file.path, sourcePath: nil, kind: .modified, source: kind, target: kind)
-        return (unchanged, target, .init(base: data, recorded: data, isConflict: false))
+        return (unchanged, target, .init(base: data, recorded: data, isConflict: false), snapshot)
     }
 
     static func mutate(

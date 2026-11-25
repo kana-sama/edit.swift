@@ -82,6 +82,21 @@ enum MarkdownCheck {
         try await wait("formatted document, Mermaid, and math") {
             try await preview.evaluateForCheck("!!document.querySelector('.alert.warning') && !!document.querySelector('.diagram svg') && !!document.querySelector('.katex')") as? Bool == true
         }
+        try checkGlassEdge(preview, in: document.window)
+        guard try await preview.evaluateForCheck("scrollY === 0 && document.querySelector('h1').getBoundingClientRect().top > 0") as? Bool == true else {
+            throw Failure("The first Markdown heading starts under the scroll edge.")
+        }
+        guard try await preview.evaluateForCheck("""
+            (() => {
+                const heading = document.querySelector('h1');
+                window.scrollTo(0, heading.getBoundingClientRect().top + 8);
+                const position = heading.getBoundingClientRect();
+                return position.top < 0 && position.bottom > 0;
+            })()
+            """) as? Bool == true else {
+            throw Failure("The Markdown heading cannot scroll through the top edge.")
+        }
+        _ = try await preview.evaluateForCheck("window.scrollTo(0, 0)")
         guard try await preview.evaluateForCheck("document.querySelectorAll('a[data-footnote-ref]').length === 2 && !!document.querySelector('[data-load-image]') && !!document.querySelector('.syntax-function')") as? Bool == true else {
             throw Failure("The preview is missing footnotes, the image control, or code colors.")
         }
@@ -119,9 +134,12 @@ enum MarkdownCheck {
         try await wait("prepared destination frame behind current Markdown preview") { stagedPreview != nil }
         guard document.window.title == originTitle, document.markdownPreviewForCheck === preview,
               document.fileURL == FileBuffer.canonicalURL(file), document.scrollView.isHidden,
-              try await stagedPreview?.evaluateForCheck("Math.abs(document.querySelector('#target').getBoundingClientRect().top) < 2") as? Bool == true else {
+              let prepared = stagedPreview,
+              try await prepared.evaluateForCheck("Math.abs(document.querySelector('#target').getBoundingClientRect().top) < 2") as? Bool == true else {
             throw Failure("The originating title and preview must stay together until the destination frame is ready at its fragment.")
         }
+        try checkGlassEdge(preview, in: document.window)
+        try checkGlassEdge(prepared, in: document.window)
         if let screenshot {
             let path = URL(fileURLWithPath: screenshot).deletingPathExtension().path
             try await preview.captureForCheck(to: path + "-pending.png")
@@ -132,12 +150,13 @@ enum MarkdownCheck {
         try await wait("clicked local destination in preview") {
             guard document.fileURL == FileBuffer.canonicalURL(other), let destination = document.markdownPreviewForCheck,
                   destination === stagedPreview, destination.hasCurrentDocument else { return false }
-            return try await destination.evaluateForCheck("document.querySelector('#target')?.textContent === 'Target'") as? Bool == true
+            return try await destination.evaluateForCheck("Math.abs(document.querySelector('#target').getBoundingClientRect().top) < 2") as? Bool == true
         }
         text.observeEditorUnhideForCheck(nil)
         guard !exposedEditor, document.window.title == "Other.md", document.scrollView.isHidden else {
             throw Failure("The destination title and preview did not replace the origin without exposing the editor.")
         }
+        try checkGlassEdge(prepared, in: document.window)
         guard try await app.openFile(file, in: document) === document, document.isShowingMarkdownPreview,
               let reopened = document.markdownPreviewForCheck else { throw Failure("A reopened file lost its preview mode.") }
         try await wait("stored disclosure") { try await reopened.evaluateForCheck("document.querySelector('details')?.open === true") as? Bool == true }
@@ -190,6 +209,7 @@ enum MarkdownCheck {
         try await wait("disabled task in a recorded revision") {
             try await preview.evaluateForCheck("document.querySelector('[data-task]')?.disabled === true") as? Bool == true
         }
+        try checkGlassEdge(preview, in: document.window)
         var exposedEditor = false
         document.editor.observeEditorUnhideForCheck { exposedEditor = true }
         await document.followMarkdownForCheck("/Other.md")
@@ -216,5 +236,16 @@ enum MarkdownCheck {
             try await Task.sleep(for: .milliseconds(40))
         } while ContinuousClock.now < deadline
         throw Failure("Timed out waiting for \(description).")
+    }
+
+    private static func checkGlassEdge(_ preview: MarkdownPreviewView, in window: NSWindow) throws {
+        window.layoutIfNeeded()
+        let webView = preview.responder
+        let webTop = webView.convert(webView.bounds, to: nil).maxY
+        let overlap = webTop - window.contentLayoutRect.maxY
+        let inset = preview.topContentInsetForCheck
+        guard overlap > 8, abs(inset - overlap) < 2 else {
+            throw Failure("Markdown must fill the glass header and inset its content (overlap \(overlap), inset \(inset)).")
+        }
     }
 }

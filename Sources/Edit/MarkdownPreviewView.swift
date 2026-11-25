@@ -51,7 +51,8 @@ final class MarkdownPreviewView: NSView, WKNavigationDelegate, NSSearchFieldDele
         addSubview(searchField)
 
         NSLayoutConstraint.activate([
-            webView.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor),
+            // WebKit insets the page for the native titlebar while painting through the scroll edge.
+            webView.topAnchor.constraint(equalTo: topAnchor),
             webView.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor),
             webView.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor),
@@ -232,6 +233,8 @@ final class MarkdownPreviewView: NSView, WKNavigationDelegate, NSSearchFieldDele
     }
 
     #if EDIT_AGENT_CHECKS
+    var topContentInsetForCheck: CGFloat { webView.obscuredContentInsets.top }
+
     func evaluateForCheck(_ script: String) async throws -> Any? { try await webView.evaluateJavaScript(script) }
 
     func captureForCheck(to destination: String) async throws {

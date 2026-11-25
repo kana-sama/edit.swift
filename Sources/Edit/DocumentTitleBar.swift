@@ -7,10 +7,10 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     static let terminalItemIdentifier = NSToolbarItem.Identifier("Edit.Terminal.Title")
     static let sidebarItemIdentifier = NSToolbarItem.Identifier("Edit.SidebarTitle")
     static let languageServerItemIdentifier = NSToolbarItem.Identifier("Edit.LanguageServer")
+    static let conflictsItemIdentifier = NSToolbarItem.Identifier("Edit.Conflicts")
     static let terminalItemIdentifiers: [NSToolbarItem.Identifier] = [.inspectorTrackingSeparator, terminalItemIdentifier]
     private static let sidebarItemIdentifiers: [NSToolbarItem.Identifier] = [sidebarItemIdentifier, .sidebarTrackingSeparator]
     private static let itemIdentifiers = [folderItemIdentifier, fileItemIdentifier]
-    private static let serverItemIdentifiers: [NSToolbarItem.Identifier] = [.flexibleSpace, languageServerItemIdentifier]
     private static let leadingInset: CGFloat = 8
 
     private unowned let document: DocumentWindow
@@ -23,6 +23,8 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     private weak var fileItem: NSToolbarItem?
     private weak var folderWidth: NSLayoutConstraint?
     private weak var fileWidth: NSLayoutConstraint?
+    private weak var revisionStatus: SourceControlRevisionBanner?
+    private weak var conflictControls: JJConflictPanel?
     private weak var sidebar: DocumentSidebar?
     private var sidebarHeaderVisible = false
     private var terminalHeaderVisible = false
@@ -62,6 +64,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         updateItems {
             changeItem(Self.sidebarItemIdentifier, in: toolbar, visible: visible, at: 0)
         }
+        fitLabels()
     }
 
     func setTerminalDocked(_ docked: Bool) {
@@ -121,18 +124,30 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             sidebarHeaderVisible ? Self.sidebarItemIdentifiers : [.sidebarTrackingSeparator]
         let trailing: [NSToolbarItem.Identifier] = terminalDocked
             ? (terminalHeaderVisible ? Self.terminalItemIdentifiers : [.inspectorTrackingSeparator]) : []
-        let server = languageServerVisible ? Self.serverItemIdentifiers : []
-        return leading + Self.itemIdentifiers + server + trailing
+        let conflicts = conflictControls == nil ? [] : [Self.conflictsItemIdentifier]
+        let server = languageServerVisible ? [Self.languageServerItemIdentifier] : []
+        let space: [NSToolbarItem.Identifier] = conflicts.isEmpty && server.isEmpty ? [] : [.flexibleSpace]
+        return leading + Self.itemIdentifiers + space + conflicts + server + trailing
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        Self.sidebarItemIdentifiers + Self.itemIdentifiers + Self.serverItemIdentifiers + Self.terminalItemIdentifiers
+        Self.sidebarItemIdentifiers + Self.itemIdentifiers + [.flexibleSpace, Self.conflictsItemIdentifier, Self.languageServerItemIdentifier]
+            + Self.terminalItemIdentifiers
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         if identifier == Self.sidebarItemIdentifier { return sidebar?.makeSidebarHeader() }
         if identifier == Self.terminalItemIdentifier { return document.makeTerminalTitleItem() }
+        if identifier == Self.conflictsItemIdentifier {
+            let item = NSToolbarItem(itemIdentifier: identifier)
+            item.label = "Conflicts"
+            item.isBordered = false
+            item.autovalidates = false
+            item.visibilityPriority = .high
+            item.view = conflictControls
+            return item
+        }
         if identifier == Self.languageServerItemIdentifier {
             let item = NSToolbarItem(itemIdentifier: identifier)
             item.label = "Language Servers"
@@ -150,6 +165,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         if identifier == Self.folderItemIdentifier {
             item.label = "Folder"
             let label = makeLabel()
+            label.textColor = .secondaryLabelColor
             folderWidth = constrainWidth(of: label)
             folderLabel = label
             folderItem = item
@@ -183,6 +199,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             title.onLayout = { [weak self] in self?.updateDividerContinuation() }
             fileTitle = title
             item.view = title
+            installRevisionStatus(in: title)
         }
 
         update()
@@ -270,15 +287,78 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         let exposed = editor.window === window ? editor.convert(editor.safeAreaRect, to: nil) : window.contentLayoutRect
         let zoom = window.standardWindowButton(.zoomButton)
         let controls = zoom.map { $0.convert($0.bounds, to: nil).maxX + 8 } ?? 84
-        // Keep the icon and a compact file name inside the editor pane as the divider moves.
         let button = document.languageFeatures.statusButton
         let serverWidth = languageServerVisible ? ceil(button.intrinsicContentSize.width) + 12 : 0
+        // Leave room for native toolbar item spacing and the language icon.
         let width = max(0, floor(exposed.maxX - max(exposed.minX, controls) - 40 - serverWidth))
-        // Explicit widths let the toolbar grow the labels again after compressing them.
-        let folder = document.folderURL == nil ? 0 : min(folderLabel?.intrinsicContentSize.width ?? 0, 160, width * 0.4)
-        let file = min(fileLabel?.intrinsicContentSize.width ?? 0, width - folder)
+        let fileIdeal = document.showsEmptyFolder ? 0 : fileLabel?.intrinsicContentSize.width ?? 0
+        let folderIdeal = document.folderURL == nil ? 0 : min(folderLabel?.intrinsicContentSize.width ?? 0, 160)
+
+        var format = JJConflictPanel.Presentation.segments
+        var revision = SourceControlRevisionBanner.Presentation.full
+        func controlsWidth() -> CGFloat {
+            let conflict = conflictControls.map { $0.width(for: format) + 12 } ?? 0
+            let status = revisionStatus.map { $0.width(for: revision) + 7 } ?? 0
+            return ceil(conflict + status)
+        }
+        func titleWidth() -> CGFloat { width - controlsWidth() }
+        if conflictControls != nil, folderIdeal + fileIdeal > titleWidth() { format = .menu }
+        if revisionStatus != nil, folderIdeal + fileIdeal > titleWidth() { revision = .label }
+        if revisionStatus != nil, folderIdeal + fileIdeal > titleWidth() { revision = .icon }
+        if conflictControls != nil, titleWidth() < min(fileIdeal, 20) { format = .compactMenu }
+        let room = max(0, titleWidth())
+        let truncatedFolder = min(folderIdeal, max(0, room - fileIdeal))
+        let folder = truncatedFolder >= 13 ? truncatedFolder : 0
+        let file = min(fileIdeal, room - folder)
+
+        revisionStatus?.presentation = revision
+        conflictControls?.presentation = format
+        let hideFolder = folder == 0
+        if let folderItem, folderItem.isHidden != hideFolder { folderItem.isHidden = hideFolder }
+        let inset: CGFloat = hideFolder ? Self.leadingInset : 7
+        if let fileTitle, fileTitle.edgeInsets.left != inset { fileTitle.edgeInsets.left = inset }
         if folderWidth?.constant != folder { folderWidth?.constant = folder }
         if fileWidth?.constant != file { fileWidth?.constant = file }
+    }
+
+    func setDocumentStatus(revision: SourceControlRevisionBanner?, conflict: JJConflictPanel?) {
+        let revisionChanged = revisionStatus !== revision
+        let conflictChanged = conflictControls !== conflict
+        guard revisionChanged || conflictChanged else { return }
+        if revisionChanged {
+            revisionStatus?.removeFromSuperview()
+            revisionStatus = revision
+            if let fileTitle { installRevisionStatus(in: fileTitle) }
+        }
+        if conflictChanged {
+            conflictControls?.onPreferredSizeChange = nil
+            conflictControls = conflict
+            conflict?.onPreferredSizeChange = { [weak self] in self?.fitLabels() }
+            let right = toolbar.items.firstIndex {
+                $0.itemIdentifier == Self.languageServerItemIdentifier || $0.itemIdentifier == .inspectorTrackingSeparator
+            } ?? toolbar.items.count
+            changeItem(Self.conflictsItemIdentifier, in: toolbar, visible: conflict != nil, at: right)
+            if let conflict, let item = toolbar.items.first(where: { $0.itemIdentifier == Self.conflictsItemIdentifier }),
+               item.view !== conflict { item.view = conflict }
+            updateDocumentToolbarSpace()
+        }
+        fitLabels()
+    }
+
+    private func installRevisionStatus(in title: NSStackView) {
+        if let revisionStatus, let fileLabel {
+            title.setCustomSpacing(7, after: fileLabel)
+            title.addArrangedSubview(revisionStatus)
+        } else if let fileLabel {
+            title.setCustomSpacing(title.spacing, after: fileLabel)
+        }
+    }
+
+    private func updateDocumentToolbarSpace() {
+        let trailing = toolbar.items.firstIndex {
+            $0.itemIdentifier == Self.conflictsItemIdentifier || $0.itemIdentifier == Self.languageServerItemIdentifier
+        } ?? toolbar.items.count
+        changeItem(.flexibleSpace, in: toolbar, visible: conflictControls != nil || languageServerVisible, at: trailing)
     }
 
     func languageServerStatusChanged() {
@@ -288,12 +368,11 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         updateItems {
             if visible {
                 let index = toolbar.items.firstIndex { $0.itemIdentifier == .inspectorTrackingSeparator } ?? toolbar.items.count
-                changeItem(.flexibleSpace, in: toolbar, visible: true, at: index)
-                changeItem(Self.languageServerItemIdentifier, in: toolbar, visible: true, at: index + 1)
+                changeItem(Self.languageServerItemIdentifier, in: toolbar, visible: true, at: index)
             } else {
                 changeItem(Self.languageServerItemIdentifier, in: toolbar, visible: false, at: 0)
-                changeItem(.flexibleSpace, in: toolbar, visible: false, at: 0)
             }
+            updateDocumentToolbarSpace()
             fitLabels()
         }
     }
@@ -303,11 +382,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             let name = folder.lastPathComponent
             folderLabel?.stringValue = name.isEmpty ? folder.path : name
             folderLabel?.toolTip = folder.path
-            folderItem?.isHidden = false
-        } else {
-            folderItem?.isHidden = true
         }
-        fileTitle?.edgeInsets.left = document.folderURL == nil ? Self.leadingInset : 7
         fileItem?.isHidden = document.showsEmptyFolder
         fileLabel?.stringValue = document.displayName
         fileLabel?.toolTip = document.displayedFileURL?.path ?? document.displayName

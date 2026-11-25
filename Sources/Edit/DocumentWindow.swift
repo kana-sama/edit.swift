@@ -192,7 +192,6 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var sourceControlFileTransition: Task<Void, Never>?
     private(set) var sourceControlRevisionBanner: SourceControlRevisionBanner?
     private(set) var conflictPanel: JJConflictPanel?
-    private var editorPanelConstraints: [NSLayoutConstraint] = []
     private var conflictBlocks: [JJConflict] = []
     var displayedConflicts: [JJConflict] { conflictBlocks }
     private var conflictPresentationCurrent = false
@@ -1092,7 +1091,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         guard isCurrent() else { return }
 
         do {
-            let preview: SourceControlRevisionPreview?
+            let preview: (details: SourceControlRevisionPreview, operationID: String)?
             let live: OpenedFile?
             let openingConflicts: JJOpeningConflicts?
             if selection.ownsWorkingCopy(state) && state.changes[selection.file.path]?.status != .removed {
@@ -1107,12 +1106,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                     openingConflicts = nil
                 }
             } else {
-                let (file, revision, contents) = try await JJSourceControlRepository.departedFile(
+                let (file, revision, contents, snapshot) = try await JJSourceControlRepository.departedFile(
                     selection.file, from: selection.revision, lastCommitID: lastLiveSourceControlCheckout?.commitID ?? selection.revision.id,
                     lastOperationID: lastLiveSourceControlCheckout?.operationID ?? selection.operationID,
                     in: selection.workspace, at: state.operationID
                 )
-                preview = try await SourceControlRevisionPreview.prepare(contents, file: file, revision: revision, at: selection.url)
+                let details = try await SourceControlRevisionPreview.prepare(contents, file: file, revision: revision, at: selection.url)
+                preview = (details, snapshot)
                 live = nil
                 openingConflicts = nil
             }
@@ -1123,7 +1123,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             PanelLayout.withoutAnimation {
                 autosave.reset()
                 if let preview {
-                    loadSourceControlRevision(preview)
+                    loadSourceControlRevision(preview.details, workspace: selection.workspace, operationID: preview.operationID)
                 } else if let live {
                     switch live {
                     case .text(let file):
@@ -1146,7 +1146,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    private func loadSourceControlRevision(_ preview: SourceControlRevisionPreview, keepingMarkdownPresentation: Bool = false) {
+    private func loadSourceControlRevision(_ preview: SourceControlRevisionPreview, workspace: JJWorkspace, operationID: String,
+                                           keepingMarkdownPresentation: Bool = false) {
         resetMarkdownView(keepingPresentation: keepingMarkdownPresentation)
         removeSourceControlRevision()
         removeFilePreview()
@@ -1171,19 +1172,20 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             installFilePreview(media, revealInWorktree: false)
         }
 
-        sourceControlRevisionBanner = SourceControlRevisionBanner(preview)
-        layoutEditorPanels()
+        let context = SourceControlRevisionHover.LinkContext(workspace: workspace, operationID: operationID)
+        sourceControlRevisionBanner = SourceControlRevisionBanner(preview, linkContext: context, ownerWindow: window)
+        updateDocumentHeader()
     }
 
     private func removeSourceControlRevision() {
         guard sourceControlRevision != nil else { return }
         sourceControlRevision = nil
         editor.setJJLineMarks([])
-        sourceControlRevisionBanner?.removeFromSuperview()
+        sourceControlRevisionBanner?.dismissHover()
         sourceControlRevisionBanner = nil
         editor.conflictEdits.removeAll()
-        if conflictPanel == nil { layoutEditorPanels() }
         showEditorConflicts([])
+        updateDocumentHeader()
     }
 
     func loadEmptyFolder() {
@@ -1242,33 +1244,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         setEditorBottomInset(terminalDockView?.coveredHeight ?? 0)
     }
 
-    private func layoutEditorPanels() {
-        preserveEditorViewport {
-            NSLayoutConstraint.deactivate(editorPanelConstraints)
-            editorPanelConstraints.removeAll()
-            let guide = editorContentView.safeAreaLayoutGuide
-            var top = guide.topAnchor
-            var height: CGFloat = 0
-            for case let panel? in [sourceControlRevisionBanner as NSView?, conflictPanel] {
-                if panel.superview == nil { editorContentView.addSubview(panel) }
-                editorPanelConstraints += [
-                    panel.topAnchor.constraint(equalTo: top),
-                    panel.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
-                    panel.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
-                ]
-                top = panel.bottomAnchor
-                height += panel.fittingSize.height
-            }
-            NSLayoutConstraint.activate(editorPanelConstraints)
-
-            // Keep the scrolling surface under the native toolbar, including when AppKit detaches it.
-            for case let view? in [scrollView as NSView?, filePreviewView, markdownPreview] {
-                var insets = view.additionalSafeAreaInsets
-                if insets.top == height { continue }
-                insets.top = height
-                view.additionalSafeAreaInsets = insets
-            }
-        }
+    private func updateDocumentHeader() {
+        titleBar.setDocumentStatus(revision: sourceControlRevisionBanner, conflict: conflictPanel)
     }
 
     func restoreDraft(_ record: SessionDocument, text: String, identity: FileIdentity? = nil, scratch: ScratchFile? = nil,
@@ -2068,14 +2045,15 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                (markdownLink?.showsPreview ?? position?.markdown?.showsPreview) == true {
                 let source = JJConflictEdit.project(analysis.conflicts, in: text).text
                 guard let prepared = await prepareMarkdownOpening(source, position: position, fragment: markdownLink?.fragment,
-                    writable: false, topInset: SourceControlRevisionBanner.height, while: isCurrent) else { return false }
+                    writable: false, while: isCurrent) else { return false }
                 guard isCurrent(), !Task.isCancelled else { prepared.view.removeFromSuperview(); return false }
                 preparedMarkdown = prepared
             }
             rememberFilePosition()
             rememberFileUndoHistory()
             clearSourceControlFile()
-            loadSourceControlRevision(preview, keepingMarkdownPresentation: preparedMarkdown != nil)
+            loadSourceControlRevision(preview, workspace: selection.workspace, operationID: selection.operationID,
+                                      keepingMarkdownPresentation: preparedMarkdown != nil)
             observeSourceControlFile(selection)
             finishOpeningPresentation(preparedMarkdown, position: position, focus: restoreFocus, markdownLink: markdownLink)
         case .emptyFolder(let focus, let folder):
@@ -2376,11 +2354,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         updateConflictHighlights()
         guard !conflicts.isEmpty else {
             suspendConflictControls()
-            if let panel = conflictPanel {
-                panel.suspend()
-                panel.removeFromSuperview()
+            if conflictPanel != nil {
                 conflictPanel = nil
-                layoutEditorPanels()
+                updateDocumentHeader()
             }
             return
         }
@@ -2398,9 +2374,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 showsPendingConflictChanges = enabled
                 updateConflictHighlights()
             }
-            layoutEditorPanels()
         }
         updateConflictControls()
+        updateDocumentHeader()
         updateConflictActions()
     }
 
@@ -2537,6 +2513,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.setCaretSelections([target])
         focusContent()
         editor.scrollRangeToVisible(target)
+        markdownPreview?.restore(.init(sourceOffset: target.location))
     }
 
     private func canResolve(_ conflict: JJConflict) -> Bool {
@@ -2772,7 +2749,7 @@ extension DocumentWindow {
 
     func restoreMarkdownRevision(_ loaded: MarkdownRevisionRecord.Loaded, syntax: String? = nil) {
         clearSourceControlFile()
-        loadSourceControlRevision(loaded.preview)
+        loadSourceControlRevision(loaded.preview, workspace: loaded.workspace, operationID: loaded.operation)
         observeSourceControlFile(SourceControlFile(file: loaded.file, revision: loaded.revision,
                                                   workspace: loaded.workspace, operationID: loaded.operation))
         if let syntax, let language = SyntaxLanguage(rawValue: syntax) { setSyntaxLanguage(language) }
@@ -2820,7 +2797,6 @@ extension DocumentWindow {
             markdownPreview = view
             connectMarkdownPreview(view)
             pinToEditorContent(view)
-            layoutEditorPanels()
             scrollView.isHidden = true
             refreshMarkdown(immediate: true)
         } else if !enabled, let view = markdownPreview {
@@ -2870,7 +2846,7 @@ extension DocumentWindow {
     }
 
     private func prepareMarkdownOpening(
-        _ source: String, position: EditorPosition?, fragment: String?, writable: Bool, topInset: CGFloat = 0,
+        _ source: String, position: EditorPosition?, fragment: String?, writable: Bool,
         while isCurrent: () -> Bool
     ) async -> PreparedMarkdownOpening? {
         do {
@@ -2884,7 +2860,7 @@ extension DocumentWindow {
             var keepView = false
             defer { if !keepView { view.removeFromSuperview() } }
             let visible = (markdownPreview as NSView?) ?? (filePreviewView as NSView?) ?? (emptyFolderView as NSView?) ?? scrollView
-            view.additionalSafeAreaInsets = NSEdgeInsets(top: topInset, left: 0, bottom: terminalDockView?.coveredHeight ?? 0, right: 0)
+            view.additionalSafeAreaInsets.bottom = terminalDockView?.coveredHeight ?? 0
             pinToEditorContent(view, below: visible)
             window.layoutIfNeeded()
             view.show(html: document.html, highlighted: highlighted, reading: reading, writable: writable,
@@ -2916,7 +2892,6 @@ extension DocumentWindow {
         connectMarkdownPreview(prepared.view)
         scrollView.isHidden = true
         previous?.removeFromSuperview()
-        layoutEditorPanels()
         window.initialFirstResponder = contentResponder
         sidebar.markdownModeChanged()
         prepared.view.activatePreparedFrame()

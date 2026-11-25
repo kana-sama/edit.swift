@@ -19,26 +19,49 @@ final class SourceControlRevisionHover: NSObject {
     private var revision: JJSourceControlRevision?
     private var linkContext: LinkContext?
     private var corridor: SourceControlRevisionCorridor?
-    private var rowPointer: NSPoint?
+    private var anchorPointer: NSPoint?
+    private weak var indicator: NSView?
     private var selectingText = false
     private var eventMonitor: Any?
     private(set) var row: Int?
 
     func track(_ revision: JJSourceControlRevision, row: Int, at point: NSPoint, in table: NSTableView,
                linkContext: LinkContext?, settled: Bool = false) {
-        guard self.row != row else { rowPointer = point; return }
+        guard self.row != row else { anchorPointer = point; return }
         dismiss()
         guard let window = table.window, window.isKeyWindow, window.isVisible,
               let clip = table.enclosingScrollView?.contentView else { return }
 
         self.row = row
+        clip.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(dismiss), name: NSView.boundsDidChangeNotification, object: clip)
+        beginTracking(revision, at: point, owner: window, linkContext: linkContext, settled: settled) { [weak self, weak table] in
+            guard let self, let table else { return }
+            guard table.isEnabled, row < table.numberOfRows else { dismiss(); return }
+            show(in: table, target: table.rect(ofRow: row))
+        }
+    }
+
+    func track(_ revision: JJSourceControlRevision, at point: NSPoint, in indicator: NSView,
+               owner window: NSWindow, linkContext: LinkContext?) {
+        guard self.indicator !== indicator, window.isKeyWindow, window.isVisible else { return }
+        dismiss()
+        self.indicator = indicator
+        indicator.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(dismiss), name: NSView.frameDidChangeNotification, object: indicator)
+        beginTracking(revision, at: point, owner: window, linkContext: linkContext) { [weak self, weak indicator] in
+            guard let self, let indicator else { return }
+            show(in: indicator, target: indicator.bounds, prefersVertical: true)
+        }
+    }
+
+    private func beginTracking(_ revision: JJSourceControlRevision, at point: NSPoint, owner window: NSWindow,
+                               linkContext: LinkContext?, settled: Bool = false, show: @escaping () -> Void) {
         self.revision = revision
         self.linkContext = linkContext
-        rowPointer = point
+        anchorPointer = point
         owner = window
-        clip.postsBoundsChangedNotifications = true
         let center = NotificationCenter.default
-        center.addObserver(self, selector: #selector(dismiss), name: NSView.boundsDidChangeNotification, object: clip)
         for name in [NSWindow.willCloseNotification, NSWindow.willMiniaturizeNotification,
                      NSWindow.didMoveNotification, NSWindow.didResizeNotification, NSWindow.didChangeScreenNotification] {
             center.addObserver(self, selector: #selector(dismiss), name: name, object: window)
@@ -52,20 +75,20 @@ final class SourceControlRevisionHover: NSObject {
             return handle(event)
         }
         if settled {
-            show(revision, row: row, in: table)
+            show()
             return
         }
-        pending = Task { [weak self, weak table] in
+        pending = Task { [weak self] in
             do { try await Task.sleep(for: Self.settleDelay) } catch { return }
-            guard let self, !Task.isCancelled, let table else { return }
+            guard let self, !Task.isCancelled else { return }
             pending = nil
-            show(revision, row: row, in: table)
+            show()
         }
     }
 
     func isApproachingCard(at point: NSPoint) -> Bool {
-        guard let corridor, let rowPointer else { return false }
-        return corridor.isApproach(point, from: rowPointer)
+        guard let corridor, let anchorPointer else { return false }
+        return corridor.isApproach(point, from: anchorPointer)
     }
 
     func updateLinkContext(_ context: LinkContext?) {
@@ -118,7 +141,8 @@ final class SourceControlRevisionHover: NSObject {
         revision = nil
         linkContext = nil
         corridor = nil
-        rowPointer = nil
+        anchorPointer = nil
+        indicator = nil
         selectingText = false
         row = nil
     }
@@ -153,7 +177,7 @@ final class SourceControlRevisionHover: NSObject {
     func pointerLeft(at point: NSPoint) {
         guard let corridor, let owner else { dismiss(); return }
         pointerMoved(to: point)
-        if corridor.contains(point, from: rowPointer) || !owner.frame.contains(point) { watchCrossing() }
+        if corridor.contains(point, from: anchorPointer) || !owner.frame.contains(point) { watchCrossing() }
     }
 
     private func watchCrossing() {
@@ -166,7 +190,7 @@ final class SourceControlRevisionHover: NSObject {
                 let location = NSEvent.mouseLocation
                 pointerMoved(to: location)
                 if corridor.anchor.contains(location) || corridor.card.contains(location) ||
-                    !corridor.contains(location, from: rowPointer) { break }
+                    !corridor.contains(location, from: anchorPointer) { break }
             }
             if !Task.isCancelled { self?.crossing = nil }
         }
@@ -174,8 +198,8 @@ final class SourceControlRevisionHover: NSObject {
 
     private func pointerMoved(to point: NSPoint) {
         guard let corridor, !selectingText else { return }
-        if corridor.anchor.contains(point) { rowPointer = point }
-        if corridor.contains(point, from: rowPointer) {
+        if corridor.anchor.contains(point) { anchorPointer = point }
+        if corridor.contains(point, from: anchorPointer) {
             departure?.cancel()
             departure = nil
             if corridor.anchor.contains(point) || corridor.card.contains(point) {
@@ -192,18 +216,22 @@ final class SourceControlRevisionHover: NSObject {
         }
     }
 
-    private func show(_ revision: JJSourceControlRevision, row: Int, in table: NSTableView) {
-        guard let owner = table.window, owner.isKeyWindow, owner.isVisible,
-              owner.attachedSheet == nil, table.isEnabled, !table.isHiddenOrHasHiddenAncestor,
-              row < table.numberOfRows, let screen = owner.screen ?? NSScreen.main else { dismiss(); return }
-        let anchor = table.rect(ofRow: row).intersection(table.visibleRect)
+    private func show(in anchorView: NSView, target: NSRect, prefersVertical: Bool = false) {
+        guard let revision, let owner, let anchorWindow = anchorView.window, owner.isKeyWindow, owner.isVisible,
+              owner.attachedSheet == nil, !anchorView.isHiddenOrHasHiddenAncestor,
+              let screen = anchorWindow.screen ?? owner.screen ?? NSScreen.main else { dismiss(); return }
+        let anchor = target.intersection(anchorView.visibleRect)
         guard !anchor.isEmpty else { dismiss(); return }
 
         let card = SourceControlRevisionCard(revision: revision)
         let contentSize = card.fittingSize
-        let target = owner.convertToScreen(table.convert(anchor, to: nil))
-        let frame = Self.frame(size: contentSize, beside: target, on: screen.visibleFrame)
-        let panel = SourceControlRevisionHoverPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
+        let target = anchorWindow.convertToScreen(anchorView.convert(anchor, to: nil))
+        guard let placement = SourceControlRevisionHoverPlacement(size: contentSize, anchor: target,
+                                                                  screen: screen.visibleFrame, prefersVertical: prefersVertical) else {
+            dismiss()
+            return
+        }
+        let panel = SourceControlRevisionHoverPanel(contentRect: placement.frame, styleMask: [.borderless, .nonactivatingPanel],
                                                     backing: .buffered, defer: false)
         panel.isReleasedWhenClosed = false
         panel.isOpaque = false
@@ -214,11 +242,11 @@ final class SourceControlRevisionHover: NSObject {
         panel.acceptsMouseMovedEvents = true
         panel.ignoresMouseEvents = owner.ignoresMouseEvents
         panel.alphaValue = owner.alphaValue
-        panel.appearance = table.effectiveAppearance
-        panel.contentView = SourceControlRevisionHoverSurface(card: card, contentSize: contentSize, visibleSize: frame.size,
+        panel.appearance = anchorView.effectiveAppearance
+        panel.contentView = SourceControlRevisionHoverSurface(card: card, contentSize: contentSize, placement: placement,
             pointerEntered: { [weak self] point in self?.pointerMoved(to: point) },
             pointerLeft: { [weak self] point in self?.pointerLeft(at: point) })
-        corridor = SourceControlRevisionCorridor(anchor: target, card: frame)
+        corridor = SourceControlRevisionCorridor(anchor: target, card: placement.body)
         self.panel = panel
         self.card = card
         NotificationCenter.default.addObserver(self, selector: #selector(checkFocus), name: NSWindow.didResignKeyNotification, object: panel)
@@ -226,25 +254,6 @@ final class SourceControlRevisionHover: NSObject {
         updateLinkContext(linkContext)
     }
 
-    private static func frame(size: NSSize, beside anchor: NSRect, on screen: NSRect) -> NSRect {
-        let area = screen.insetBy(dx: 8, dy: 8)
-        let height = min(size.height, area.height)
-        let gap: CGFloat = 8
-        let right = anchor.maxX + gap
-        let left = anchor.minX - size.width - gap
-        var x = right
-        var y = anchor.midY - height / 2
-        if right + size.width > area.maxX {
-            if left >= area.minX {
-                x = left
-            } else {
-                let above = anchor.maxY + gap
-                y = above + height <= area.maxY ? above : anchor.minY - gap - height
-            }
-        }
-        return NSRect(x: max(area.minX, min(x, area.maxX - size.width)),
-                      y: max(area.minY, min(y, area.maxY - height)), width: size.width, height: height)
-    }
 }
 
 @MainActor
@@ -253,39 +262,137 @@ private final class SourceControlRevisionHoverPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+struct SourceControlRevisionHoverPlacement {
+    private enum Side {
+        case right, left, above, below
+    }
+
+    private static let length: CGFloat = 8
+    private static let halfBase: CGFloat = 7
+    fileprivate static let cornerRadius: CGFloat = 12
+
+    let body: NSRect
+    let tip: NSPoint
+    private let baseStart: NSPoint
+    private let baseEnd: NSPoint
+
+    var frame: NSRect {
+        NSRect(x: min(body.minX, tip.x), y: min(body.minY, tip.y),
+               width: max(body.maxX, tip.x) - min(body.minX, tip.x),
+               height: max(body.maxY, tip.y) - min(body.minY, tip.y))
+    }
+
+    init?(size: NSSize, anchor: NSRect, screen: NSRect, prefersVertical: Bool = false) {
+        let area = screen.insetBy(dx: 8, dy: 8)
+        guard size.width <= area.width else { return nil }
+        func clamp(_ value: CGFloat, _ lower: CGFloat, _ upper: CGFloat) -> CGFloat {
+            max(lower, min(value, upper))
+        }
+        let visibleAnchor = anchor.intersection(screen)
+        let target = visibleAnchor.isEmpty
+            ? NSRect(x: clamp(anchor.midX, area.minX, area.maxX), y: clamp(anchor.midY, area.minY, area.maxY), width: 0, height: 0)
+            : visibleAnchor
+        let gap = Self.length
+        let below = target.minY - gap - area.minY
+        let above = area.maxY - target.maxY - gap
+        let minimumHeight = min(size.height, 78)
+        let canPlaceRight = target.maxX + gap + size.width <= area.maxX
+        let canPlaceLeft = target.minX - gap - size.width >= area.minX
+        let side: Side
+        if prefersVertical && below >= minimumHeight { side = .below }
+        else if prefersVertical && above >= minimumHeight { side = .above }
+        else if canPlaceRight { side = .right }
+        else if canPlaceLeft { side = .left }
+        else if max(above, below) >= minimumHeight { side = above >= below ? .above : .below }
+        else { return nil }
+
+        let height: CGFloat
+        switch side {
+        case .right, .left: height = min(size.height, area.height)
+        case .above: height = min(size.height, above)
+        case .below: height = min(size.height, below)
+        }
+        let x = clamp(target.midX - size.width / 2, area.minX, area.maxX - size.width)
+        let y = clamp(target.midY - height / 2, area.minY, area.maxY - height)
+        let cornerAndBase = Self.cornerRadius + Self.halfBase
+        switch side {
+        case .right, .left:
+            let edge = side == .right ? target.maxX : target.minX
+            let bodyX = side == .right ? edge + gap : edge - gap - size.width
+            body = NSRect(x: bodyX, y: y, width: size.width, height: height)
+            tip = NSPoint(x: edge, y: target.midY)
+            let baseX = side == .right ? body.minX : body.maxX
+            let baseY = clamp(tip.y, body.minY + cornerAndBase, body.maxY - cornerAndBase)
+            baseStart = NSPoint(x: baseX, y: baseY - Self.halfBase)
+            baseEnd = NSPoint(x: baseX, y: baseY + Self.halfBase)
+        case .above, .below:
+            let edge = side == .above ? target.maxY : target.minY
+            let bodyY = side == .above ? edge + gap : edge - gap - height
+            body = NSRect(x: x, y: bodyY, width: size.width, height: height)
+            tip = NSPoint(x: target.midX, y: edge)
+            let baseX = clamp(tip.x, body.minX + cornerAndBase, body.maxX - cornerAndBase)
+            let baseY = side == .above ? body.minY : body.maxY
+            baseStart = NSPoint(x: baseX - Self.halfBase, y: baseY)
+            baseEnd = NSPoint(x: baseX + Self.halfBase, y: baseY)
+        }
+    }
+
+    fileprivate func mask() -> NSImage {
+        let frame = self.frame
+        func local(_ point: NSPoint) -> NSPoint { NSPoint(x: point.x - frame.minX, y: point.y - frame.minY) }
+        let roundedBody = body.offsetBy(dx: -frame.minX, dy: -frame.minY)
+        let points = [local(baseStart), local(tip), local(baseEnd)]
+        return NSImage(size: frame.size, flipped: false) { _ in
+            NSColor.white.setFill()
+            let outline = NSBezierPath(roundedRect: roundedBody, xRadius: Self.cornerRadius, yRadius: Self.cornerRadius)
+            outline.move(to: points[0])
+            outline.line(to: points[1])
+            outline.line(to: points[2])
+            outline.close()
+            outline.fill()
+            return true
+        }
+    }
+}
+
 @MainActor
 private final class SourceControlRevisionHoverSurface: NSVisualEffectView {
     private let pointerEntered: (NSPoint) -> Void
     private let pointerLeft: (NSPoint) -> Void
     private var hoverTrackingArea: NSTrackingArea?
 
-    init(card: NSView, contentSize: NSSize, visibleSize: NSSize,
+    init(card: NSView, contentSize: NSSize, placement: SourceControlRevisionHoverPlacement,
          pointerEntered: @escaping (NSPoint) -> Void, pointerLeft: @escaping (NSPoint) -> Void) {
         self.pointerEntered = pointerEntered
         self.pointerLeft = pointerLeft
-        super.init(frame: NSRect(origin: .zero, size: visibleSize))
+        let frame = placement.frame
+        super.init(frame: NSRect(origin: .zero, size: frame.size))
         identifier = .init("JujutsuRevisionHoverCard")
         material = .popover
         blendingMode = .behindWindow
         state = .active
-        wantsLayer = true
-        layer?.cornerRadius = 12
-        layer?.masksToBounds = true
+        maskImage = placement.mask()
+        let body = NSView(frame: placement.body.offsetBy(dx: -frame.minX, dy: -frame.minY))
+        body.identifier = .init("JujutsuRevisionHoverBody")
+        body.wantsLayer = true
+        body.layer?.cornerRadius = SourceControlRevisionHoverPlacement.cornerRadius
+        body.layer?.masksToBounds = true
+        addSubview(body)
         card.frame = NSRect(origin: .zero, size: contentSize)
-        if contentSize.height > visibleSize.height {
-            let scrollView = NSScrollView(frame: bounds)
+        if contentSize.height > body.bounds.height {
+            let scrollView = NSScrollView(frame: body.bounds)
             scrollView.drawsBackground = false
             scrollView.hasVerticalScroller = true
             scrollView.scrollerStyle = .overlay
             scrollView.autohidesScrollers = true
             scrollView.documentView = card
-            addSubview(scrollView)
+            body.addSubview(scrollView)
             let clip = scrollView.contentView
             let top = clip.isFlipped ? 0 : contentSize.height - clip.bounds.height
             clip.scroll(to: NSPoint(x: 0, y: top))
             scrollView.reflectScrolledClipView(clip)
         } else {
-            addSubview(card)
+            body.addSubview(card)
         }
     }
 

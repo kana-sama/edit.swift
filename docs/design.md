@@ -12,9 +12,11 @@ Match the corresponding interaction in the current macOS system app by default. 
 
 Use one compact unified AppKit toolbar with native glass and a fixed icon-only display mode in every document presentation, in windowed and full-screen layouts. The source editor, rendered Markdown, file previews, and historical revisions all scroll under the same header. Wherever content passes beneath it, that content must remain visible through the glass. Use the same scroll-edge treatment when the visible surface changes. Use AppKit’s safe area and automatic scroll insets to place the initial content below the header and let it pass underneath during scrolling. Let the editor’s scroll view extend behind the native sidebar.
 
-Place document-wide status and actions in the existing header row. This includes Read-only, Deleted File, revision details, and conflict controls. Fit essential status and actions in the available width and put secondary details or overflow in a popover anchored to the header. Never add a second row, strip, or panel beneath the header, or a status bar. Preserve vertical space for document content.
+Place document-wide status and actions in the existing header row. This includes Read-only, Deleted File, revision details, and conflict controls. Keep the header height and the document viewport independent of those states. Use a tooltip or anchored hover card for secondary information. A passive status stays passive when it offers details on hover. Never add a second row, strip, or panel beneath the header, or a status bar.
 
-Keep the filename whole while any lower-priority element can yield space. Compact the header in this order: collapse Diff / Snapshot to its format menu, shorten Read-only, then shorten the project name, and only then truncate the filename. Keep the Pending Changes control immediately to the left of the format control in Diff mode. Its icon and tooltip indicate that it dims resolved diff fragments.
+Keep the filename whole while any lower-priority element can yield space. Collapse Diff / Snapshot to its format menu first. Then shorten Read-only, shorten or hide the project name, and truncate the filename last. Measure the actual document pane as the window and dividers move. Restore the expanded presentations as room returns. Keep frequently used navigation and actions directly in the header. A compact mode picker contains only its mode choices.
+
+Place an action beside the control or mode it affects, and show it while that context applies. Give it a symbol and tooltip that describe the visible effect. Keep a short visible label when the symbol alone may be ambiguous and space allows. Use compact rounded badges for status and revision IDs. Use a subdued translucent fill and reserve tinted fills for meaningful states. Keep independent status symbols, such as a lock or conflict mark, where they add information.
 
 Present the new document, title, header status, and restored scroll position together on the first rendered frame. Keep the current header and content paired while a replacement is pending. Verify the glass with content visibly passing beneath it, including when entering and leaving preview, and verify that status changes do not change the header height or reduce the document viewport.
 
@@ -26,7 +28,7 @@ Place context-wide status controls at the trailing edge of the relevant header. 
 
 Every rich tooltip or hover card has a pointer. Its tip meets the edge of the element it describes. Put the arrow in the gap between the element and the card, clear of the element, nearby controls, and the card contents. When space is limited, reposition the card and its arrow together so the arrow still points to the element’s edge.
 
-Use the same revision hover card in the Jujutsu graph and on the Read-only status in the document header. The status is an indicator and reveals the card on hover.
+Reuse the same card for the same object wherever it is described. The Jujutsu graph and the Read-only status in the document header use the same revision hover card.
 
 ## Sidebar results
 
