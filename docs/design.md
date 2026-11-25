@@ -20,6 +20,12 @@ Use system appearance, semantic colors, text styles, control metrics, and SF Sym
 
 Place context-wide status controls at the trailing edge of the relevant header. Show a control when its context has a matching service or action. Use an icon and a compact status cue for the closed control. Give the icon an accessible name and tooltip. Put per-item names and actions together in the popover, with the identity leading and the actions trailing.
 
+## Anchored hover cards
+
+Every rich tooltip or hover card has a pointer. Its tip meets the edge of the element it describes. Put the arrow in the gap between the element and the card, clear of the element, nearby controls, and the card contents. When space is limited, reposition the card and its arrow together so the arrow still points to the element’s edge.
+
+Use the same revision hover card in the Jujutsu graph and on the Read-only status in the document header. The status is an indicator and reveals the card on hover.
+
 ## Sidebar results
 
 Reuse the editor’s existing result component and interaction patterns for new lists of document locations. Match Search’s row spacing, excerpts, highlight treatment, and focus behavior. Place the file icon and name at the leading edge, indent excerpts slightly past the filename, and give separate file groups 8 points of additional space. Keep the full path in the heading tooltip and show the group count in a subdued numeric badge. When file groups are always open, treat each file heading as a label and skip it in mouse and keyboard selection.
