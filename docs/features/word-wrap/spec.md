@@ -1,6 +1,6 @@
 # Word Wrap
 
-Use **View → Toggle Word Wrap** or **Toggle Word Wrap** in Command Mode to change how the current text buffer is displayed. The View menu shows a checkmark when wrapping is enabled. The command is available for file and untitled buffers in the text editor, including Markdown source.
+Use **View → Toggle Word Wrap** or **View: Toggle Word Wrap** in Command Mode to change how the current text buffer is displayed. The View menu shows a checkmark when wrapping is enabled. The command is available for file and untitled buffers in the text editor, including Markdown source.
 
 With wrapping enabled, use the width of the exposed editor between the sidebars and preserve its text padding. Reflow when the window, a split pane, or the text size changes. Wrap at word boundaries and split a word across display rows when it cannot fit on one. Use vertical scrolling and keep the caret and selection. Soft wraps are presentation only. They do not insert line breaks, mark the document edited, or add an undo step.
 

@@ -24,7 +24,8 @@ enum WordWrapCheck {
         window.setContentSize(NSSize(width: 690, height: 455))
         let menu = try require(NSApp.mainMenu, "main menu")
         let item = try require(menu.item(withTitle: "View")?.submenu?.item(withTitle: "Toggle Word Wrap"), "View menu command")
-        let command = try require(ControlCommand.fromMenu(menu).first { $0.title == "Toggle Word Wrap" }, "Command Mode action")
+        let command = try require(ControlCommand.fromMenu(menu).first { $0.result.title == "View: Toggle Word Wrap" },
+                                  "Command Mode action with its menu prefix")
         let action = try require(item.action, "word wrap menu action")
 
         func layout() {

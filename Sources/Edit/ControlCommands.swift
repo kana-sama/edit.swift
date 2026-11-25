@@ -197,7 +197,7 @@ struct ControlCommand {
                action != #selector(NSWindow.performMiniaturize(_:)),
                action != #selector(NSWindow.performZoom(_:)) { return [] }
             let title = action == #selector(Edit.goBack(_:)) || action == #selector(Edit.goForward(_:))
-                || action == #selector(Edit.toggleMarkdownPreview(_:)) || action == #selector(Edit.toggleWordWrap(_:))
+                || action == #selector(Edit.toggleMarkdownPreview(_:))
                 ? item.title : "\(prefix): \(item.title)"
             return [ControlCommand(id: NSStringFromSelector(action), title: title, item: item,
                                    documentOnly: isBracketCommand(action) || isCaseCommand(action))]
