@@ -31,7 +31,7 @@ final class SourceControlSidebar: NSObject {
     private static let expandedChevron = disclosureImage("chevron.down")
     private let graphMessage = NSTextField(wrappingLabelWithString: "")
     private let detailTitle = SourceControlDetailButton()
-    private let detailMetadata = SourceControlRevisionIdentity()
+    private let detailMetadata = SourceControlRevisionIdentity(showsBadge: true)
     private let fileMessage = NSTextField(wrappingLabelWithString: "")
     private lazy var descriptionPopover = SourceControlDescriptionPopover(anchor: detailTitle, agentCheck: app.isAgentCheck) { [weak self] in self?.saveDescription($0) }
     private lazy var revsetPicker = SourceControlRevsetPicker(
@@ -922,13 +922,14 @@ final class SourceControlSidebar: NSObject {
             header.addSubview(identity)
             identity.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
-                identity.leadingAnchor.constraint(equalTo: title.trailingAnchor, constant: 8),
+                identity.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 8),
+                identity.trailingAnchor.constraint(equalTo: row.leadingAnchor, constant: -6),
                 identity.centerYAnchor.constraint(equalTo: title.centerYAnchor)
             ])
         }
         NSLayoutConstraint.activate([
             title.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 11), title.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            row.leadingAnchor.constraint(greaterThanOrEqualTo: identity?.trailingAnchor ?? title.trailingAnchor, constant: 12),
+            row.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 12),
             row.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -9), row.centerYAnchor.constraint(equalTo: header.centerYAnchor)
         ])
         return header

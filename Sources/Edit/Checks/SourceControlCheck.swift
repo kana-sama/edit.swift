@@ -140,18 +140,23 @@ enum SourceControlCheck {
             throw Failure("find the history row")
         }
         let history = panel.graphView.revisions[historyRow]
+        guard let badge = changeBadge(in: panel) else { throw Failure("find the selected change badge") }
+        let workingLabel = badge.accessibilityLabel()
         let contextMenu = panel.graphView.table.menuForRow?(historyRow)
         try expect(contextMenu?.item(withTitle: "Squash into Parent")?.isEnabled == true && contextMenu?.item(withTitle: "Abandon Change…")?.isEnabled == true,
                    "offer change actions when opening the context menu on an unselected row")
         document.window.layoutIfNeeded()
         let previousTitle = button(in: panel.view, where: { $0.title == workingSubject })
         try expect(previousTitle?.isAccessibilityEnabled() == false &&
-                   !panel.fileTree.view.isHidden && row(named: "Removed.txt", in: tree) != nil && !tree.isEnabled,
+                   !panel.fileTree.view.isHidden && row(named: "Removed.txt", in: tree) != nil && !tree.isEnabled &&
+                   badge.accessibilityLabel() == workingLabel && badge.badgeFillColor == NSColor.systemBlue.withAlphaComponent(0.20),
                    "keep the complete previous Change pane visible while the next detail loads")
         try await waitFor("browse a historical change while keeping the working-copy pointer") {
             panel.selection?.subject == "Historical change" && panel.detail?.files.count == 2
         }
         try expect(panel.graph?.workingCopy.subject == workingSubject, "keep @ distinct from graph selection")
+        try expect(badge.accessibilityLabel() == history.shortID && badge.badgeFillColor == NSColor.labelColor.withAlphaComponent(0.10),
+                   "show the historical change in a neutral badge when its details appear")
         try open("Tracked.txt", in: panel.fileTree)
         try await waitFor("open historical text with a revision banner and expanded diff") {
             document.sourceControlRevisionBanner != nil && !document.editor.isEditable &&
@@ -363,7 +368,7 @@ enum SourceControlCheck {
         try expect(document.conflictPanel === panel && firstLineY().map { abs($0 - openingLineY) < 1 } == true,
                    "keep the original conflict strip and line position when the live analysis arrives")
         try await waitFor("show the conflict cross next to the selected change ID") {
-            guard let identity: NSView = descendant(of: sidebar.view, where: { $0.identifier?.rawValue == "JujutsuSelectedChangeID" }),
+            guard let identity = changeBadge(in: sidebar),
                   let icon: NSImageView = descendant(of: identity, where: { $0.identifier?.rawValue == "JujutsuConflictIcon" }) else {
                 return false
             }
@@ -1470,6 +1475,9 @@ enum SourceControlCheck {
         let immutable = panel.graphView.revisions[index]
         panel.graphView.table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
         try await waitFor("present the immutable change") { panel.selection?.id == immutable.id && panel.detail != nil }
+        guard let badge = changeBadge(in: panel) else { throw Failure("find the immutable change badge") }
+        let lock: NSImageView? = descendant(of: badge, where: { $0.identifier?.rawValue == "JujutsuImmutableIcon" })
+        try expect(lock?.isHiddenOrHasHiddenAncestor == false, "show the lock in the immutable change badge")
         guard let view = button(in: panel.view, where: { $0.toolTip == "View change description" }) else {
             throw Failure("find the read-only description action")
         }
@@ -1575,6 +1583,10 @@ enum SourceControlCheck {
         }
     }
 
+    private static func changeBadge(in panel: SourceControlSidebar) -> SourceControlRevisionIdentity? {
+        descendant(of: panel.view, where: { $0.identifier?.rawValue == "JujutsuSelectedChangeID" })
+    }
+
     private static func checkLayout(in document: DocumentWindow, panel: SourceControlSidebar) throws {
         let split = document.documentSplitView
         guard let sidebar = split.arrangedSubviews.first,
@@ -1582,7 +1594,7 @@ enum SourceControlCheck {
               let graphCell = graph.cell,
               let detail = button(in: panel.view, where: { $0.title == "Change" }),
               let detailCell = detail.cell,
-              let identity = descendant(of: panel.view, where: { $0.identifier?.rawValue == "JujutsuSelectedChangeID" }),
+              let identity = changeBadge(in: panel),
               let revsets = button(in: panel.view, where: { $0.identifier?.rawValue == "JujutsuRevsets" }),
               let actions = button(in: panel.view, where: { $0.toolTip == "Change Actions" }),
               let create = button(in: panel.view, where: { $0.toolTip == "New Change" }) else {
@@ -1612,9 +1624,15 @@ enum SourceControlCheck {
         }
         try expect(title.cell?.usesSingleLineMode == true && title.bounds.height <= 24 && title.image == nil,
                    "make the compact change title a one-line description action")
+        let actionGap = panel.view.convert(actions.bounds, from: actions).minX - panel.view.convert(identity.bounds, from: identity).maxX
         try expect(!identity.isHiddenOrHasHiddenAncestor && identity.superview === detail.superview &&
-                   identity.frame.minX > detail.frame.maxX && abs(identity.frame.midY - detail.frame.midY) < 1,
-                   "keep the change ID in the Change header beside its disclosure")
+                   identity.frame.minX > detail.frame.maxX && abs(identity.frame.midY - detail.frame.midY) < 1 &&
+                   (4...8).contains(actionGap),
+                   "place the change ID to the left of the actions menu (gap \(actionGap))")
+        let statusIcon: NSImageView? = descendant(of: identity, where: { _ in true })
+        try expect(identity.badgeFillColor == NSColor.systemBlue.withAlphaComponent(0.20) && statusIcon == nil &&
+                   identity.accessibilityLabel()?.contains("Working copy") == true,
+                   "identify the working copy with a blue fill and an accessibility label")
         try checkGraphRows(in: panel)
         let graphTitle = graphCell.titleRect(forBounds: graph.bounds)
         let graphChevron = graphCell.imageRect(forBounds: graph.bounds)

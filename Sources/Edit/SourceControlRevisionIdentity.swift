@@ -23,6 +23,7 @@ struct SourceControlRevisionStatus {
             .withSymbolConfiguration(.init(pointSize: isConflict ? 13 : 10, weight: isConflict ? .bold : .semibold)) ?? NSImage()
         let icon = NSImageView(image: image)
         if isConflict { icon.identifier = .init("JujutsuConflictIcon") }
+        if symbol == "lock.fill" { icon.identifier = .init("JujutsuImmutableIcon") }
         icon.imageScaling = .scaleProportionallyDown
         icon.widthAnchor.constraint(equalToConstant: Self.iconWidth).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 13).isActive = true
@@ -33,6 +34,8 @@ struct SourceControlRevisionStatus {
 @MainActor
 final class SourceControlRevisionIdentity: NSView {
     private static let textSpacing: CGFloat = 7
+    private let showsBadge: Bool
+    private let horizontalInset: CGFloat
     private let symbols = NSStackView()
     private let changeID = NSTextField(labelWithString: "")
     private let author = NSTextField(labelWithString: "")
@@ -45,8 +48,11 @@ final class SourceControlRevisionIdentity: NSView {
     private var bookmarkGap: NSLayoutConstraint!
     private var bookmarkMinimumWidth: NSLayoutConstraint!
     private var emphasized = false
+    private var isWorkingCopy = false
 
-    init() {
+    init(showsBadge: Bool = false) {
+        self.showsBadge = showsBadge
+        horizontalInset = showsBadge ? 6 : 0
         super.init(frame: .zero)
         setAccessibilityElement(true)
         changeID.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
@@ -78,13 +84,14 @@ final class SourceControlRevisionIdentity: NSView {
         bookmarkMinimumWidth = bookmarks.widthAnchor.constraint(greaterThanOrEqualToConstant: 0)
         bookmarkMinimumWidth.priority = .init(rawValue: 500)
         NSLayoutConstraint.activate([
-            symbols.leadingAnchor.constraint(equalTo: leadingAnchor), symbols.centerYAnchor.constraint(equalTo: centerYAnchor), symbolWidth,
+            symbols.leadingAnchor.constraint(equalTo: leadingAnchor, constant: horizontalInset),
+            symbols.centerYAnchor.constraint(equalTo: centerYAnchor), symbolWidth,
             statusGap, changeID.centerYAnchor.constraint(equalTo: centerYAnchor),
-            changeID.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            changeID.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -horizontalInset),
             authorGap, author.leadingAnchor.constraint(greaterThanOrEqualTo: changeID.trailingAnchor),
             author.centerYAnchor.constraint(equalTo: centerYAnchor),
             bookmarkGap, bookmarks.leadingAnchor.constraint(greaterThanOrEqualTo: author.trailingAnchor),
-            bookmarks.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            bookmarks.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -horizontalInset),
             bookmarks.centerYAnchor.constraint(equalTo: centerYAnchor), bookmarkMinimumWidth,
         ])
     }
@@ -100,12 +107,34 @@ final class SourceControlRevisionIdentity: NSView {
         let authorWidth = author.isHidden ? 0 : Self.textSpacing + author.intrinsicContentSize.width
         let bookmarkWidth = bookmarks.isHidden ? 0 : Self.textSpacing + bookmarks.intrinsicContentSize.width
         let width = symbolWidth.constant + statusGap.constant + changeID.intrinsicContentSize.width + authorWidth + bookmarkWidth
-        return NSSize(width: ceil(width), height: 14)
+        return NSSize(width: ceil(width) + 2 * horizontalInset, height: showsBadge ? 21 : 14)
+    }
+
+    var badgeFillColor: NSColor? {
+        guard showsBadge else { return nil }
+        return isWorkingCopy ? NSColor.systemBlue.withAlphaComponent(0.20) : NSColor.labelColor.withAlphaComponent(0.10)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let badgeFillColor else { return }
+        badgeFillColor.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        if showsBadge { needsDisplay = true }
     }
 
     func update(_ revision: JJSourceControlRevision, showsAuthor: Bool = true, showsAllStatuses: Bool = false) {
         let statuses = SourceControlRevisionStatus.statuses(for: revision)
-        let visibleStatuses = showsAuthor || showsAllStatuses ? statuses : Array(statuses.prefix(2))
+        let symbolsToShow = showsBadge ? statuses.filter { $0.symbol != "at" } : statuses
+        let visibleStatuses = showsAuthor || showsAllStatuses ? symbolsToShow : Array(symbolsToShow.prefix(2))
+        if isWorkingCopy != revision.isWorkingCopy {
+            isWorkingCopy = revision.isWorkingCopy
+            if showsBadge { needsDisplay = true }
+        }
         if shownStatuses.map(\.symbol) != visibleStatuses.map(\.symbol) {
             for (icon, _) in icons {
                 symbols.removeArrangedSubview(icon)
@@ -145,7 +174,8 @@ final class SourceControlRevisionIdentity: NSView {
 
     private func updateColors() {
         let selected = NSColor.alternateSelectedControlTextColor
-        changeID.textColor = emphasized ? selected : (shownStatuses.first?.color ?? .secondaryLabelColor)
+        let identifierColor: NSColor = showsBadge ? .labelColor : (shownStatuses.first?.color ?? .secondaryLabelColor)
+        changeID.textColor = emphasized ? selected : identifierColor
         author.textColor = emphasized ? selected : .secondaryLabelColor
         bookmarks.textColor = emphasized ? selected : .controlAccentColor
         for (icon, color) in icons { icon.contentTintColor = emphasized ? selected : color }
