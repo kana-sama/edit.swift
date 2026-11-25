@@ -266,16 +266,15 @@ enum LSPSemanticHighlightCheck {
             let typed = NSRange(location: dot.location, length: suffix.utf16.count)
             try require((editor.string as NSString).substring(with: typed) == suffix, "type \(suffix) at the end of the keyword")
 
-            func verifyFrame(tagColor: SyntaxColor, phase: String) throws {
+            func verifyFrame(_ phase: String) throws {
                 try requireGlyphColors(in: keyword, document: document, expected: .keyword)
                 try requireGlyphColors(in: dot, document: document, expected: .plain)
-                if tag.length > 0 { try requireGlyphColors(in: tag, document: document, expected: tagColor) }
+                if tag.length > 0 { try requireGlyphColors(in: tag, document: document, expected: .type) }
                 try capture(window, "typing-\(index + 1)-\(phase)")
             }
-            let firstColor: SyntaxColor = index > 1 ? .type : .plain
-            try verifyFrame(tagColor: firstColor, phase: "first")
+            try verifyFrame("first")
             try await wait("hold both results for \(suffix)") { heldTree > 0 && heldSemantic > 0 }
-            try verifyFrame(tagColor: firstColor, phase: "held")
+            try verifyFrame("held")
 
             holdTree = false
             try await wait("show the current Tree-sitter colors for \(suffix)") {
@@ -283,11 +282,11 @@ enum LSPSemanticHighlightCheck {
                     $0.range == tag && $0.color == .type && !$0.provisional
                 })
             }
-            try verifyFrame(tagColor: .type, phase: "tree")
+            try verifyFrame("tree")
 
             holdSemantic = false
             try await wait("finish applying the semantic response for \(suffix)") { !highlighting.needsFullSemanticTokensForCheck }
-            try verifyFrame(tagColor: .type, phase: "settled")
+            try verifyFrame("settled")
         }
 
         let hello = NSRange(location: dot.upperBound, length: "Hello".utf16.count)
@@ -415,6 +414,22 @@ enum LSPSemanticHighlightCheck {
         try await checkSeparatorEdit("delete-leading-space", result: "return error", words: [returnKeyword, keyword]) {
             editor.deleteBackward(nil)
         }
+
+        try await setLine("return error.")
+        holdTree = true
+        holdSemantic = true
+        for (index, character) in "He".enumerated() {
+            editor.insertText(String(character), replacementRange: NSRange(location: NSNotFound, length: 0))
+            let tag = NSRange(location: dot.upperBound, length: index + 1)
+            try requireGlyphColors(in: tag, document: document, expected: .type)
+            try requireGlyphColors(in: dot, document: document, expected: .plain)
+            try capture(window, "new-error-tag-at-line-end-\(tag.length)")
+        }
+        try await wait("hold the results after two successive error-tag letters") { heldTree > 0 && heldSemantic > 0 }
+        try requireGlyphColors(in: NSRange(location: dot.upperBound, length: 2), document: document, expected: .type)
+        holdTree = false
+        holdSemantic = false
+        try await wait("publish the completed color for the new tag") { heldTree == 0 && !highlighting.needsFullSemanticTokensForCheck }
 
         try await setLine("return error.Hello;")
         try require(highlighting.semanticSpansForCheck.contains { $0.range == returnKeyword && $0.color == .keyword },
