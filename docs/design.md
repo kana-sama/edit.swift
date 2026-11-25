@@ -8,11 +8,13 @@ Match the corresponding interaction in the current macOS system app by default. 
 - For opening files and confirming unsaved changes, use the system file panel and document sheet conventions. Reserve modal confirmation for actions that require a separate decision.
 - For sidebars and menus, follow native placement, keyboard navigation, glass materials, and active and inactive selection states. Search and Worktree leave 10 points of space below the last row at the bottom of their scroll areas.
 
-Document windows use the compact unified AppKit toolbar with a fixed icon-only display. Let editor content scroll beneath the filename and system window buttons to receive the native scroll-edge material. Let the editor’s scroll view extend behind the native sidebar. Use AppKit’s safe area and automatic scroll insets so text begins in the exposed area and can pass under the titlebar and sidebar during scrolling.
+## Document header
 
-Overlay editor status strips below the native toolbar. Reserve their height in the scrolling surface’s safe area so the same document surface extends behind the toolbar in windowed and full-screen layouts.
+Use one compact unified AppKit toolbar with native glass and a fixed icon-only display mode in every document presentation, in windowed and full-screen layouts. The source editor, rendered Markdown, file previews, and historical revisions all scroll under the same header. Wherever content passes beneath it, that content must remain visible through the glass. Use the same scroll-edge treatment when the visible surface changes. Use AppKit’s safe area and automatic scroll insets to place the initial content below the header and let it pass underneath during scrolling. Let the editor’s scroll view extend behind the native sidebar.
 
-When opening or switching buffers, prepare geometry-changing status strips before showing the new text. Present the text, strips, and restored scroll position together in the first rendered frame.
+Place document-wide status and actions in the existing header row. This includes Read-only, Deleted File, revision details, and conflict controls. Fit essential status and actions in the available width and put secondary details or overflow in a popover anchored to the header. Never add a second row, strip, or panel beneath the header, or a status bar. Preserve vertical space for document content.
+
+Present the new document, title, header status, and restored scroll position together on the first rendered frame. Keep the current header and content paired while a replacement is pending. Verify the glass with content visibly passing beneath it, including when entering and leaving preview, and verify that status changes do not change the header height or reduce the document viewport.
 
 Use system appearance, semantic colors, text styles, control metrics, and SF Symbols for interface chrome. Respect platform preferences for contrast and reduced transparency. Keep persistent controls focused on actions the owner needs.
 
