@@ -53,9 +53,10 @@ enum LSPSemanticHighlightCheck {
             hasColor("null", in: document, color: .keyword) && hasColor("null", in: document, layer: .lsp, color: .control)
                 && paintedColor("null", in: document) == SyntaxColor.control.nativeColor
         }
-        try require(hasColor("Counter", in: document, color: .type) && hasColor("Counter", in: document, layer: .lsp, color: .plain)
-                    && paintedColor("Counter", in: document) == .textColor,
-                    "use the default text color when the server corrects a locally colored identifier to a variable")
+        try require(!hasColor("Counter", in: document) && hasColor("Counter", in: document, layer: .lsp, color: .plain)
+                    && paintedColor("Counter", in: document) == .textColor &&
+                    !hasColor("ZigWidget", in: document) && paintedColor("ZigWidget", in: document) == SyntaxColor.type.nativeColor,
+                    "let ZLS classify ambiguous declarations while Tree-sitter paints syntax")
 
         document.performFind(.find)
         let control = ControlPanel(app: app)
@@ -66,6 +67,8 @@ enum LSPSemanticHighlightCheck {
                     "share the setting in one workspace only")
         try require(paintedColor("null", in: document) == SyntaxColor.keyword.nativeColor,
                     "reveal Tree-sitter at once when removing the semantic overlay")
+        try require(paintedColor("ZigWidget", in: document) == .textColor,
+                    "leave the type declaration name uncolored with the semantic overlay off")
         try await wait("keep Tree-sitter in both windows") {
             [document, swiftWindow].allSatisfy {
                 $0.editor.syntaxHighlighting?.usesLSPForCheck == false

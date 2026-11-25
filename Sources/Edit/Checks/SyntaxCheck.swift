@@ -372,12 +372,34 @@ enum SyntaxCheck {
             (.tsx, "const card = <section />;", "section", .markup),
             (.yaml, "name: Edit\n", "name", .property),
             (.zig, ".{ .version = \"0.1.0\", .id = 0x0123456789abcdef }", "version", .property),
+            (.zig, "fn use(arg: input_type) void {}", "input_type", .type),
+            (.zig, "fn use() void { obj.run(); }", "run", .function),
         ]
         for (mode, source, text, color) in fixtures {
             let token = (source as NSString).range(of: text)
             guard let spans = SyntaxEngine.spans(in: source, language: mode),
                   spans.contains(where: { $0.start <= token.location && $0.end >= NSMaxRange(token) && $0.color == color }) else {
                 throw Failure("Missing \(mode.displayName) capture for \(text).")
+            }
+        }
+        let zigSource = """
+            const std = @import("std");
+            const MAX_SIZE = 32;
+            const record = struct { field: u32 };
+            var Counter: u32 = 0;
+            fn use(obj: record) void {
+                _ = obj.Member;
+                _ = obj.size;
+                _ = .green;
+            }
+            """
+        guard let zigSpans = SyntaxEngine.spans(in: zigSource, language: .zig) else {
+            throw Failure("Missing Zig Tree-sitter captures.")
+        }
+        for name in ["std", "MAX_SIZE", "record", "Counter", "Member", "size", "green"] {
+            let token = (zigSource as NSString).range(of: name)
+            guard !zigSpans.contains(where: { $0.start < token.upperBound && $0.end > token.location }) else {
+                throw Failure("Tree-sitter guessed a Zig symbol color for \(name).")
             }
         }
         let names: [(String, SyntaxLanguage)] = [

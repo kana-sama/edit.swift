@@ -13,6 +13,8 @@ C, C++, Clojure, CSS, Erlang, Go, HTML, JavaScript, JavaScript JSX, JSON, Lua, M
 
 Auto Detect uses Objective-C for `.m`, Objective-C++ for `.mm`, and C++ for ambiguous `.h` headers. C++ uses the shared C-family rules for directives, keywords, types, literals, and comments, including when no language server runs. Use the language picker to select a different mode for a header.
 
+The Zig base layer colors syntax such as keywords, literals, parameter type positions, call sites, and field designators. ZLS can color identifiers whose roles require resolving symbols, including type bindings, imported namespaces, and members.
+
 In Markdown, apply inline code highlighting inside table cells and color heading markers with the heading. An HTML comment in Markdown keeps its comment color from its opener through its close, or through the end of the buffer while it is unclosed. Comment-like text inside code stays code.
 
 [Grammar versions and licenses](../../../resources/syntax/README.md)

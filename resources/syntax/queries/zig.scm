@@ -1,6 +1,3 @@
-; Variables
-(identifier) @variable
-
 ; Parameters
 (parameter
   name: (identifier) @variable.parameter)
@@ -9,41 +6,17 @@
 (parameter
   type: (identifier) @type)
 
-((identifier) @type
-  (#match? @type "^[A-Z_][a-zA-Z0-9_]*"))
-
-(variable_declaration
-  (identifier) @type
-  "="
-  [
-    (struct_declaration)
-    (enum_declaration)
-    (union_declaration)
-    (opaque_declaration)
-  ])
-
 [
   (builtin_type)
   "anyframe"
 ] @type.builtin
 
 ; Constants
-((identifier) @constant
-  (#match? @constant "^[A-Z][A-Z_0-9]+$"))
-
 [
   "null"
   "unreachable"
   "undefined"
 ] @constant.builtin
-
-(field_expression
-  .
-  member: (identifier) @constant)
-
-(enum_declaration
-  (container_field
-    type: (identifier) @constant))
 
 ; Labels
 (block_label
@@ -56,15 +29,6 @@
 (field_initializer
   .
   (identifier) @variable.member)
-
-(field_expression
-  (_)
-  member: (identifier) @property)
-
-(field_expression
-  (_)
-  member: (identifier) @type
-  (#match? @type "^[A-Z_][a-zA-Z0-9_]*"))
 
 (container_field
   name: (identifier) @property)
@@ -88,13 +52,6 @@
 (function_declaration
   name: (identifier) @function.definition)
 
-; Modules
-(variable_declaration
-  (identifier) @module
-  (builtin_function
-    (builtin_identifier) @keyword.import
-    (#any-of? @keyword.import "@import" "@cImport")))
-
 ; Builtins
 [
   "c"
@@ -103,9 +60,6 @@
 
 ((identifier) @variable.builtin
   (#eq? @variable.builtin "_"))
-
-(calling_convention
-  (identifier) @variable.builtin)
 
 ; Keywords
 [
@@ -280,6 +234,3 @@
 
 ; Comments
 (comment) @comment
-
-((comment) @comment.documentation
-  (#match? @comment.documentation "^//(/|!)"))
