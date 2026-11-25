@@ -8,86 +8,86 @@ Checked November 25, 2026 against ZLS 0.17.0 and SourceKit-LSP bundled with Appl
 
 Edit ranks comparable [workspace symbol matches](features/lsp-symbol-navigation/spec.md#go-to-workspace-symbol) by their proximity to the active folder's root for both servers.
 
-| Method | ZLS | SourceKit-LSP |
-| --- | :---: | :---: |
-| [`textDocument/definition`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_definition) | ✓ | ✓ |
-| [`textDocument/references`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_references) | ✓ | ✓ |
-| [`textDocument/documentHighlight`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_documentHighlight) | ✓ | ✓ |
-| [`textDocument/documentSymbol`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_documentSymbol) | ✓ | ✓ |
-| [`workspace/symbol`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_symbol) | ✓ | ✓ |
-| [`textDocument/hover`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_hover) | ✓ | ✓ |
-| [`textDocument/prepareRename`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_prepareRename) | ✓ | ✓ |
-| [`textDocument/rename`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_rename) | ✓ | ✓ |
-| [`window/workDoneProgress/create`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#window_workDoneProgress_create) | ✓ | ✓ |
-| [`$/progress`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#progress) | ✓ | ✓ |
-| [`workspace/didChangeWorkspaceFolders`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_didChangeWorkspaceFolders) | ✓ |  |
-| [`workspace/didChangeWatchedFiles`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_didChangeWatchedFiles) |  | ✓ |
-| [`textDocument/declaration`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_declaration) |  | ✗ |
-| [`textDocument/typeDefinition`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_typeDefinition) |  |  |
-| [`textDocument/implementation`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_implementation) | ✗ |  |
-| [`textDocument/prepareCallHierarchy`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_prepareCallHierarchy) | ✗ |  |
-| [`callHierarchy/incomingCalls`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#callHierarchy_incomingCalls) | ✗ |  |
-| [`callHierarchy/outgoingCalls`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#callHierarchy_outgoingCalls) | ✗ |  |
-| [`textDocument/prepareTypeHierarchy`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_prepareTypeHierarchy) | ✗ |  |
-| [`typeHierarchy/supertypes`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#typeHierarchy_supertypes) | ✗ |  |
-| [`typeHierarchy/subtypes`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#typeHierarchy_subtypes) | ✗ |  |
-| [`textDocument/completion`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_completion) |  |  |
-| [`completionItem/resolve`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#completionItem_resolve) | ✗ |  |
-| [`textDocument/signatureHelp`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_signatureHelp) |  |  |
-| [`textDocument/inlayHint`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_inlayHint) |  |  |
-| [`inlayHint/resolve`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#inlayHint_resolve) | ✗ |  |
-| [`workspace/inlayHint/refresh`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_inlayHint_refresh) |  | ✗ |
-| [`textDocument/codeLens`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_codeLens) | ✗ |  |
-| [`textDocument/semanticTokens/full`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#semanticTokens_fullRequest) |  |  |
-| [`textDocument/semanticTokens/range`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#semanticTokens_rangeRequest) |  |  |
-| [`workspace/semanticTokens/refresh`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#semanticTokens_refreshRequest) |  |  |
-| [`textDocument/foldingRange`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_foldingRange) |  |  |
-| [`textDocument/selectionRange`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_selectionRange) |  |  |
-| [`textDocument/documentColor`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_documentColor) | ✗ |  |
-| [`textDocument/colorPresentation`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_colorPresentation) | ✗ |  |
-| [`textDocument/publishDiagnostics`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_publishDiagnostics) |  |  |
-| [`textDocument/diagnostic`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_diagnostic) | ✗ |  |
-| [`workspace/diagnostic/refresh`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#diagnostic_refresh) | ✗ |  |
-| [`textDocument/codeAction`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_codeAction) |  |  |
-| [`codeAction/resolve`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#codeAction_resolve) | ✗ |  |
-| [`textDocument/formatting`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_formatting) |  |  |
-| [`textDocument/rangeFormatting`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_rangeFormatting) | ✗ |  |
-| [`textDocument/onTypeFormatting`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_onTypeFormatting) | ✗ |  |
-| [`textDocument/willSave`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_willSave) | ✗ |  |
-| [`textDocument/willSaveWaitUntil`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_willSaveWaitUntil) |  | ✗ |
-| [`textDocument/didSave`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_didSave) |  |  |
-| [`workspace/configuration`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_configuration) |  | ✗ |
-| [`workspace/didChangeConfiguration`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_didChangeConfiguration) |  | ✗ |
-| [`workspace/executeCommand`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_executeCommand) | ✗ |  |
-| [`workspace/applyEdit`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_applyEdit) |  |  |
-| [`window/showMessage`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#window_showMessage) |  | ✗ |
-| [`window/logMessage`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#window_logMessage) |  |  |
-| [`textDocument/documentLink`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_documentLink) | ✗ | ✗ |
-| [`documentLink/resolve`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#documentLink_resolve) | ✗ | ✗ |
-| [`textDocument/moniker`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_moniker) | ✗ | ✗ |
-| [`workspaceSymbol/resolve`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_symbolResolve) | ✗ | ✗ |
-| [`workspace/textDocumentContent`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_textDocumentContent) | ✗ | ✗ |
-| [`workspace/textDocumentContent/refresh`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_textDocumentContentRefresh) | ✗ | ✗ |
-| [`textDocument/inlineCompletion`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_inlineCompletion) | ✗ | ✗ |
-| [`textDocument/inlineValue`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_inlineValue) | ✗ | ✗ |
-| [`workspace/inlineValue/refresh`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_inlineValue_refresh) | ✗ | ✗ |
-| [`codeLens/resolve`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#codeLens_resolve) | ✗ | ✗ |
-| [`workspace/codeLens/refresh`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#codeLens_refresh) | ✗ | ✗ |
-| [`textDocument/semanticTokens/full/delta`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#semanticTokens_deltaRequest) | ✗ | ✗ |
-| [`workspace/foldingRange/refresh`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_foldingRange_refresh) | ✗ | ✗ |
-| [`workspace/diagnostic`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_diagnostic) | ✗ | ✗ |
-| [`textDocument/rangesFormatting`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#documentRangesFormattingParams) | ✗ | ✗ |
-| [`textDocument/linkedEditingRange`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_linkedEditingRange) | ✗ | ✗ |
-| [`textDocument/didRename`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_didRename) | ✗ | ✗ |
-| [`workspace/willCreateFiles`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_willCreateFiles) | ✗ | ✗ |
-| [`workspace/didCreateFiles`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_didCreateFiles) | ✗ | ✗ |
-| [`workspace/willRenameFiles`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_willRenameFiles) | ✗ | ✗ |
-| [`workspace/didRenameFiles`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_didRenameFiles) | ✗ | ✗ |
-| [`workspace/willDeleteFiles`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_willDeleteFiles) | ✗ | ✗ |
-| [`workspace/didDeleteFiles`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_didDeleteFiles) | ✗ | ✗ |
-| [`window/showMessageRequest`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#window_showMessageRequest) | ✗ | ✗ |
-| [`window/showDocument`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#window_showDocument) | ✗ | ✗ |
-| [`window/workDoneProgress/cancel`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#window_workDoneProgress_cancel) | ✗ | ✗ |
+| Method                                                                       | ZLS   | SourceKit-LSP |
+| ---------------------------------------------------------------------------- | :---: | :-----------: |
+| [`textDocument/definition`][lsp-definition]                                  | ✓     | ✓             |
+| [`textDocument/references`][lsp-references]                                  | ✓     | ✓             |
+| [`textDocument/documentHighlight`][lsp-documenthighlight]                    | ✓     | ✓             |
+| [`textDocument/documentSymbol`][lsp-documentsymbol]                          | ✓     | ✓             |
+| [`workspace/symbol`][lsp-ws-symbol]                                          | ✓     | ✓             |
+| [`textDocument/hover`][lsp-hover]                                            | ✓     | ✓             |
+| [`textDocument/prepareRename`][lsp-preparerename]                            | ✓     | ✓             |
+| [`textDocument/rename`][lsp-rename]                                          | ✓     | ✓             |
+| [`window/workDoneProgress/create`][lsp-win-workdoneprogress-create]          | ✓     | ✓             |
+| [`$/progress`][lsp-progress]                                                 | ✓     | ✓             |
+| [`workspace/didChangeWorkspaceFolders`][lsp-ws-didchangeworkspacefolders]    | ✓     |               |
+| [`workspace/didChangeWatchedFiles`][lsp-ws-didchangewatchedfiles]            |       | ✓             |
+| [`textDocument/declaration`][lsp-declaration]                                |       | ✗             |
+| [`textDocument/typeDefinition`][lsp-typedefinition]                          |       |               |
+| [`textDocument/implementation`][lsp-implementation]                          | ✗     |               |
+| [`textDocument/prepareCallHierarchy`][lsp-preparecallhierarchy]              | ✗     |               |
+| [`callHierarchy/incomingCalls`][lsp-callhierarchy-incomingcalls]             | ✗     |               |
+| [`callHierarchy/outgoingCalls`][lsp-callhierarchy-outgoingcalls]             | ✗     |               |
+| [`textDocument/prepareTypeHierarchy`][lsp-preparetypehierarchy]              | ✗     |               |
+| [`typeHierarchy/supertypes`][lsp-typehierarchy-supertypes]                   | ✗     |               |
+| [`typeHierarchy/subtypes`][lsp-typehierarchy-subtypes]                       | ✗     |               |
+| [`textDocument/completion`][lsp-completion]                                  |       |               |
+| [`completionItem/resolve`][lsp-completionitem-resolve]                       | ✗     |               |
+| [`textDocument/signatureHelp`][lsp-signaturehelp]                            |       |               |
+| [`textDocument/inlayHint`][lsp-inlayhint]                                    |       |               |
+| [`inlayHint/resolve`][lsp-inlayhint-resolve]                                 | ✗     |               |
+| [`workspace/inlayHint/refresh`][lsp-ws-inlayhint-refresh]                    |       | ✗             |
+| [`textDocument/codeLens`][lsp-codelens]                                      | ✗     |               |
+| [`textDocument/semanticTokens/full`][lsp-semantictokens-fullrequest]         |       |               |
+| [`textDocument/semanticTokens/range`][lsp-semantictokens-rangerequest]       |       |               |
+| [`workspace/semanticTokens/refresh`][lsp-semantictokens-refreshrequest]      |       |               |
+| [`textDocument/foldingRange`][lsp-foldingrange]                              |       |               |
+| [`textDocument/selectionRange`][lsp-selectionrange]                          |       |               |
+| [`textDocument/documentColor`][lsp-documentcolor]                            | ✗     |               |
+| [`textDocument/colorPresentation`][lsp-colorpresentation]                    | ✗     |               |
+| [`textDocument/publishDiagnostics`][lsp-publishdiagnostics]                  |       |               |
+| [`textDocument/diagnostic`][lsp-diagnostic]                                  | ✗     |               |
+| [`workspace/diagnostic/refresh`][lsp-diagnostic-refresh]                     | ✗     |               |
+| [`textDocument/codeAction`][lsp-codeaction]                                  |       |               |
+| [`codeAction/resolve`][lsp-codeaction-resolve]                               | ✗     |               |
+| [`textDocument/formatting`][lsp-formatting]                                  |       |               |
+| [`textDocument/rangeFormatting`][lsp-rangeformatting]                        | ✗     |               |
+| [`textDocument/onTypeFormatting`][lsp-ontypeformatting]                      | ✗     |               |
+| [`textDocument/willSave`][lsp-willsave]                                      | ✗     |               |
+| [`textDocument/willSaveWaitUntil`][lsp-willsavewaituntil]                    |       | ✗             |
+| [`textDocument/didSave`][lsp-didsave]                                        |       |               |
+| [`workspace/configuration`][lsp-ws-configuration]                            |       | ✗             |
+| [`workspace/didChangeConfiguration`][lsp-ws-didchangeconfiguration]          |       | ✗             |
+| [`workspace/executeCommand`][lsp-ws-executecommand]                          | ✗     |               |
+| [`workspace/applyEdit`][lsp-ws-applyedit]                                    |       |               |
+| [`window/showMessage`][lsp-win-showmessage]                                  |       | ✗             |
+| [`window/logMessage`][lsp-win-logmessage]                                    |       |               |
+| [`textDocument/documentLink`][lsp-documentlink]                              | ✗     | ✗             |
+| [`documentLink/resolve`][lsp-documentlink-resolve]                           | ✗     | ✗             |
+| [`textDocument/moniker`][lsp-moniker]                                        | ✗     | ✗             |
+| [`workspaceSymbol/resolve`][lsp-ws-symbolresolve]                            | ✗     | ✗             |
+| [`workspace/textDocumentContent`][lsp-ws-textdocumentcontent]                | ✗     | ✗             |
+| [`workspace/textDocumentContent/refresh`][lsp-ws-textdocumentcontentrefresh] | ✗     | ✗             |
+| [`textDocument/inlineCompletion`][lsp-inlinecompletion]                      | ✗     | ✗             |
+| [`textDocument/inlineValue`][lsp-inlinevalue]                                | ✗     | ✗             |
+| [`workspace/inlineValue/refresh`][lsp-ws-inlinevalue-refresh]                | ✗     | ✗             |
+| [`codeLens/resolve`][lsp-codelens-resolve]                                   | ✗     | ✗             |
+| [`workspace/codeLens/refresh`][lsp-codelens-refresh]                         | ✗     | ✗             |
+| [`textDocument/semanticTokens/full/delta`][lsp-semantictokens-deltarequest]  | ✗     | ✗             |
+| [`workspace/foldingRange/refresh`][lsp-ws-foldingrange-refresh]              | ✗     | ✗             |
+| [`workspace/diagnostic`][lsp-ws-diagnostic]                                  | ✗     | ✗             |
+| [`textDocument/rangesFormatting`][lsp-documentrangesformattingparams]        | ✗     | ✗             |
+| [`textDocument/linkedEditingRange`][lsp-linkededitingrange]                  | ✗     | ✗             |
+| [`textDocument/didRename`][lsp-didrename]                                    | ✗     | ✗             |
+| [`workspace/willCreateFiles`][lsp-ws-willcreatefiles]                        | ✗     | ✗             |
+| [`workspace/didCreateFiles`][lsp-ws-didcreatefiles]                          | ✗     | ✗             |
+| [`workspace/willRenameFiles`][lsp-ws-willrenamefiles]                        | ✗     | ✗             |
+| [`workspace/didRenameFiles`][lsp-ws-didrenamefiles]                          | ✗     | ✗             |
+| [`workspace/willDeleteFiles`][lsp-ws-willdeletefiles]                        | ✗     | ✗             |
+| [`workspace/didDeleteFiles`][lsp-ws-diddeletefiles]                          | ✗     | ✗             |
+| [`window/showMessageRequest`][lsp-win-showmessagerequest]                    | ✗     | ✗             |
+| [`window/showDocument`][lsp-win-showdocument]                                | ✗     | ✗             |
+| [`window/workDoneProgress/cancel`][lsp-win-workdoneprogress-cancel]          | ✗     | ✗             |
 
 SourceKit-LSP advertises `textDocument/declaration` for C-family languages. Its Swift handler reports that the method is unsupported. To enable Swift on-type formatting, opt in to `on-type-formatting`. [Swift declaration handler][swift-service] · [SourceKit-LSP configuration][swift-config]
 
@@ -136,6 +136,84 @@ Method names above use the audited toolchain’s spelling. Newer releases add th
 Update this checklist in the same change as an Edit LSP feature or server integration. Move implemented rows or items to the top of their lists. When updating the server versions recorded here, recheck their `initialize` capabilities, conditional registrations and language-specific handlers before changing a blank or a ✗. Add extension candidates when they become available in a supported toolchain.
 
 [lsp]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/
+[lsp-definition]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_definition
+[lsp-references]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_references
+[lsp-documenthighlight]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_documentHighlight
+[lsp-documentsymbol]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_documentSymbol
+[lsp-ws-symbol]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_symbol
+[lsp-hover]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_hover
+[lsp-preparerename]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_prepareRename
+[lsp-rename]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_rename
+[lsp-win-workdoneprogress-create]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#window_workDoneProgress_create
+[lsp-progress]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#progress
+[lsp-ws-didchangeworkspacefolders]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_didChangeWorkspaceFolders
+[lsp-ws-didchangewatchedfiles]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_didChangeWatchedFiles
+[lsp-declaration]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_declaration
+[lsp-typedefinition]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_typeDefinition
+[lsp-implementation]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_implementation
+[lsp-preparecallhierarchy]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_prepareCallHierarchy
+[lsp-callhierarchy-incomingcalls]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#callHierarchy_incomingCalls
+[lsp-callhierarchy-outgoingcalls]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#callHierarchy_outgoingCalls
+[lsp-preparetypehierarchy]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_prepareTypeHierarchy
+[lsp-typehierarchy-supertypes]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#typeHierarchy_supertypes
+[lsp-typehierarchy-subtypes]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#typeHierarchy_subtypes
+[lsp-completion]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_completion
+[lsp-completionitem-resolve]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#completionItem_resolve
+[lsp-signaturehelp]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_signatureHelp
+[lsp-inlayhint]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_inlayHint
+[lsp-inlayhint-resolve]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#inlayHint_resolve
+[lsp-ws-inlayhint-refresh]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_inlayHint_refresh
+[lsp-codelens]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_codeLens
+[lsp-semantictokens-fullrequest]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#semanticTokens_fullRequest
+[lsp-semantictokens-rangerequest]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#semanticTokens_rangeRequest
+[lsp-semantictokens-refreshrequest]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#semanticTokens_refreshRequest
+[lsp-foldingrange]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_foldingRange
+[lsp-selectionrange]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_selectionRange
+[lsp-documentcolor]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_documentColor
+[lsp-colorpresentation]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_colorPresentation
+[lsp-publishdiagnostics]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_publishDiagnostics
+[lsp-diagnostic]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_diagnostic
+[lsp-diagnostic-refresh]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#diagnostic_refresh
+[lsp-codeaction]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_codeAction
+[lsp-codeaction-resolve]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#codeAction_resolve
+[lsp-formatting]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_formatting
+[lsp-rangeformatting]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_rangeFormatting
+[lsp-ontypeformatting]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_onTypeFormatting
+[lsp-willsave]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_willSave
+[lsp-willsavewaituntil]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_willSaveWaitUntil
+[lsp-didsave]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_didSave
+[lsp-ws-configuration]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_configuration
+[lsp-ws-didchangeconfiguration]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_didChangeConfiguration
+[lsp-ws-executecommand]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_executeCommand
+[lsp-ws-applyedit]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_applyEdit
+[lsp-win-showmessage]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#window_showMessage
+[lsp-win-logmessage]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#window_logMessage
+[lsp-documentlink]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_documentLink
+[lsp-documentlink-resolve]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#documentLink_resolve
+[lsp-moniker]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_moniker
+[lsp-ws-symbolresolve]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_symbolResolve
+[lsp-ws-textdocumentcontent]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_textDocumentContent
+[lsp-ws-textdocumentcontentrefresh]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_textDocumentContentRefresh
+[lsp-inlinecompletion]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_inlineCompletion
+[lsp-inlinevalue]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_inlineValue
+[lsp-ws-inlinevalue-refresh]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_inlineValue_refresh
+[lsp-codelens-resolve]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#codeLens_resolve
+[lsp-codelens-refresh]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#codeLens_refresh
+[lsp-semantictokens-deltarequest]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#semanticTokens_deltaRequest
+[lsp-ws-foldingrange-refresh]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_foldingRange_refresh
+[lsp-ws-diagnostic]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_diagnostic
+[lsp-documentrangesformattingparams]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#documentRangesFormattingParams
+[lsp-linkededitingrange]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_linkedEditingRange
+[lsp-didrename]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_didRename
+[lsp-ws-willcreatefiles]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_willCreateFiles
+[lsp-ws-didcreatefiles]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_didCreateFiles
+[lsp-ws-willrenamefiles]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_willRenameFiles
+[lsp-ws-didrenamefiles]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_didRenameFiles
+[lsp-ws-willdeletefiles]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_willDeleteFiles
+[lsp-ws-diddeletefiles]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#workspace_didDeleteFiles
+[lsp-win-showmessagerequest]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#window_showMessageRequest
+[lsp-win-showdocument]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#window_showDocument
+[lsp-win-workdoneprogress-cancel]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#window_workDoneProgress_cancel
 [zls-handlers]: https://github.com/zigtools/zls/blob/0.17.0/src/Server.zig#L1152-L1188
 [zls-config]: https://github.com/zigtools/zls/blob/0.17.0/src/Config.zig
 [zls-completion]: https://github.com/zigtools/zls/blob/0.17.0/src/features/completions.zig
