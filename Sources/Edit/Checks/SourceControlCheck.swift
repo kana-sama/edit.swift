@@ -440,10 +440,27 @@ enum SourceControlCheck {
               let menu: NSPopUpButton = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuConflictFormatMenu" }) else {
             throw Failure("find the conflict navigation")
         }
-        guard let pending: NSButton = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuPendingChanges" }) else {
+        guard let pending: NSButton = descendant(of: panel, where: { $0.identifier?.rawValue == "JujutsuPendingChanges" }),
+              let pendingCell = pending.cell as? NSButtonCell else {
             throw Failure("find Pending Changes beside the format control")
         }
+        func checkDimPadding() throws {
+            let icon = pendingCell.imageRect(forBounds: pending.bounds)
+            if pending.title.isEmpty {
+                try expect(!icon.isEmpty && abs(icon.midX - pending.bounds.midX) < 0.5,
+                           "center the dim icon when the label is hidden")
+            } else {
+                let title = pendingCell.titleRect(forBounds: pending.bounds)
+                let content = icon.union(title)
+                let left = content.minX - pending.bounds.minX
+                let right = pending.bounds.maxX - content.maxX
+                let gap = max(title.minX - icon.maxX, icon.minX - title.maxX)
+                try expect(left >= 6 && abs(right - left) < 0.5 && abs(gap - 5) < 0.5,
+                           "give the dim icon and title even padding and a compact gap (\(left), \(right))")
+            }
+        }
         try expect(pending.state == .off && pending.isEnabled, "offer Pending Changes as an optional diff view")
+        try checkDimPadding()
         try expect(format.isHidden == false && menu.isHidden && menu.itemTitles == ["Diff", "Snapshot"],
                    "show the wide segments and keep only the two format choices in the compact menu")
         var narrowFrame = wideFrame
@@ -456,6 +473,7 @@ enum SourceControlCheck {
                    "keep navigation inline beside the selected format in a narrow header")
         try expect(panel.convert(pending.bounds, from: pending).maxX <= panel.convert(menu.bounds, from: menu).minX,
                    "place the dim toggle immediately before the active format control")
+        try checkDimPadding()
         try render(document.window)
         document.window.setFrame(wideFrame, display: false)
         document.titleBar.resize()

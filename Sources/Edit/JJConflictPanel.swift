@@ -33,7 +33,8 @@ final class JJConflictPanel: NSView {
     private let format = ModeSelector(["Diff", "Snapshot"])
     private let formatMenu = NSPopUpButton(frame: .zero, pullsDown: false)
     private let formatDisplay = NSMenuItem(title: "Format", action: nil, keyEquivalent: "")
-    private let pending = ConflictDimmingButton()
+    private let pending = NSButton()
+    private let pendingCell = ConflictDimmingCell()
     private var selectedFormat: JJConflict.Style?
     private var showsDim = false
     private var current = false
@@ -73,6 +74,7 @@ final class JJConflictPanel: NSView {
         formatMenu.action = #selector(changeStyleFromMenu)
 
         pending.identifier = .init("JujutsuPendingChanges")
+        pending.cell = pendingCell
         pending.setButtonType(.pushOnPushOff)
         pending.isBordered = false
         pending.controlSize = .small
@@ -128,9 +130,7 @@ final class JJConflictPanel: NSView {
     }
 
     private func dimWidth(for presentation: Presentation) -> CGFloat {
-        if presentation == .compactMenu { return 22 }
-        let titleWidth = (presentation.dimTitle as NSString).size(withAttributes: [.font: Self.controlFont]).width
-        return ceil(titleWidth) + 28
+        pendingCell.width(for: presentation.dimTitle)
     }
 
     private func formatWidth(for presentation: Presentation) -> CGFloat {
@@ -262,14 +262,48 @@ final class JJConflictPanel: NSView {
 }
 
 @MainActor
-private final class ConflictDimmingButton: NSButton {
-    override func draw(_ dirtyRect: NSRect) {
+private final class ConflictDimmingCell: NSButtonCell {
+    private static let padding: CGFloat = 7
+    private static let spacing: CGFloat = 5
+
+    func width(for title: String) -> CGFloat {
+        if title.isEmpty { return ModeSelector.height }
+        return (image?.size.width ?? 0) + Self.spacing + titleWidth(title) + 2 * Self.padding
+    }
+
+    private func titleWidth(_ title: String) -> CGFloat {
+        ceil((title as NSString).size(withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 11)]).width)
+    }
+
+    override func imageRect(forBounds rect: NSRect) -> NSRect {
+        guard let size = image?.size else { return .zero }
+        let textWidth = title.isEmpty ? 0 : Self.spacing + titleWidth(title)
+        let offset = (controlView?.userInterfaceLayoutDirection == .rightToLeft ? textWidth : -textWidth) / 2
+        return NSRect(x: rect.midX - size.width / 2 + offset, y: rect.midY - size.height / 2,
+                      width: size.width, height: size.height)
+    }
+
+    override func titleRect(forBounds rect: NSRect) -> NSRect {
+        guard !title.isEmpty else { return .zero }
+        let icon = imageRect(forBounds: rect)
+        let width = titleWidth(title)
+        let x = controlView?.userInterfaceLayoutDirection == .rightToLeft
+            ? icon.minX - Self.spacing - width : icon.maxX + Self.spacing
+        return NSRect(x: x, y: rect.minY, width: width, height: rect.height)
+    }
+
+    override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {
         let emphasis = state == .on || isHighlighted
         let opacity = ModeSelector.trackOpacity + (emphasis ? 0.12 : 0)
         NSColor.labelColor.withAlphaComponent(isEnabled ? opacity : opacity * 0.5).setFill()
         let radius = ModeSelector.cornerRadius
-        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
-        super.draw(dirtyRect)
+        NSBezierPath(roundedRect: cellFrame, xRadius: radius, yRadius: radius).fill()
+        super.draw(withFrame: cellFrame, in: controlView)
+    }
+
+    override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
+        if let image { drawImage(image, withFrame: imageRect(forBounds: cellFrame), in: controlView) }
+        if !title.isEmpty { _ = drawTitle(attributedTitle, withFrame: titleRect(forBounds: cellFrame), in: controlView) }
     }
 }
 
