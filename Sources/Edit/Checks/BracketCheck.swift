@@ -128,7 +128,7 @@ enum BracketCheck {
         window.contentView = scroll
         window.makeFirstResponder(editor)
 
-        let source = "test \"typing\" {\n    return error.Hello;\n    return error;\n}\n"
+        let source = "test \"typing\" {\n    return error.Hello;\n    return error;\n    return error.Hello\n}\n"
         let text = source as NSString
         let opening = text.range(of: "{")
         let closing = text.range(of: "}")
@@ -163,7 +163,7 @@ enum BracketCheck {
         let painted = try areas.map { try capture($0).tiffRepresentation }
         guard let green = try capture(stripe).colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB),
               green.greenComponent > green.redComponent + 0.2,
-              marks.contains(.init(kind: .insertion, lines: 0..<4)), !window.isVisible, !NSApp.isActive else {
+              marks.contains(.init(kind: .insertion, lines: 0..<5)), !window.isVisible, !NSApp.isActive else {
             throw Failure("The added closing brace must have a green gutter mark in the isolated fixture.")
         }
 
@@ -176,9 +176,12 @@ enum BracketCheck {
         }
         defer { hold = false; editor.bracketNavigation.beforeInstallIndexForCheck = nil }
 
+        let secondReturn = text.range(of: "return error;")
         let edits = [("ы", text.range(of: ";").upperBound),
-                     (" ", text.range(of: "return", options: .backwards).upperBound),
-                     (".", text.range(of: "error", options: .backwards).upperBound)]
+                     (" ", secondReturn.location + "return".utf16.count),
+                     (".", secondReturn.upperBound - 1),
+                     (";", text.range(of: "Hello", options: .backwards).upperBound),
+                     (";", text.range(of: ";").upperBound)]
         for (character, position) in edits {
             editor.setCaretSelections([caret(position)])
             editor.bracketNavigation.refresh()

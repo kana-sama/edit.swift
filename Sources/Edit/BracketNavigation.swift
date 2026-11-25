@@ -119,7 +119,9 @@ final class BracketNavigation {
     }
 
     private func isOrdinary(_ text: String) -> Bool {
-        text.unicodeScalars.allSatisfy { Self.ordinaryText.contains($0) || (language == .zig && $0 == ".") }
+        text.unicodeScalars.allSatisfy {
+            Self.ordinaryText.contains($0) || (language == .zig && ($0 == "." || $0 == ";"))
+        }
     }
 
     func refresh() {

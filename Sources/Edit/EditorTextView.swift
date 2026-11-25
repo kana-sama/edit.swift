@@ -290,7 +290,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         guard replacementString == nil || allowsProjectedChange(in: affectedCharRange) else { return false }
         if let replacementString, !allowsConflictEdit(in: affectedCharRange, replacement: replacementString) { return false }
         let allowed = super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
-        if allowed && replacementString != nil { bracketNavigation.prepareForEdit(in: [affectedCharRange]) }
+        if allowed, let replacementString {
+            bracketNavigation.prepareForEdit(in: [affectedCharRange])
+            syntaxHighlighting?.prepareForDeletions(in: replacementString.isEmpty ? [affectedCharRange] : [])
+        }
         return allowed
     }
 
@@ -311,7 +314,13 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
                   }) else { return false }
         }
         let allowed = super.shouldChangeText(inRanges: affectedRanges, replacementStrings: replacementStrings)
-        if allowed && replacementStrings != nil { bracketNavigation.prepareForEdit(in: affectedRanges.map(\.rangeValue)) }
+        if allowed, let replacementStrings {
+            let ranges = affectedRanges.map(\.rangeValue)
+            bracketNavigation.prepareForEdit(in: ranges)
+            syntaxHighlighting?.prepareForDeletions(in: zip(ranges, replacementStrings).compactMap { range, replacement in
+                replacement.isEmpty ? range : nil
+            })
+        }
         return allowed
     }
 

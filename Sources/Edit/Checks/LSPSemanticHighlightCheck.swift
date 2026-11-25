@@ -290,6 +290,53 @@ enum LSPSemanticHighlightCheck {
             try verifyFrame(tagColor: .type, phase: "settled")
         }
 
+        let hello = NSRange(location: dot.upperBound, length: "Hello".utf16.count)
+        let extraSemicolons = ";;;"
+        editor.insertText(extraSemicolons, replacementRange: NSRange(location: NSNotFound, length: 0))
+        try await wait("start Backspace checks with a ZLS-colored error tag before repeated semicolons") {
+            !highlighting.needsFullSemanticTokensForCheck && highlighting.semanticSpansForCheck.contains {
+                $0.range == hello && $0.color == .type
+            }
+        }
+        for (index, deletion) in [4, 2, 0].enumerated() {
+            holdTree = true
+            holdSemantic = true
+            editor.setSelectedRange(NSRange(location: hello.location + deletion + 1, length: 0))
+            editor.deleteBackward(nil)
+            let tag = NSRange(location: hello.location, length: hello.length - index - 1)
+            let shortened = ["Hell", "Hel", "el"][index]
+            try require((editor.string as NSString).substring(with: tag) == shortened,
+                        "shorten the error tag to \(shortened)")
+            try requireGlyphColors(in: tag, document: document, expected: .type)
+            try require(highlighting.semanticSpansForCheck.contains { $0.range == tag && $0.color == .type && $0.provisional },
+                        "keep the ZLS color across the whole shortened tag \(shortened)")
+            try capture(window, "backspace-\(shortened)-first")
+            try await wait("hold both results for \(shortened)") { heldTree > 0 && heldSemantic > 0 }
+            try requireGlyphColors(in: tag, document: document, expected: .type)
+            try capture(window, "backspace-\(shortened)-held")
+            holdTree = false
+            try await wait("show the current Tree-sitter color for \(shortened)") {
+                heldTree == 0 && highlighting.treeSpansForCheck.contains {
+                    $0.range == tag && $0.color == .type && !$0.provisional
+                }
+            }
+            try requireGlyphColors(in: tag, document: document, expected: .type)
+            holdSemantic = false
+            try await wait("apply the ZLS color for \(shortened)") {
+                !highlighting.needsFullSemanticTokensForCheck && highlighting.semanticSpansForCheck.contains {
+                    $0.range == tag && $0.color == .type && !$0.provisional
+                }
+            }
+            try requireGlyphColors(in: tag, document: document, expected: .type)
+        }
+        let shortenedTagAndExtraSemicolons = NSRange(location: hello.location, length: 2 + extraSemicolons.utf16.count)
+        editor.insertText("Hello", replacementRange: shortenedTagAndExtraSemicolons)
+        try await wait("restore the classified error tag") {
+            !highlighting.needsFullSemanticTokensForCheck && highlighting.treeSpansForCheck.contains {
+                $0.range == hello && $0.color == .type && !$0.provisional
+            }
+        }
+
         document.toggleHighlighting(.lsp)
         holdTree = true
         for (index, character) in "Ab".enumerated() {

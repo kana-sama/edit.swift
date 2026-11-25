@@ -22,6 +22,7 @@ final class SyntaxHighlighting {
     private var hasRenderingColors = false
     private var backedColorRange: NSRange?
     private var editedRenderingColorRange: NSRange?
+    private var wordDeletions: Set<NSRange> = []
     private var task: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var activity: NSTitlebarAccessoryViewController?
@@ -307,7 +308,20 @@ final class SyntaxHighlighting {
         editor.setNeedsDisplay(editor.visibleRect)
     }
 
+    func prepareForDeletions(in ranges: [NSRange]) {
+        wordDeletions.removeAll(keepingCapacity: true)
+        guard !ranges.isEmpty, !treeSpans.isEmpty || !semanticSpans.isEmpty,
+              let text = editor?.textStorage?.mutableString else { return }
+        // Check the removed characters while they can still tell us whether this was part of a word.
+        for range in ranges where range.location != NSNotFound && range.length > 0 && range.upperBound <= text.length {
+            if (range.location..<range.upperBound).allSatisfy({ Self.isWord(text.character(at: $0)) }) {
+                wordDeletions.insert(range)
+            }
+        }
+    }
+
     func storageDidEdit(_ storage: NSTextStorage, replacements: [EditorTextEdit]?) -> NSRange? {
+        defer { wordDeletions.removeAll(keepingCapacity: true) }
         lastSemanticColors = nil
         treeSpansAreStale = true
         semanticSpansAreStale = true
@@ -373,7 +387,7 @@ final class SyntaxHighlighting {
         var mapped: [SyntaxSpan] = []
         var editIndex = 0
         var offset = 0
-        for span in self.spans(overlapping: visible, from: spans) {
+        spanLoop: for span in self.spans(overlapping: visible, from: spans) {
             var editedAtStart = false
             while editIndex < edits.count, edits[editIndex].range.upperBound <= span.start {
                 let edit = edits[editIndex]
@@ -381,12 +395,20 @@ final class SyntaxHighlighting {
                 offset += edit.delta
                 editIndex += 1
             }
-            let next = editIndex < edits.count ? edits[editIndex] : nil
-            if let next, next.range.location < span.end { continue }
-            let shifted = SyntaxSpan(start: span.start + offset, end: span.end + offset,
-                                     color: span.color, provisional: span.provisional)
+            var nextIndex = editIndex
+            var removed = 0
+            while nextIndex < edits.count, edits[nextIndex].range.location < span.end {
+                let edit = edits[nextIndex]
+                guard typingText != nil, edit.range.upperBound <= span.end,
+                      edit.delta == -edit.range.length, wordDeletions.contains(edit.range) else { continue spanLoop }
+                removed += edit.range.length
+                nextIndex += 1
+            }
+            let next = nextIndex < edits.count ? edits[nextIndex] : nil
+            let shifted = SyntaxSpan(start: span.start + offset, end: span.end + offset - removed,
+                                     color: span.color, provisional: span.provisional || removed > 0)
             let editedAtEnd = next?.range.location == span.end
-            if !editedAtStart && !editedAtEnd {
+            if removed == 0 && !editedAtStart && !editedAtEnd {
                 mapped.append(shifted)
             } else if let typingText {
                 let appended = if let next, editedAtEnd, next.range.length == 0 { next.delta } else { 0 }
@@ -397,6 +419,9 @@ final class SyntaxHighlighting {
         }
         return mapped
     }
+
+    private static func isLetter(_ unit: UInt16) -> Bool { (65...90).contains(unit) || (97...122).contains(unit) || unit == 95 }
+    private static func isWord(_ unit: UInt16) -> Bool { isLetter(unit) || (48...57).contains(unit) }
 
     private func colorAfterBoundaryEdit(to span: SyntaxSpan, appended: Int, in text: NSString) -> SyntaxSpan? {
         switch span.color {
@@ -411,21 +436,19 @@ final class SyntaxHighlighting {
         }
         guard span.start >= 0, span.start < span.end, span.end + appended <= text.length else { return nil }
 
-        func isLetter(_ unit: UInt16) -> Bool { (65...90).contains(unit) || (97...122).contains(unit) || unit == 95 }
-        func isWord(_ unit: UInt16) -> Bool { isLetter(unit) || (48...57).contains(unit) }
         func isWordBoundary(at offset: Int) -> Bool {
             guard offset >= 0, offset < text.length else { return true }
             return Self.bareWordSeparators.contains(text.character(at: offset))
         }
 
-        guard isLetter(text.character(at: span.start)), isWordBoundary(at: span.start - 1),
-              (span.start..<span.end).allSatisfy({ isWord(text.character(at: $0)) }) else { return nil }
+        guard Self.isLetter(text.character(at: span.start)), isWordBoundary(at: span.start - 1),
+              (span.start..<span.end).allSatisfy({ Self.isWord(text.character(at: $0)) }) else { return nil }
         if isWordBoundary(at: span.end) { return span }
         // If deleting a separator joins words, the old ranges are no longer tokens.
         // When typing an identifier continuation, carry its color on the new whole range.
         let end = span.end + appended
         guard appended > 0, isWordBoundary(at: end),
-              (span.end..<end).allSatisfy({ isWord(text.character(at: $0)) }) else { return nil }
+              (span.end..<end).allSatisfy({ Self.isWord(text.character(at: $0)) }) else { return nil }
         return SyntaxSpan(start: span.start, end: end, color: span.color, provisional: true)
     }
 

@@ -52,7 +52,7 @@ Review the diff against the request. Select the smallest check that could expose
 
 Expand verification if inspection reveals additional affected callers or a failure the chosen check cannot explain. Honor explicit requests for checks or captures. Reuse a passing result while its inputs remain the same. If a failure is confirmed unrelated, report it and finish the relevant verification. Retry when there is a specific cause to test.
 
-Check the final history and current working state after any amend or squash. Verify affected descendants when rewriting a mutable ancestor. Report the changed behavior, relevant commit or change ID, checks completed, and any specific limitation that remains.
+Check the final history and current working state after any amend or squash. Verify affected descendants when rewriting a mutable ancestor. Report the changed behavior, relevant commit or change ID, checks completed, and any specific limitation that remains. For a bug fix, explain what caused the failure and how the change removes that cause. State when the cause is still uncertain.
 
 ## Launch command
 
