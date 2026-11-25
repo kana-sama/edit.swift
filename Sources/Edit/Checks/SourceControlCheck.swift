@@ -272,6 +272,7 @@ enum SourceControlCheck {
         try await checkImmutableActivation(executable: executable, workspace: workspace, changeID: history.changeID, file: file)
         try await checkPublishedLinks(executable: executable, folder: fixture.appending(path: "Origin links"))
         try await checkConflicts(in: app, executable: executable, folder: fixture.appending(path: "Conflicts"), render: render)
+        try await checkModeSelector()
     }
 
     private static func checkConflicts(in app: Edit, executable: URL, folder: URL, render: (NSWindow) throws -> Void) async throws {
@@ -2136,6 +2137,69 @@ enum SourceControlCheck {
         try expect(document.titleBar.toolbarWindow === companion && !NSApp.isActive,
                    "test the header with the toolbar in an inactive full-screen companion")
         try checkDocumentHeader(controls, over: document.scrollView, in: document)
+    }
+
+    private static func checkModeSelector() async throws {
+        let frame = NSRect(x: -10_000, y: -10_000, width: 320, height: 70)
+        let window = EditorFocusCheckWindow(contentRect: frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let view = NSView(frame: NSRect(origin: .zero, size: frame.size))
+        let picker = ModeSelector(["Current Buffer", "Workspace"], equalWidths: true)
+        picker.frame = NSRect(x: 20, y: 24, width: 260, height: ModeSelector.height)
+        picker.setSelection(0)
+        picker.onSelect = { [weak picker] in picker?.setSelection($0) }
+        view.addSubview(picker)
+        window.contentView = view
+        window.orderBack(nil)
+        window.layoutIfNeeded()
+
+        func click(_ point: NSPoint, segment: Int) throws {
+            guard let hit = view.hitTest(picker.convert(point, to: view.superview)),
+                  hit === picker.buttonForCheck(at: segment) else { throw Failure("hit the mode button outside its label") }
+            let location = picker.convert(point, to: nil)
+            let stamp = ProcessInfo.processInfo.systemUptime
+            func mouse(_ type: NSEvent.EventType) -> NSEvent? {
+                NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: stamp,
+                                   windowNumber: window.windowNumber, context: nil, eventNumber: 1,
+                                   clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)
+            }
+            guard let down = mouse(.leftMouseDown), let up = mouse(.leftMouseUp) else {
+                throw Failure("synthesize a click on the segment padding")
+            }
+            NSApp.postEvent(up, atStart: true)
+            hit.mouseDown(with: down)
+            _ = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: true)
+            try expect(picker.selectedSegment == segment, "select a mode by clicking its padding")
+        }
+
+        let left = picker.segmentFrame(at: 0)
+        let right = picker.segmentFrame(at: 1)
+        CATransaction.flush()
+        try await Task.sleep(for: .milliseconds(25))
+        try click(NSPoint(x: right.minX + 3, y: right.minY + 3), segment: 1)
+        try expect(picker.hasLocalSlideForCheck(from: 0, to: 1), "start the spring in the previous segment")
+
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            CATransaction.flush()
+            var positions: [CGFloat] = []
+            let deadline = ContinuousClock.now + .milliseconds(450)
+            repeat {
+                try await Task.sleep(for: .milliseconds(15))
+                let rendered = picker.indicatorPresentationFrameForCheck
+                try expect(abs(rendered.midY - right.midY) < 0.5, "keep the moving highlight vertically aligned")
+                positions.append(rendered.midX)
+            } while ContinuousClock.now < deadline
+            try expect(positions.contains { $0 > left.midX + 10 && $0 < right.midX - 10 } &&
+                       positions.contains { $0 > right.midX + 0.5 && $0 < right.midX + 5 } &&
+                       positions.last.map { abs($0 - right.midX) < 0.5 } == true,
+                       "draw intermediate positions, a small overshoot, and the settled selection")
+        }
+
+        try click(NSPoint(x: left.maxX - 3, y: left.maxY - 3), segment: 0)
+        try expect(picker.hasLocalSlideForCheck(from: 1, to: 0), "start the reverse spring in the other segment")
     }
 
     private static func button(in view: NSView, where test: (NSButton) -> Bool) -> NSButton? {

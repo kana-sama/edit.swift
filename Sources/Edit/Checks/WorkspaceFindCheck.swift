@@ -175,7 +175,7 @@ enum WorkspaceFindCheck {
                    include.isHiddenOrHasHiddenAncestor && exclude.isHiddenOrHasHiddenAncestor,
                    "Command-F chooses Current Buffer and hides the filters")
         try expect(scope.hasLocalSlideForCheck(from: 1, to: 0), "slide from Workspace to Current Buffer")
-        try await Task.sleep(for: .milliseconds(220))
+        try await waitFor("let the Current Buffer highlight settle") { !scope.selectionIsAnimatingForCheck }
         finder.insertText("live", replacementRange: NSRange(location: 0, length: finder.string.utf16.count))
         scope.moveRight(nil)
         try expect(scope.selectedSegment == 1 && scope.hasLocalSlideForCheck(from: 0, to: 1),

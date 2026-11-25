@@ -7,7 +7,8 @@ final class ModeSelector: NSControl {
     static let trackOpacity: CGFloat = 0.08
     private static let titleFont = NSFont.systemFont(ofSize: 12, weight: .medium)
     private static let selectionInset: CGFloat = 1
-    private let indicator = NSView()
+    private let indicatorHost = NSView()
+    private let indicator = CALayer()
     private let buttons: [ModeButton]
     private let widths: [CGFloat]
     private let equalWidths: Bool
@@ -27,11 +28,13 @@ final class ModeSelector: NSControl {
         wantsLayer = true
         layer?.masksToBounds = true
         layer?.cornerRadius = Self.cornerRadius
-        indicator.wantsLayer = true
-        indicator.layer?.cornerRadius = Self.cornerRadius - Self.selectionInset
+        indicatorHost.wantsLayer = true
+        indicatorHost.setAccessibilityElement(false)
+        indicator.cornerRadius = Self.cornerRadius - Self.selectionInset
         indicator.isHidden = true
-        indicator.setAccessibilityElement(false)
-        addSubview(indicator)
+        indicator.actions = ["position": NSNull(), "bounds": NSNull(), "backgroundColor": NSNull(), "hidden": NSNull()]
+        indicatorHost.layer?.addSublayer(indicator)
+        addSubview(indicatorHost)
         for (index, button) in buttons.enumerated() {
             button.tag = index
             button.setButtonType(.radio)
@@ -75,6 +78,7 @@ final class ModeSelector: NSControl {
 
     override func layout() {
         super.layout()
+        indicatorHost.frame = bounds
         for (index, button) in buttons.enumerated() { button.frame = segmentFrame(at: index) }
         moveIndicator(from: nil)
     }
@@ -82,8 +86,8 @@ final class ModeSelector: NSControl {
     func setSelection(_ index: Int) {
         let selection = buttons.indices.contains(index) ? index : -1
         guard selectedSegment != selection else { return }
-        let inFlight = indicator.layer?.animation(forKey: "selection") != nil
-        let prior = indicator.isHidden ? nil : ((inFlight ? indicator.layer?.presentation()?.frame : nil) ?? indicator.frame)
+        let inFlight = indicator.animation(forKey: "selection") != nil
+        let prior = indicator.isHidden ? nil : ((inFlight ? indicator.presentation()?.frame : nil) ?? indicator.frame)
         selectedSegment = selection
         updateButtonStates()
         moveIndicator(from: prior)
@@ -114,37 +118,36 @@ final class ModeSelector: NSControl {
     private func updateColors() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(Self.trackOpacity).cgColor
-            indicator.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(isEnabled ? 0.12 : 0.08).cgColor
+            indicator.backgroundColor = NSColor.labelColor.withAlphaComponent(isEnabled ? 0.12 : 0.08).cgColor
         }
     }
 
     private func moveIndicator(from prior: NSRect?) {
         let show = buttons.indices.contains(selectedSegment) && !bounds.isEmpty
         indicator.isHidden = !show
-        guard let thumb = indicator.layer else { return }
-        guard show else { thumb.removeAllAnimations(); return }
+        guard show else { indicator.removeAllAnimations(); return }
         let frame = segmentFrame(at: selectedSegment).insetBy(dx: Self.selectionInset, dy: Self.selectionInset)
         if frame == indicator.frame && prior == nil { return }
-        thumb.removeAllAnimations()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
+        indicator.removeAnimation(forKey: "selection")
         indicator.frame = frame
-        CATransaction.commit()
         guard let prior, !prior.isEmpty, window != nil, !isHiddenOrHasHiddenAncestor,
               !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
-        let movement = CABasicAnimation(keyPath: "position")
-        movement.fromValue = NSPoint(x: prior.midX, y: prior.midY)
-        movement.toValue = NSPoint(x: frame.midX, y: frame.midY)
-        let resizing = CABasicAnimation(keyPath: "bounds.size")
-        resizing.fromValue = prior.size
-        resizing.toValue = frame.size
+        let movement = spring("position", from: NSPoint(x: prior.midX, y: prior.midY), to: indicator.position)
+        let resizing = spring("bounds.size", from: prior.size, to: frame.size)
         let slide = CAAnimationGroup()
         slide.animations = [movement, resizing]
-        slide.duration = 0.18
-        movement.duration = slide.duration
-        resizing.duration = slide.duration
-        slide.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        thumb.add(slide, forKey: "selection")
+        slide.duration = movement.duration
+        indicator.add(slide, forKey: "selection")
+    }
+
+    private func spring(_ key: String, from start: Any, to end: Any) -> CASpringAnimation {
+        let animation = CASpringAnimation(keyPath: key)
+        animation.stiffness = 720
+        animation.damping = 42
+        animation.fromValue = start
+        animation.toValue = end
+        animation.duration = animation.settlingDuration
+        return animation
     }
 
     private func moveSelection(by offset: Int) {
@@ -166,11 +169,13 @@ final class ModeSelector: NSControl {
 
     #if EDIT_AGENT_CHECKS
     func buttonForCheck(at index: Int) -> NSButton { buttons[index] }
+    var indicatorPresentationFrameForCheck: NSRect { (indicator.presentation() ?? indicator).frame }
+    var selectionIsAnimatingForCheck: Bool { indicator.animation(forKey: "selection") != nil }
 
     func hasLocalSlideForCheck(from start: Int, to end: Int) -> Bool {
-        let slide = indicator.layer?.animation(forKey: "selection") as? CAAnimationGroup
+        let slide = indicator.animation(forKey: "selection") as? CAAnimationGroup
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { return slide == nil }
-        guard let movement = slide?.animations?.compactMap({ $0 as? CABasicAnimation }).first(where: { $0.keyPath == "position" }),
+        guard let movement = slide?.animations?.compactMap({ $0 as? CASpringAnimation }).first(where: { $0.keyPath == "position" }),
               let from = (movement.fromValue as? NSValue)?.pointValue,
               let to = (movement.toValue as? NSValue)?.pointValue else { return false }
         return abs(from.x - segmentFrame(at: start).midX) < 1 && abs(to.x - segmentFrame(at: end).midX) < 1 &&
@@ -182,4 +187,24 @@ final class ModeSelector: NSControl {
 @MainActor
 private final class ModeButton: NSButton {
     override var acceptsFirstResponder: Bool { false }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled, let window, bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+        // A borderless button's cell tracks its label. Track the whole segment instead.
+        highlight(true)
+        var activate = false
+        window.trackEvents(matching: [.leftMouseDragged, .leftMouseUp], timeout: .greatestFiniteMagnitude,
+                           mode: .eventTracking) { event, stop in
+            guard let event else { stop.pointee = true; return }
+            let inside = event.window === window && bounds.contains(convert(event.locationInWindow, from: nil))
+            if event.type == .leftMouseUp {
+                activate = inside
+                stop.pointee = true
+            } else {
+                highlight(inside)
+            }
+        }
+        highlight(false)
+        if activate && isEnabled { sendAction(action, to: target) }
+    }
 }
