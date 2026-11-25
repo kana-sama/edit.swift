@@ -117,8 +117,8 @@ enum FolderCheck {
                    && document.window.frame == frame && document.window.title == "Project One",
                    "opening an unvisited folder preserves the window and shows only the folder title")
         try expect(document.window.representedURL == nil, "the empty screen represents no file")
-        try expect(!document.canPerformFind(.find) && document.canPerformFind(.toggleSidebar),
-                   "the empty screen keeps sidebar navigation available")
+        try expect(document.canPerformFind(.find) && document.canPerformFind(.findWorkspace) && document.canPerformFind(.toggleSidebar),
+                   "the empty screen keeps buffer search, workspace search, and sidebar navigation available")
         if let menu = NSApp.mainMenu,
            let goToBracket = ControlCommand.fromMenu(menu).first(where: {
                $0.item.action == #selector(EditorTextView.goToBracket(_:))

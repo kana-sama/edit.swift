@@ -23,16 +23,57 @@ enum WorkspaceFindCheck {
 
         let document = app.makeDocument()
         defer { document.window.close() }
-        try expect(!document.canPerformFind(.findWorkspace), "workspace search is unavailable without a folder")
-        _ = try await app.openFile(root, in: document)
-        try expect(document.showsEmptyFolder && document.canPerformFind(.findWorkspace), "search can open before a file is selected")
-        document.performFind(.findWorkspace)
         let window = document.window
-        let table = try require(descendant(in: window.contentView, of: WorkspaceFindTable.self), "a native workspace results table")
-        let finder = try require(window.firstResponder as? FindFieldTextView, "Find in Workspace focuses Find")
+        _ = try await app.openFile(alpha, in: document)
+        for action in [FindCommand.find, .findWorkspace] {
+            try expect(document.folderURL == nil && document.canPerformFind(action), "both Find commands are available for a standalone file")
+            document.performFind(action)
+            let input = try require(window.firstResponder as? FindFieldTextView, "focus Find for the standalone file")
+            set("alpha", in: input)
+            let buffer = try require(descendant(in: window.contentView, of: SidebarActionResultTable.self) {
+                $0.accessibilityLabel() == "Search Results"
+            }, "find standalone buffer results")
+            try await waitFor("show the match in the standalone file") {
+                document.findScope == .buffer && !buffer.isHiddenOrHasHiddenAncestor && buffer.numberOfRows == 1
+            }
+            try expect(descendant(in: window.contentView, of: ModeSelector.self) {
+                $0.accessibilityLabel() == "Search scope" && !$0.isHiddenOrHasHiddenAncestor
+            } == nil, "a standalone file has no scope picker")
+            document.performFind(.toggleSidebar)
+        }
+        _ = try await app.openFile(root, in: document)
+        document.performFind(.find)
+        let finder = try require(window.firstResponder as? FindFieldTextView, "Command-F focuses Find before a file is selected")
         let scope = try require(descendant(in: window.contentView, of: ModeSelector.self) {
             $0.accessibilityLabel() == "Search scope"
         }, "Search uses the shared mode selector")
+        try expect(document.showsEmptyFolder && !scope.isHiddenOrHasHiddenAncestor && scope.selectedSegment == 0,
+                   "Command-F selects Current Buffer in a folder with no open file")
+        let buffer = try require(descendant(in: window.contentView, of: SidebarActionResultTable.self) {
+            $0.accessibilityLabel() == "Search Results"
+        }, "find the empty buffer results")
+        let header = try require(descendant(in: window.contentView, of: SidebarResultGroupHeader.self) {
+            !$0.isHiddenOrHasHiddenAncestor
+        }, "find the visible buffer result count")
+        let regex = try require(descendant(in: window.contentView, of: NSButton.self) { $0.toolTip == "Regular Expression" },
+                                "find the regex option")
+        regex.performClick(nil)
+        // Wait for this query's publication even when the previous query also had no results.
+        header.detailText = ""
+        set("^", in: finder)
+        try await waitFor("a zero-width regex finds no matches without an open buffer") {
+            !buffer.isHiddenOrHasHiddenAncestor && buffer.numberOfRows == 0 && header.detailText == "No results"
+        }
+        regex.performClick(nil)
+        set("beta", in: finder)
+        document.performFind(.findWorkspace)
+        let table = try require(descendant(in: window.contentView, of: WorkspaceFindTable.self), "a native workspace results table")
+        try await waitFor("Shift-Command-F searches files on disk before a file is selected") {
+            scope.selectedSegment == 1 && window.firstResponder === finder && finder.string == "beta" &&
+                !table.isHiddenOrHasHiddenAncestor && rows(in: table).count == 1
+        }
+        set("", in: finder)
+        try await waitFor("clear workspace results before the first-scan transition") { table.numberOfRows == 0 }
         let include = try require(field("Files to include", in: window), "the Include field is available")
         let exclude = try require(field("Files to exclude", in: window), "the Exclude field is available")
         let ignore = try require(descendant(in: window.contentView, of: NSButton.self) {

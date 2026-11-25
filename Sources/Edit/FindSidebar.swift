@@ -594,7 +594,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         pending = false
         keepsBufferHighlights = keepingHighlights
         updateReplaceAvailability()
-        if settings.query.isEmpty {
+        if !document.hasTextDocument || settings.query.isEmpty {
             resultSnapshot = bufferSnapshot
             publish([])
             return
@@ -634,7 +634,7 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         let previousLocation = selectedMatchLocation
         baseMatches = found
         matches = found.filter { !dismissed.contains($0.range) }
-        validResults = !invalid && !settings.query.isEmpty
+        validResults = document.hasTextDocument && !invalid && !settings.query.isEmpty
         let target = previousLocation.flatMap { location in
             matches.firstIndex { $0.range.location >= location } ?? matches.indices.first
         }

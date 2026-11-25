@@ -756,17 +756,19 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func canPerformFind(_ command: FindCommand) -> Bool {
         guard window.attachedSheet == nil else { return false }
-        if command == .findWorkspace { return folderURL != nil }
-        if findScope == .workspace && command != .find { return sidebar.canPerformFind(command) }
-        if markdownPreview != nil {
-            return command == .find || command == .next || command == .previous || command == .toggleSidebar
+        if command == .find || command == .findWorkspace || findScope == .workspace {
+            return sidebar.canPerformFind(command)
         }
-        if !hasTextDocument { return command == .toggleSidebar || (command == .find && folderURL != nil) }
+        if markdownPreview != nil {
+            return command == .next || command == .previous || command == .toggleSidebar
+        }
+        if !hasTextDocument { return command == .toggleSidebar }
         if !hasEditableTextDocument && (command == .replace || command == .toggleReplace) { return false }
         return sidebar.canPerformFind(command)
     }
 
-    func performFind(_ command: FindCommand) {
+    func performFind(_ requestedCommand: FindCommand) {
+        let command = requestedCommand == .findWorkspace && folderURL == nil ? .find : requestedCommand
         guard !app.isQuitting, window.attachedSheet == nil, canPerformFind(command) else { return }
         if let markdownPreview, command == .find || (findScope == .buffer && command != .findWorkspace) {
             switch command {

@@ -223,8 +223,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
 
     func canPerformFind(_ command: FindCommand) -> Bool {
         switch command {
-        case .find, .replace, .toggleSidebar: return true
-        case .findWorkspace: return document.folderURL != nil
+        case .find, .findWorkspace, .replace, .toggleSidebar: return true
         case .next, .previous: return search?.canPerform(command) ?? !document.findSettings.query.isEmpty
         default: return search?.canPerform(command) == true
         }
