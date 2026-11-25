@@ -550,6 +550,11 @@ final class SidebarActionResultCell: SidebarResultExcerptCell, SidebarResultHove
         updateActions()
     }
 
+    func suspendActions() {
+        acceptsActions = false
+        updateActions()
+    }
+
     override func prepareForReuse() {
         super.prepareForReuse()
         hover = false

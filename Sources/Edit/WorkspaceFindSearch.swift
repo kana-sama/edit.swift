@@ -159,6 +159,12 @@ struct WorkspaceFindGlob {
 }
 
 enum WorkspaceFindSearch {
+    private static let metadata: Set<String> = [".git", ".jj", ".hg", ".svn", ".DS_Store"]
+
+    static func isMetadataPath(_ path: String, in root: URL) -> Bool {
+        path.dropFirst(root.path.count).split(separator: "/").contains { metadata.contains(String($0)) }
+    }
+
     struct File: Sendable {
         let disk: FileBuffer
         let text: String
@@ -209,7 +215,6 @@ enum WorkspaceFindSearch {
         if respectIgnore, let repository {
             rules[rootPath] = (repository.ancestors + [root]).compactMap { FolderIgnoreRules.read(in: $0) }
         }
-        let metadata: Set<String> = [".git", ".jj", ".hg", ".svn", ".DS_Store"]
         let matchLimit = 5_000
         let snapshotLimit = 32 * 1024 * 1024
         var matchCount = 0

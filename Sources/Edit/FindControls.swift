@@ -3,10 +3,12 @@ import AppKit
 final class FindInput: NSView, NSTextViewDelegate {
     let input = FindFieldTextView(frame: .zero)
     private let scroll = NSScrollView()
-    private let placeholder: NSTextField
     private let bezel = NSTextFieldCell(textCell: "")
     private let fieldUndo = UndoManager()
-    private var inputHeight: NSLayoutConstraint?
+    private let singleLine: Bool
+    private let lineHeight: CGFloat
+    private let rowHeight: CGFloat
+    private lazy var inputHeight = heightAnchor.constraint(equalToConstant: rowHeight)
     var onChange: (() -> Void)?
     var onReturn: (() -> Void)?
     var onEscape: (() -> Void)?
@@ -21,15 +23,19 @@ final class FindInput: NSView, NSTextViewDelegate {
         }
     }
 
-    init(name: String, options: [NSButton] = []) {
-        placeholder = NSTextField(labelWithString: name)
+    init(name: String, options: [NSButton] = [], singleLine: Bool = false) {
+        self.singleLine = singleLine
+        let font = EditorTextView.defaultFont
+        lineHeight = ceil(NSLayoutManager().defaultLineHeight(for: font))
+        rowHeight = max(26, lineHeight + 8)
         super.init(frame: .zero)
         bezel.isBezeled = true
         bezel.bezelStyle = .roundedBezel
         bezel.drawsBackground = true
         focusRingType = .none
 
-        let font = EditorTextView.defaultFont
+        input.placeholder = name
+        input.singleLine = singleLine
         input.isRichText = false
         input.importsGraphics = false
         input.allowsUndo = true
@@ -39,12 +45,13 @@ final class FindInput: NSView, NSTextViewDelegate {
         input.font = font
         input.drawsBackground = false
         input.focusRingType = .none
-        input.textContainerInset = NSSize(width: 0, height: 2)
+        input.textContainerInset = NSSize(width: 0, height: (rowHeight - lineHeight) / 2 - 2)
         input.textContainer?.lineFragmentPadding = 0
-        input.isVerticallyResizable = true
-        input.isHorizontallyResizable = false
-        input.autoresizingMask = [.width]
-        input.textContainer?.widthTracksTextView = true
+        input.isVerticallyResizable = !singleLine
+        input.isHorizontallyResizable = singleLine
+        input.autoresizingMask = singleLine ? [.height] : [.width]
+        input.textContainer?.widthTracksTextView = !singleLine
+        if singleLine { input.textContainer?.containerSize.width = CGFloat.greatestFiniteMagnitude }
         input.textContainer?.heightTracksTextView = false
         input.textContainer?.containerSize.height = CGFloat.greatestFiniteMagnitude
         input.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -64,13 +71,6 @@ final class FindInput: NSView, NSTextViewDelegate {
         scroll.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scroll)
 
-        placeholder.font = font
-        placeholder.textColor = .placeholderTextColor
-        placeholder.setAccessibilityElement(false)
-        placeholder.translatesAutoresizingMaskIntoConstraints = false
-        // In the native text view so clicking the placeholder still focuses the input.
-        input.addSubview(placeholder)
-
         var trailing = trailingAnchor
         if !options.isEmpty {
             let buttons = NSStackView(views: options)
@@ -79,23 +79,23 @@ final class FindInput: NSView, NSTextViewDelegate {
             buttons.spacing = 1
             buttons.translatesAutoresizingMaskIntoConstraints = false
             addSubview(buttons)
+            for option in options {
+                option.widthAnchor.constraint(equalToConstant: 23).isActive = true
+                option.heightAnchor.constraint(equalToConstant: 22).isActive = true
+            }
             NSLayoutConstraint.activate([
-                buttons.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+                buttons.centerYAnchor.constraint(equalTo: topAnchor, constant: rowHeight / 2),
                 buttons.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
             ])
             trailing = buttons.leadingAnchor
         }
 
-        let height = heightAnchor.constraint(equalToConstant: 26)
-        inputHeight = height
         NSLayoutConstraint.activate([
-            height,
+            inputHeight,
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
-            scroll.trailingAnchor.constraint(equalTo: trailing, constant: -4),
-            scroll.topAnchor.constraint(equalTo: topAnchor, constant: 3),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
-            placeholder.leadingAnchor.constraint(equalTo: input.leadingAnchor),
-            placeholder.topAnchor.constraint(equalTo: input.topAnchor, constant: 2),
+            scroll.trailingAnchor.constraint(equalTo: trailing, constant: options.isEmpty ? -4 : 0),
+            scroll.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
         ])
         updateContents()
     }
@@ -140,6 +140,10 @@ final class FindInput: NSView, NSTextViewDelegate {
         onChange?()
     }
 
+    func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
+        !singleLine || replacementString?.rangeOfCharacter(from: .newlines) == nil
+    }
+
     func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         switch selector {
         case #selector(NSResponder.insertTab(_:)):
@@ -148,27 +152,63 @@ final class FindInput: NSView, NSTextViewDelegate {
         case #selector(NSResponder.insertBacktab(_:)):
             window?.selectPreviousKeyView(input)
             return true
+        case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertLineBreak(_:)):
+            if singleLine { onReturn?() }
+            return singleLine
         default:
             return false
         }
     }
 
     private func updateContents() {
-        placeholder.isHidden = !value.isEmpty
-        guard let inputHeight, let font = input.font, scroll.bounds.width > 0,
-              let manager = input.layoutManager, let container = input.textContainer else { return }
+        input.needsDisplay = true
+        guard scroll.bounds.width > 0, let manager = input.layoutManager, let container = input.textContainer else { return }
         manager.ensureLayout(for: container)
-        let lineHeight = ceil(manager.defaultLineHeight(for: font))
+        if singleLine {
+            let minimum = scroll.contentSize
+            input.minSize = minimum
+            let size = NSSize(width: max(minimum.width, ceil(manager.usedRect(for: container).width) + 1),
+                              height: minimum.height)
+            if input.frame.size != size { input.setFrameSize(size) }
+            return
+        }
         let textHeight = max(manager.usedRect(for: container).height, manager.extraLineFragmentUsedRect.maxY)
         let cap = min(5, max(1, Int((window?.contentLayoutRect.height ?? 560) / 105)))
-        let newHeight = max(26, min(lineHeight * CGFloat(cap), max(lineHeight, ceil(textHeight))) + 10)
+        let newHeight = rowHeight + max(0, min(lineHeight * CGFloat(cap), ceil(textHeight)) - lineHeight)
         if inputHeight.constant != newHeight { inputHeight.constant = newHeight }
     }
 }
 final class FindFieldTextView: NSTextView {
+    var placeholder = ""
+    var singleLine = false
     var onFocusChange: (() -> Void)?
     var onReturn: (() -> Void)?
     var onEscape: (() -> Void)?
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, !placeholder.isEmpty, let font else { return }
+        (placeholder as NSString).draw(at: textContainerOrigin, withAttributes: [
+            .font: font, .foregroundColor: NSColor.placeholderTextColor,
+        ])
+    }
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        guard singleLine, let text = (insertString as? NSAttributedString)?.string ?? insertString as? String,
+              text.rangeOfCharacter(from: .newlines) != nil else {
+            super.insertText(insertString, replacementRange: replacementRange)
+            return
+        }
+        super.insertText(text.components(separatedBy: .newlines).joined(separator: " "), replacementRange: replacementRange)
+    }
+
+    override func paste(_ sender: Any?) {
+        if singleLine, let text = NSPasteboard.general.string(forType: .string) {
+            insertText(text, replacementRange: selectedRange())
+        } else {
+            super.paste(sender)
+        }
+    }
 
     override func becomeFirstResponder() -> Bool {
         let accepted = super.becomeFirstResponder()
@@ -195,7 +235,7 @@ final class FindFieldTextView: NSTextView {
                     return
                 }
                 if modifiers == .shift {
-                    insertNewline(nil)
+                    if !singleLine { insertNewline(nil) }
                     return
                 }
             }

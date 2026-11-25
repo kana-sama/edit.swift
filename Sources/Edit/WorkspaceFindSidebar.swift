@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 
 @MainActor
 final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
@@ -30,8 +31,8 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
     private let focusFind: () -> Void
     private let availabilityChanged: () -> Void
     private let ignore = NSButton()
-    private let include = WorkspaceFindField(label: "In.", name: "Include")
-    private lazy var exclude = WorkspaceFindField(label: "Ex.", name: "Exclude", option: ignore)
+    private let include = FindInput(name: "Files to include", singleLine: true)
+    private lazy var exclude = FindInput(name: "Files to exclude", options: [ignore], singleLine: true)
     private let table = WorkspaceFindTable()
     private let scroll = SidebarActionResultScrollView()
     private let status = NSTextField(labelWithString: "")
@@ -40,12 +41,15 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
     var includeInput: NSView { include.input }
     var excludeInput: NSView { exclude.input }
     var resultResponder: NSView { table }
+    var hasResultPresentation: Bool {
+        (terms == currentTerms && (valid || queryError != nil)) || (!rows.isEmpty && !scroll.isHidden)
+    }
 
     private var root: URL?
     private var filters = WorkspaceFindFilters()
     private var terms: Terms?
     private var files: [WorkspaceFindSearch.File] = []
-    private var filesByURL: [URL: WorkspaceFindSearch.File] = [:]
+    private var filesByPath: [String: WorkspaceFindSearch.File] = [:]
     private var matches: [Match] = []
     private var rows: [Row] = []
     private var collapsed: Set<URL> = []
@@ -65,12 +69,14 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
     private var search: Task<Void, Never>?
     private var settle: Task<Void, Never>?
     private var repositoryLookup: Task<Void, Never>?
+    private var fileEvents: FileSystemEvents?
     private var opening: Task<Void, Never>?
     private weak var pendingFocus: NSResponder?
     private var queuedStep: Int?
     private var undo: [[WorkspaceFindReplacement.Change]] = []
     private var redo: [[WorkspaceFindReplacement.Change]] = []
     private var visible: Bool { document.findScope == .workspace && document.isSearchSidebarVisible }
+    private var currentTerms: Terms { Terms(query: document.findSettings.query, options: document.findSettings.options) }
 
     init(document: DocumentWindow, app: Edit, onReturnFocus: @escaping () -> Void,
          focusFind: @escaping () -> Void, availabilityChanged: @escaping () -> Void) {
@@ -101,14 +107,13 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
         ignore.target = self
         ignore.action = #selector(changeIgnore)
         ignore.isHidden = true
-        ignore.widthAnchor.constraint(equalToConstant: 23).isActive = true
-        ignore.heightAnchor.constraint(equalToConstant: 19).isActive = true
         for field in [include, exclude] {
+            field.input.toolTip = "Enter workspace-relative paths or glob patterns separated by commas."
             field.onReturn = { [weak self] in self?.focusFirstResult() }
             field.onEscape = { [weak self] in self?.onReturnFocus() }
         }
-        include.changed = { [weak self] in self?.filterEdited(include: true) }
-        exclude.changed = { [weak self] in self?.filterEdited(include: false) }
+        include.onChange = { [weak self] in self?.filterEdited(include: true) }
+        exclude.onChange = { [weak self] in self?.filterEdited(include: false) }
 
         table.install(in: scroll, column: .init("WorkspaceFindResult"), accessibilityLabel: "Workspace Search Results")
         table.dataSource = self
@@ -165,6 +170,7 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
         guard folder?.path != root?.path else { return }
         root = folder
         cancelSearch()
+        fileEvents = nil
         suspendNavigation()
         repositoryLookup?.cancel()
         repositoryLookup = nil
@@ -175,13 +181,15 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
         redo.removeAll()
         selected = nil
         presented = nil
+        terms = nil
         files = []
-        filesByURL = [:]
+        filesByPath = [:]
         valid = false
         dirty = true
         limited = false
         queryError = nil
         operationError = nil
+        scroll.isHidden = false
         rebuildRows()
         guard let folder else { return }
         syncFilters()
@@ -203,8 +211,8 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
             dismissed.removeAll()
         }
         filters = latest
-        if include.input.stringValue != filters.include { include.input.stringValue = filters.include }
-        if exclude.input.stringValue != filters.exclude { exclude.input.stringValue = filters.exclude }
+        include.value = filters.include
+        exclude.value = filters.exclude
         ignore.state = filters.respectsIgnoreFiles ? .on : .off
         ignore.contentTintColor = filters.respectsIgnoreFiles ? .controlAccentColor : nil
     }
@@ -216,8 +224,10 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
         guard let relative = DocumentWindow.worktreePathSuffix(from: root, to: directory),
               path == rootPath || !relative.isEmpty else { return }
         syncFilters()
-        filters.include = relative.isEmpty ? "" : WorkspaceFindGlob.folder(relative)
-        app.workspaceFindPreferences[root] = filters
+        var updated = filters
+        updated.include = relative.isEmpty ? "" : WorkspaceFindGlob.folder(relative)
+        guard updated != filters else { return }
+        app.workspaceFindPreferences[root] = updated
         syncFilters()
         invalidate(resetDismissals: true)
     }
@@ -225,11 +235,11 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
     private func filterEdited(include updatingInclude: Bool) {
         guard let root else { return }
         var latest = app.workspaceFindPreferences[root]
-        if updatingInclude { latest.include = include.input.stringValue }
-        else { latest.exclude = exclude.input.stringValue }
+        if updatingInclude { latest.include = include.value }
+        else { latest.exclude = exclude.value }
         filters = latest
         app.workspaceFindPreferences[root] = filters
-        invalidate(resetDismissals: true)
+        invalidate(resetDismissals: true, after: .milliseconds(65))
     }
 
     @objc private func changeIgnore() {
@@ -241,7 +251,7 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
         invalidate(resetDismissals: true)
     }
 
-    func invalidate(resetDismissals: Bool = false) {
+    func invalidate(resetDismissals: Bool = false, after delay: Duration = .zero) {
         if resetDismissals {
             dismissed.removeAll()
             selected = nil
@@ -251,12 +261,13 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
         }
         dirty = true
         valid = false
-        if visible && !running { requestSearch() }
+        if visible && !running { requestSearch(after: delay) }
         else { cancelSearch() }
     }
 
     func searchWhenShown() {
         syncFilters()
+        if terms != currentTerms { dirty = true }
         if dirty && !running && search == nil { requestSearch() }
         else { refreshDecorations() }
     }
@@ -270,7 +281,7 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
         queuedStep = nil
     }
 
-    private func requestSearch() {
+    private func requestSearch(after delay: Duration = .zero) {
         guard let root else { return }
         search?.cancel()
         suspendNavigation()
@@ -278,8 +289,7 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
         valid = false
         queryError = nil
         availabilityChanged()
-        let settings = document.findSettings
-        let terms = Terms(query: settings.query, options: settings.options)
+        let terms = currentTerms
         if self.terms != terms {
             dismissed.removeAll()
             selected = nil
@@ -288,20 +298,33 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
             self.terms = terms
         }
         let filters = self.filters
-        if settings.query.isEmpty {
+        if terms.query.isEmpty {
             cancelSearch()
             publish(.matches([], limited: false))
             return
         }
-        rebuildRows()
-        if settle == nil {
+        if fileEvents == nil {
+            fileEvents = FileSystemEvents(directory: root) { [weak self] events in
+                let content = FSEventStreamEventFlags(kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemRemoved
+                    | kFSEventStreamEventFlagItemRenamed | kFSEventStreamEventFlagItemModified)
+                if events.contains(where: { event in
+                    event.requiresRescan || (event.flags & content != 0 && !WorkspaceFindSearch.isMetadataPath(event.path, in: root))
+                }) {
+                    // Refresh on the next use of the cached search. File events do not reload visible rows.
+                    self?.dirty = true
+                }
+            }
+        }
+        if rows.isEmpty || scroll.isHidden {
+            updateStatus("Searching…")
+        } else if settle == nil {
+            suspendVisibleRowActions()
             settle = Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(170))
                 guard let self, !Task.isCancelled, search != nil else { return }
-                files = []
-                filesByURL = [:]
-                rebuildRows()
-                refreshDecorations()
+                scroll.isHidden = true
+                updateStatus("Searching…")
+                availabilityChanged()
             }
         }
         let snapshots: [String: String]
@@ -309,13 +332,19 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
             snapshots = [file.path: document.editor.string]
         } else { snapshots = [:] }
         search = Task { [weak self] in
-            do { try await Task.sleep(for: .milliseconds(65)) } catch { return }
+            if delay > .zero {
+                do { try await Task.sleep(for: delay) } catch { return }
+            }
             let worker = Task.detached(priority: .userInitiated) {
-                WorkspaceFindSearch.run(root: root, query: settings.query, options: settings.options, filters: filters,
+                WorkspaceFindSearch.run(root: root, query: terms.query, options: terms.options, filters: filters,
                                         repository: WorkspaceFindSearch.Repository.containing(root), openText: snapshots)
             }
             let outcome = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
             guard let self, !Task.isCancelled else { return }
+            #if EDIT_AGENT_CHECKS
+            await document.beforePublishingWorkspaceFindForCheck?()
+            guard !Task.isCancelled else { return }
+            #endif
             search = nil
             settle?.cancel()
             settle = nil
@@ -323,20 +352,29 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
         }
     }
 
+    private func suspendVisibleRowActions() {
+        table.enumerateAvailableRowViews { rowView, _ in
+            let view = rowView.view(atColumn: 0)
+            (view as? SidebarActionResultCell)?.suspendActions()
+            (view as? SidebarResultGroupHeader)?.setFileAction(nil)
+        }
+    }
+
     private func publish(_ outcome: WorkspaceFindSearch.Outcome) {
         switch outcome {
         case .matches(let files, let limited):
             self.files = files
-            filesByURL = Dictionary(uniqueKeysWithValues: files.map { ($0.url, $0) })
+            filesByPath = Dictionary(uniqueKeysWithValues: files.map { ($0.url.path, $0) })
             self.limited = limited
             valid = true
         case .invalid(let message):
             files = []
-            filesByURL = [:]
+            filesByPath = [:]
             limited = false
             queryError = message
         }
         rebuildRows()
+        scroll.isHidden = false
         if let responder = pendingFocus, responder === document.window.firstResponder {
             pendingFocus = nil
             focusFirstResult()
@@ -375,10 +413,14 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
         else if !valid && groups.isEmpty && !document.findSettings.query.isEmpty { message = "Searching…" }
         else if valid && groups.isEmpty && !document.findSettings.query.isEmpty { message = "No results" }
         else { message = nil }
+        updateStatus(message)
+        availabilityChanged()
+    }
+
+    private func updateStatus(_ message: String?) {
         status.stringValue = message?.components(separatedBy: "\n").first ?? ""
         status.toolTip = message
         status.isHidden = message == nil
-        availabilityChanged()
     }
 
     private func row(at index: Int) -> Row? { rows.indices.contains(index) ? rows[index] : nil }
@@ -410,14 +452,14 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
         switch action {
         case .next, .previous: return queryError == nil && !running && !document.findSettings.query.isEmpty
         case .replaceAll: return visible && valid && !running && !limited && document.findSettings.showsReplacement && !matches.isEmpty
-        case .replaceSelected: return selected != nil && canReplaceMatch
+        case .replaceSelected: return visible && selected != nil && canReplaceMatch
         case .dismissSelected: return visible && valid && selected != nil && !running
         case .clearSelection: return visible && selected != nil
         default: return false
         }
     }
 
-    private var canReplaceMatch: Bool { visible && valid && !running && document.findSettings.showsReplacement }
+    private var canReplaceMatch: Bool { valid && !running && document.findSettings.showsReplacement }
 
     func perform(_ action: FindCommand) {
         switch action {
@@ -431,7 +473,7 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
         }
     }
 
-    func replacementChanged() {
+    func replacementVisibilityChanged() {
         rebuildRows()
         refreshDecorations()
     }
@@ -493,7 +535,7 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
 
     func bufferEdited() {
         if running { return }
-        if navigation == nil { invalidate() }
+        if navigation == nil { invalidate(after: .milliseconds(65)) }
     }
 
     func documentPresented() {
@@ -506,7 +548,7 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     private func reveal(_ match: Match, focusEditor: Bool, previewReplace: Bool = true) {
-        guard valid, !running, root?.path == document.folderURL?.path, let snapshot = filesByURL[match.file]?.text else { return }
+        guard valid, !running, root?.path == document.folderURL?.path, let snapshot = filesByPath[match.file.path]?.text else { return }
         selected = match
         if tableRow(for: match) == nil {
             collapsed = collapsed.filter { !WorktreeFileOperations.contains(match.file, in: $0) }
@@ -554,7 +596,7 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
 
     private func install(_ destination: Navigation) {
         guard valid, document.fileURL?.path == destination.match.file.path,
-              let file = filesByURL[destination.match.file],
+              let file = filesByPath[destination.match.file.path],
               document.editor.string.utf8.elementsEqual(file.text.utf8) else {
             presented = nil
             if !running { invalidate() }
@@ -577,9 +619,12 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
     func refreshDecorations() {
         guard document.findScope == .workspace,
               !document.isSidebarVisible || document.sidebarMode != .references else { return }
-        guard let url = document.fileURL, let file = files.first(where: { $0.url.path == url.path }),
+        let decorations = document.resultDecorations
+        // Keep the current buffer's matching highlights until the workspace snapshot arrives.
+        if visible && !valid && (search != nil || dirty) { return }
+        guard let url = document.fileURL, let file = filesByPath[url.path],
               valid, !document.isShowingMarkdownPreview else {
-            document.resultDecorations.update(snapshot: "", ranges: [], selected: nil, preview: nil)
+            decorations.update(snapshot: "", ranges: [], selected: nil, preview: nil)
             return
         }
         let hits = retained(file)
@@ -590,8 +635,8 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
                                        isRegex: document.findSettings.options.regularExpression))
             }
         } : nil
-        document.resultDecorations.update(snapshot: file.text, ranges: visible ? hits.map(\.range) : [],
-                                          selected: active, preview: preview)
+        decorations.update(snapshot: file.text, ranges: visible ? hits.map(\.range) : [],
+                           selected: active, preview: preview)
     }
 
     private func activate(replace: Bool) {
@@ -603,7 +648,7 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     private func dismiss(_ match: Match) {
-        guard valid, let file = filesByURL[match.file], let index = matches.firstIndex(of: match) else { return }
+        guard valid, let file = filesByPath[match.file.path], let index = matches.firstIndex(of: match) else { return }
         var record = dismissed[match.file] ?? Dismissed(text: file.text, ranges: [])
         if !record.text.utf8.elementsEqual(file.text.utf8) { record = Dismissed(text: file.text, ranges: []) }
         record.ranges.insert(match.range)
@@ -614,7 +659,7 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     private func replace(_ matches: [Match], confirm: Bool = false) {
-        guard canReplaceMatch, !matches.isEmpty, let root, !confirm || !limited else { return }
+        guard visible, canReplaceMatch, !matches.isEmpty, let root, !confirm || !limited else { return }
         let chosen = Dictionary(grouping: matches, by: \.file).mapValues { Set($0.map(\.range)) }
         let inputs = files.compactMap { file -> (WorkspaceFindSearch.File, [FindHit])? in
             guard let ranges = chosen[file.url] else { return nil }
@@ -752,7 +797,7 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
             table.configureHover(for: header, row: row)
             return header
         case .hit(let match, let depth):
-            guard let file = filesByURL[match.file] else { return nil }
+            guard let file = filesByPath[match.file.path] else { return nil }
             let identifier = NSUserInterfaceItemIdentifier("WorkspaceFindExcerpt")
             let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? SidebarActionResultCell
                 ?? SidebarActionResultCell(frame: .zero)

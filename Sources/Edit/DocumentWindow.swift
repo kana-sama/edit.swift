@@ -168,6 +168,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     #if EDIT_AGENT_CHECKS
     var beforePresentMarkdownForCheck: ((MarkdownPreviewView) async -> Void)?
     var beforeInstallFileForCheck: ((FileBuffer) async -> Void)?
+    var beforePublishingWorkspaceFindForCheck: (() async -> Void)?
     var confirmWorkspaceReplaceForCheck: ((Int, Int) async -> Bool)?
     var beforeCloseWorkspaceForCheck: (() async -> Void)?
     #endif

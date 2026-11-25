@@ -32,11 +32,11 @@ Reuse the same card for the same object wherever it is described. The Jujutsu gr
 
 ## Mode selectors
 
-Use the shared mode selector for related, mutually exclusive text options in the document header and in sidebars. Give the options a single rounded-rectangle track and slide the selection within it, from the previously selected option to the new one. Keep the selection paired with the visible content while a mode is preparing. Move the highlight immediately when Reduce Motion is enabled. Keep pointer, keyboard, and accessibility behavior consistent across placements. Match adjacent toggles to the track's compact corner radius.
+Use the shared mode selector for related, mutually exclusive text options in the document header and in sidebars. Give the options a single rounded-rectangle track. Make every enabled segment clickable across its full surface, including the padding around its label. Slide the highlight within the track from its current position to the new segment with a short, gently damped spring. Keep the selection paired with the visible content while a mode is preparing. Move the highlight immediately when Reduce Motion is enabled. Keep pointer, keyboard, and accessibility behavior consistent across placements. Match adjacent toggles to the track's compact corner radius.
 
 ## Sidebar results
 
-Use one content grid for controls and results. Align both edges of the control stack with the first-level file and folder gutter and the trailing count column. Give the [mode selector](#mode-selectors) equal segments spanning the stack. Give independent text inputs a full row each, with short visible labels and full accessible names. Keep contextual options inside the field they affect. Check the full stack at the sidebar’s minimum width.
+Use one content grid for controls and results. Align both edges of the control stack with the first-level file and folder gutter and the trailing count column. Give the [mode selector](#mode-selectors) equal segments spanning the stack. Give independent text inputs a full row each. Use a descriptive placeholder and an accessible name when the placeholder is enough to identify the field. Reuse the same field component for adjacent inputs, including single-line and multiline variants. Match their resting height, text position, focus outline, and the size and inset of any embedded buttons. Keep the text position fixed when focus changes. Check the full stack at the sidebar’s minimum width.
 
 Reuse the editor’s existing result component and interaction patterns for new lists of document locations. Match Search’s row spacing, excerpts, highlight treatment, and focus behavior. Align top-level file icons and folder chevrons with the Search controls and Worktree's first level. Indent excerpts slightly past the filename and give separate file groups 8 points of additional space. Keep the full path in the heading tooltip and align subdued count badges 10 points from the trailing edge. When file groups are always open, treat each file heading as a label and skip it in mouse and keyboard selection.
 
@@ -51,6 +51,8 @@ Show the pointing hand as soon as the pointer enters any part of the clickable a
 Keep the pointer image steady while clicking, moving between targets that use the same cursor, or updating the content under a stationary pointer. Active drags use their system cursors.
 
 ## Asynchronous updates
+
+Fix flicker at its source first. Eliminate redundant searches, layout and redraw work, and intermediate clears. Reuse still-valid results and apply related changes together. Use animation or defer a presentation update only when eliminating the underlying work is impractical. Verify the pending state and the first frame of the completed update in the native app.
 
 Flicker, jumps, and unexpected displacement are rendering defects. Keep the last complete presentation visible while preparing its replacement, then install the new presentation in one update. Keep titles, counts, and the content they describe together during the transition. When the visible result is temporarily out of date, give it a short, fixed timeout that repeated requests cannot extend. Suspend actions that need current information while the result is stale. At the timeout, show a stable pending or unavailable state until the current result is ready. Clear an old result immediately if it belongs to a different active context.
 

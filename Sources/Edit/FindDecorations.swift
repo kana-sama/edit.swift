@@ -24,12 +24,18 @@ final class FindDecorations {
     private var previewSourceRange: NSRange?
     private var layingOut = false
 
+    #if EDIT_AGENT_CHECKS
+    var visibleHighlightsForCheck: [NSRect] { matchRects + activeRects }
+    #endif
+
     init(editor: EditorTextView) {
         self.editor = editor
         editor.onDrawFindHighlights = { [weak self] dirtyRect in self?.drawHighlights(in: dirtyRect) }
     }
 
     func update(snapshot: String, ranges: [NSRange], selected: NSRange?, preview: (NSRange, String)?) {
+        guard self.snapshot != snapshot || self.ranges != ranges || self.selected != selected ||
+                self.preview?.0 != preview?.0 || self.preview?.1 != preview?.1 else { return }
         self.snapshot = snapshot
         self.ranges = ranges
         self.selected = selected
@@ -44,7 +50,7 @@ final class FindDecorations {
 
         if (ranges.isEmpty && selected == nil && preview == nil) || editor.string != snapshot {
             setHighlightRects(matches: [], active: [], in: editor)
-            clearPreview()
+            clearRenderedPreview()
             return
         }
 
@@ -123,12 +129,12 @@ final class FindDecorations {
 
     private func updatePreview(in editor: EditorTextView) {
         guard let (range, replacement) = preview, let manager = editor.textLayoutManager else {
-            clearPreview()
+            clearRenderedPreview()
             return
         }
         let source = snapshot as NSString
         guard range.location >= 0, NSMaxRange(range) <= source.length, source.length > 0 else {
-            clearPreview()
+            clearRenderedPreview()
             return
         }
         let start = LineEditing.line(at: range.location, in: source).start
@@ -225,6 +231,11 @@ final class FindDecorations {
     }
 
     func clearPreview() {
+        preview = nil
+        clearRenderedPreview()
+    }
+
+    private func clearRenderedPreview() {
         guard let editor else { return }
         let previous = previewBounds
         previewAccessibility?.isHidden = true

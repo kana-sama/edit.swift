@@ -33,13 +33,16 @@ enum WorkspaceFindCheck {
         let scope = try require(descendant(in: window.contentView, of: ModeSelector.self) {
             $0.accessibilityLabel() == "Search scope"
         }, "Search uses the shared mode selector")
-        let include = try require(field("Include", in: window), "the Include field is available")
-        let exclude = try require(field("Exclude", in: window), "the Exclude field is available")
+        let include = try require(field("Files to include", in: window), "the Include field is available")
+        let exclude = try require(field("Files to exclude", in: window), "the Exclude field is available")
         let ignore = try require(descendant(in: window.contentView, of: NSButton.self) {
             $0.toolTip == "Respect .gitignore"
         }, "the repository has a .gitignore control")
 
-        finder.insertText("value", replacementRange: finder.selectedRange())
+        try await waitFor("prepare the repository field control") { !ignore.isHidden }
+        try checkFields(in: document, finder: finder, include: include, exclude: exclude, ignore: ignore, capture: capture)
+        _ = try await app.openFile(alpha, in: document)
+        try await checkScopeTransition(in: document, scope: scope, finder: finder, workspace: table, capture: capture)
         try await waitFor("show four matches and apply the ignore rules") { rows(in: table).count == 4 && !ignore.isHidden }
         try expect(scope.selectedSegment == 1 && ignore.state == .on, "Workspace scope and .gitignore are selected")
         ignore.performClick(nil)
@@ -71,15 +74,15 @@ enum WorkspaceFindCheck {
         try expect(findHere >= 0, "Find Here appears for a Worktree folder")
         menu.performActionForItem(at: findHere)
         try await waitFor("Find Here searches only Sources and preserves Exclude") {
-            rows(in: table).count == 2 && include.stringValue == "./Sources/**" && exclude.stringValue == "*.log"
+            rows(in: table).count == 2 && include.string == "./Sources/**" && exclude.string == "*.log"
         }
         try expect(document.findSettings.query == "value" && window.firstResponder === finder, "Find Here preserves the query and focuses Find")
         let split = document.documentSplitView
         let sidebar = try require(window.contentViewController as? NSSplitViewController, "a native split sidebar")
         split.setPosition(sidebar.splitViewItems[0].minimumThickness, ofDividerAt: 0)
         window.layoutIfNeeded()
-        let inFrame = try require(include.superview?.superview, "Include has a shared field bezel")
-        let exFrame = try require(exclude.superview?.superview, "Exclude has a shared field bezel")
+        let inFrame = try require(include.enclosingScrollView?.superview as? FindInput, "Include has a shared field bezel")
+        let exFrame = try require(exclude.enclosingScrollView?.superview as? FindInput, "Exclude has a shared field bezel")
         try expect(abs(inFrame.frame.width - scope.frame.width) < 1 &&
                    abs(exFrame.frame.width - scope.frame.width) < 1 && scope.frame.width >= 188,
                    "equal-width fields and scope fill the minimum sidebar width")
@@ -184,11 +187,102 @@ enum WorkspaceFindCheck {
         defer { peer.window.close() }
         _ = try await app.openFile(root, in: peer)
         peer.performFind(.findWorkspace)
-        try expect(field("Include", in: peer.window)?.stringValue == "./Sources/**" &&
-                   field("Exclude", in: peer.window)?.stringValue == "*.log" &&
+        try expect(field("Files to include", in: peer.window)?.string == "./Sources/**" &&
+                   field("Files to exclude", in: peer.window)?.string == "*.log" &&
                    peer.sessionDocument().findSettings?.scope == .workspace,
                    "workspace filters are shared by folder and the active scope belongs to the window session")
         try checkStoredFilters(root: root)
+    }
+
+    private static func checkFields(in document: DocumentWindow, finder: FindFieldTextView, include: FindFieldTextView,
+                                    exclude: FindFieldTextView, ignore: NSButton, capture: (NSWindow, String) throws -> Void) throws {
+        let window = document.window
+        document.performFind(.replace)
+        let replace = try require(field("Replace", in: window), "find the Replace field")
+        let regex = try require(descendant(in: window.contentView, of: NSButton.self) {
+            $0.toolTip == "Regular Expression"
+        }, "find the trailing toggle in Find")
+        window.layoutIfNeeded()
+        let fields = [finder, replace, include, exclude]
+        let bezels = try fields.map { try require($0.enclosingScrollView?.superview as? FindInput, "use a shared Search field") }
+        func origin(_ field: FindFieldTextView, in bezel: FindInput) -> CGFloat {
+            field.convert(field.textContainerOrigin, to: bezel).y
+        }
+        let first = bezels[0]
+        for (field, bezel) in zip(fields, bezels) {
+            let position = origin(field, in: bezel)
+            try expect(abs(first.bounds.height - bezel.bounds.height) < 0.5 &&
+                       abs(position - origin(finder, in: first)) < 0.5, "use the same text position and height in all four fields")
+            try expect(window.makeFirstResponder(field), "focus \(field.placeholder)")
+            window.layoutIfNeeded()
+            try expect(abs(position - origin(field, in: bezel)) < 0.5, "the text baseline stays fixed on focus")
+        }
+        let findButton = regex.convert(regex.bounds, to: first)
+        let excludeButton = ignore.convert(ignore.bounds, to: bezels[3])
+        try expect(findButton.size == excludeButton.size &&
+                   abs(findButton.midY - excludeButton.midY) < 0.5 &&
+                   abs((first.bounds.maxX - findButton.maxX) - (bezels[3].bounds.maxX - excludeButton.maxX)) < 0.5,
+                   "the trailing toggles share size and insets")
+        try capture(window, "fields")
+        let longGlob = String(repeating: "Long Folder/", count: 12) + "*.swift"
+        set(longGlob, in: exclude)
+        try expect(exclude.string == longGlob && exclude.frame.width > (exclude.enclosingScrollView?.bounds.width ?? 0) &&
+                   abs(bezels[3].bounds.height - first.bounds.height) < 0.5, "long globs scroll horizontally on one line")
+        set("", in: exclude)
+        document.performFind(.toggleReplace)
+    }
+
+    private static func checkScopeTransition(in document: DocumentWindow, scope: ModeSelector, finder: FindFieldTextView,
+                                             workspace: WorkspaceFindTable, capture: (NSWindow, String) throws -> Void) async throws {
+        let window = document.window
+        document.performFind(.find)
+        let menu = try require(window.toolbar?.items.compactMap { $0 as? SidebarMenuItem }.first?.options?.menu,
+                               "find the Search options menu")
+        menu.performActionForItem(at: menu.indexOfItem(withTitle: "Tree Mode"))
+        defer { menu.performActionForItem(at: menu.indexOfItem(withTitle: "Tree Mode")) }
+        let buffer = try require(descendant(in: window.contentView, of: SidebarActionResultTable.self) {
+            $0.accessibilityLabel() == "Search Results"
+        }, "find the Current Buffer results")
+        set("value", in: finder)
+        try await waitFor("paint the Current Buffer match before selecting Workspace") {
+            buffer.numberOfRows == 1 && !document.resultDecorations.visibleHighlightsForCheck.isEmpty
+        }
+        let highlights = document.resultDecorations.visibleHighlightsForCheck
+        let text = document.editor.string
+        let (gate, release) = AsyncStream<Void>.makeStream()
+        var scans = 0
+        document.beforePublishingWorkspaceFindForCheck = {
+            scans += 1
+            for await _ in gate { break }
+        }
+        defer {
+            release.finish()
+            document.beforePublishingWorkspaceFindForCheck = nil
+        }
+        scope.buttonForCheck(at: 1).performClick(nil)
+        try await waitFor("hold the first workspace response") { scans == 1 }
+        try await Task.sleep(for: .milliseconds(200))
+        try capture(window, "scope-pending")
+        try expect(window.title.contains("Alpha.swift") && document.editor.string == text,
+                   "keep the title and buffer text paired during the scope switch")
+        try expect(document.resultDecorations.visibleHighlightsForCheck == highlights,
+                   "keep the editor highlight while the workspace scan is pending")
+        try expect(!buffer.isHiddenOrHasHiddenAncestor && buffer.numberOfRows == 1,
+                   "keep the buffer result visible while the first workspace scan is pending")
+        release.finish()
+        try await waitFor("present the workspace tree and editor highlight together") {
+            !workspace.isHiddenOrHasHiddenAncestor && workspace.numberOfRows == 9 && rows(in: workspace).count == 4
+        }
+        try capture(window, "scope-ready")
+        try expect(document.resultDecorations.visibleHighlightsForCheck == highlights,
+                   "the first frame of Workspace preserves the editor highlight")
+        scope.buttonForCheck(at: 0).performClick(nil)
+        scope.buttonForCheck(at: 1).performClick(nil)
+        try expect(!workspace.isHiddenOrHasHiddenAncestor && rows(in: workspace).count == 4 &&
+                   document.resultDecorations.visibleHighlightsForCheck == highlights,
+                   "return to a populated Workspace tree and preserve the highlight immediately")
+        try await Task.sleep(for: .milliseconds(200))
+        try expect(scans == 1, "switching back to Workspace does not rerun an unchanged search")
     }
 
     private static func checkGlobs() throws {
@@ -217,17 +311,16 @@ enum WorkspaceFindCheck {
         (0..<table.numberOfRows).filter { table.view(atColumn: 0, row: $0, makeIfNecessary: true) is SidebarActionResultCell }
     }
 
-    private static func field(_ name: String, in window: NSWindow) -> NSTextField? {
-        descendant(in: window.contentView, of: NSTextField.self) { $0.accessibilityLabel() == name }
+    private static func field(_ name: String, in window: NSWindow) -> FindFieldTextView? {
+        descendant(in: window.contentView, of: FindFieldTextView.self) { $0.accessibilityLabel() == name }
     }
 
     private static func fieldValue(_ value: String, in window: NSWindow) -> Bool {
         descendant(in: window.contentView, of: NSTextField.self) { $0.stringValue == value && !$0.isHiddenOrHasHiddenAncestor } != nil
     }
 
-    private static func set(_ value: String, in field: NSTextField) {
-        field.stringValue = value
-        field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
+    private static func set(_ value: String, in field: FindFieldTextView) {
+        field.insertText(value, replacementRange: NSRange(location: 0, length: field.string.utf16.count))
     }
 
     private static func descendant<T: NSView>(in view: NSView?, of type: T.Type, where matches: (T) -> Bool = { _ in true }) -> T? {
