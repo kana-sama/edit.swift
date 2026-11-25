@@ -2,3 +2,4 @@
 /.local/
 /.swiftpm/
 .DS_Store
+.vscode
