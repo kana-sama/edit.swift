@@ -106,13 +106,15 @@ final class SyntaxHighlighting {
             semanticExpiry?.cancel()
             semanticExpiry = nil
             displaySemantic([])
-        } else if let previous, previous.revision != request.revision, !semanticSpans.isEmpty, semanticExpiry == nil {
-            // Keep remapped colors through ordinary edits. Repeated edits cannot extend the deadline.
+        } else if semanticExpiry == nil, semanticSpans.contains(where: \.provisional) {
+            // Only a token whose text changed has a speculative color. Keep the rest until replacement.
             semanticExpiry = Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(1500))
-                guard !Task.isCancelled else { return }
-                self?.semanticExpiry = nil
-                self?.displaySemantic([])
+                guard !Task.isCancelled, let self else { return }
+                self.semanticExpiry = nil
+                let count = self.semanticSpans.count
+                self.semanticSpans.removeAll(where: \.provisional)
+                if self.semanticSpans.count != count { self.repaintLayers() }
             }
         }
 

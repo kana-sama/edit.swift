@@ -62,7 +62,7 @@ final class LanguageServerSession {
     var supportsRename: Bool { isReady && capabilities?.rename == true }
     var workspaceRoot: URL? { root }
 
-    private var canControl: Bool { isEligible && rootLookup == nil }
+    private var canControl: Bool { isEligible && rootLookup?.blocksServer != true }
     private var isServerReady: Bool { canControl && phase == .ready }
     private var isReady: Bool { isServerReady && document.url != nil }
     private var phase = State.stopped
@@ -82,13 +82,20 @@ final class LanguageServerSession {
         guard let root, let recognizedScope else { return nil }
         return recognizedScope.searchesParentProjects ? root : recognizedScope.directory
     }
-    private var rootLookup: Task<Void, Never>?
+    private struct ProjectLookup {
+        let task: Task<Void, Never>
+        let blocksServer: Bool
+    }
+    private var rootLookup: ProjectLookup?
     private var transition: Task<Void, Never>?
     private var sync: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var connection: LanguageServerConnection?
     private var capabilities: LSPCapabilities?
     private var semanticTokenResult: LSPSemanticTokens?
+#if EDIT_AGENT_CHECKS
+    var beforeApplyProjectRootForCheck: (() async -> Void)?
+#endif
 
     init(server: LanguageServer, workspacePreferences: WorkspaceLanguageServers) {
         self.server = server
@@ -115,7 +122,7 @@ final class LanguageServerSession {
                 FileSystemEvents(directory: scope.directory) { [weak self] events in
                     guard let self, self.scope == scope,
                           events.contains(where: { server.affectsProjectDiscovery($0, in: scope.directory) }) else { return }
-                    discoverProject()
+                    discoverProject(recheckingCurrentContext: true)
                 }
             }
         }
@@ -127,8 +134,9 @@ final class LanguageServerSession {
         discoverProject()
     }
 
-    private func discoverProject() {
-        rootLookup?.cancel()
+    private func discoverProject(recheckingCurrentContext: Bool = false) {
+        let blocksServer = !recheckingCurrentContext || !canControl
+        rootLookup?.task.cancel()
         rootLookup = nil
         guard let scope else {
             recognizedScope = nil
@@ -142,18 +150,26 @@ final class LanguageServerSession {
             server.projectRoot(in: scope.directory, activeFile: file, previousRoot: previousRoot,
                                searchesParents: scope.searchesParentProjects)
         }
-        rootLookup = Task { [weak self] in
+        let task = Task { [weak self] in
             let root = await withTaskCancellationHandler {
                 await search.value
             } onCancel: {
                 search.cancel()
             }
             guard !Task.isCancelled, let self else { return }
+#if EDIT_AGENT_CHECKS
+            if let beforeApply = self.beforeApplyProjectRootForCheck {
+                await beforeApply()
+                guard !Task.isCancelled else { return }
+            }
+#endif
             self.rootLookup = nil
             self.recognizedScope = scope
             self.activate(root: root)
         }
-        onStateChange?()
+        // A filesystem recheck can confirm the current root. Keep serving it until there is a change.
+        rootLookup = ProjectLookup(task: task, blocksServer: blocksServer)
+        if blocksServer { onStateChange?() }
     }
 
     func updateText(_ text: String) {
@@ -198,7 +214,7 @@ final class LanguageServerSession {
     }
 
     func close() {
-        rootLookup?.cancel()
+        rootLookup?.task.cancel()
         rootLookup = nil
         monitor = nil
         sync?.cancel()
@@ -385,7 +401,7 @@ final class LanguageServerSession {
                     connection?.updateWatchedFiles(LanguageServer.sourceKit.indexChanges(events, in: root))
                 }
             }
-            if rootLookup == nil { connection.updateDocument(document) }
+            if canControl { connection.updateDocument(document) }
             setPhase(.ready)
         } catch {
             await connection.stop()

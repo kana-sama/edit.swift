@@ -37,7 +37,8 @@ enum LSPSemanticHighlightCheck {
             """
         try manifest.write(to: root.appending(path: "Package.swift"), atomically: true, encoding: .utf8)
         let zigText = "pub const none: ?u64 = null;\r\nconst label = \"🧩\"; pub const ZigWidget = struct {};\r\n"
-            + "pub const WidgetAlias = ZigWidget;\r\npub var Counter: u64 = 3;\r\nconst wordSize = @sizeOf(u64);\r\n"
+            + "pub const FirstAlias = ZigWidget;\r\npub const WidgetAlias = ZigWidget;\r\n"
+            + "pub const LastAlias = ZigWidget;\r\npub var Counter: u64 = 3;\r\nconst wordSize = @sizeOf(u64);\r\n"
         try zigText.write(to: zig, atomically: true, encoding: .utf8)
         try swiftText.write(to: swift, atomically: true, encoding: .utf8)
         try "fn marker() -> i32 { 7 }\n".write(to: rust, atomically: true, encoding: .utf8)
@@ -113,29 +114,66 @@ enum LSPSemanticHighlightCheck {
 
         let editor = document.editor
         guard let highlighting = editor.syntaxHighlighting else { throw Failure(detail: "attach highlighting") }
-        let (heldResult, release) = AsyncStream<Void>.makeStream()
+        let session = document.languageFeatures.session
+        let generation = session.generation
+        var holdProjectRoot = true
+        var projectRootPending = false
+        session.beforeApplyProjectRootForCheck = {
+            projectRootPending = true
+            while holdProjectRoot && !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
+        }
+        var holdResult = true
         var responsePending = false
         highlighting.beforeInstallSemanticTokensForCheck = {
             responsePending = true
-            for await _ in heldResult { break }
+            while holdResult && !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
         }
         defer {
             highlighting.beforeInstallSemanticTokensForCheck = nil
-            release.finish()
+            holdResult = false
+            session.beforeApplyProjectRootForCheck = nil
+            holdProjectRoot = false
         }
         let outgoingTitle = document.window.title
+        document.window.appearance = NSAppearance(named: .darkAqua)
+        document.window.layoutIfNeeded()
+        func checkUnchangedAliases(_ frame: String) throws {
+            for alias in ["FirstAlias", "LastAlias"] {
+                try require(!hasColor(alias, in: document) && hasColor(alias, in: document, layer: .lsp, color: .type),
+                            "retain the LSP-only color of \(alias) \(frame)")
+                let range = (editor.string as NSString).range(of: alias)
+                try requireGlyphColors(in: range, document: document, expected: .type)
+            }
+        }
+        try checkUnchangedAliases("before editing")
+        let alias = (editor.string as NSString).range(of: "WidgetAlias")
+        let extended = NSRange(location: alias.location, length: alias.length + 1)
         let start = ContinuousClock.now
-        editor.insertText("pub const Added = struct {};\n", replacementRange: NSRange(location: 0, length: 0))
+        editor.insertText("X", replacementRange: NSRange(location: alias.upperBound, length: 0))
+        try checkUnchangedAliases("in the first edited frame")
+        try requireGlyphColors(in: extended, document: document, expected: .type)
         try await wait("receive an edited token result") { responsePending }
-        try await Task.sleep(for: .milliseconds(450))
+        await document.flushAutosave()
+        try await wait("hold the project rediscovery triggered by the atomic save") { projectRootPending }
+        try require(session.supportsSemanticTokens && session.generation == generation,
+                    "keep the same semantic provider while checking the saved file's project")
+        try checkUnchangedAliases("while project rediscovery is pending")
+        try captureWindow(document.window, "pending")
+        try await Task.sleep(until: start + .milliseconds(1_750), clock: .continuous)
+        try captureWindow(document.window, "pending-after-deadline")
+        try checkUnchangedAliases("after the stale color deadline with ZLS still held")
+        try requireGlyphColors(in: extended, document: document, expected: .plain)
         try require(document.window.title == outgoingTitle && hasColor("null", in: document, color: .control)
                     && hasColor("null", in: document, layer: .lsp, color: .control)
                     && paintedColor("null", in: document) == SyntaxColor.control.nativeColor,
                     "keep both layers and the title while a replacement overlay is held")
-        try captureWindow(document.window, "pending")
+        session.beforeApplyProjectRootForCheck = nil
+        holdProjectRoot = false
         highlighting.beforeInstallSemanticTokensForCheck = nil
-        release.finish()
-        try await wait("paint the new semantic tokens") { hasSemanticColor("Added", in: document) }
+        holdResult = false
+        try await wait("paint the new semantic tokens") { hasSemanticColor("WidgetAliasX", in: document) }
+        try checkUnchangedAliases("in the first frame with the fresh response")
+        try requireGlyphColors(in: extended, document: document, expected: .type)
         try require(document.window.title == outgoingTitle, "retain the title on the first colored frame")
         try captureWindow(document.window, "ready")
         print("LSP highlighting: edited Zig buffer painted in \(start.duration(to: .now)) including the held response.")
@@ -154,7 +192,7 @@ enum LSPSemanticHighlightCheck {
             opening.cancel()
         }
         try await wait("hold the incoming Rust buffer") { openingPending }
-        try require(document.window.title == outgoingTitle && hasSemanticColor("Added", in: document),
+        try require(document.window.title == outgoingTitle && hasSemanticColor("WidgetAliasX", in: document),
                     "keep the outgoing buffer, colors and title while opening")
         finishOpen.finish()
         try require(try await opening.value === document, "open a file without an LSP")
