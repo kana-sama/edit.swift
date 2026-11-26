@@ -68,6 +68,12 @@ struct LSPTextIndex: @unchecked Sendable {
         lineEnds.indices.contains(line) ? lineEnds[line] : nil
     }
 
+    func diagnosticDisplayRange(_ range: NSRange, on line: Int) -> NSRange {
+        guard range.length == 0, lineStarts.indices.contains(line) else { return range }
+        let bounds = lineStarts[line]..<lineEnds[line]
+        return EditorWordBoundary.wordRange(containing: range.location, within: bounds, in: text) ?? range
+    }
+
     func position(at offset: Int) -> LSPPosition? {
         guard (0...text.length).contains(offset), isScalarBoundary(offset) else { return nil }
         let line = lineContaining(offset)

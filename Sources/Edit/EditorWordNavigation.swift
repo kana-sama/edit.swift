@@ -46,6 +46,13 @@ enum EditorWordBoundary {
         return index
     }
 
+    static func wordRange(containing offset: Int, within bounds: Range<Int>, in text: NSString) -> NSRange? {
+        guard bounds.contains(offset), kind(at: offset, in: text) == .word else { return nil }
+        let start = skip(.word, from: offset, toward: bounds.lowerBound, in: text)
+        let end = skip(.word, from: offset, toward: bounds.upperBound, in: text)
+        return NSRange(location: start, length: end - start)
+    }
+
     static func move(from offset: Int, backward: Bool, multipleCarets: Bool, in text: NSString) -> Int {
         var position = offset
         var bounds = line(at: offset, in: text)

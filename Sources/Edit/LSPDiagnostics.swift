@@ -29,7 +29,8 @@ struct LSPPublishedDiagnostics: Decodable {
             guard diagnostic.severity == nil || diagnostic.severity == 1,
                   let range = index.nsRange(diagnostic.range),
                   let lineEnd = index.lineContentEnd(at: diagnostic.range.start.line) else { return nil }
-            let error = LSPError(range: range, lineEnd: lineEnd, message: diagnostic.message ?? "")
+            let displayRange = index.diagnosticDisplayRange(range, on: diagnostic.range.start.line)
+            let error = LSPError(range: range, lineEnd: lineEnd, message: diagnostic.message ?? "", displayRange: displayRange)
             return seen.insert(error).inserted ? error : nil
         }
         return errors.sorted { $0.range.location < $1.range.location }
@@ -38,8 +39,16 @@ struct LSPPublishedDiagnostics: Decodable {
 
 struct LSPError: Hashable, Sendable {
     let range: NSRange
+    let displayRange: NSRange
     let lineEnd: Int
     let message: String
+
+    init(range: NSRange, lineEnd: Int, message: String, displayRange: NSRange? = nil) {
+        self.range = range
+        self.displayRange = displayRange ?? range
+        self.lineEnd = lineEnd
+        self.message = message
+    }
 }
 
 struct LSPDocumentErrors: Sendable {

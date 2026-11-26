@@ -73,7 +73,7 @@ extension EditorTextView {
         return charRange(viewport, in: manager)
     }
 
-    var diagnosticRanges: [NSRange] { diagnostics.map(\.range) }
+    var diagnosticRanges: [NSRange] { diagnostics.map(\.displayRange) }
 
     func diagnosticRects() -> [NSRect] {
         guard let visible = diagnosticViewport else { return [] }
@@ -127,25 +127,27 @@ extension EditorTextView {
     }
 
     func diagnosticHover(at point: NSPoint) -> EditorDiagnosticHover? {
-        guard let visible = diagnosticViewport else { return nil }
-        if let row = diagnosticRows(in: visible).first(where: { $0.bounds.minY <= point.y && point.y < $0.bounds.maxY }) {
-            let message = messageFrame(for: row).intersection(visibleRect)
-            let anchor = !message.isEmpty
-                ? NSRect(x: message.minX + min(7, message.width / 2), y: message.minY, width: 1, height: message.height)
-                : row.bounds
-            let clipped = anchor.intersection(visibleRect)
-            if !clipped.isEmpty { return EditorDiagnosticHover(anchor: clipped, messages: row.message.messages) }
+        guard visibleRect.contains(point), let visible = diagnosticViewport else { return nil }
+        for row in diagnosticRows(in: visible) where row.bounds.minY <= point.y && point.y < row.bounds.maxY {
+            let lens = messageFrame(for: row).intersection(visibleRect)
+            if lens.contains(point) {
+                let anchor = NSRect(x: lens.minX + min(7, lens.width / 2), y: lens.minY, width: 1, height: lens.height)
+                return EditorDiagnosticHover(anchor: anchor, messages: row.message.messages)
+            }
         }
-        // An underline can be on an earlier wrapped row or span several source lines.
-        let matching = diagnostics.compactMap { error -> (LSPError, NSRect)? in
-            guard let rect = diagnosticRects(for: [error.range], in: visible).first(where: {
-                $0.minY <= point.y && point.y < $0.maxY && $0.intersects(visibleRect)
-            }) else { return nil }
-            return (error, rect)
+
+        // A narrower underline identifies the more specific error when ranges overlap.
+        var match: (error: LSPError, anchor: NSRect)?
+        for error in diagnostics {
+            let range = error.displayRange
+            guard range.location <= visible.upperBound, range.upperBound >= visible.location,
+                  range.length < (match?.error.displayRange.length ?? Int.max),
+                  error.message.contains(where: { !$0.isWhitespace }),
+                  let rect = diagnosticRects(for: [range], in: visible).first(where: { $0.contains(point) }) else { continue }
+            match = (error, rect)
         }
-        let messages = diagnosticMessages(matching.map(\.0))
-        guard let anchor = matching.first?.1, !messages.isEmpty else { return nil }
-        return EditorDiagnosticHover(anchor: anchor.intersection(visibleRect), messages: messages)
+        guard let match else { return nil }
+        return EditorDiagnosticHover(anchor: match.anchor.intersection(visibleRect), messages: [match.error.message])
     }
 
     private var usesDarkDiagnosticColors: Bool {

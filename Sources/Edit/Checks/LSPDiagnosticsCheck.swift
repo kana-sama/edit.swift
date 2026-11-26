@@ -22,15 +22,18 @@ enum LSPDiagnosticsCheck {
         }
         let zig = root.appending(path: "Error.zig")
         let swift = sources.appending(path: "Error.swift")
+        let swiftParser = sources.appending(path: "Parser.swift")
         let odin = root.appending(path: "Error.odin")
         let c = cRoot.appending(path: "Error.c")
         let clean = root.appending(path: "Clean.txt")
         let zigText = "pub const label = \"🧩\"; pub const value = );\r\n"
         let swiftText = "let label = \"🧩\"; let value = missingName\r\n"
+        let swiftParserText = "func parserFixture() {\n    let let = 1; let \n}\n"
         let odinText = "package fixture\nmain :: proc() { x := ) }\n"
         let cText = "int value(void) { return missing_name; }\n"
         try zigText.write(to: zig, atomically: true, encoding: .utf8)
         try swiftText.write(to: swift, atomically: true, encoding: .utf8)
+        try swiftParserText.write(to: swiftParser, atomically: true, encoding: .utf8)
         try odinText.write(to: odin, atomically: true, encoding: .utf8)
         try cText.write(to: c, atomically: true, encoding: .utf8)
         try "clean\n".write(to: clean, atomically: true, encoding: .utf8)
@@ -70,13 +73,11 @@ enum LSPDiagnosticsCheck {
         guard let first = editor.diagnostics.first(where: { $0.range.location == zigError.location }) else {
             throw Failure(detail: "find the primary error for the multiple-error fixture")
         }
-        guard let move = NSEvent.mouseEvent(
-            with: .mouseMoved, location: editor.convert(NSPoint(x: row.minX + 2, y: row.midY), to: nil),
-            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: document.window.windowNumber,
-            context: nil, eventNumber: 0, clickCount: 0, pressure: 0
-        ) else { throw Failure(detail: "create a pointer event over the start of the line") }
-        editor.mouseMoved(with: move)
-        try await wait("show the full error when hovering away from the underline on its row") {
+        guard let underline = rects.first else { throw Failure(detail: "find an underlined error under the pointer") }
+        let codePoint = NSPoint(x: underline.midX, y: underline.midY)
+        let lensPoint = NSPoint(x: messageArea.minX + 4, y: messageArea.midY)
+        try movePointer(to: codePoint, in: document)
+        try await wait("show the error under the pointer") {
             guard let view = editor.languageHoverWindowForCheck?.contentView else { return false }
             return hoverContains(first.message, in: view)
         }
@@ -107,12 +108,17 @@ enum LSPDiagnosticsCheck {
         editor.setDiagnostics([first])
         let singleWidth = editor.diagnosticMinimumWidth
         let detail = "Another error on this line. Its full explanation is only visible in the diagnostic card."
-        editor.setDiagnostics([first, LSPError(range: first.range, lineEnd: end, message: detail)])
+        editor.setDiagnostics([first, LSPError(range: first.range, lineEnd: end, message: detail, displayRange: first.displayRange)])
         let extraWidth = editor.diagnosticMinimumWidth - singleWidth
         try require(extraWidth > 0 && extraWidth < 30, "reserve room for the count and keep only the first message inline")
         try capture(document.window, nil)
-        editor.mouseMoved(with: move)
-        try await wait("show both full errors when hovering their row") {
+        try movePointer(to: codePoint, in: document)
+        try await wait("show a single error on code even when two diagnostics share its range") {
+            guard let view = editor.languageHoverWindowForCheck?.contentView else { return false }
+            return hoverRows(in: view) == [first.message]
+        }
+        try movePointer(to: lensPoint, in: document)
+        try await wait("show both full errors when hovering the diagnostic lens") {
             guard let view = editor.languageHoverWindowForCheck?.contentView else { return false }
             return hoverRows(in: view) == [first.message, detail] && errorIconCount(in: view) == 2
         }
@@ -144,13 +150,18 @@ enum LSPDiagnosticsCheck {
         try require(document.window.title.hasSuffix("Clean.txt") && editor.diagnosticRanges.isEmpty,
                     "clear outgoing diagnostics on the first presentation of the new file")
 
-        for (url, text, marker, server) in [(swift, swiftText, "missingName", LanguageServer.sourceKit),
-                                            (odin, odinText, "main ::", .odin)] {
-            try require(try await app.openFile(url, in: document) === document, "open \(server.name) fixture")
-            let error = (text as NSString).range(of: marker)
-            try await wait("receive \(server.name) diagnostics for \(marker)") {
-                editor.diagnosticRanges.contains { $0.location == error.location }
-            }
+        try require(try await app.openFile(swift, in: document) === document, "open the Swift type-checking fixture")
+        let missingName = (swiftText as NSString).range(of: "missingName")
+        try await wait("receive SourceKit-LSP diagnostics for missingName") {
+            editor.diagnosticRanges.contains { $0.location == missingName.location }
+        }
+        try require(try await app.openFile(swiftParser, in: document) === document, "open the Swift parser fixture")
+        try await checkSwiftParserDiagnostics(in: document, text: swiftParserText)
+
+        try require(try await app.openFile(odin, in: document) === document, "open the OLS fixture")
+        let odinError = (odinText as NSString).range(of: "main ::")
+        try await wait("receive the OLS parser diagnostics") {
+            editor.diagnosticRanges.contains { $0.location == odinError.location }
         }
         document.setFolder(cRoot)
         try require(try await app.openFile(c, in: document) === document, "open C fixture")
@@ -160,6 +171,64 @@ enum LSPDiagnosticsCheck {
         }
         document.window.close()
         try await wait("stop the fixture servers") { features.serversStoppedForCheck }
+    }
+
+    private static func checkSwiftParserDiagnostics(in document: DocumentWindow, text: String) async throws {
+        let editor = document.editor
+        let source = text as NSString
+        let fragment = source.range(of: "let let =")
+        let secondLet = NSRange(location: fragment.location + 4, length: 3)
+        let equals = NSRange(location: secondLet.upperBound + 1, length: 0)
+        let line = LineEditing.line(at: secondLet.location, in: source)
+        try await wait("receive all three parser diagnostics on the Swift line") {
+            editor.diagnostics.filter { $0.lineEnd == line.contentEnd }.count == 3
+        }
+        let errors = editor.diagnostics.filter { $0.lineEnd == line.contentEnd }
+        guard let nested = errors.first(where: { $0.range.location == secondLet.location }),
+              let expected = errors.first(where: { $0.range.location == equals.location }) else {
+            throw Failure(detail: "find the nested let and expected-pattern diagnostics")
+        }
+        try require(nested.range.length == 0 && nested.displayRange == secondLet && expected.displayRange == equals,
+                    "underline the entire second let and preserve the point at punctuation")
+
+        document.window.layoutIfNeeded()
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        let lastCharacter = NSRange(location: secondLet.upperBound - 1, length: 1)
+        guard let lastGlyph = editor.highlightRects(for: [lastCharacter]).first,
+              let value = editor.highlightRects(for: [source.range(of: "1")]).first,
+              let row = editor.laidOutLineBounds(at: line.contentEnd),
+              let secondPoint = editor.lineBounds(at: equals.location) else {
+            throw Failure(detail: "lay out distinct Swift diagnostic hit targets")
+        }
+        let gap = ("0000" as NSString).size(withAttributes: [.font: editor.font ?? EditorTextView.defaultFont]).width
+        let lastGlyphPoint = NSPoint(x: lastGlyph.midX, y: lastGlyph.midY)
+        let punctuation = NSPoint(x: secondPoint.minX + 2, y: secondPoint.midY)
+        try require(editor.diagnosticHover(at: lastGlyphPoint)?.messages == [nested.message]
+                    && editor.diagnosticHover(at: punctuation)?.messages == [expected.message],
+                    "hit distinct diagnostics on the same line, including the last letter of the expanded token")
+        try require(editor.diagnosticHover(at: NSPoint(x: value.midX, y: value.midY)) == nil
+                    && editor.diagnosticHover(at: NSPoint(x: row.maxX + gap / 2, y: row.midY)) == nil,
+                    "leave unrelated source text and the gap before the lens free of diagnostic hover")
+        try movePointer(to: lastGlyphPoint, in: document)
+        try await wait("show only the nested-let error from the last letter of let") {
+            guard let view = editor.languageHoverWindowForCheck?.contentView else { return false }
+            return hoverRows(in: view) == [nested.message]
+        }
+        try movePointer(to: NSPoint(x: row.maxX + gap + 8, y: row.midY), in: document)
+        try await wait("show all Swift parser errors from the lens") {
+            guard let view = editor.languageHoverWindowForCheck?.contentView else { return false }
+            return hoverRows(in: view) == errors.map(\.message)
+        }
+    }
+
+    private static func movePointer(to point: NSPoint, in document: DocumentWindow) throws {
+        let editor = document.editor
+        guard let event = NSEvent.mouseEvent(
+            with: .mouseMoved, location: editor.convert(point, to: nil), modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: document.window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: 0, pressure: 0
+        ) else { throw Failure(detail: "create a pointer event in the diagnostic fixture") }
+        editor.mouseMoved(with: event)
     }
 
     private static func checkPublications() throws {
@@ -185,6 +254,14 @@ enum LSPDiagnosticsCheck {
                     "ignore both stale versions and other documents")
         try require(try decode(url, nil, [error])?.count == 1 && decode(url, 7, []) == [],
                     "accept unversioned reports and an empty replacement")
+
+        let point = NSRange(location: 4, length: 0)
+        let explicit = NSRange(location: 4, length: 1)
+        let lineEnd = NSRange(location: 6, length: 0)
+        try require(index.diagnosticDisplayRange(point, on: 0) == NSRange(location: 3, length: 3)
+                    && index.diagnosticDisplayRange(explicit, on: 0) == explicit
+                    && index.diagnosticDisplayRange(lineEnd, on: 0) == lineEnd,
+                    "expand a point inside a word without changing explicit ranges or line-end points")
     }
 
     private static func hoverContains(_ message: String, in view: NSView) -> Bool {
@@ -297,7 +374,7 @@ enum LSPDiagnosticsCheck {
         try require(!scroll.hasHorizontalScroller && abs(editor.frame.width - wrappedWidth) < 1,
                     "keep word wrap within the viewport (editor \(editor.frame.width), expected \(wrappedWidth), scroller \(scroll.hasHorizontalScroller))")
         try require(editor.laidOutLineBounds(at: lineEnd)?.height == row.height
-                    && editor.diagnosticHover(at: NSPoint(x: 16, y: row.midY))?.messages.last?.hasSuffix("END") == true,
+                    && editor.diagnosticHover(at: NSPoint(x: row.maxX + 36, y: row.midY))?.messages.last?.hasSuffix("END") == true,
                     "keep the message on one row and reveal its full text on hover in word wrap")
 
         editor.setWordWrap(false)
