@@ -20,6 +20,7 @@ Use separate fresh directories via `EDIT_BUILD_DIR` and `EDIT_SDK_CACHE_DIR` to 
 ## Focused checks
 
 - `./script/check --only editor [screenshot-path]` checks editing, multiple carets, viewport resizing, zoom, word wrap, and active-line painting. The optional PNG captures the initial editor fixture. The `-word-wrap.png` and `-word-wrap-sidebar.png` captures show the wrapped buffer at two widths.
+- `./script/check --only syntax` checks bundled grammars, first-frame drawing, and Tree-sitter-only editing while a background result is held.
 - `./script/check --only inline-diff [screenshot-path]` checks the inline diff, Escape priority, sidebar geometry, and overscroll. The optional PNG captures the viewport at the final right overscroll position, or the viewport where the geometry check failed.
 - `./script/check --only files [screenshot-path]` checks file and folder opening, Close Workspace, saves, autosave, session restoration, and previews. The optional `-pending.png` and `-standalone.png` captures show both sides of the Close Workspace transition.
 - `./script/check --only markdown [screenshot-path]` exercises Markdown table edits, rendering, task undo, link tooltips, navigation, and preview state. With a screenshot path, it captures the original preview, the original preview while the transition is held, and the prepared destination at its anchor.

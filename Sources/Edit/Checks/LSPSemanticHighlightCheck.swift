@@ -142,7 +142,7 @@ enum LSPSemanticHighlightCheck {
                 try require(!hasColor(alias, in: document) && hasColor(alias, in: document, layer: .lsp, color: .type),
                             "retain the LSP-only color of \(alias) \(frame)")
                 let range = (editor.string as NSString).range(of: alias)
-                try requireGlyphColors(in: range, document: document, expected: .type)
+                try SyntaxCheck.requireGlyphColors(in: range, document: document, expected: .type)
             }
         }
         try checkUnchangedAliases("before editing")
@@ -151,7 +151,7 @@ enum LSPSemanticHighlightCheck {
         let start = ContinuousClock.now
         editor.insertText("X", replacementRange: NSRange(location: alias.upperBound, length: 0))
         try checkUnchangedAliases("in the first edited frame")
-        try requireGlyphColors(in: extended, document: document, expected: .type)
+        try SyntaxCheck.requireGlyphColors(in: extended, document: document, expected: .type)
         try await wait("receive an edited token result") { responsePending }
         await document.flushAutosave()
         try await wait("hold the project rediscovery triggered by the atomic save") { projectRootPending }
@@ -162,7 +162,7 @@ enum LSPSemanticHighlightCheck {
         try await Task.sleep(until: start + .milliseconds(1_750), clock: .continuous)
         try captureWindow(document.window, "pending-after-deadline")
         try checkUnchangedAliases("after the stale color deadline with ZLS still held")
-        try requireGlyphColors(in: extended, document: document, expected: .plain)
+        try SyntaxCheck.requireGlyphColors(in: extended, document: document, expected: .plain)
         try require(document.window.title == outgoingTitle && hasColor("null", in: document, color: .control)
                     && hasColor("null", in: document, layer: .lsp, color: .control)
                     && paintedColor("null", in: document) == SyntaxColor.control.nativeColor,
@@ -173,7 +173,7 @@ enum LSPSemanticHighlightCheck {
         holdResult = false
         try await wait("paint the new semantic tokens") { hasSemanticColor("WidgetAliasX", in: document) }
         try checkUnchangedAliases("in the first frame with the fresh response")
-        try requireGlyphColors(in: extended, document: document, expected: .type)
+        try SyntaxCheck.requireGlyphColors(in: extended, document: document, expected: .type)
         try require(document.window.title == outgoingTitle, "retain the title on the first colored frame")
         try captureWindow(document.window, "ready")
         print("LSP highlighting: edited Zig buffer painted in \(start.duration(to: .now)) including the held response.")
@@ -270,30 +270,30 @@ enum LSPSemanticHighlightCheck {
             highlighting.beforeInstallSemanticTokensForCheck = nil
         }
         let title = window.title
-        let incrementalBefore = editor.syntaxAnalysis.zigReusesForCheck
+        let incrementalBefore = editor.syntaxAnalysis.treeReusesForCheck
         editor.setSelectedRange(NSRange(location: prefix.upperBound, length: 0))
         editor.insertText("r", replacementRange: NSRange(location: NSNotFound, length: 0))
         let keyword = NSRange(location: prefix.location, length: 5)
-        try require(editor.syntaxAnalysis.zigReusesForCheck > incrementalBefore,
+        try require(editor.syntaxAnalysis.treeReusesForCheck > incrementalBefore,
                     "parse the completed keyword using the previous Zig tree before drawing")
         try require(hasSemanticColor("Other", in: document), "preserve an unaffected semantic token beside the edit")
-        try requireGlyphColors(in: keyword, document: document, expected: .keyword)
+        try SyntaxCheck.requireGlyphColors(in: keyword, document: document, expected: .keyword)
         try capture(window, "keyword-first")
         try await wait("hold both results for the new keyword") { heldTree > 0 && heldSemantic > 0 }
-        try requireGlyphColors(in: keyword, document: document, expected: .keyword)
+        try SyntaxCheck.requireGlyphColors(in: keyword, document: document, expected: .keyword)
         holdTree = false
         try await wait("install the viewport colors while the semantic update is held") {
-            heldTree == 0 && highlighting.zigCoveredRangeForCheck != nil
+            heldTree == 0 && highlighting.syntaxCoveredRangeForCheck != nil
         }
         try require(window.title == title, "preserve the title while the response is held")
         try require(!highlighting.semanticSpansForCheck.contains { NSIntersectionRange($0.range, keyword).length > 0 },
                     "replace the provisional semantic color even when the ranges match")
-        try requireGlyphColors(in: keyword, document: document, expected: .keyword)
+        try SyntaxCheck.requireGlyphColors(in: keyword, document: document, expected: .keyword)
         try capture(window, "keyword-tree")
 
         holdSemantic = false
         try await wait("finish installing the semantic response") { !highlighting.needsFullSemanticTokensForCheck }
-        try requireGlyphColors(in: keyword, document: document, expected: .keyword)
+        try SyntaxCheck.requireGlyphColors(in: keyword, document: document, expected: .keyword)
         try capture(window, "keyword-settled")
 
         let dot = NSRange(location: keyword.upperBound, length: 1)
@@ -312,9 +312,9 @@ enum LSPSemanticHighlightCheck {
             }
 
             func verifyFrame(_ phase: String) throws {
-                try requireGlyphColors(in: keyword, document: document, expected: .keyword)
-                try requireGlyphColors(in: dot, document: document, expected: .plain)
-                if tag.length > 0 { try requireGlyphColors(in: tag, document: document, expected: .type) }
+                try SyntaxCheck.requireGlyphColors(in: keyword, document: document, expected: .keyword)
+                try SyntaxCheck.requireGlyphColors(in: dot, document: document, expected: .plain)
+                if tag.length > 0 { try SyntaxCheck.requireGlyphColors(in: tag, document: document, expected: .type) }
                 try capture(window, "typing-\(index + 1)-\(phase)")
             }
             try verifyFrame("first")
@@ -354,14 +354,14 @@ enum LSPSemanticHighlightCheck {
                         "shorten the error tag to \(shortened)")
             try require(highlighting.zigImmediateUpdatesForCheck > immediateBefore,
                         "query the shortened error tag from the updated tree before painting it")
-            try requireGlyphColors(in: tag, document: document, expected: .type)
+            try SyntaxCheck.requireGlyphColors(in: tag, document: document, expected: .type)
             try require(highlighting.treeSpansForCheck.contains { $0.range == tag && $0.color == .type && !$0.provisional },
                         "classify the whole shortened tag \(shortened) locally before either response")
             try require(!highlighting.semanticSpansForCheck.contains { NSIntersectionRange($0.range, tag).length > 0 },
                         "clear the old semantic range for the locally classified tag \(shortened)")
             try capture(window, "backspace-\(shortened)-first")
             try await wait("hold both results for \(shortened)") { heldTree > 0 && heldSemantic > 0 }
-            try requireGlyphColors(in: tag, document: document, expected: .type)
+            try SyntaxCheck.requireGlyphColors(in: tag, document: document, expected: .type)
             try capture(window, "backspace-\(shortened)-held")
             holdTree = false
             try await wait("show the current Tree-sitter color for \(shortened)") {
@@ -369,7 +369,7 @@ enum LSPSemanticHighlightCheck {
                     $0.range == tag && $0.color == .type && !$0.provisional
                 }
             }
-            try requireGlyphColors(in: tag, document: document, expected: .type)
+            try SyntaxCheck.requireGlyphColors(in: tag, document: document, expected: .type)
             try capture(window, "backspace-\(shortened)-tree")
             holdSemantic = false
             try await wait("apply the ZLS color for \(shortened)") {
@@ -377,7 +377,7 @@ enum LSPSemanticHighlightCheck {
                     $0.range == tag && $0.color == .type && !$0.provisional
                 }
             }
-            try requireGlyphColors(in: tag, document: document, expected: .type)
+            try SyntaxCheck.requireGlyphColors(in: tag, document: document, expected: .type)
             try capture(window, "backspace-\(shortened)-settled")
         }
         let shortenedTagAndExtraSemicolons = NSRange(location: hello.location, length: 2 + extraSemicolons.utf16.count)
@@ -393,8 +393,8 @@ enum LSPSemanticHighlightCheck {
         for (index, character) in "Ab".enumerated() {
             editor.insertText(String(character), replacementRange: NSRange(location: NSNotFound, length: 0))
             let tag = NSRange(location: dot.upperBound, length: "Hello".utf16.count + index + 1)
-            try requireGlyphColors(in: keyword, document: document, expected: .keyword)
-            try requireGlyphColors(in: tag, document: document, expected: .type)
+            try SyntaxCheck.requireGlyphColors(in: keyword, document: document, expected: .keyword)
+            try SyntaxCheck.requireGlyphColors(in: tag, document: document, expected: .type)
         }
         try await wait("hold the Tree-sitter result after successive keystrokes") { heldTree > 0 }
         holdTree = false
@@ -407,7 +407,7 @@ enum LSPSemanticHighlightCheck {
         let joined = NSRange(location: prefix.location - 7, length: 11)
         try require((editor.string as NSString).substring(with: joined) == "returnerror", "join the two keywords")
         try capture(window, "whole-token-joined")
-        try requireGlyphColors(in: joined, document: document, expected: .plain)
+        try SyntaxCheck.requireGlyphColors(in: joined, document: document, expected: .plain)
 
         let returnKeyword = NSRange(location: joined.location, length: 6)
         document.toggleHighlighting(.lsp)
@@ -432,7 +432,7 @@ enum LSPSemanticHighlightCheck {
                                                                              length: result.utf16.count + 1))
             try require(actual == result + "\n", "edit the expected line for \(name)")
             func verify(_ phase: String) throws {
-                for word in words { try requireGlyphColors(in: word, document: document, expected: .keyword) }
+                for word in words { try SyntaxCheck.requireGlyphColors(in: word, document: document, expected: .keyword) }
                 try capture(window, "separator-\(name)-\(phase)")
             }
             try verify("first")
@@ -469,12 +469,12 @@ enum LSPSemanticHighlightCheck {
         for (index, character) in "He".enumerated() {
             editor.insertText(String(character), replacementRange: NSRange(location: NSNotFound, length: 0))
             let tag = NSRange(location: dot.upperBound, length: index + 1)
-            try requireGlyphColors(in: tag, document: document, expected: .type)
-            try requireGlyphColors(in: dot, document: document, expected: .plain)
+            try SyntaxCheck.requireGlyphColors(in: tag, document: document, expected: .type)
+            try SyntaxCheck.requireGlyphColors(in: dot, document: document, expected: .plain)
             try capture(window, "new-error-tag-at-line-end-\(tag.length)")
         }
         try await wait("hold the results after two successive error-tag letters") { heldTree > 0 && heldSemantic > 0 }
-        try requireGlyphColors(in: NSRange(location: dot.upperBound, length: 2), document: document, expected: .type)
+        try SyntaxCheck.requireGlyphColors(in: NSRange(location: dot.upperBound, length: 2), document: document, expected: .type)
         holdTree = false
         holdSemantic = false
         try await wait("publish the completed color for the new tag") { heldTree == 0 && !highlighting.needsFullSemanticTokensForCheck }
@@ -482,7 +482,7 @@ enum LSPSemanticHighlightCheck {
         try await setLine("return error.Hello;")
         try require(highlighting.semanticSpansForCheck.contains { $0.range == returnKeyword && $0.color == .keyword },
                     "start with a ZLS keyword that could mask the local update")
-        try requireGlyphColors(in: returnKeyword, document: document, expected: .keyword)
+        try SyntaxCheck.requireGlyphColors(in: returnKeyword, document: document, expected: .keyword)
         holdTree = true
         holdSemantic = true
         let immediateBefore = highlighting.zigImmediateUpdatesForCheck
@@ -492,79 +492,45 @@ enum LSPSemanticHighlightCheck {
         try require((editor.string as NSString).substring(with: shortenedReturn) == "retur", "shorten the return keyword")
         try require(highlighting.zigImmediateUpdatesForCheck > immediateBefore,
                     "remove the old keyword color with a query on the updated tree")
-        try requireGlyphColors(in: shortenedReturn, document: document, expected: .plain)
+        try SyntaxCheck.requireGlyphColors(in: shortenedReturn, document: document, expected: .plain)
         try require(!highlighting.semanticSpansForCheck.contains { NSIntersectionRange($0.range, shortenedReturn).length > 0 },
                     "drop the stale semantic keyword on the first frame")
         try require(window.title == title, "preserve the document title during local highlighting")
         try capture(window, "backspace-retur-first")
         try await wait("hold both responses for retur") { heldTree > 0 && heldSemantic > 0 }
-        try requireGlyphColors(in: shortenedReturn, document: document, expected: .plain)
+        try SyntaxCheck.requireGlyphColors(in: shortenedReturn, document: document, expected: .plain)
         try capture(window, "backspace-retur-held")
         // Exercise the opposite completion order to the error-tag checks above.
         holdSemantic = false
         try await wait("install ZLS while Tree-sitter is held for retur") { !highlighting.needsFullSemanticTokensForCheck }
-        try requireGlyphColors(in: shortenedReturn, document: document, expected: .plain)
+        try SyntaxCheck.requireGlyphColors(in: shortenedReturn, document: document, expected: .plain)
         try capture(window, "backspace-retur-zls")
         holdTree = false
         try await wait("install Tree-sitter for retur") { heldTree == 0 }
-        try requireGlyphColors(in: shortenedReturn, document: document, expected: .plain)
+        try SyntaxCheck.requireGlyphColors(in: shortenedReturn, document: document, expected: .plain)
         try capture(window, "backspace-retur-settled")
     }
 
     private static func checkIncrementalZigTree() async throws {
         let analysis = EditorSyntaxAnalysis()
         let source = NSMutableString(string: "const label = \"🧩\";\r\ntest \"typing\" {\r\n    return error.Hello;\r\n}\r\n")
-        guard await analysis.zigTree(in: source as String) != nil else { throw Failure(detail: "parse the initial Zig tree") }
+        guard await analysis.tree(in: source as String, language: .zig) != nil else { throw Failure(detail: "parse the initial Zig tree") }
         for (original, replacement) in [("🧩", "🚀!"), ("return", "retur"), ("Hello", "Hell")] {
             let range = source.range(of: original)
             source.replaceCharacters(in: range, with: replacement)
             let length = replacement.utf16.count
-            analysis.recordZigEdit(NSRange(location: range.location, length: length), delta: length - range.length, length: source.length)
+            analysis.recordEdit(NSRange(location: range.location, length: length), delta: length - range.length, length: source.length)
         }
         let tag = source.range(of: "Hell")
         let insideTag = NSRange(location: tag.location + 1, length: 1)
-        guard let updated = await analysis.zigTree(in: source as String), let ranged = updated.highlights(in: insideTag),
+        guard let updated = await analysis.tree(in: source as String, language: .zig), let ranged = updated.highlights(in: insideTag),
               let full = SyntaxEngine.spans(in: source as String, language: .zig) else {
             throw Failure(detail: "resolve a range after several UTF-16 edits against the same Zig tree")
         }
         let expected = full.filter { NSIntersectionRange($0.range, insideTag).length > 0 }
-        try require(analysis.zigReusesForCheck == 1 && ranged.count == 1 && expected.count == 1
+        try require(analysis.treeReusesForCheck == 1 && ranged.count == 1 && expected.count == 1
                     && ranged[0].range == tag && ranged[0].range == expected[0].range && ranged[0].color == expected[0].color,
                     "reuse the original tree across CRLF and emoji edits and return the whole token across query boundaries")
-    }
-
-    private static func requireGlyphColors(in range: NSRange, document: DocumentWindow, expected: SyntaxColor) throws {
-        let window = document.window
-        let editor = document.editor
-        let clip = document.scrollView.contentView
-        guard let manager = editor.textLayoutManager, let visible = manager.textViewportLayoutController.viewportRange,
-              NSIntersectionRange(editor.charRange(visible, in: manager), range) == range else {
-            throw Failure(detail: "show the entire edited token in the frame being sampled")
-        }
-        let columns = (range.location...range.upperBound).map { offset in
-            let position = NSRange(location: offset, length: 0)
-            return clip.convert(window.convertFromScreen(editor.firstRect(forCharacterRange: position, actualRange: nil)), from: nil)
-        }
-        let bounds = clip.bounds
-        guard let bitmap = clip.bitmapImageRepForCachingDisplay(in: bounds) else { throw Failure(detail: "capture typed glyphs") }
-        clip.cacheDisplay(in: bounds, to: bitmap)
-        let scale = CGFloat(bitmap.pixelsWide) / bounds.width
-        for (index, (left, right)) in zip(columns, columns.dropFirst()).enumerated() {
-            let x = Int(((left.minX - bounds.minX) * scale).rounded())..<Int(((right.minX - bounds.minX) * scale).rounded())
-            let y = Int(((left.minY - bounds.minY) * scale).rounded())..<Int(((left.maxY - bounds.minY) * scale).rounded())
-            var colors = Set<SyntaxColor>()
-            for row in y where (0..<bitmap.pixelsHigh).contains(row) {
-                for column in x where (0..<bitmap.pixelsWide).contains(column) {
-                    guard let pixel = bitmap.colorAt(x: column, y: row)?.usingColorSpace(.sRGB) else { continue }
-                    let (red, green, blue) = (pixel.redComponent, pixel.greenComponent, pixel.blueComponent)
-                    if blue > red + 0.2 && blue > green + 0.1 { colors.insert(.keyword) }
-                    if green > red + 0.2 && green > blue + 0.03 { colors.insert(.type) }
-                    if min(red, green, blue) > 0.7 { colors.insert(.plain) }
-                }
-            }
-            try require(colors == [expected],
-                        "glyph \(index + 1) of \(range.length) has \(expected) paint: found \(colors)")
-        }
     }
 
     private static func checkViewportPreview(in app: Edit, document: DocumentWindow, folder: URL,
@@ -603,7 +569,7 @@ enum LSPSemanticHighlightCheck {
         let sourceLength = source.utf16.count
         let initialKeyword = (source as NSString).range(of: "struct")
         try await wait("query syntax for the initial viewport without querying the whole large buffer") {
-            guard let covered = drawing.zigCoveredRangeForCheck else { return false }
+            guard let covered = drawing.syntaxCoveredRangeForCheck else { return false }
             return NSIntersectionRange(covered, initialKeyword) == initialKeyword && covered.length < sourceLength / 4
         }
         let keyword = (source as NSString).range(of: "struct", options: .backwards)
@@ -612,17 +578,17 @@ enum LSPSemanticHighlightCheck {
         editor.revealNavigationSelection(editor.selectedRange())
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         try await wait("query Tree-sitter colors for the viewport after scrolling") {
-            guard let covered = drawing.zigCoveredRangeForCheck else { return false }
+            guard let covered = drawing.syntaxCoveredRangeForCheck else { return false }
             return NSIntersectionRange(covered, keyword) == keyword && covered.length < sourceLength / 4
                 && drawing.treeSpansForCheck.contains { $0.range == keyword && $0.color == .keyword }
         }
         try capture(document.window, "whole-token-scrolled-before")
-        try requireGlyphColors(in: keyword, document: document, expected: .keyword)
+        try SyntaxCheck.requireGlyphColors(in: keyword, document: document, expected: .keyword)
         editor.insertText("s", replacementRange: NSRange(location: NSNotFound, length: 0))
         let extended = NSRange(location: keyword.location, length: keyword.length + 1)
         try require((editor.string as NSString).substring(with: extended) == "structs", "extend a token after scrolling")
         try capture(document.window, "whole-token-scrolled")
-        try requireGlyphColors(in: extended, document: document, expected: .keyword)
+        try SyntaxCheck.requireGlyphColors(in: extended, document: document, expected: .keyword)
     }
 
     private static func checkPreferences(root: URL, other: URL) throws {

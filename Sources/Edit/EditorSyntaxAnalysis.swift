@@ -8,9 +8,9 @@ final class EditorSyntaxAnalysis {
     }
 
     private var current: (source: String, language: SyntaxLanguage, job: Job)?
-    private let zig = ZigSyntaxSession()
+    private let incremental = IncrementalSyntaxSession()
 #if EDIT_AGENT_CHECKS
-    var zigReusesForCheck: Int { zig.reuses }
+    var treeReusesForCheck: Int { incremental.reuses }
 #endif
 
     deinit { current?.job.task.cancel() }
@@ -24,10 +24,10 @@ final class EditorSyntaxAnalysis {
             continuation.yield(preview)
         }
         let task: Task<SyntaxAnalysis?, Never>
-        if language == .zig && SyntaxEngine.supportsIncrementalZig {
-            task = Task { [zig] in
+        if SyntaxEngine.supportsIncremental(language) {
+            task = Task { [incremental] in
                 defer { continuation.finish() }
-                guard let tree = await zig.resolve(source), !Task.isCancelled else { return nil }
+                guard let tree = await incremental.resolve(source, language: language), !Task.isCancelled else { return nil }
                 let work = Task.detached(priority: .userInitiated) { tree.bracketContext() }
                 let brackets = await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
                 return brackets.map { SyntaxAnalysis(spans: [], brackets: $0) }
@@ -44,9 +44,9 @@ final class EditorSyntaxAnalysis {
         return job
     }
 
-    func install(_ analysis: SyntaxAnalysis, in source: String, language: SyntaxLanguage, zigTree: SyntaxEngine.ZigTree?) {
+    func install(_ analysis: SyntaxAnalysis, in source: String, language: SyntaxLanguage, tree: SyntaxEngine.Tree?) {
         cancel()
-        if let zigTree { zig.install(zigTree) }
+        if let tree { incremental.install(tree) }
         let (previews, continuation) = AsyncStream<[SyntaxSpan]>.makeStream()
         continuation.finish()
         let job = Job(task: Task { analysis }, previews: previews)
@@ -55,22 +55,25 @@ final class EditorSyntaxAnalysis {
 
     func cancelIfChanged(to source: String, language: SyntaxLanguage) {
         if let current, current.language != language || current.source != source { cancelJob() }
-        if language != .zig { zig.reset() }
+        incremental.resetIfLanguageChanged(to: language)
     }
 
-    func recordZigEdit(_ range: NSRange, delta: Int, length: Int) {
-        zig.record(range, delta: delta, length: length)
+    func recordEdit(_ range: NSRange, delta: Int, length: Int) {
+        incremental.record(range, delta: delta, length: length)
     }
 
-    func zigTree(in source: String) async -> SyntaxEngine.ZigTree? { await zig.resolve(source) }
+    func tree(in source: String, language: SyntaxLanguage) async -> SyntaxEngine.Tree? {
+        await incremental.resolve(source, language: language)
+    }
 
-    func zigTreeForEdit(in source: String, deadline: ContinuousClock.Instant) -> SyntaxEngine.ZigTree? {
-        zig.parseImmediately(source, deadline: deadline)
+    func treeForEdit(in source: String, language: SyntaxLanguage, length: Int,
+                     deadline: ContinuousClock.Instant) -> SyntaxEngine.Tree? {
+        incremental.parseImmediately(source, language: language, length: length, deadline: deadline)
     }
 
     func cancel() {
         cancelJob()
-        zig.reset()
+        incremental.reset()
     }
 
     private func cancelJob() {
@@ -80,7 +83,7 @@ final class EditorSyntaxAnalysis {
 }
 
 @MainActor
-private final class ZigSyntaxSession {
+private final class IncrementalSyntaxSession {
     // Across revisions only the common untouched prefix and suffix can be reused.
     private struct EditBounds {
         var prefix: Int
@@ -94,24 +97,30 @@ private final class ZigSyntaxSession {
     private struct Worker {
         let id: Int
         let revision: Int
-        let task: Task<SyntaxEngine.ZigTree?, Never>
+        let task: Task<SyntaxEngine.Tree?, Never>
         let reusedTree: Bool
         var laterEdits: EditBounds?
     }
 
     private var revision = 0
     private var workerID = 0
+    private var language: SyntaxLanguage?
     private var length: Int?
-    private var tree: SyntaxEngine.ZigTree?
+    private var tree: SyntaxEngine.Tree?
     private var pending: EditBounds?
     private var worker: Worker?
     private(set) var reuses = 0
 
     deinit { worker?.task.cancel() }
 
-    func install(_ tree: SyntaxEngine.ZigTree) {
+    func install(_ tree: SyntaxEngine.Tree) {
         self.tree = tree
+        language = tree.language
         length = tree.length
+    }
+
+    func resetIfLanguageChanged(to language: SyntaxLanguage) {
+        if self.language != language { reset() }
     }
 
     func reset() {
@@ -119,6 +128,7 @@ private final class ZigSyntaxSession {
         revision &+= 1
         worker?.task.cancel()
         worker = nil
+        language = nil
         length = nil
         tree = nil
         pending = nil
@@ -139,22 +149,34 @@ private final class ZigSyntaxSession {
         else { worker?.laterEdits = edit }
     }
 
-    func parseImmediately(_ source: String, deadline: ContinuousClock.Instant) -> SyntaxEngine.ZigTree? {
-        guard worker == nil, let tree, let length, length <= 64 * 1_024 else { return nil }
-        guard let pending else { return tree }
-        guard let parsed = SyntaxEngine.ZigTree(source: source, previous: tree, prefix: pending.prefix,
-                                                suffix: pending.suffix, deadline: deadline) else { return nil }
+    func parseImmediately(_ source: String, language: SyntaxLanguage, length: Int,
+                          deadline: ContinuousClock.Instant) -> SyntaxEngine.Tree? {
+        let previous = tree?.language == language && self.length == length ? tree : nil
+        if language == .zig {
+            guard previous != nil, worker == nil, length <= 64 * 1_024 else { return nil }
+        } else if previous == nil {
+            // The first edit of an empty buffer has no tree to reuse.
+            guard length <= 16 * 1_024 else { return nil }
+        }
+        if let previous, pending == nil { return previous }
+        let bounds = pending
+        guard let parsed = SyntaxEngine.Tree(source: source, language: language, previous: previous,
+                                             prefix: bounds?.prefix ?? 0, suffix: bounds?.suffix ?? 0,
+                                             deadline: deadline) else { return nil }
+        worker?.task.cancel()
+        worker = nil
         install(parsed)
         self.pending = nil
-        reuses += 1
+        if previous != nil { reuses += 1 }
         return parsed
     }
 
-    func resolve(_ source: String) async -> SyntaxEngine.ZigTree? {
+    func resolve(_ source: String, language: SyntaxLanguage) async -> SyntaxEngine.Tree? {
         guard !Task.isCancelled else { return nil }
         let count = source.utf16.count
-        if length != count {
+        if self.language != language || length != count {
             reset()
+            self.language = language
             length = count
         }
         guard count > 0 else { return nil }
@@ -165,7 +187,7 @@ private final class ZigSyntaxSession {
                 let previous = tree
                 let changes = pending
                 let task = Task.detached(priority: .userInitiated) {
-                    SyntaxEngine.ZigTree(source: source, previous: previous, prefix: changes?.prefix ?? 0,
+                    SyntaxEngine.Tree(source: source, language: language, previous: previous, prefix: changes?.prefix ?? 0,
                                          suffix: changes?.suffix ?? 0)
                 }
                 workerID &+= 1
@@ -180,9 +202,10 @@ private final class ZigSyntaxSession {
                     tree = parsed
                     pending = finished.laterEdits
                     if finished.reusedTree { reuses += 1 }
+                } else if finished.revision == requested {
+                    return nil
                 }
             }
-            if parsed == nil && active.revision == requested { return nil }
         }
         return nil
     }

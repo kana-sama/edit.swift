@@ -19,19 +19,19 @@ typedef bool EditSyntaxAnalysisFunction(const char * _Nonnull language, const ch
 typedef EditSyntaxAnalysisFunction *EditSyntaxAnalyze;
 extern EditSyntaxAnalysisFunction edit_syntax_analyze_v1;
 
-typedef void * _Nullable EditZigParseFunction(
-    const uint16_t * _Nonnull units, uint32_t count, const void * _Nullable previous,
+typedef void * _Nullable EditSyntaxTreeParseFunction(
+    const char * _Nonnull language, const uint16_t * _Nonnull units, uint32_t count, const void * _Nullable previous,
     const uint16_t * _Nullable previousUnits, uint32_t previousCount, uint32_t prefix, uint32_t suffix,
     EditSyntaxCancelled _Nullable cancelled, void * _Null_unspecified context);
-typedef EditZigParseFunction *EditZigParse;
-typedef bool EditZigQueryFunction(
-    const void * _Nonnull tree, const char * _Nonnull queryDirectory,
+typedef EditSyntaxTreeParseFunction *EditSyntaxTreeParse;
+typedef bool EditSyntaxTreeQueryFunction(
+    const void * _Nonnull tree, const char * _Nonnull language, const char * _Nonnull queryDirectory,
     const uint16_t * _Nonnull units, uint32_t count, uint32_t start, uint32_t end,
     EditSyntaxCapture _Nullable highlight, EditSyntaxCapture _Nullable bracket,
     EditSyntaxCancelled _Nullable cancelled, void * _Null_unspecified context);
-typedef EditZigQueryFunction *EditZigQuery;
-typedef void EditZigReleaseFunction(void * _Nonnull tree);
-typedef EditZigReleaseFunction *EditZigRelease;
+typedef EditSyntaxTreeQueryFunction *EditSyntaxTreeQuery;
+typedef void EditSyntaxTreeReleaseFunction(void * _Nonnull tree);
+typedef EditSyntaxTreeReleaseFunction *EditSyntaxTreeRelease;
 
 typedef bool EditMarkdownTableFunction(const uint16_t * _Nonnull units, uint32_t count, uint32_t caret,
                                        EditSyntaxCapture _Nonnull row, void * _Null_unspecified context);

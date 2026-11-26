@@ -40,6 +40,8 @@ If repeated attempts uncover a concrete blocker or the implementation calls for 
 
 Update the [LSP checklist](lsp-checklist.md) in the same change when adding or changing an LSP capability or updating a supported language server.
 
+Every bundled language must meet the [Tree-sitter editing requirements](features/syntax-highlighting/spec.md#tokenization-during-editing). A new language may ship only with language-aware tokenization and a passing native check for flicker-free editing with LSP off. Apply the same acceptance criteria when bringing existing modes up to standard. Treat a known flicker as missing highlighting support for that mode until its regression check passes. Update the [language support matrix](language-support.md) in the same change whenever language support or its verification status changes.
+
 Review the diff against the request. Select the smallest check that could expose a plausible failure in the affected path. The acceptance scenarios in feature specifications describe available coverage. Choose the ones the change can affect.
 
 | Change | Sufficient verification |

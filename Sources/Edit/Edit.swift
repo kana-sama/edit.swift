@@ -1529,6 +1529,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 try checkWindow(window, screenshot: target)
             }
             try await NavigationHistoryCheck.run(in: self)
+        case "syntax":
+            document.window.close()
+            try await SyntaxCheck.run(in: self)
         case "inline-diff":
             if let screenshot {
                 try JJInlineDiffCheck.run(in: document) { view in

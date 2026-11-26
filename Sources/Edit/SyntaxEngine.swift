@@ -64,7 +64,7 @@ struct SyntaxSnapshot: Sendable {
     let language: SyntaxLanguage
     let analysis: SyntaxAnalysis
     let coversDocument: Bool
-    var zigTree: SyntaxEngine.ZigTree? = nil
+    var tree: SyntaxEngine.Tree? = nil
 }
 
 struct SyntaxAnalysis: Sendable {
@@ -153,25 +153,32 @@ enum SyntaxEngine {
         return unsafeBitCast(entry, to: EditSyntaxAnalyze.self)
     }()
 
-    private static let zigAPI: (parse: EditZigParse, query: EditZigQuery, release: EditZigRelease)? = {
-        guard let library, let parse = dlsym(library, "edit_zig_parse_v1"),
-              let query = dlsym(library, "edit_zig_query_v1"),
-              let release = dlsym(library, "edit_zig_release_v1") else { return nil }
-        return (unsafeBitCast(parse, to: EditZigParse.self), unsafeBitCast(query, to: EditZigQuery.self),
-                unsafeBitCast(release, to: EditZigRelease.self))
+    private static let treeAPI: (parse: EditSyntaxTreeParse, query: EditSyntaxTreeQuery, release: EditSyntaxTreeRelease)? = {
+        guard let library, let parse = dlsym(library, "edit_syntax_tree_parse_v1"),
+              let query = dlsym(library, "edit_syntax_tree_query_v1"),
+              let release = dlsym(library, "edit_syntax_tree_release_v1") else { return nil }
+        return (unsafeBitCast(parse, to: EditSyntaxTreeParse.self), unsafeBitCast(query, to: EditSyntaxTreeQuery.self),
+                unsafeBitCast(release, to: EditSyntaxTreeRelease.self))
     }()
 
-    static var supportsIncrementalZig: Bool { zigAPI != nil && queries != nil }
+    static func supportsIncremental(_ language: SyntaxLanguage) -> Bool {
+        switch language {
+        case .ruby, .shell, .swift, .zig: treeAPI != nil && queries != nil
+        default: false
+        }
+    }
 
     // The native entry points copy the immutable tree before editing or querying it.
-    final class ZigTree: @unchecked Sendable {
+    final class Tree: @unchecked Sendable {
+        let language: SyntaxLanguage
         private let units: [UInt16]
         private let tree: UnsafeMutableRawPointer
         var length: Int { units.count }
 
-        init?(source: String, previous: ZigTree?, prefix: Int = 0, suffix: Int = 0,
+        init?(source: String, language: SyntaxLanguage, previous: Tree?, prefix: Int = 0, suffix: Int = 0,
               deadline: ContinuousClock.Instant? = nil) {
-            guard let api = zigAPI else { return nil }
+            guard let api = treeAPI, deadline.map({ ContinuousClock.now < $0 }) ?? true else { return nil }
+            self.language = language
             let units = Array(source.utf16)
             guard let count = UInt32(exactly: units.count) else { return nil }
             let sink = Captures(length: units.count, deadline: deadline)
@@ -183,13 +190,13 @@ enum SyntaxEngine {
             let parsed: UnsafeMutableRawPointer? = withExtendedLifetime(sink) {
                 units.withUnsafeBufferPointer { buffer in
                     guard let base = buffer.baseAddress else { return nil }
-                    if let previous {
+                    if let previous, previous.language == language {
                         return previous.units.withUnsafeBufferPointer { old in
-                            api.parse(base, count, UnsafeRawPointer(previous.tree), old.baseAddress, UInt32(old.count),
+                            api.parse(language.rawValue, base, count, UnsafeRawPointer(previous.tree), old.baseAddress, UInt32(old.count),
                                       UInt32(prefix), UInt32(suffix), check, context)
                         }
                     }
-                    return api.parse(base, count, nil, nil, 0, 0, 0, check, context)
+                    return api.parse(language.rawValue, base, count, nil, nil, 0, 0, 0, check, context)
                 }
             }
             guard let parsed else { return nil }
@@ -197,7 +204,7 @@ enum SyntaxEngine {
             tree = parsed
         }
 
-        deinit { zigAPI?.release(tree) }
+        deinit { treeAPI?.release(tree) }
 
         func highlights(in range: NSRange, deadline: ContinuousClock.Instant? = nil) -> [SyntaxSpan]? {
             if range.length == 0 { return [] }
@@ -217,11 +224,11 @@ enum SyntaxEngine {
 
         private func query(_ range: NSRange, highlight: EditSyntaxCapture?, bracket: EditSyntaxCapture?,
                            deadline: ContinuousClock.Instant?) -> Captures? {
-            guard let api = zigAPI, let queries, range.location >= 0, range.upperBound <= length else { return nil }
+            guard let api = treeAPI, let queries, range.location >= 0, range.upperBound <= length else { return nil }
             let sink = Captures(length: length, deadline: deadline)
             let success = units.withUnsafeBufferPointer { buffer in
                 guard let base = buffer.baseAddress else { return false }
-                return api.query(UnsafeRawPointer(tree), queries, base, UInt32(length), UInt32(range.location),
+                return api.query(UnsafeRawPointer(tree), language.rawValue, queries, base, UInt32(length), UInt32(range.location),
                                  UInt32(range.upperBound), highlight, bracket, { context in
                     guard let context else { return true }
                     return Unmanaged<Captures>.fromOpaque(context).takeUnretainedValue().cancelled
@@ -266,11 +273,11 @@ enum SyntaxEngine {
         let units = text.utf16
         let prefix = units.prefix(maximumPrefixLength)
         if prefix.endIndex == units.endIndex {
-            if language == .zig, let tree = ZigTree(source: text, previous: nil),
+            if supportsIncremental(language), let tree = Tree(source: text, language: language, previous: nil),
                let spans = tree.highlights(in: NSRange(location: 0, length: tree.length)),
                let brackets = tree.bracketContext() {
                 return SyntaxSnapshot(language: language, analysis: SyntaxAnalysis(spans: spans, brackets: brackets),
-                                      coversDocument: true, zigTree: tree)
+                                      coversDocument: true, tree: tree)
             }
             guard let analysis = analysis(in: text, language: language) else { return nil }
             return SyntaxSnapshot(language: language, analysis: analysis, coversDocument: true)

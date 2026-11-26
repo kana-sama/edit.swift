@@ -659,14 +659,15 @@ static TSPoint advancePoint(TSPoint point, const uint16_t *units, uint32_t start
     return point;
 }
 
-EDIT_VISIBLE EditZigParseFunction edit_zig_parse_v1;
-void *edit_zig_parse_v1(const uint16_t *units, uint32_t count, const void *previous,
+EDIT_VISIBLE EditSyntaxTreeParseFunction edit_syntax_tree_parse_v1;
+void *edit_syntax_tree_parse_v1(const char *name, const uint16_t *units, uint32_t count, const void *previous,
                         const uint16_t *previousUnits, uint32_t previousCount, uint32_t prefix, uint32_t suffix,
                         EditSyntaxCancelled check, void *context) {
-    if (count > UINT32_MAX / 2u || previousCount > UINT32_MAX / 2u) return NULL;
+    const TSLanguage *language = languageForName(name);
+    if (!language || count > UINT32_MAX / 2u || previousCount > UINT32_MAX / 2u) return NULL;
     Input input = {.units = units, .bytes = count * 2u, .cancelled = check, .context = context};
     TSTree *old = NULL;
-    if (previous && previousUnits && prefix <= count && prefix <= previousCount &&
+    if (previous && previousUnits && ts_tree_language(previous) == language && prefix <= count && prefix <= previousCount &&
         suffix <= count - prefix && suffix <= previousCount - prefix) {
         uint32_t oldEnd = previousCount - suffix;
         uint32_t newEnd = count - suffix;
@@ -682,7 +683,7 @@ void *edit_zig_parse_v1(const uint16_t *units, uint32_t count, const void *previ
 
     TSParser *parser = ts_parser_new();
     TSTree *tree = NULL;
-    if (parser && !cancelled(&input) && ts_parser_set_language(parser, tree_sitter_zig())) {
+    if (parser && !cancelled(&input) && ts_parser_set_language(parser, language)) {
         TSInput text = {.payload = &input, .read = readInput, .encoding = TSInputEncodingUTF16LE};
         TSParseOptions options = {.payload = &input, .progress_callback = parseProgress};
         tree = ts_parser_parse_with_options(parser, old, text, options);
@@ -696,21 +697,23 @@ void *edit_zig_parse_v1(const uint16_t *units, uint32_t count, const void *previ
     return tree;
 }
 
-EDIT_VISIBLE EditZigQueryFunction edit_zig_query_v1;
-bool edit_zig_query_v1(const void *tree, const char *queryDirectory, const uint16_t *units, uint32_t count,
+EDIT_VISIBLE EditSyntaxTreeQueryFunction edit_syntax_tree_query_v1;
+bool edit_syntax_tree_query_v1(const void *tree, const char *name, const char *queryDirectory, const uint16_t *units, uint32_t count,
                        uint32_t start, uint32_t end, EditSyntaxCapture highlight, EditSyntaxCapture bracket,
                        EditSyntaxCancelled check, void *context) {
     if (start > end || end > count || count > UINT32_MAX / 2u) return false;
     @autoreleasepool {
         NSString *directory = [NSString stringWithUTF8String:queryDirectory];
-        if (!directory) return false;
+        const TSLanguage *language = ts_tree_language(tree);
+        if (!directory || languageForName(name) != language) return false;
         Input input = {.units = units, .bytes = count * 2u, .highlight = highlight, .bracket = bracket,
                        .cancelled = check, .context = context, .highlightLimit = count};
         TSTree *snapshot = ts_tree_copy(tree);
         if (!snapshot) return false;
         TSNode root = ts_tree_root_node(snapshot);
         if (highlight && start < end && !cancelled(&input)) {
-            const TSQuery *query = loadQuery(tree_sitter_zig(), [directory stringByAppendingPathComponent:@"zig.scm"], nil);
+            NSString *filename = [@(name) stringByAppendingString:@".scm"];
+            const TSQuery *query = loadQuery(language, [directory stringByAppendingPathComponent:filename], nil);
             if (!query) {
                 ts_tree_delete(snapshot);
                 return false;
@@ -718,17 +721,17 @@ bool edit_zig_query_v1(const void *tree, const char *queryDirectory, const uint1
             Preview range = {start * 2u, end * 2u, NULL};
             runQuery(&input, query, root, directory, 0, 0, false, &range);
         }
-        if (bracket && !cancelled(&input)) readBracketContext(&input, root, tree_sitter_zig(), "zig", 0, 0);
+        if (bracket && !cancelled(&input)) readBracketContext(&input, root, language, name, 0, 0);
         ts_tree_delete(snapshot);
         return !cancelled(&input);
     }
 }
 
-static void releaseZigTree(void *tree) { ts_tree_delete(tree); }
+static void releaseSyntaxTree(void *tree) { ts_tree_delete(tree); }
 
-EDIT_VISIBLE EditZigReleaseFunction edit_zig_release_v1;
-void edit_zig_release_v1(void *tree) {
-    dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), tree, releaseZigTree);
+EDIT_VISIBLE EditSyntaxTreeReleaseFunction edit_syntax_tree_release_v1;
+void edit_syntax_tree_release_v1(void *tree) {
+    dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), tree, releaseSyntaxTree);
 }
 
 EDIT_VISIBLE bool edit_markdown_table_v1(const uint16_t *units, uint32_t count, uint32_t caret,

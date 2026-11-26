@@ -13,6 +13,7 @@ enum SyntaxCheck {
         app.workspaceHighlighting.setEnabled(false, for: .lsp, in: nil)
         defer { app.workspaceHighlighting.setEnabled(wasEnabled, for: .lsp, in: nil) }
 
+        try await checkTyping(in: app)
         try await checkFirstDraw(in: app, appearance: .aqua)
         try await checkFirstDraw(in: app, appearance: .darkAqua)
         try await checkSwiftDrawing(in: app, requiresFirstFrame: true)
@@ -49,6 +50,156 @@ enum SyntaxCheck {
         document.restoreDraft(record, text: input)
         guard document.resolvedSyntaxLanguage == .plainText, document.manualSyntaxLanguage == .plainText else {
             throw Failure("Session restoration lost the manual Plain Text mode.")
+        }
+    }
+
+    private static func checkTyping(in app: Edit) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        struct Fixture {
+            let filename: String
+            let language: SyntaxLanguage
+            let prefix: String
+            let initial: String
+            let suffix: String
+            let typed: [String]
+            let color: SyntaxColor
+            let comment: (marker: String, beforeToken: Int)?
+        }
+        let fixtures = [
+            Fixture(filename: "Brewfile", language: .ruby, prefix: "brew \"café\"\n\n", initial: "b",
+                    suffix: "\n", typed: ["r", "e", "w"], color: .function, comment: ("# ", 0)),
+            Fixture(filename: "Method.rb", language: .ruby, prefix: "def ", initial: "ready?",
+                    suffix: "\nend\n", typed: [], color: .function, comment: nil),
+            Fixture(filename: "example.bash", language: .shell, prefix: "# café\n", initial: "p",
+                    suffix: "\n", typed: ["r", "i", "n", "t", "f"], color: .function, comment: ("# ", 0)),
+            Fixture(filename: "heredoc.bash", language: .shell, prefix: "cat <<'EOF'\nfirst\n", initial: "café",
+                    suffix: "\nlast\nEOF\n", typed: ["s"], color: .string, comment: nil),
+            Fixture(filename: "Example.swift", language: .swift, prefix: "// café\nfunc ", initial: "café",
+                    suffix: "() {}\n", typed: ["N", "o", "w"], color: .function, comment: ("// ", 5)),
+            Fixture(filename: "Empty.rb", language: .ruby, prefix: "", initial: "",
+                    suffix: "", typed: ["b", "r"], color: .function, comment: nil),
+        ]
+
+        for fixture in fixtures {
+            let file = directory.appendingPathComponent(fixture.filename)
+            let source = fixture.prefix + fixture.initial + fixture.suffix
+            try source.write(to: file, atomically: true, encoding: .utf8)
+            let document = app.makeDocument()
+            let window = document.window
+            defer { window.close() }
+            window.appearance = NSAppearance(named: .darkAqua)
+            guard try await app.openFile(file, in: document) === document, window.alphaValue == 0, !window.isVisible,
+                  let highlighting = document.editor.syntaxHighlighting,
+                  document.editor.syntaxLanguage == fixture.language else {
+                throw Failure("Could not open a hidden typing fixture for \(fixture.filename).")
+            }
+            window.layoutIfNeeded()
+            let editor = document.editor
+            var hold = false
+            var waiting = false
+            highlighting.beforeInstallTreeTokensForCheck = {
+                waiting = true
+                defer { waiting = false }
+                while hold && !Task.isCancelled { try? await Task.sleep(for: .milliseconds(3)) }
+            }
+            defer {
+                hold = false
+                highlighting.beforeInstallTreeTokensForCheck = nil
+            }
+
+            let start = fixture.prefix.utf16.count
+            var token = NSRange(location: start, length: fixture.initial.utf16.count)
+            func expect(_ color: SyntaxColor, _ phase: String) throws {
+                editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+                do {
+                    try requireGlyphColors(in: token, document: document, expected: color)
+                } catch {
+                    throw Failure("\(fixture.filename) \(phase), token \(token): \(error.localizedDescription)")
+                }
+            }
+            func checkEdit(_ color: SyntaxColor, _ edit: () -> Void) async throws {
+                hold = true
+                edit()
+                try expect(color, "first edited frame")
+                try await waitForFrame("background result pending for \(fixture.filename)") { waiting }
+                try expect(color, "pending frame")
+                hold = false
+                try await waitForFrame("background result applied for \(fixture.filename)") { !waiting }
+                try expect(color, "first updated frame")
+            }
+
+            if token.length > 0 { try expect(fixture.color, "opening frame") }
+            for character in fixture.typed {
+                try await checkEdit(fixture.color) {
+                    editor.setSelectedRange(NSRange(location: token.upperBound, length: 0))
+                    editor.insertText(character, replacementRange: NSRange(location: NSNotFound, length: 0))
+                    token.length += character.utf16.count
+                }
+            }
+            try await checkEdit(fixture.color) {
+                editor.setSelectedRange(NSRange(location: token.upperBound, length: 0))
+                editor.deleteBackward(nil)
+                token.length -= 1
+            }
+            if let comment = fixture.comment {
+                try await checkEdit(.comment) {
+                    editor.setSelectedRange(NSRange(location: token.location - comment.beforeToken, length: 0))
+                    editor.insertText(comment.marker, replacementRange: NSRange(location: NSNotFound, length: 0))
+                    token.location += comment.marker.utf16.count
+                }
+            }
+            guard !highlighting.usesLSPForCheck else { throw Failure("Typing fixture used LSP colors.") }
+        }
+    }
+
+    private static func waitForFrame(_ detail: String, until condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while !condition() {
+            guard ContinuousClock.now < deadline else { throw Failure("Timed out waiting for \(detail).") }
+            try await Task.sleep(for: .milliseconds(4))
+        }
+    }
+
+    static func requireGlyphColors(in range: NSRange, document: DocumentWindow, expected: SyntaxColor) throws {
+        let window = document.window
+        let editor = document.editor
+        let clip = document.scrollView.contentView
+        guard let manager = editor.textLayoutManager, let visible = manager.textViewportLayoutController.viewportRange,
+              NSIntersectionRange(editor.charRange(visible, in: manager), range) == range else {
+            throw Failure("show the entire edited token in the frame being sampled")
+        }
+        let columns = (range.location...range.upperBound).map { offset in
+            let position = NSRange(location: offset, length: 0)
+            return clip.convert(window.convertFromScreen(editor.firstRect(forCharacterRange: position, actualRange: nil)), from: nil)
+        }
+        let bounds = clip.bounds
+        guard let bitmap = clip.bitmapImageRepForCachingDisplay(in: bounds) else { throw Failure("capture typed glyphs") }
+        clip.cacheDisplay(in: bounds, to: bitmap)
+        let scale = CGFloat(bitmap.pixelsWide) / bounds.width
+        for (index, (left, right)) in zip(columns, columns.dropFirst()).enumerated() {
+            let x = Int(((left.minX - bounds.minX) * scale).rounded())..<Int(((right.minX - bounds.minX) * scale).rounded())
+            let y = Int(((left.minY - bounds.minY) * scale).rounded())..<Int(((left.maxY - bounds.minY) * scale).rounded())
+            var colors = Set<SyntaxColor>()
+            for row in y where (0..<bitmap.pixelsHigh).contains(row) {
+                for column in x where (0..<bitmap.pixelsWide).contains(column) {
+                    guard let pixel = bitmap.colorAt(x: column, y: row)?.usingColorSpace(.sRGB) else { continue }
+                    let (red, green, blue) = (pixel.redComponent, pixel.greenComponent, pixel.blueComponent)
+                    if blue > red + 0.2 && blue > green + 0.1 { colors.insert(.keyword) }
+                    if green > red + 0.2 && green > blue + 0.03 { colors.insert(.type) }
+                    if expected == .function, (red - green).magnitude < 0.05 && green > blue + 0.12 { colors.insert(.function) }
+                    if expected == .comment, green > red + 0.08 && green > blue + 0.11 { colors.insert(.comment) }
+                    if expected == .string, red > green + 0.11 && green > blue + 0.04 { colors.insert(.string) }
+                    if min(red, green, blue) > 0.7 { colors.insert(.plain) }
+                }
+            }
+            // The typing fixtures can have a white caret sharing a cell with a colored glyph.
+            if expected == .function || expected == .comment || expected == .string { colors.remove(.plain) }
+            guard colors == [expected] else {
+                throw Failure("Glyph \(index + 1) of \(range.length) expected \(expected) paint, found \(colors).")
+            }
         }
     }
 
