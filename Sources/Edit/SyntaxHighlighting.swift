@@ -2,6 +2,7 @@ import AppKit
 
 @MainActor
 final class SyntaxHighlighting {
+    private static let odinQuotes = CharacterSet(charactersIn: "\"'`")
     private static let bareWordSeparators = Set(" \t\n\r\u{0B}\u{0C}!%&()*+,-./:;<=>?[]^{|}~".utf16)
     // The native tree currently takes a contiguous UTF-16 snapshot. Defer that copy for large buffers.
     private static let foregroundSyntaxSnapshotLimit = 256 * 1_024
@@ -446,6 +447,7 @@ final class SyntaxHighlighting {
                     }
                 } else {
                     updated = refreshEditedViewport(edit, visible: visible, in: typingText)
+                        ?? (edits.count == 1 ? refreshOdinQuote(edit, in: typingText) : nil)
                 }
                 if let range = updated ?? preserveEditedSyntax(edit, visible: visible, previous: previousTree,
                                                                 edits: edits, in: typingText) {
@@ -496,6 +498,40 @@ final class SyntaxHighlighting {
         treeSpans = fresh
         treeSpansAreStale = false
         return range
+    }
+
+    private func refreshOdinQuote(_ edit: NSRange, in text: NSString) -> NSRange? {
+        guard treeSitterEnabled, treeLanguage == .odin, editor?.syntaxLanguage == .odin,
+              edit.location < text.length else { return nil }
+        let line = LineEditing.line(at: edit.location, in: text).contentRange
+        guard line.length <= 2_048, edit.upperBound <= line.upperBound,
+              text.rangeOfCharacter(from: Self.odinQuotes, options: [], range: line).location != NSNotFound else { return nil }
+
+        // Keep preceding lines for constructs such as proc followed by a comment and its convention.
+        let lowerBound = max(0, line.upperBound - 2_048)
+        var start = lowerBound == 0 ? 0 : text.lineRange(for: NSRange(location: lowerBound - 1, length: 1)).upperBound
+        guard start <= line.location else { return nil }
+        if let crossing = spans(overlapping: NSRange(location: start, length: 1), from: treeSpans).first,
+           crossing.start < start {
+            // A bounded parse must start outside a multiline comment or literal.
+            guard crossing.end <= edit.location else { return nil }
+            start = crossing.end
+        }
+        let fragment = NSRange(location: start, length: line.upperBound - start)
+        let deadline = ContinuousClock.now + .milliseconds(4)
+        guard let tree = SyntaxEngine.Tree(source: text.substring(with: fragment), language: .odin, previous: nil,
+                                           deadline: deadline),
+              let spans = tree.highlights(in: NSRange(location: 0, length: fragment.length), deadline: deadline),
+              let literal = spans.first(where: {
+                  ($0.color == .string || $0.color == .control) && $0.start <= edit.location - start
+                      && $0.end >= max(edit.location - start + 1, edit.upperBound - start)
+                      && Self.odinQuotes.contains(Unicode.Scalar(text.character(at: start + $0.start)) ?? " ")
+              }) else { return nil }
+        let fresh = SyntaxSpan(start: start + literal.start, end: start + literal.end, color: literal.color)
+        let old = self.spans(overlapping: fresh.range, from: treeSpans)
+        guard old.allSatisfy({ $0.start >= fresh.start && $0.end <= fresh.end }) else { return nil }
+        treeSpans.replaceSubrange(old.startIndex..<old.endIndex, with: [fresh])
+        return fresh.range
     }
 
     private func preserveEditedSyntax(_ edit: NSRange, visible: NSRange, previous: [SyntaxSpan],

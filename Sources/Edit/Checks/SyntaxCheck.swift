@@ -70,6 +70,7 @@ enum SyntaxCheck {
             let typed: [String]
             let color: SyntaxColor
             let comment: (marker: String, beforeToken: Int)?
+            var colorsOpeningDelimiter = false
         }
         var fixtures = [
             Fixture(filename: "Brewfile", language: .ruby, prefix: "brew \"café\"\n\n", initial: "b",
@@ -90,6 +91,15 @@ enum SyntaxCheck {
                     suffix: "\n", typed: ["b", "2"], color: .number, comment: nil),
             Fixture(filename: "RawString.odin", language: .odin, prefix: "package example\n\nmessage :: `first\n",
                     initial: "café", suffix: "`\n", typed: ["!", "?"], color: .string, comment: nil),
+            Fixture(filename: "CallingConvention.odin", language: .odin, prefix: "package example\n\nf :: proc ",
+                    initial: "", suffix: "\n", typed: ["\"", "c", "\""], color: .control, comment: nil,
+                    colorsOpeningDelimiter: true),
+            Fixture(filename: "Quote.odin", language: .odin, prefix: "package example\n\nmessage ",
+                    initial: "", suffix: "\n", typed: ["\"", "é", "\""], color: .string, comment: nil,
+                    colorsOpeningDelimiter: true),
+            Fixture(filename: "Rune.odin", language: .odin, prefix: "package example\n\nletter :: ",
+                    initial: "", suffix: "\n", typed: ["'", "é", "'"], color: .string, comment: nil,
+                    colorsOpeningDelimiter: true),
             Fixture(filename: "String.zig", language: .zig, prefix: "const value = ", initial: "",
                     suffix: ";\nconst next = 1;\n", typed: ["\"", "h", "e", "l", "l", "o", "\""],
                     color: .string, comment: nil),
@@ -177,7 +187,8 @@ enum SyntaxCheck {
                 }
             } else {
                 for character in fixture.typed {
-                    let pending: SyntaxColor? = expiresForegroundParse && token.length == 0 && fixture.language != .zig ? .plain : nil
+                    let pending: SyntaxColor? = expiresForegroundParse && token.length == 0
+                        && fixture.language != .zig && !fixture.colorsOpeningDelimiter ? .plain : nil
                     try await checkEdit(fixture.color, pending: pending) { type(character) }
                 }
             }
@@ -282,6 +293,7 @@ enum SyntaxCheck {
                     guard let pixel = bitmap.colorAt(x: column, y: row)?.usingColorSpace(.sRGB) else { continue }
                     let (red, green, blue) = (pixel.redComponent, pixel.greenComponent, pixel.blueComponent)
                     if blue > red + 0.2 && blue > green + 0.1 { colors.insert(.keyword) }
+                    if expected == .control, red > green + 0.12 && blue > green + 0.12 { colors.insert(.control) }
                     if green > red + 0.2 && green > blue + 0.03 { colors.insert(.type) }
                     if expected == .function, (red - green).magnitude < 0.05 && green > blue + 0.12 { colors.insert(.function) }
                     if expected == .comment, green > red + 0.08 && green > blue + 0.11 { colors.insert(.comment) }
@@ -291,7 +303,7 @@ enum SyntaxCheck {
                 }
             }
             // The typing fixtures can have a white caret sharing a cell with a colored glyph.
-            if [.function, .comment, .string, .number].contains(expected) { colors.remove(.plain) }
+            if [.control, .function, .comment, .string, .number].contains(expected) { colors.remove(.plain) }
             guard colors == [expected] else {
                 throw Failure("Glyph \(index + 1) of \(range.length) expected \(expected) paint, found \(colors).")
             }
@@ -313,6 +325,12 @@ enum SyntaxCheck {
               analysis.brackets.ignoredRanges.contains(where: { NSIntersectionRange($0, ignored).length == ignored.length }),
               cache.request(in: source + "Changed", language: .markdown).task != colors.task else {
             throw Failure("Embedded colors or bracket context were missing from the current parse.")
+        }
+        let odin = "f :: proc \"(\n"
+        let quote = (odin as NSString).range(of: "\"(")
+        guard let analysis = SyntaxEngine.analysis(in: odin, language: .odin),
+              analysis.brackets.ignoredRanges.contains(where: { NSIntersectionRange($0, quote) == quote }) else {
+            throw Failure("An unfinished Odin calling convention exposed its contents to bracket matching.")
         }
     }
 
@@ -614,6 +632,20 @@ enum SyntaxCheck {
             (.odin, "package shapes\n\nimport \"core:fmt\"\nmain :: proc() { fmt.println(\"café 🦜\") }\n", "\"café 🦜\"", .string),
             (.odin, "package shapes\n\nimport \"core:fmt\"\nmain :: proc() { fmt.println(\"café 🦜\") }\n", "println", .function),
             (.odin, "package shapes\n\n/* outer /* nested */ still a comment */\n", "still a comment", .comment),
+            (.odin, "proc \"", "\"", .control),
+            (.odin, "f :: proc \"cust", "\"cust", .control),
+            (.odin, "f :: proc /* ABI */\n \"c\" () {}", "\"c\"", .control),
+            (.odin, "callback_proc :: \"", "\"", .string),
+            (.odin, "callback_proc \"", "\"", .string),
+            (.odin, "foo() '", "'", .string),
+            (.odin, "\"", "\"", .string),
+            (.odin, "'", "'", .string),
+            (.odin, "text :: \"left\\\"right\nnext :: 42", "\"left\\\"right", .string),
+            (.odin, "text :: \"left\\\"right\nnext :: 42", "42", .number),
+            (.odin, "r :: '\\''\nnext :: 42", "'\\''", .string),
+            (.odin, "text :: \"\"\"\nproc \"\nthird line", "third line", .string),
+            (.odin, "text :: `proc \" ' still raw", "still raw", .string),
+            (.odin, "/*\" proc \" ' still a comment", "still a comment", .comment),
             (.markdown, "```odin\npackage shapes\nArea :: proc() {}\n```\n", "Area", .function),
             (.python, "def greet():\n    return 1\n", "greet", .function),
             (.ruby, "def greet\n  'hello'\nend", "greet", .function),

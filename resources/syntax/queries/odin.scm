@@ -37,7 +37,7 @@
 (field (identifier) @property)
 (attribute (identifier) @attribute)
 
-[(string) (character) (escape_sequence)] @string
+[(string_literal) (raw_string_literal) (character)] @string
 [(number) (float)] @number
 [(boolean) (nil) (uninitialized)] @constant.builtin
 [(comment) (block_comment)] @comment

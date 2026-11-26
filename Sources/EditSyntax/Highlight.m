@@ -307,7 +307,7 @@ static bool bracketTextNode(const char *type, bool interpolation) {
     static const char *const ignored[] = {
         "comment", "line_comment", "block_comment", "multiline_comment", "js_comment", "html_comment", "shebang",
         "string_literal", "objc_string_literal", "interpreted_string_literal", "raw_string_literal", "char_literal", "rune_literal",
-        "char_lit", "character", "system_lib_string", "hex_string_literal", "unicode_string_literal",
+        "char_lit", "character", "calling_convention", "system_lib_string", "hex_string_literal", "unicode_string_literal",
         "yul_string_literal", "yul_hex_string_literal", "string_value", "single_quote_scalar", "double_quote_scalar",
         "block_scalar", "multi_string", "raw_string", "ansi_c_string", "multiline_string",
         "char", "str_lit", "regex_lit", "regex", "regex_literal", "regex_pattern",

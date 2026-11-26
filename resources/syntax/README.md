@@ -18,7 +18,7 @@ The source archive contains Tree-sitter 0.25.10 and the generated parser and sca
 | Lua | 0.5.0 |
 | Markdown and inline Markdown | `9a23c1a96c0513d8fc6520972beedd419a973539` |
 | Objective-C and Objective-C++ | [tree-sitter-objcpp `f744aa49e05971a2177f9b993f81a494744df7f5`](https://tangled.org/dunkirk.sh/dots/commit/f744aa49e05971a2177f9b993f81a494744df7f5) |
-| Odin | [tree-sitter-odin `d2ca8efb4487e156a60d5bd6db2598b872629403`](https://github.com/tree-sitter-grammars/tree-sitter-odin/commit/d2ca8efb4487e156a60d5bd6db2598b872629403) |
+| Odin | [tree-sitter-odin `d2ca8efb4487e156a60d5bd6db2598b872629403`](https://github.com/tree-sitter-grammars/tree-sitter-odin/commit/d2ca8efb4487e156a60d5bd6db2598b872629403) with Edit's quote recovery |
 | Python | 0.25.0 |
 | Ruby | 0.23.1 |
 | Rust | 0.24.0 |
@@ -33,5 +33,7 @@ The source archive contains Tree-sitter 0.25.10 and the generated parser and sca
 JavaScript and JSX use the TSX grammar. Queries start from the grammar distributions for supported capture names. Edit supplies its own JavaScript queries and retains the original Edit queries for Clojure, Erlang, Solidity, TOML, and Zig. TSX and TypeScript share the JavaScript rules and add TypeScript-specific rules. Objective-C and Objective-C++ share a grammar and use the C and C++ captures with additional Objective-C rules.
 
 The build applies [local grammar patches](patches/) after extracting the archive. The Ruby scanner retains an unterminated ordinary or percent string's body at EOF so the parser can report a missing delimiter and keep the literal as a syntax node.
+
+The Odin parser and scanner in the archive already include [the quote recovery source patch](odin/quote-recovery.patch). To regenerate them, apply that patch at the root of the pinned upstream checkout and run `tree-sitter generate --abi 15` with Tree-sitter CLI 0.25.10. Copy `src/parser.c`, `src/scanner.c`, and `src/tree_sitter/parser.h` into the corresponding archive paths.
 
 Tree-sitter is distributed under the [MIT License](https://github.com/tree-sitter/tree-sitter/blob/v0.25.10/LICENSE). Each parser retains its respective license.
