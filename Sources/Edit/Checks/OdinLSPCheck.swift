@@ -207,6 +207,7 @@ enum OdinLSPCheck {
                         && documentation.string.contains("\nConstant Variables:")
                         && fontName(in: documentation, at: "type_info_of") == mono,
                         "preserve the authored line breaks and inline code in runtime documentation")
+            try checkAlignedNamingFields(in: documentation)
             try capture(view, "runtime")
             let body = documentation.string as NSString
             let pattern = body.range(of: "File pattern")
@@ -221,6 +222,25 @@ enum OdinLSPCheck {
                         "show the Markdown table headers in separate columns on the same row")
             try capture(view, "runtime-table")
         }
+    }
+
+    private static func checkAlignedNamingFields(in view: NSTextView) throws {
+        let labels = ["Package Name", "Import Name", "Types", "Enum Values", "Procedures", "Local Variables",
+                      "Constant Variables"]
+        let text = view.string as NSString
+        let columns = try labels.map { label in
+            let prefix = text.range(of: "\n\(label):\t")
+            guard prefix.location != NSNotFound else { throw Failure(detail: "recognize the \(label) field") }
+            let value = NSRange(location: prefix.upperBound, length: 1)
+            let rect = view.firstRect(forCharacterRange: value, actualRange: nil)
+            try require(!rect.isEmpty, "locate the rendered value for \(label)")
+            return rect.minX
+        }
+        try require(columns.dropFirst().allSatisfy { abs($0 - columns[0]) < 1 },
+                    "start all naming values in the same column")
+        try require(OLSHover.alignedFields(in: "Alpha: one\nBravo: two\nGamma: three") == nil
+                    && OLSHover.alignedFields(in: "Name:     A\nOther:  B\nThird:  C") == nil,
+                    "leave prose and unevenly padded lines in their original layout")
     }
 
     private static func hoverBody(_ name: String, in view: NSView) -> NSTextView? {

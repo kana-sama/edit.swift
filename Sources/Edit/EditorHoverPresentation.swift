@@ -64,9 +64,10 @@ struct EditorHoverLayout {
     init?(_ presentation: EditorHoverPresentation, maximumWidth: CGFloat) {
         switch presentation {
         case .markdown(let content):
-            let attributed = content.attributedText()
+            let inset = NSSize(width: 12, height: 10)
+            let attributed = content.attributedText(maximumWidth: maximumWidth - 2 * inset.width)
             guard attributed.length > 0 else { return nil }
-            let text = HoverTextView(width: maximumWidth, text: attributed, inset: NSSize(width: 12, height: 10))
+            let text = HoverTextView(width: maximumWidth, text: attributed, inset: inset)
             guard let natural = text.measure(at: maximumWidth) else { return nil }
             let width = min(maximumWidth, max(84, natural.width))
             guard let size = text.measure(at: width) else { return nil }
@@ -109,7 +110,9 @@ private final class HoverSectionsView: NSView {
             label.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
             label.isHidden = !section.kind.showsLabel
 
-            let body = HoverTextView(width: maximumWidth, text: section.content.attributedText(), inset: .zero)
+            let textWidth = maximumWidth - 2 * inset - codePadding.width
+            let body = HoverTextView(width: maximumWidth, text: section.content.attributedText(maximumWidth: textWidth),
+                                     inset: .zero)
             body.identifier = .init("EditorLanguageHover.\(name).body")
             if label.isHidden { body.setAccessibilityLabel(name) }
             return (label: label, body: body, isCode: section.kind.isCode)

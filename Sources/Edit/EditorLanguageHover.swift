@@ -64,6 +64,8 @@ struct EditorHoverContent: Sendable {
         var codeLanguage: SyntaxLanguage?
         var codeSpans: [SyntaxSpan] = []
         var cell: Cell?
+        var isTopLevelParagraph = false
+        var alignedFields: [OLSHover.Field]?
         var runs: [Run] = []
     }
 
@@ -99,6 +101,7 @@ struct EditorHoverContent: Sendable {
             if blocks.isEmpty || blocks.last?.identity != identity {
                 let isOrdered = components.contains { $0.kind == .orderedList }
                 var block = Block(identity: identity)
+                block.isTopLevelParagraph = components.count == 1 && components.first?.kind == .paragraph
                 var table: (id: Int, columns: [PresentationIntent.TableColumn])?
                 var row: Int?
                 var column: Int?
@@ -146,15 +149,19 @@ struct EditorHoverContent: Sendable {
         }
 
         for index in blocks.indices {
-            guard let language = blocks[index].codeLanguage, !Task.isCancelled else { continue }
-            let code = blocks[index].runs.map(\.text).joined()
-            blocks[index].codeSpans = SyntaxEngine.analysis(in: code, language: language, includesBrackets: false)?.spans ?? []
+            if Task.isCancelled { break }
+            if let language = blocks[index].codeLanguage {
+                let code = blocks[index].runs.map(\.text).joined()
+                blocks[index].codeSpans = SyntaxEngine.analysis(in: code, language: language, includesBrackets: false)?.spans ?? []
+            } else if preservesSoftBreaks, blocks[index].isTopLevelParagraph {
+                blocks[index].alignedFields = OLSHover.alignedFields(in: blocks[index].runs.map(\.text).joined())
+            }
         }
         self.blocks = blocks
     }
 
     @MainActor
-    func attributedText() -> NSAttributedString {
+    func attributedText(maximumWidth: CGFloat = .greatestFiniteMagnitude) -> NSAttributedString {
         let result = NSMutableAttributedString()
         let codeBackground = NSColor.labelColor.withAlphaComponent(0.075)
         var tables: [Int: NSTextTable] = [:]
@@ -216,6 +223,9 @@ struct EditorHoverContent: Sendable {
                 result.addAttribute(.foregroundColor, value: span.color.nativeColor,
                                     range: NSRange(location: start + span.start, length: span.end - span.start))
             }
+            if let fields = block.alignedFields {
+                alignFields(fields, in: result, startingAt: start, paragraph: paragraph, maximumWidth: maximumWidth)
+            }
             // Foundation includes the newline before the closing Markdown fence in the code.
             if block.isCode, result.length > start, result.mutableString.hasSuffix("\n") {
                 result.deleteCharacters(in: NSRange(location: result.length - 1, length: 1))
@@ -234,6 +244,27 @@ struct EditorHoverContent: Sendable {
             }
         }
         return result
+    }
+
+    @MainActor
+    private func alignFields(_ fields: [OLSHover.Field], in text: NSMutableAttributedString,
+                             startingAt start: Int, paragraph: NSMutableParagraphStyle, maximumWidth: CGFloat) {
+        let labels = fields.map { NSRange(location: start + $0.label.location, length: $0.label.length) }
+        let longestLabel = labels.map { text.attributedSubstring(from: $0).size().width }.max() ?? 0
+        let column = ceil(longestLabel) + 14
+        guard column <= maximumWidth * 0.6 else { return }
+
+        let style = NSMutableParagraphStyle()
+        style.setParagraphStyle(paragraph)
+        style.tabStops = [NSTextTab(textAlignment: .left, location: column)]
+        style.headIndent = column
+        let labelColor = NSColor.labelColor.withAlphaComponent(0.8)
+        for (field, label) in zip(fields, labels).reversed() {
+            text.addAttribute(.foregroundColor, value: labelColor, range: label)
+            text.replaceCharacters(in: NSRange(location: start + field.padding.location, length: field.padding.length), with: "\t")
+        }
+        text.addAttribute(.paragraphStyle, value: style, range: NSRange(location: start, length: text.length - start))
+        paragraph.setParagraphStyle(style)
     }
 }
 
