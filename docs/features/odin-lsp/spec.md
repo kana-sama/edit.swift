@@ -10,8 +10,10 @@ Use the existing **Go to Definition**, **Find All References**, **Hover**, occur
 
 Ask OLS for semantic tokens by default and respect a workspace `ols.json` setting of `"enable_semantic_tokens": false`. Full-file semantic tokens augment [Tree-sitter highlighting](../odin/spec.md) through the existing LSP Highlighting toggle.
 
+Show an OLS signature in the same selectable code block as a Zig declaration, with Odin syntax colors. Render the following documentation as Markdown, including inline code, links, and fenced examples. Show indentation-based examples attached to top-level prose as code, including the format verbs in the `core:fmt` package hover. Ignore an OLS hover range that does not contain the hovered character and anchor the card to the hovered word.
+
 ## Acceptance
 
-Run `./script/check --only lsp-odin` with OLS on PATH. The hidden native fixture covers a nested workspace, a path with reserved characters, an emoji before the queried identifier, semantic paint, and the source and destination frames of cross-file navigation. It checks rename in the open buffer and a closed file, indexing a subsequent external change, and reloading the project settings on restart.
+Run `./script/check --only lsp-odin` with OLS on PATH. The hidden native fixture checks the package hover from a pointer event over `fmt` in `import "core:fmt"`, including its signature, inline code, separate indented examples, and scrolling. It also covers a nested workspace, a path with reserved characters, an emoji before the queried identifier, semantic paint, and the source and destination frames of cross-file navigation. It checks rename in the open buffer and a closed file, indexing a subsequent external change, and reloading the project settings on restart.
 
 [ols]: https://github.com/DanielGavin/ols#installation

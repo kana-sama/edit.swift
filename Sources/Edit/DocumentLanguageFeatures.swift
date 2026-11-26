@@ -339,8 +339,11 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     func hover(at offset: Int, word: NSRange) async -> EditorLanguageHover? {
         guard session.supportsHover, let query = query(), let result = try? await session.hover(at: offset),
               isCurrent(query) else { return nil }
-        return EditorLanguageHover(text: result.content, isMarkdown: result.isMarkdown,
-                                   range: result.range?.nsRange(in: query.text) ?? word)
+        let range = result.range?.nsRange(in: query.text)
+        // OLS sometimes returns the package declaration range for an import hover.
+        let anchor = range.flatMap { query.server == .odin && !NSLocationInRange(offset, $0) ? nil : $0 }
+        return EditorLanguageHover(text: result.content, isMarkdown: result.isMarkdown, range: anchor ?? word,
+                                   server: query.server)
     }
 
     func documentHighlights(at offset: Int) async -> [NSRange] {

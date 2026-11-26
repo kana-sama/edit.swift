@@ -269,7 +269,7 @@ final class EditorLanguageInteraction: NSObject {
                 return
             }
             let parse = Task.detached(priority: .userInitiated) {
-                EditorHoverPresentation(text: response.text, isMarkdown: response.isMarkdown)
+                response.presentation
             }
             let content = await withTaskCancellationHandler { await parse.value } onCancel: { parse.cancel() }
             guard !Task.isCancelled, let self, hoverWord == target.word else { return }

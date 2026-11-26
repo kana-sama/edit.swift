@@ -7,7 +7,7 @@ enum OdinLSPCheck {
         var errorDescription: String? { "OLS check: \(detail)" }
     }
 
-    static func run(in app: Edit, document: DocumentWindow) async throws {
+    static func run(in app: Edit, document: DocumentWindow, captureHover: (NSView) throws -> Void) async throws {
         let folder = FileManager.default.temporaryDirectory
             .appending(path: "Odin # ? café \(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -18,9 +18,10 @@ enum OdinLSPCheck {
         let config = root.appending(path: "ols.json")
         let text = """
             package fixture
+            import "core:fmt"
             main :: proc() {
                 label := "🦜"; result := double_value(2)
-                _ = label
+                fmt.println(label)
                 _ = result
             }
 
@@ -53,6 +54,7 @@ enum OdinLSPCheck {
                     "use the ols.json project and show OLS as ready")
         let generation = session.generation
         let editor = document.editor
+        try await checkImportHover(in: document, capture: captureHover)
 
         let use = (text as NSString).range(of: "double_value")
         let declarationName = (declaration as NSString).range(of: "double_value")
@@ -152,6 +154,56 @@ enum OdinLSPCheck {
                     "respect the project's semantic token setting and clear the stopped preference")
         try require(!document.window.isVisible && document.window.alphaValue == 0 && !NSApp.isActive,
                     "keep the isolated OLS check hidden")
+    }
+
+    private static func checkImportHover(in document: DocumentWindow, capture: (NSView) throws -> Void) async throws {
+        let editor = document.editor
+        let path = (editor.string as NSString).range(of: "core:fmt")
+        let fmt = NSRange(location: path.upperBound - 3, length: 3)
+        let response = await document.languageFeatures.hover(at: fmt.location + 1, word: fmt)
+        try require(response?.range == fmt, "anchor the package hover at the import in the current file")
+
+        document.window.layoutIfNeeded()
+        if let layout = editor.textLayoutManager { layout.ensureLayout(for: layout.documentRange) }
+        guard let glyphs = editor.highlightRects(for: [fmt]).first,
+              let move = NSEvent.mouseEvent(with: .mouseMoved,
+                  location: editor.convert(NSPoint(x: glyphs.midX, y: glyphs.midY), to: nil),
+                  modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                  windowNumber: document.window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)
+        else { throw Failure(detail: "create the pointer event over the Odin import") }
+        editor.mouseMoved(with: move)
+        try await wait("show the live core:fmt hover") { editor.languageHoverWindowForCheck != nil }
+        defer { editor.cancelOperation(nil) }
+        guard let panel = editor.languageHoverWindowForCheck, let view = panel.contentView,
+              let declaration = hoverBody("Declaration", in: view),
+              let documentation = hoverBody("Description", in: view)
+        else { throw Failure(detail: "show separate declaration and documentation sections for core:fmt") }
+        try require(!panel.isVisible && panel.alphaValue == 0, "keep the hover capture hidden")
+        try require(declaration.string == "fmt: package" && declaration.isSelectable && documentation.isSelectable,
+                    "render the selectable package signature in its own code block")
+        let mono = EditorTextView.defaultFont.fontName
+        try require(fontName(in: declaration, at: "fmt: package") == mono
+                    && fontName(in: documentation, at: "I/O") == mono
+                    && fontName(in: documentation, at: "General:") != mono,
+                    "render inline code and prose with their respective fonts")
+        try require(documentation.string.contains("General:\n%v")
+                    && documentation.string.contains("\n%#v")
+                    && fontName(in: documentation, at: "%#v") == mono,
+                    "keep adjacent tab-indented format verbs on separate code lines")
+        try require(documentation.enclosingScrollView?.hasVerticalScroller == true,
+                    "keep the full package documentation scrollable")
+        try capture(view)
+    }
+
+    private static func hoverBody(_ name: String, in view: NSView) -> NSTextView? {
+        if view.identifier?.rawValue == "EditorLanguageHover.\(name).body" { return view as? NSTextView }
+        return view.subviews.lazy.compactMap { hoverBody(name, in: $0) }.first
+    }
+
+    private static func fontName(in view: NSTextView, at text: String) -> String? {
+        let index = (view.string as NSString).range(of: text).location
+        guard index != NSNotFound else { return nil }
+        return (view.textStorage?.attribute(.font, at: index, effectiveRange: nil) as? NSFont)?.fontName
     }
 
     private static func wait(_ detail: String, session: LanguageServerSession? = nil,

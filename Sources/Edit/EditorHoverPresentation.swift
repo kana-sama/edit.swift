@@ -26,19 +26,27 @@ enum EditorHoverPresentation: Sendable {
         }
     }
 
-    init(text: String, isMarkdown: Bool) {
-        guard isMarkdown, let hover = ZLSHover(markdown: text) else {
+    init(text: String, isMarkdown: Bool, server: LanguageServer? = nil) {
+        if isMarkdown, server == .odin, let hover = OLSHover(markdown: text) {
+            var sections = [Section(kind: .declaration, content: EditorHoverContent(code: [hover.declaration], language: .odin))]
+            if let documentation = hover.documentation {
+                sections.append(Section(kind: .documentation, content: EditorHoverContent(text: documentation, isMarkdown: true)))
+            }
+            self = .structured(sections)
+            return
+        }
+        guard isMarkdown, server != .odin, let hover = ZLSHover(markdown: text) else {
             self = .markdown(EditorHoverContent(text: text, isMarkdown: isMarkdown))
             return
         }
 
-        var sections = [Section(kind: .declaration, content: EditorHoverContent(zigCode: [hover.declaration]))]
+        var sections = [Section(kind: .declaration, content: EditorHoverContent(code: [hover.declaration], language: .zig))]
         if let documentation = hover.documentation {
             sections.append(Section(kind: .documentation, content: EditorHoverContent(text: documentation, isMarkdown: true)))
         }
         if !hover.types.isEmpty {
             let types = hover.hasMoreTypes ? hover.types + ["…"] : hover.types
-            sections.append(Section(kind: .type, content: EditorHoverContent(zigCode: types)))
+            sections.append(Section(kind: .type, content: EditorHoverContent(code: types, language: .zig)))
         }
         if !hover.references.isEmpty {
             sections.append(Section(kind: .references, content: EditorHoverContent(references: hover.references)))

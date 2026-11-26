@@ -4,6 +4,11 @@ struct EditorLanguageHover: Sendable {
     let text: String
     let isMarkdown: Bool
     let range: NSRange?
+    let server: LanguageServer
+
+    var presentation: EditorHoverPresentation {
+        EditorHoverPresentation(text: text, isMarkdown: isMarkdown, server: server)
+    }
 }
 
 enum HoverLink {
@@ -55,9 +60,9 @@ struct EditorHoverContent: Sendable {
 
     private let blocks: [Block]
 
-    init(zigCode snippets: [String]) {
+    init(code snippets: [String], language: SyntaxLanguage) {
         blocks = snippets.map { snippet in
-            let spans = Task.isCancelled ? [] : SyntaxEngine.analysis(in: snippet, language: .zig, includesBrackets: false)?.spans ?? []
+            let spans = Task.isCancelled ? [] : SyntaxEngine.analysis(in: snippet, language: language, includesBrackets: false)?.spans ?? []
             return Block(isCode: true, codeSpans: spans, runs: [Run(text: snippet)])
         }
     }
