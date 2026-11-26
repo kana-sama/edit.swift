@@ -27,7 +27,7 @@ key="$(
         printf '%s\n' "$target" "$clang" "$sdk" &&
         /usr/bin/stat -L -f '%i:%m:%c:%z' "$clang" "$sdk/SDKSettings.plist" &&
         /usr/bin/shasum -a 256 script/build-syntax Sources/EditSyntax/Highlight.m Sources/EditSyntaxABI/EditSyntaxABI.h \
-            resources/syntax/sources.tar.gz
+            resources/syntax/sources.tar.gz resources/syntax/patches/*.patch
     } | /usr/bin/shasum -a 256
 )"
 key="${key%% *}"
@@ -38,6 +38,9 @@ if [[ ! -f "$destination" ]]; then
     trap 'rm -rf -- "$stage"' EXIT
     mkdir "$stage/sources" "$stage/objects"
     /usr/bin/tar -xzf resources/syntax/sources.tar.gz -C "$stage/sources"
+    for grammar_patch in resources/syntax/patches/*.patch; do
+        /usr/bin/patch -s -d "$stage/sources" -p1 < "$grammar_patch"
+    done
     jobs="$(getconf _NPROCESSORS_ONLN)"
     if (( jobs > 8 )); then jobs=8; fi
     {

@@ -43,7 +43,7 @@ build_fingerprint() {
         /usr/bin/shasum -a 256 "${sources[@]}" Package.swift Package.resolved resources/Info.plist resources/Edit.icns \
             script/build script/build-syntax script/app-bundle.sh script/publish-app.c Sources/Edit/Resources/Seti/* \
             Sources/Edit/Resources/LanguageServerLogos/* \
-            Sources/EditSyntax/Highlight.m Sources/EditSyntaxABI/* resources/syntax/sources.tar.gz \
+            Sources/EditSyntax/Highlight.m Sources/EditSyntaxABI/* resources/syntax/sources.tar.gz resources/syntax/patches/*.patch \
             resources/syntax/queries/*.scm resources/syntax/licenses/* resources/syntax/README.md \
             resources/markdown/assets.tar.gz resources/markdown/preview.html
     } | /usr/bin/shasum -a 256

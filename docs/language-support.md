@@ -28,7 +28,7 @@ Initial inventory as of November 26, 2026, based on the bundled modes, server ro
 | Objective-C | Unverified | SourceKit-LSP (clangd) | |
 | Objective-C++ | Unverified | SourceKit-LSP (clangd) | |
 | Python | Unverified | — | |
-| Ruby | Supported | — | The native typing check covers `Brewfile`, an empty file, and Backspace in a method ending in `?`. |
+| Ruby | Supported | — | Native checks cover `Brewfile`, an empty file, Backspace in a method ending in `?`, and closing or reopening a multiline string. |
 | Rust | Unverified | — | Existing first-frame check covers opening a file. |
 | Shell Script | Supported | — | The native typing check covers Bash commands, comments, and a multiline heredoc. |
 | Solidity | Unverified | — | |

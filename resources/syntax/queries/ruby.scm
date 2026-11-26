@@ -93,6 +93,9 @@
 
 ; Literals
 
+; A lone opening delimiter can remain in an error node until the first body character.
+(ERROR "\"" @string)
+
 [
   (string)
   (bare_string)

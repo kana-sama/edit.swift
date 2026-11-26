@@ -16,6 +16,7 @@ enum SyntaxCheck {
         try await checkTyping(in: app, expiresForegroundParse: false)
         try await checkTyping(in: app, expiresForegroundParse: true)
         try await checkTyping(in: app, expiresForegroundParse: true, expiresProjectedQuery: true)
+        try await checkUnclosedRubyString(in: app)
         try await checkFirstDraw(in: app, appearance: .aqua)
         try await checkFirstDraw(in: app, appearance: .darkAqua)
         try await checkSwiftDrawing(in: app, requiresFirstFrame: true)
@@ -182,6 +183,58 @@ enum SyntaxCheck {
             guard ContinuousClock.now < deadline else { throw Failure("Timed out waiting for \(detail).") }
             try await Task.sleep(for: .milliseconds(4))
         }
+    }
+
+    private static func checkUnclosedRubyString(in app: Edit) async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("Ruby-string-\(UUID()).rb")
+        let source = "\"hello\ndef fn\nend"
+        try source.write(to: file, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        document.window.appearance = NSAppearance(named: .darkAqua)
+        guard try await app.openFile(file, in: document) === document, !document.window.isVisible,
+              document.window.alphaValue == 0, let highlighting = document.editor.syntaxHighlighting else {
+            throw Failure("Could not prepare the hidden Ruby string fixture.")
+        }
+        document.window.layoutIfNeeded()
+        let editor = document.editor
+        let closingQuote = NSRange(location: "\"hello".utf16.count, length: 0)
+        func expect(_ nextLine: SyntaxColor, method: SyntaxColor) throws {
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            let text = editor.string as NSString
+            try requireGlyphColors(in: text.range(of: "\"hello"), document: document, expected: .string)
+            try requireGlyphColors(in: text.range(of: "def"), document: document, expected: nextLine)
+            try requireGlyphColors(in: text.range(of: "fn"), document: document, expected: method)
+        }
+
+        try expect(.string, method: .string)
+        var hold = true
+        var pending = false
+        highlighting.expireForegroundParseForCheck = true
+        highlighting.beforeInstallTreeTokensForCheck = {
+            pending = true
+            defer { pending = false }
+            while hold && !Task.isCancelled { try? await Task.sleep(for: .milliseconds(3)) }
+        }
+        defer {
+            hold = false
+            highlighting.beforeInstallTreeTokensForCheck = nil
+        }
+        editor.setSelectedRange(closingQuote)
+        editor.insertText("\"", replacementRange: NSRange(location: NSNotFound, length: 0))
+        try expect(.string, method: .string)
+        try await waitForFrame("hold the Ruby parse after closing the quote") { pending }
+        try expect(.string, method: .string)
+        hold = false
+        try await waitForFrame("apply the Ruby parse after closing the quote") { !pending }
+        try expect(.keyword, method: .function)
+
+        editor.deleteBackward(nil)
+        try await waitForFrame("restore string color when Backspace reopens the Ruby string") {
+            highlighting.treeSpansForCheck.contains { $0.start == 0 && $0.end == source.utf16.count && $0.color == .string }
+        }
+        try expect(.string, method: .string)
     }
 
     static func requireGlyphColors(in range: NSRange, document: DocumentWindow, expected: SyntaxColor) throws {
@@ -535,6 +588,15 @@ enum SyntaxCheck {
             (.objectiveCPP, "namespace ui { int run() { return [Widget count]; } }", "count", .function),
             (.python, "def greet():\n    return 1\n", "greet", .function),
             (.ruby, "def greet\n  'hello'\nend", "greet", .function),
+            (.ruby, "\"", "\"", .string),
+            (.ruby, "\"hello\ndef fn", "\"hello\ndef fn", .string),
+            (.ruby, "puts 'hello\ndef fn", "'hello\ndef fn", .string),
+            (.ruby, "%q(hello\ndef fn", "%q(hello\ndef fn", .string),
+            (.ruby, #""escaped \"# + "\n" + "def fn", "def fn", .string),
+            (.ruby, #""escape\"#, #""escape\"#, .string),
+            (.ruby, "\"hello #{name}\ndef fn", "def fn", .string),
+            (.ruby, "\"hello #{name}\ndef fn", "name", .function),
+            (.ruby, "\"hello\"\ndef fn\nend", "def", .keyword),
             (.rust, "fn main() { let café = \"🦜\"; }", "\"🦜\"", .string),
             (.shell, "greet() { echo hello; }", "greet", .function),
             (.solidity, "contract Counter { function get() public pure returns (uint) { return 1; } }", "get", .function),

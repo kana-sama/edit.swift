@@ -1,0 +1,27 @@
+--- a/ruby/src/scanner.c
++++ b/ruby/src/scanner.c
+@@ -815,4 +815,8 @@
+-                if (has_content) {
+-                    lexer->mark_end(lexer);
+-                    lexer->result_symbol = STRING_CONTENT;
+-                    return true;
++                lexer->mark_end(lexer);
++                if (literal->type == STRING_START) {
++                    advance(lexer);
++                    if (lexer->eof(lexer)) {
++                        lexer->mark_end(lexer);
++                        lexer->result_symbol = STRING_CONTENT;
++                        return true;
++                    }
+@@ -820 +824,2 @@
+-                return false;
++                lexer->result_symbol = STRING_CONTENT;
++                return has_content;
+@@ -826 +831,2 @@
+-            advance(lexer);
++            // Keep the body of an unterminated string. The parser can then recover
++            // by inserting a missing closing delimiter at EOF.
+@@ -828 +834,2 @@
+-            return false;
++            lexer->result_symbol = STRING_CONTENT;
++            return has_content && literal->type == STRING_START;

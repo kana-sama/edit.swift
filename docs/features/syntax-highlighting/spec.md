@@ -33,6 +33,8 @@ The Zig and ZON base layer colors keywords, literals, primitive types, comments,
 
 In Markdown, apply inline code highlighting inside table cells and color heading markers with the heading. An HTML comment in Markdown keeps its comment color from its opener through its close, or through the end of the buffer while it is unclosed. Comment-like text inside code stays code.
 
+In Ruby, when a quoted or percent string is missing its closing delimiter, highlight its body through EOF, including subsequent lines. Complete interpolations and escapes keep their usual Ruby highlighting. A real closing delimiter ends the string, and code after it resumes normal highlighting.
+
 [Grammar versions and licenses](../../../resources/syntax/README.md)
 
 ## Acceptance

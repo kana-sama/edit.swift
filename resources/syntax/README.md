@@ -31,4 +31,6 @@ The source archive contains Tree-sitter 0.25.10 and the generated parser and sca
 
 JavaScript and JSX use the TSX grammar. Queries start from the grammar distributions for supported capture names. Edit supplies its own JavaScript queries and retains the original Edit queries for Clojure, Erlang, Solidity, TOML, and Zig. TSX and TypeScript share the JavaScript rules and add TypeScript-specific rules. Objective-C and Objective-C++ share a grammar and use the C and C++ captures with additional Objective-C rules.
 
+The build applies [local grammar patches](patches/) after extracting the archive. The Ruby scanner retains an unterminated ordinary or percent string's body at EOF so the parser can report a missing delimiter and keep the literal as a syntax node.
+
 Tree-sitter is distributed under the [MIT License](https://github.com/tree-sitter/tree-sitter/blob/v0.25.10/LICENSE). Each parser retains its respective license.
