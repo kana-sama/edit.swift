@@ -7,7 +7,7 @@ enum OdinLSPCheck {
         var errorDescription: String? { "OLS check: \(detail)" }
     }
 
-    static func run(in app: Edit, document: DocumentWindow, captureHover: (NSView) throws -> Void) async throws {
+    static func run(in app: Edit, document: DocumentWindow, captureHover: (NSView, String) throws -> Void) async throws {
         let folder = FileManager.default.temporaryDirectory
             .appending(path: "Odin # ? café \(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -19,6 +19,7 @@ enum OdinLSPCheck {
         let text = """
             package fixture
             import "core:fmt"
+            import "base:runtime"
             main :: proc() {
                 label := "🦜"; result := double_value(2)
                 fmt.println(label)
@@ -54,7 +55,8 @@ enum OdinLSPCheck {
                     "use the ols.json project and show OLS as ready")
         let generation = session.generation
         let editor = document.editor
-        try await checkImportHover(in: document, capture: captureHover)
+        try await checkImportHover("core:fmt", in: document, capture: captureHover)
+        try await checkImportHover("base:runtime", in: document, capture: captureHover)
 
         let use = (text as NSString).range(of: "double_value")
         let declarationName = (declaration as NSString).range(of: "double_value")
@@ -156,43 +158,69 @@ enum OdinLSPCheck {
                     "keep the isolated OLS check hidden")
     }
 
-    private static func checkImportHover(in document: DocumentWindow, capture: (NSView) throws -> Void) async throws {
+    private static func checkImportHover(_ importPath: String, in document: DocumentWindow,
+                                         capture: (NSView, String) throws -> Void) async throws {
         let editor = document.editor
-        let path = (editor.string as NSString).range(of: "core:fmt")
-        let fmt = NSRange(location: path.upperBound - 3, length: 3)
-        let response = await document.languageFeatures.hover(at: fmt.location + 1, word: fmt)
-        try require(response?.range == fmt, "anchor the package hover at the import in the current file")
+        let path = (editor.string as NSString).range(of: importPath)
+        guard path.location != NSNotFound, let name = importPath.split(separator: ":").last else {
+            throw Failure(detail: "find \(importPath) in the fixture")
+        }
+        let word = NSRange(location: path.upperBound - name.utf16.count, length: name.utf16.count)
+        let response = await document.languageFeatures.hover(at: word.location + 1, word: word)
+        try require(response?.range == word, "anchor the package hover at the import in the current file")
 
         document.window.layoutIfNeeded()
         if let layout = editor.textLayoutManager { layout.ensureLayout(for: layout.documentRange) }
-        guard let glyphs = editor.highlightRects(for: [fmt]).first,
+        guard let glyphs = editor.highlightRects(for: [word]).first,
               let move = NSEvent.mouseEvent(with: .mouseMoved,
                   location: editor.convert(NSPoint(x: glyphs.midX, y: glyphs.midY), to: nil),
                   modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                   windowNumber: document.window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)
         else { throw Failure(detail: "create the pointer event over the Odin import") }
         editor.mouseMoved(with: move)
-        try await wait("show the live core:fmt hover") { editor.languageHoverWindowForCheck != nil }
+        try await wait("show the live \(importPath) hover") { editor.languageHoverWindowForCheck != nil }
         defer { editor.cancelOperation(nil) }
         guard let panel = editor.languageHoverWindowForCheck, let view = panel.contentView,
               let declaration = hoverBody("Declaration", in: view),
               let documentation = hoverBody("Description", in: view)
-        else { throw Failure(detail: "show separate declaration and documentation sections for core:fmt") }
+        else { throw Failure(detail: "show separate declaration and documentation sections for \(importPath)") }
         try require(!panel.isVisible && panel.alphaValue == 0, "keep the hover capture hidden")
-        try require(declaration.string == "fmt: package" && declaration.isSelectable && documentation.isSelectable,
+        let signature = "\(name): package"
+        try require(declaration.string == signature && declaration.isSelectable && documentation.isSelectable,
                     "render the selectable package signature in its own code block")
         let mono = EditorTextView.defaultFont.fontName
-        try require(fontName(in: declaration, at: "fmt: package") == mono
-                    && fontName(in: documentation, at: "I/O") == mono
-                    && fontName(in: documentation, at: "General:") != mono,
-                    "render inline code and prose with their respective fonts")
-        try require(documentation.string.contains("General:\n%v")
-                    && documentation.string.contains("\n%#v")
-                    && fontName(in: documentation, at: "%#v") == mono,
-                    "keep adjacent tab-indented format verbs on separate code lines")
+        try require(fontName(in: declaration, at: signature) == mono, "render the signature in the editor font")
         try require(documentation.enclosingScrollView?.hasVerticalScroller == true,
                     "keep the full package documentation scrollable")
-        try capture(view)
+        if name == "fmt" {
+            try require(fontName(in: documentation, at: "I/O") == mono
+                        && fontName(in: documentation, at: "General:") != mono,
+                        "render inline code and prose with their respective fonts")
+            try require(documentation.string.contains("General:\n%v")
+                        && documentation.string.contains("\n%#v")
+                        && fontName(in: documentation, at: "%#v") == mono,
+                        "keep adjacent tab-indented format verbs on separate code lines")
+            try capture(view, "")
+        } else {
+            try require(documentation.string.contains("compiler\nIMPORTANT NOTE(bill):")
+                        && documentation.string.contains("\nImport Name:")
+                        && documentation.string.contains("\nConstant Variables:")
+                        && fontName(in: documentation, at: "type_info_of") == mono,
+                        "preserve the authored line breaks and inline code in runtime documentation")
+            try capture(view, "runtime")
+            let body = documentation.string as NSString
+            let pattern = body.range(of: "File pattern")
+            guard pattern.location != NSNotFound else { throw Failure(detail: "find the first table header") }
+            let description = body.range(of: "Description", options: [], range: NSRange(
+                location: pattern.upperBound, length: body.length - pattern.upperBound))
+            try require(description.location != NSNotFound, "find the second table header")
+            documentation.scrollRangeToVisible(pattern)
+            let left = documentation.firstRect(forCharacterRange: pattern, actualRange: nil)
+            let right = documentation.firstRect(forCharacterRange: description, actualRange: nil)
+            try require(!left.isEmpty && !right.isEmpty && abs(left.midY - right.midY) < 1 && right.minX > left.maxX,
+                        "show the Markdown table headers in separate columns on the same row")
+            try capture(view, "runtime-table")
+        }
     }
 
     private static func hoverBody(_ name: String, in view: NSView) -> NSTextView? {

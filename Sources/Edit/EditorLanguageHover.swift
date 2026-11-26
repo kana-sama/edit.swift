@@ -47,6 +47,14 @@ struct EditorHoverContent: Sendable {
     }
 
     private struct Block: Sendable {
+        struct Cell: Sendable {
+            let table: Int
+            let columnCount: Int
+            let row: Int
+            let column: Int
+            let alignment: NSTextAlignment
+        }
+
         var identity: Int?
         var heading: Int?
         var listMarker: String?
@@ -55,6 +63,7 @@ struct EditorHoverContent: Sendable {
         var isCode = false
         var codeLanguage: SyntaxLanguage?
         var codeSpans: [SyntaxSpan] = []
+        var cell: Cell?
         var runs: [Run] = []
     }
 
@@ -76,8 +85,9 @@ struct EditorHoverContent: Sendable {
         blocks = [Block(runs: runs)]
     }
 
-    init(text: String, isMarkdown: Bool) {
-        guard isMarkdown, let value = try? AttributedString(markdown: text), !value.characters.isEmpty else {
+    init(text: String, isMarkdown: Bool, preservesSoftBreaks: Bool = false) {
+        let options = AttributedString.MarkdownParsingOptions(appliesSourcePositionAttributes: preservesSoftBreaks)
+        guard isMarkdown, let value = try? AttributedString(markdown: text, options: options), !value.characters.isEmpty else {
             blocks = [Block(runs: [Run(text: text)])]
             return
         }
@@ -89,6 +99,9 @@ struct EditorHoverContent: Sendable {
             if blocks.isEmpty || blocks.last?.identity != identity {
                 let isOrdered = components.contains { $0.kind == .orderedList }
                 var block = Block(identity: identity)
+                var table: (id: Int, columns: [PresentationIntent.TableColumn])?
+                var row: Int?
+                var column: Int?
                 for component in components {
                     switch component.kind {
                     case .header(let level): block.heading = level
@@ -99,15 +112,33 @@ struct EditorHoverContent: Sendable {
                     case .codeBlock(let hint):
                         block.isCode = true
                         block.codeLanguage = hint.flatMap { SyntaxLanguage(rawValue: $0.lowercased()) }
+                    case .table(let columns): table = (component.identity, columns)
+                    case .tableHeaderRow: row = 0
+                    case .tableRow(let index): row = index
+                    case .tableCell(let index): column = index
                     default: break
                     }
+                }
+                if let table, let row, let column, table.columns.indices.contains(column) {
+                    let alignment: NSTextAlignment = switch table.columns[column].alignment {
+                    case .right: .right
+                    case .center: .center
+                    default: .left
+                    }
+                    block.cell = .init(table: table.id, columnCount: table.columns.count, row: row,
+                                       column: column, alignment: alignment)
                 }
                 blocks.append(block)
             }
 
             let attributes = run.inlinePresentationIntent ?? []
             let link = run.link.flatMap { HoverLink($0) == nil ? nil : $0 }
-            blocks[blocks.count - 1].runs.append(Run(text: String(value[run.range].characters),
+            var text = String(value[run.range].characters)
+            // Foundation emits a synthetic space for a Markdown soft break.
+            if preservesSoftBreaks, text == " ", run.markdownSourcePosition == nil, components.first?.kind == .paragraph {
+                text = "\n"
+            }
+            blocks[blocks.count - 1].runs.append(Run(text: text,
                                                      emphasis: attributes.contains(.emphasized),
                                                      strong: attributes.contains(.stronglyEmphasized),
                                                      code: attributes.contains(.code),
@@ -126,6 +157,7 @@ struct EditorHoverContent: Sendable {
     func attributedText() -> NSAttributedString {
         let result = NSMutableAttributedString()
         let codeBackground = NSColor.labelColor.withAlphaComponent(0.075)
+        var tables: [Int: NSTextTable] = [:]
         for (index, block) in blocks.enumerated() {
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineSpacing = block.isCode ? 0 : 2
@@ -137,6 +169,24 @@ struct EditorHoverContent: Sendable {
             if block.isQuote {
                 paragraph.firstLineHeadIndent += 12
                 paragraph.headIndent += 12
+            }
+            if let cell = block.cell {
+                let table: NSTextTable
+                if let existing = tables[cell.table] { table = existing }
+                else {
+                    table = NSTextTable()
+                    table.numberOfColumns = cell.columnCount
+                    table.collapsesBorders = true
+                    tables[cell.table] = table
+                }
+                let box = NSTextTableBlock(table: table, startingRow: cell.row, rowSpan: 1,
+                                          startingColumn: cell.column, columnSpan: 1)
+                box.setWidth(5, type: .absolute, for: .padding)
+                box.setWidth(1, type: .absolute, for: .border)
+                box.setBorderColor(.separatorColor)
+                if cell.row == 0 { box.backgroundColor = codeBackground }
+                paragraph.textBlocks = [box]
+                paragraph.alignment = cell.alignment
             }
             let size: CGFloat = block.heading == 1 ? 15 : block.heading != nil ? 14 : 13
             let foreground: NSColor = block.isQuote ? .secondaryLabelColor : .labelColor
@@ -152,7 +202,7 @@ struct EditorHoverContent: Sendable {
                 if run.code && !block.isCode {
                     attributes[.font] = EditorTextView.defaultFont
                     attributes[.backgroundColor] = codeBackground
-                } else if !block.isCode && (run.strong || block.heading != nil) {
+                } else if !block.isCode && (run.strong || block.heading != nil || block.cell?.row == 0) {
                     attributes[.font] = NSFont.systemFont(ofSize: size, weight: .semibold)
                 }
                 if run.emphasis, let font = attributes[.font] as? NSFont {
@@ -170,10 +220,10 @@ struct EditorHoverContent: Sendable {
             if block.isCode, result.length > start, result.mutableString.hasSuffix("\n") {
                 result.deleteCharacters(in: NSRange(location: result.length - 1, length: 1))
             }
-            if index < blocks.count - 1, block.isCode || !result.mutableString.hasSuffix("\n") {
+            if (index < blocks.count - 1 || block.cell != nil), block.isCode || !result.mutableString.hasSuffix("\n") {
                 result.append(NSAttributedString(string: "\n", attributes: base))
             }
-            if index > 0, blockStart < result.length {
+            if index > 0, block.cell == nil, blockStart < result.length {
                 let previous = blocks[index - 1]
                 let leadingParagraph = NSMutableParagraphStyle()
                 leadingParagraph.setParagraphStyle(paragraph)
@@ -328,7 +378,16 @@ final class HoverTextView: NSTextView {
     private(set) var selecting = false
 
     convenience init(width: CGFloat, text: NSAttributedString, inset: NSSize) {
-        self.init(frame: NSRect(x: 0, y: 0, width: width, height: 0))
+        var hasTable = false
+        text.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: text.length)) { style, _, stop in
+            if let style = style as? NSParagraphStyle, !style.textBlocks.isEmpty {
+                hasTable = true
+                stop.pointee = true
+            }
+        }
+        // NSTextTable lays out columns in TextKit 1. TextKit 2 stacks the cells.
+        self.init(usingTextLayoutManager: !hasTable)
+        setFrameSize(NSSize(width: width, height: 0))
         identifier = .init("EditorLanguageHoverText")
         isEditable = false
         isSelectable = true
@@ -346,17 +405,28 @@ final class HoverTextView: NSTextView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     var firstTextBaseline: CGFloat? {
-        guard let layout = textLayoutManager,
-              let fragment = layout.textLayoutFragment(for: layout.documentRange.location),
-              let line = fragment.textLineFragments.first else { return nil }
-        return textContainerOrigin.y + fragment.layoutFragmentFrame.minY + line.glyphOrigin.y
+        if let layout = textLayoutManager {
+            guard let fragment = layout.textLayoutFragment(for: layout.documentRange.location),
+                  let line = fragment.textLineFragments.first else { return nil }
+            return textContainerOrigin.y + fragment.layoutFragmentFrame.minY + line.glyphOrigin.y
+        }
+        guard let layout = layoutManager, let container = textContainer else { return nil }
+        layout.ensureLayout(for: container)
+        guard layout.numberOfGlyphs > 0 else { return nil }
+        return textContainerOrigin.y + layout.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil).minY
+            + layout.location(forGlyphAt: 0).y
     }
 
     func measure(at width: CGFloat) -> NSSize? {
         if frame.width != width { setFrameSize(NSSize(width: width, height: frame.height)) }
-        guard let layout = textLayoutManager else { return nil }
-        layout.ensureLayout(for: layout.documentRange)
-        let used = layout.usageBoundsForTextContainer
+        let used: NSRect
+        if let layout = textLayoutManager {
+            layout.ensureLayout(for: layout.documentRange)
+            used = layout.usageBoundsForTextContainer
+        } else if let layout = layoutManager, let container = textContainer {
+            layout.ensureLayout(for: container)
+            used = layout.usedRect(for: container)
+        } else { return nil }
         return NSSize(width: ceil(used.maxX) + textContainerInset.width * 2,
                       height: ceil(used.maxY) + textContainerInset.height * 2)
     }

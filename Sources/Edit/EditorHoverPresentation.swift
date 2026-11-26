@@ -30,7 +30,8 @@ enum EditorHoverPresentation: Sendable {
         if isMarkdown, server == .odin, let hover = OLSHover(markdown: text) {
             var sections = [Section(kind: .declaration, content: EditorHoverContent(code: [hover.declaration], language: .odin))]
             if let documentation = hover.documentation {
-                sections.append(Section(kind: .documentation, content: EditorHoverContent(text: documentation, isMarkdown: true)))
+                sections.append(Section(kind: .documentation, content: EditorHoverContent(
+                    text: documentation, isMarkdown: true, preservesSoftBreaks: true)))
             }
             self = .structured(sections)
             return
