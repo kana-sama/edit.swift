@@ -68,17 +68,19 @@ enum LSPDiagnosticsCheck {
                 - min(pixel.redComponent, pixel.greenComponent, pixel.blueComponent) < 0.2
         }, "paint message glyphs over the tinted background")
         try require(editor.string == zigText, "keep diagnostic text outside the source buffer")
-        try capture(document.window)
+
+        guard let first = editor.diagnostics.first(where: { $0.range.location == zigError.location }) else {
+            throw Failure(detail: "find the primary error for the multiple-error fixture")
+        }
         guard let move = NSEvent.mouseEvent(
             with: .mouseMoved, location: editor.convert(NSPoint(x: row.minX + 2, y: row.midY), to: nil),
             modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: document.window.windowNumber,
             context: nil, eventNumber: 0, clickCount: 0, pressure: 0
         ) else { throw Failure(detail: "create a pointer event over the start of the line") }
         editor.mouseMoved(with: move)
-        let message = editor.diagnostics.first { $0.range.location == zigError.location }?.message
         try await wait("show the full error when hovering away from the underline on its row") {
-            guard let message, !message.isEmpty, let view = editor.languageHoverWindowForCheck?.contentView else { return false }
-            return hoverContains(message, in: view)
+            guard let view = editor.languageHoverWindowForCheck?.contentView else { return false }
+            return hoverContains(first.message, in: view)
         }
         if let view = editor.languageHoverWindowForCheck?.contentView,
            let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
@@ -102,6 +104,22 @@ enum LSPDiagnosticsCheck {
         features.perform(.stop)
         try require(editor.diagnosticRanges.isEmpty, "clear diagnostics as soon as the server is stopped")
         try await wait("stop ZLS") { features.session.state == .stopped }
+        // No server publications can replace the synthetic second error while hover is pending.
+        editor.languageInteractionEnabled = true
+        editor.setDiagnostics([first])
+        let singleWidth = editor.diagnosticMinimumWidth
+        let detail = "Another error on this line. Its full explanation is only visible in the diagnostic card."
+        editor.setDiagnostics([first, LSPError(range: first.range, lineEnd: end, message: detail)])
+        let extraWidth = editor.diagnosticMinimumWidth - singleWidth
+        try require(extraWidth > 0 && extraWidth < 30, "reserve room for the count and keep only the first message inline")
+        try capture(document.window)
+        editor.mouseMoved(with: move)
+        try await wait("show both full errors when hovering their row") {
+            guard let view = editor.languageHoverWindowForCheck?.contentView else { return false }
+            return hoverContains(first.message, in: view) && hoverContains(detail, in: view)
+        }
+        editor.setDiagnostics([])
+        editor.languageInteractionEnabled = false
         features.perform(.start)
         try await wait("receive fresh diagnostics after server start") { !editor.diagnosticRanges.isEmpty }
 

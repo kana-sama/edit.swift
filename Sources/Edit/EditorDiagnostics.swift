@@ -17,14 +17,16 @@ extension EditorTextView {
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font, NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true
         ]
+        func textLine(_ text: String) -> CTLine {
+            CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
+        }
         diagnosticMessagesByLineEnd = Dictionary(grouping: diagnostics, by: \.lineEnd).compactMapValues { errors in
             let messages = diagnosticMessages(errors)
-            guard !messages.isEmpty else { return nil }
-            let summary = messages.map { $0.split(whereSeparator: \.isWhitespace).joined(separator: " ") }
-                .joined(separator: "  ·  ")
-            guard !summary.isEmpty else { return nil }
+            guard let first = messages.first else { return nil }
+            let summary = first.split(whereSeparator: \.isWhitespace).joined(separator: " ")
             return DiagnosticMessage(text: messages.joined(separator: "\n\n"),
-                                     line: CTLineCreateWithAttributedString(NSAttributedString(string: summary, attributes: attributes)))
+                                     line: textLine(summary),
+                                     countLine: messages.count > 1 ? textLine(String(messages.count)) : nil)
         }
         updateDiagnosticWidth()
     }
@@ -61,6 +63,7 @@ extension EditorTextView {
     struct DiagnosticMessage {
         let text: String
         let line: CTLine
+        let countLine: CTLine?
     }
 
     private var diagnosticViewport: NSRange? {
@@ -105,10 +108,17 @@ extension EditorTextView {
 
     private var diagnosticIconSize: CGFloat { max(6, ((font ?? Self.defaultFont).pointSize * 0.9).rounded()) }
 
-    private var diagnosticTextOffset: CGFloat { Self.diagnosticInset + diagnosticIconSize + Self.diagnosticIconGap }
+    private func diagnosticIconOffset(for message: DiagnosticMessage) -> CGFloat {
+        guard let count = message.countLine else { return Self.diagnosticInset }
+        return Self.diagnosticInset + ceil(CTLineGetTypographicBounds(count, nil, nil, nil)) + Self.diagnosticIconGap
+    }
+
+    private func diagnosticTextOffset(for message: DiagnosticMessage) -> CGFloat {
+        diagnosticIconOffset(for: message) + diagnosticIconSize + Self.diagnosticIconGap
+    }
 
     private func messageWidth(_ message: DiagnosticMessage) -> CGFloat {
-        ceil(CTLineGetTypographicBounds(message.line, nil, nil, nil)) + diagnosticTextOffset + Self.diagnosticInset
+        ceil(CTLineGetTypographicBounds(message.line, nil, nil, nil)) + diagnosticTextOffset(for: message) + Self.diagnosticInset
     }
 
     private func messageFrame(for row: DiagnosticRow) -> NSRect {
@@ -116,13 +126,12 @@ extension EditorTextView {
         let naturalWidth = messageWidth(row.message)
         // In wrap mode the text view already tracks the unobscured editor width.
         let width = wrapsWords ? min(naturalWidth, bounds.maxX - Self.diagnosticTrailingSpace - x) : naturalWidth
-        guard width >= diagnosticTextOffset + 2 * Self.diagnosticInset else { return .zero }
+        guard width >= diagnosticTextOffset(for: row.message) + 2 * Self.diagnosticInset else { return .zero }
         return NSRect(x: x, y: row.bounds.minY, width: width, height: row.bounds.height)
     }
 
     private func diagnosticMessages(_ errors: [LSPError]) -> [String] {
-        var seen: Set<String> = []
-        return errors.map(\.message).filter { !$0.isEmpty && seen.insert($0).inserted }
+        errors.map(\.message).filter { $0.contains { !$0.isWhitespace } }
     }
 
     func diagnosticHover(at point: NSPoint) -> EditorDiagnosticHover? {
@@ -164,11 +173,12 @@ extension EditorTextView {
             let background = area.insetBy(dx: 0, dy: 1)
             color.withAlphaComponent(0.28).setFill()
             NSBezierPath(roundedRect: background, xRadius: 4, yRadius: 4).fill()
-            let iconRect = NSRect(x: area.minX + Self.diagnosticInset, y: area.midY - iconSize / 2,
+            let iconRect = NSRect(x: area.minX + diagnosticIconOffset(for: row.message), y: area.midY - iconSize / 2,
                                   width: iconSize, height: iconSize)
             icon?.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
 
-            let available = area.width - diagnosticTextOffset - Self.diagnosticInset
+            let textOffset = diagnosticTextOffset(for: row.message)
+            let available = area.width - textOffset - Self.diagnosticInset
             let line = row.message.line
             let displayed: CTLine
             if wrapsWords, messageWidth(row.message) > area.width {
@@ -179,17 +189,25 @@ extension EditorTextView {
             } else {
                 displayed = line
             }
-            let ink = CTLineGetBoundsWithOptions(displayed, .useGlyphPathBounds)
-            context.saveGState()
-            context.clip(to: clip.intersection(background))
-            context.translateBy(x: area.minX + diagnosticTextOffset, y: area.midY + (ink.midY.isFinite ? ink.midY : 0))
-            context.scaleBy(x: 1, y: -1)
-            context.textMatrix = .identity
-            context.textPosition = .zero
-            context.setFillColor(NSColor.labelColor.cgColor)
-            CTLineDraw(displayed, context)
-            context.restoreGState()
+            let textClip = clip.intersection(background)
+            if let count = row.message.countLine {
+                drawDiagnosticLine(count, x: area.minX + Self.diagnosticInset, midY: area.midY, clip: textClip, in: context)
+            }
+            drawDiagnosticLine(displayed, x: area.minX + textOffset, midY: area.midY, clip: textClip, in: context)
         }
+    }
+
+    private func drawDiagnosticLine(_ line: CTLine, x: CGFloat, midY: CGFloat, clip: NSRect, in context: CGContext) {
+        let ink = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+        context.saveGState()
+        context.clip(to: clip)
+        context.translateBy(x: x, y: midY + (ink.midY.isFinite ? ink.midY : 0))
+        context.scaleBy(x: 1, y: -1)
+        context.textMatrix = .identity
+        context.textPosition = .zero
+        context.setFillColor(NSColor.labelColor.cgColor)
+        CTLineDraw(line, context)
+        context.restoreGState()
     }
 
     func drawDiagnostics(in dirtyRect: NSRect) {
