@@ -47,7 +47,7 @@ When an ordinary line change can have several equivalent positions within repeat
 
 ## Scrollbar markers
 
-The painted scrollbar marks are at most 2⅔ pt wide, with extra click tolerance around them.
+The painted scrollbar marks are at most 2⅔ pt wide, with extra click tolerance around them. Composite them at 50% opacity so overlapping marks stay equally subdued.
 
 Draw change marks inside the native vertical scrollbar track, within its existing width. Center overlay marks on the scrollbar's resting thumb and make them narrower than the thumb. Keep that center as the thumb expands on hover or fades. Keep the track at the exposed edge of the editor pane as a sidebar opens or the window resizes. Position marks over the full document's laid-out height, including changes outside the visible text and excluding empty space beyond the document. For example, a conflict three quarters of the way through the file has a purple mark three quarters of the way down the track. The native thumb sits above the marks and can cover them. When the whole file fits, marks in that area are passive. Preserve a visible minimum size for a one-line mark. When marks overlap, display conflict before deletion, deletion before replacement, and replacement before insertion.
 

@@ -59,7 +59,7 @@ final class JJEditorDecorations {
     private static var restingOverlaySlots: [NSControl.ControlSize: NSRect] = [:]
     private let gutterHitWidth: CGFloat = 12
     private let gutterStripeWidth: CGFloat = 2
-    private let collapsedGutterOpacity: CGFloat = 0.5
+    private let passiveMarkerOpacity: CGFloat = 0.5
     private let gutter = JJEditorMarkerView()
     private let track = JJEditorMarkerView()
 
@@ -365,6 +365,7 @@ final class JJEditorDecorations {
     }
 
     private func drawTrack(in dirtyRect: NSRect) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
         NSGraphicsContext.saveGraphicsState()
         defer { NSGraphicsContext.restoreGraphicsState() }
         if scrollerStyle == .legacy, let scroller = nativeScroller, !scroller.isHidden, scroller.isEnabled {
@@ -376,6 +377,10 @@ final class JJEditorDecorations {
                 paint.addClip()
             }
         }
+        // Composite the marks together so overlapping marks keep their priority and opacity.
+        context.setAlpha(passiveMarkerOpacity)
+        context.beginTransparencyLayer(auxiliaryInfo: nil)
+        defer { context.endTransparencyLayer() }
         for marker in trackMarks where marker.rect.intersects(dirtyRect) {
             fill(marker.rect, kind: marker.mark.kind, conflictBackground: .textBackgroundColor)
         }
@@ -384,7 +389,7 @@ final class JJEditorDecorations {
     private func drawGutter(in dirtyRect: NSRect) {
         guard let editor else { return }
         for marker in visibleGutterMarks(in: editor) where marker.bounds.intersects(dirtyRect) {
-            let opacity: CGFloat = marker.isExpanded ? 1 : collapsedGutterOpacity
+            let opacity: CGFloat = marker.isExpanded ? 1 : passiveMarkerOpacity
             if marker.isDeletionBoundary {
                 let rect = marker.bounds
                 let path = NSBezierPath()
@@ -416,7 +421,7 @@ final class JJEditorDecorations {
                 if let row = editor.laidOutLineBounds(at: offset) {
                     let rect = gutter.convert(row, from: editor)
                     let stripe = NSRect(x: 2, y: rect.minY, width: gutterStripeWidth, height: rect.height)
-                    if stripe.intersects(dirtyRect) { fill(stripe, kind: .conflict, opacity: collapsedGutterOpacity) }
+                    if stripe.intersects(dirtyRect) { fill(stripe, kind: .conflict, opacity: passiveMarkerOpacity) }
                 }
                 let next = LineEditing.line(at: offset, in: text).end
                 guard next > offset else { break }
