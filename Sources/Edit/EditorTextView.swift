@@ -1636,6 +1636,15 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         bracketNavigation.draw(in: dirtyRect)
         onDrawFindHighlights?(dirtyRect)
         if renameDraft == nil { drawSecondarySelections(in: dirtyRect) }
+        drawDiagnostics(in: dirtyRect)
+    }
+
+    private(set) var diagnosticRanges: [NSRange] = []
+
+    func setDiagnosticRanges(_ ranges: [NSRange]) {
+        guard ranges != diagnosticRanges else { return }
+        diagnosticRanges = ranges
+        setNeedsDisplay(visibleRect)
     }
 }
 

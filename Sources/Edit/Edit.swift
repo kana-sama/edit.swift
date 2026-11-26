@@ -1611,6 +1611,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 let file = URL(fileURLWithPath: screenshot).deletingPathExtension().path + "-" + suffix + ".png"
                 try self.captureCheckView(view, screenshot: file)
             }
+        case "lsp-diagnostics":
+            try await LSPDiagnosticsCheck.run(in: self, document: document) { window in
+                try self.checkWindow(window, screenshot: screenshot)
+            }
         case "lsp-odin":
             try await OdinLSPCheck.run(in: self, document: document) { view, suffix in
                 let target = screenshot.map {

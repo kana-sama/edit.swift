@@ -211,6 +211,8 @@ final class LanguageServerConnection: @unchecked Sendable {
     private let onSemanticTokensRefresh: @Sendable () -> Void
     let progress: AsyncStream<[LSPWorkDoneActivity]>
     private let progressUpdates: AsyncStream<[LSPWorkDoneActivity]>.Continuation
+    let diagnostics: AsyncStream<LSPDocumentErrors>
+    private let diagnosticUpdates: AsyncStream<LSPDocumentErrors>.Continuation
     private let decoder = JSONDecoder()
     private var process: Process?
     private var input: DispatchIO?
@@ -241,6 +243,8 @@ final class LanguageServerConnection: @unchecked Sendable {
         self.onFailure = onFailure
         self.onSemanticTokensRefresh = onSemanticTokensRefresh
         (progress, progressUpdates) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
+        (diagnostics, diagnosticUpdates) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
+        decoder.userInfo[LSPDocumentURI.serverKey] = server
     }
 
     func start() async throws -> LSPCapabilities {
@@ -460,6 +464,7 @@ final class LanguageServerConnection: @unchecked Sendable {
                                      "workspace": ["workspaceFolders": true, "workspaceEdit": ["documentChanges": true],
                                                    "semanticTokens": ["refreshSupport": true]],
                                      "textDocument": ["definition": ["linkSupport": true],
+                                                      "publishDiagnostics": ["versionSupport": true],
                                                       "hover": ["contentFormat": ["markdown", "plaintext"]],
                                                       "documentSymbol": ["hierarchicalDocumentSymbolSupport": true],
                                                       "semanticTokens": [
@@ -513,8 +518,9 @@ final class LanguageServerConnection: @unchecked Sendable {
                 try notify("textDocument/didOpen", ["textDocument": ["uri": url.absoluteString, "languageId": language.rawValue,
                                                                    "version": snapshot.revision, "text": snapshot.text]])
             }
-        } else if let url = snapshot.url, let previous, capabilities.change != .none,
-                  !previous.text.utf8.elementsEqual(snapshot.text.utf8) {
+        } else if let url = snapshot.url, previous != nil, capabilities.change != .none {
+            // A coalesced edit and Undo can restore the same bytes at a new revision.
+            // Send that revision so diagnostics can be published for it.
             var change: [String: Any] = ["text": snapshot.text]
             if capabilities.change == .incremental, let index { change["range"] = index.fullRange.parameters }
             try notify("textDocument/didChange", ["textDocument": ["uri": url.absoluteString, "version": snapshot.revision],
@@ -642,9 +648,14 @@ final class LanguageServerConnection: @unchecked Sendable {
         let message = try decoder.decode(Message.self, from: data)
         if let method = message.method {
             guard let id = message.id?.value else {
-                if method == "$/progress", !stopping,
+                guard !stopping else { return }
+                if method == "$/progress",
                    let notification = try? decoder.decode(Parameters<ProgressNotification>.self, from: data) {
                     updateProgress(notification.params)
+                } else if method == "textDocument/publishDiagnostics", let document, let index,
+                          let notification = try? decoder.decode(Parameters<LSPPublishedDiagnostics>.self, from: data),
+                          let ranges = notification.params.errors(for: document, index: index) {
+                    diagnosticUpdates.yield(LSPDocumentErrors(revision: document.revision, ranges: ranges))
                 }
                 return
             }
@@ -771,6 +782,7 @@ final class LanguageServerConnection: @unchecked Sendable {
         guard !closed else { return }
         closed = true
         progressUpdates.finish()
+        diagnosticUpdates.finish()
         workDone.removeAll()
         process?.terminationHandler = nil
         process = nil

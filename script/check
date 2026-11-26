@@ -1,14 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 usage() {
-    printf 'Usage: %s [--only editor|syntax|inline-diff|files|markdown|results|workspace-search|control|jj|source-control|lsp|lsp-progress|lsp-state|lsp-highlight|lsp-swift|lsp-c-family|lsp-odin|worktree] [screenshot-path]\n' "$0" >&2
+    printf 'Usage: %s [--only editor|syntax|inline-diff|files|markdown|results|workspace-search|control|jj|source-control|lsp|lsp-progress|lsp-state|lsp-highlight|lsp-diagnostics|lsp-swift|lsp-c-family|lsp-odin|worktree] [screenshot-path]\n' "$0" >&2
     exit 2
 }
 
 agent_args=(--agent-check)
 if [[ "${1:-}" == --only ]]; then
     case "${2:-}" in
-        editor|syntax|inline-diff|files|markdown|results|workspace-search|control|jj|source-control|lsp|lsp-progress|lsp-state|lsp-highlight|lsp-swift|lsp-c-family|lsp-odin|worktree) agent_args+=(--only "$2") ;;
+        editor|syntax|inline-diff|files|markdown|results|workspace-search|control|jj|source-control|lsp|lsp-progress|lsp-state|lsp-highlight|lsp-diagnostics|lsp-swift|lsp-c-family|lsp-odin|worktree) agent_args+=(--only "$2") ;;
         *) usage ;;
     esac
     shift 2

@@ -28,6 +28,11 @@ final class LanguageServerSession {
     var onStateChange: (() -> Void)?
     var onProgressChange: (() -> Void)?
     var onSemanticTokensRefresh: (() -> Void)?
+    var onDiagnosticsChange: (() -> Void)?
+    var diagnosticRanges: [NSRange] {
+        guard isReady, documentErrors?.revision == revision else { return [] }
+        return documentErrors?.ranges ?? []
+    }
     private(set) var semanticTokensRefresh = 0
     private(set) var progress: [LSPWorkDoneActivity] = []
     private(set) var generation = 0
@@ -90,6 +95,8 @@ final class LanguageServerSession {
     private var transition: Task<Void, Never>?
     private var sync: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
+    private var diagnosticsTask: Task<Void, Never>?
+    private var documentErrors: LSPDocumentErrors?
     private var connection: LanguageServerConnection?
     private var capabilities: LSPCapabilities?
     private var semanticTokenResult: LSPSemanticTokens?
@@ -344,6 +351,7 @@ final class LanguageServerSession {
         capabilities = nil
         semanticTokenResult = nil
         clearProgress()
+        clearDiagnostics()
         phase = previous != nil || previousTransition != nil ? .stopping : root == nil ? .stopped : .starting
         onStateChange?()
         transition = Task { [weak self] in
@@ -382,6 +390,7 @@ final class LanguageServerSession {
                 self.capabilities = nil
                 self.semanticTokenResult = nil
                 self.clearProgress()
+                self.clearDiagnostics()
                 self.setPhase(.failed(reason))
             }
         }
@@ -391,6 +400,14 @@ final class LanguageServerSession {
                 guard !Task.isCancelled, let self, self.generation == generation else { return }
                 self.progress = progress
                 self.onProgressChange?()
+            }
+        }
+        diagnosticsTask = Task { [weak self, updates = connection.diagnostics] in
+            for await errors in updates {
+                guard !Task.isCancelled, let self, self.generation == generation else { return }
+                guard self.isReady, self.revision == errors.revision else { continue }
+                self.documentErrors = errors
+                self.onDiagnosticsChange?()
             }
         }
         do {
@@ -410,6 +427,7 @@ final class LanguageServerSession {
             self.connection = nil
             capabilities = nil
             clearProgress()
+            clearDiagnostics()
             if case .failed = phase { return }
             setPhase(.failed(error.localizedDescription))
         }
@@ -419,6 +437,12 @@ final class LanguageServerSession {
         progressTask?.cancel()
         progressTask = nil
         progress = []
+    }
+
+    private func clearDiagnostics() {
+        diagnosticsTask?.cancel()
+        diagnosticsTask = nil
+        documentErrors = nil
     }
 
     private func setPhase(_ phase: State) {

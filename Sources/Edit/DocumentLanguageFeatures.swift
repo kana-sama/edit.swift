@@ -91,6 +91,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         for session in sessions {
             session.onStateChange = { [weak self] in self?.stateChanged() }
             session.onProgressChange = { [weak self] in self?.updateServerStatus() }
+            session.onDiagnosticsChange = { [weak self] in self?.updateDiagnostics() }
             session.onSemanticTokensRefresh = { [weak self, weak session] in
                 guard let self, let session, self.highlightingSession === session else { return }
                 self.document.updateLSPHighlighting(immediate: false)
@@ -144,6 +145,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         let revision = session.revision
         session.updateText(document.textWithConflictPrefixes)
         if session.revision != revision {
+            updateDiagnostics()
             symbolRename.cancel()
             cancelLookup()
             document.editor.invalidateLanguageInteraction()
@@ -189,12 +191,14 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
             session.onStateChange = nil
             session.onProgressChange = nil
             session.onSemanticTokensRefresh = nil
+            session.onDiagnosticsChange = nil
             session.close()
         }
     }
 
     private func stateChanged() {
         document.updateLSPHighlighting()
+        updateDiagnostics()
         if sourceURL == nil || session.state != .ready { symbolRename.cancel() }
         let canInteract = sourceURL != nil && (session.supportsDefinition || session.supportsHover
             || session.supportsReferences || session.supportsRename)
@@ -203,6 +207,12 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         document.editor.occurrenceHighlighting.setSemanticWordHighlightsEnabled(session.supportsDocumentHighlight)
         updateServerStatus()
         app.languageServerStateDidChange(in: document)
+    }
+
+    private func updateDiagnostics() {
+        let isCurrent = sourceURL != nil && sourceURL == document.fileURL
+            && sourceLanguage == document.resolvedSyntaxLanguage && document.editor.conflictEdits.isEmpty
+        document.editor.setDiagnosticRanges(isCurrent ? session.diagnosticRanges : [])
     }
 
     private func updateServerStatus() {

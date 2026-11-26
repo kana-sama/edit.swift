@@ -10,6 +10,8 @@ Edit ranks comparable [workspace symbol matches](features/lsp-symbol-navigation/
 
 Edit uses full [semantic token results](features/lsp-highlighting/spec.md) for scrolling and a concurrent visible-range preview for large ZLS files. It also supports range-only providers and deltas.
 
+Edit [underlines published errors](features/lsp-diagnostics/spec.md) in the active editor.
+
 | Method                                                                       | ZLS   | SourceKit-LSP | OLS   |
 | ---------------------------------------------------------------------------- | :---: | :-----------: | :---: |
 | [`textDocument/definition`][lsp-definition]                                  | ✓     | ✓             | ✓     |
@@ -23,6 +25,7 @@ Edit uses full [semantic token results](features/lsp-highlighting/spec.md) for s
 | [`textDocument/hover`][lsp-hover]                                            | ✓     | ✓             | ✓     |
 | [`textDocument/prepareRename`][lsp-preparerename]                            | ✓     | ✓             | ✓     |
 | [`textDocument/rename`][lsp-rename]                                          | ✓     | ✓             | ✓     |
+| [`textDocument/publishDiagnostics`][lsp-publishdiagnostics]                  | ✓     | ✓             | ✓     |
 | [`window/workDoneProgress/create`][lsp-win-workdoneprogress-create]          | ✓     | ✓             | ✗     |
 | [`$/progress`][lsp-progress]                                                 | ✓     | ✓             | ✗     |
 | [`workspace/didChangeWorkspaceFolders`][lsp-ws-didchangeworkspacefolders]    | ✓     |               | ✗     |
@@ -48,7 +51,6 @@ Edit uses full [semantic token results](features/lsp-highlighting/spec.md) for s
 | [`textDocument/documentLink`][lsp-documentlink]                              | ✗     | ✗             |       |
 | [`textDocument/documentColor`][lsp-documentcolor]                            | ✗     |               | ✗     |
 | [`textDocument/colorPresentation`][lsp-colorpresentation]                    | ✗     |               | ✗     |
-| [`textDocument/publishDiagnostics`][lsp-publishdiagnostics]                  |       |               |       |
 | [`textDocument/diagnostic`][lsp-diagnostic]                                  | ✗     |               | ✗     |
 | [`workspace/diagnostic/refresh`][lsp-diagnostic-refresh]                     | ✗     |               | ✗     |
 | [`textDocument/codeAction`][lsp-codeaction]                                  |       |               |       |
