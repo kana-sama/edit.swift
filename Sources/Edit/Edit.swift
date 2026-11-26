@@ -106,8 +106,6 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     private var sessionReadFailed = false
     private var pendingFullScreen: [DocumentWindow] = []
     private weak var enteringFullScreen: DocumentWindow?
-    private let navigationHistory = NavigationHistory()
-    private var navigationReplays: Set<ObjectIdentifier> = []
 
     private(set) var documents: [DocumentWindow] = []
     private(set) var isQuitting = false
@@ -287,8 +285,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             if event.characters(byApplyingModifiers: []) == "-",
                modifiers == .control || modifiers == [.control, .shift] {
                 let direction: NavigationHistory.Direction = modifiers.contains(.shift) ? .forward : .back
-                if canNavigate(direction) {
-                    Task { await navigate(direction) }
+                if let document = navigationDocument(for: event.window ?? NSApp.keyWindow), canNavigate(direction, in: document) {
+                    Task { await navigate(direction, in: document) }
                     return nil
                 }
             }
@@ -633,93 +631,105 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     @objc func toggleLSPHighlight(_ sender: Any?) { activeDocument?.toggleHighlighting(.lsp) }
     @objc func toggleTreeSitterHighlight(_ sender: Any?) { activeDocument?.toggleHighlighting(.treeSitter) }
 
-    @objc func goBack(_ sender: Any?) { Task { await navigate(.back) } }
-    @objc func goForward(_ sender: Any?) { Task { await navigate(.forward) } }
+    @objc func goBack(_ sender: Any?) { navigateInCurrentWindow(.back) }
+    @objc func goForward(_ sender: Any?) { navigateInCurrentWindow(.forward) }
+
+    private var currentNavigationDocument: DocumentWindow? {
+        navigationDocument(for: NSApp.keyWindow ?? NSApp.mainWindow)
+    }
+
+    private func navigationDocument(for window: NSWindow?) -> DocumentWindow? {
+        guard let window else { return nil }
+        // Control is a child window of the document it serves.
+        return documents.first { $0.window === window || $0.window === window.parent }
+    }
+
+    private func navigateInCurrentWindow(_ direction: NavigationHistory.Direction) {
+        guard let document = currentNavigationDocument else { return }
+        Task { await navigate(direction, in: document) }
+    }
 
     func recordNavigation(in document: DocumentWindow, reason: NavigationHistory.Reason = .selection) {
         guard let location = document.navigationLocation else { return }
-        recordNavigation(location, reason: reason)
+        recordNavigation(location, in: document, reason: reason)
     }
 
-    func recordNavigation(_ location: NavigationHistory.Location, reason: NavigationHistory.Reason) {
-        guard !isQuitting, !navigationReplays.contains(location.window),
-              documents.contains(where: { ObjectIdentifier($0) == location.window }) else { return }
-        navigationHistory.record(location, reason: reason)
-    }
-
-    func removeNavigationResource(_ resource: NavigationHistory.Resource, in document: DocumentWindow) {
-        navigationHistory.remove(window: ObjectIdentifier(document), resource: resource)
+    func recordNavigation(_ location: NavigationHistory.Location, in document: DocumentWindow, reason: NavigationHistory.Reason) {
+        guard !isQuitting, !document.isReplayingNavigation, documents.contains(where: { $0 === document }) else { return }
+        document.navigationHistory.record(location, reason: reason)
     }
 
     func retargetNavigation(from source: URL, to destination: URL) {
-        navigationHistory.moveFiles { url in
-            guard let suffix = DocumentWindow.worktreePathSuffix(from: source, to: url) else { return nil }
-            return (suffix.isEmpty ? destination : destination.appending(path: suffix, directoryHint: .notDirectory))
-                .standardizedFileURL
+        for document in documents {
+            document.navigationHistory.moveFiles { url in
+                guard let suffix = DocumentWindow.worktreePathSuffix(from: source, to: url) else { return nil }
+                return (suffix.isEmpty ? destination : destination.appending(path: suffix, directoryHint: .notDirectory))
+                    .standardizedFileURL
+            }
         }
     }
 
     func removeNavigationFiles(under urls: [URL]) {
-        navigationHistory.removeFiles { file in
-            urls.contains { DocumentWindow.worktreePathSuffix(from: $0, to: file) != nil }
+        for document in documents {
+            document.navigationHistory.removeFiles { file in
+                urls.contains { DocumentWindow.worktreePathSuffix(from: $0, to: file) != nil }
+            }
         }
     }
 
-    func canNavigate(_ direction: NavigationHistory.Direction) -> Bool {
-        !isQuitting && activeDocument?.window.attachedSheet == nil && navigationHistory.canGo(direction)
+    func canNavigate(_ direction: NavigationHistory.Direction, in document: DocumentWindow) -> Bool {
+        !isQuitting && document.window.attachedSheet == nil && documents.contains { $0 === document } &&
+            document.navigationHistory.canGo(direction)
     }
 
-    func navigate(_ direction: NavigationHistory.Direction) async {
-        while !Task.isCancelled, canNavigate(direction), let move = navigationHistory.begin(direction) {
-            guard await skipOrNavigate(to: move) else { return }
+    func navigate(_ direction: NavigationHistory.Direction, in document: DocumentWindow) async {
+        let history = document.navigationHistory
+        while !Task.isCancelled, canNavigate(direction, in: document), let move = history.begin(direction) {
+            guard await skipOrNavigate(to: move, in: document) else { return }
         }
     }
 
     /// A location discarded while looking it up should not block the remaining stack.
-    private func skipOrNavigate(to move: NavigationHistory.Move) async -> Bool {
+    private func skipOrNavigate(to move: NavigationHistory.Move, in document: DocumentWindow) async -> Bool {
+        let history = document.navigationHistory
         let location = move.location
-        guard let document = documents.first(where: { ObjectIdentifier($0) == location.window }) else {
-            navigationHistory.remove(window: location.window)
-            return true
+        let isCurrent = {
+            !self.isQuitting && !Task.isCancelled && history.isPending(move) && self.documents.contains { $0 === document }
         }
-
         var opened = false
-        defer { navigationHistory.finish(move, opened: opened) }
+        defer { history.finish(move, opened: opened) }
 
         if document.navigationLocation?.resource != location.resource {
             if case .revision(let key) = location.resource {
-                guard await document.reopenMarkdownRevision(key, while: { [weak self] in
-                    self?.navigationHistory.isPending(move) == true
-                }) else {
-                    navigationHistory.remove(window: location.window, resource: location.resource)
+                let reopened = await document.reopenMarkdownRevision(key, while: isCurrent)
+                guard isCurrent() else { return false }
+                if !reopened {
+                    history.remove(resource: location.resource)
                     return true
                 }
             } else if case .file(let url) = location.resource {
                 let missing = await Self.navigationFileIsMissing(url)
-                guard !Task.isCancelled, navigationHistory.isPending(move) else { return false }
+                guard isCurrent() else { return false }
                 if missing {
-                    navigationHistory.removeFiles { $0 == url }
+                    history.remove(resource: location.resource)
                     return true
                 }
                 do {
-                    guard try await openFile(url, in: document, focusEditor: false, shouldOpen: { [weak self] in
-                        self?.navigationHistory.isPending(move) == true
-                    }) === document else { return false }
+                    guard try await openFile(url, in: document, focusEditor: false, shouldOpen: isCurrent) === document else { return false }
                 } catch {
-                    guard navigationHistory.isPending(move) else { return false }
+                    guard isCurrent() else { return false }
                     await document.showError("Could Not Open “\(url.lastPathComponent)”", detail: error.localizedDescription)
                     return false
                 }
             } else {
-                navigationHistory.remove(window: location.window, resource: location.resource)
+                history.remove(resource: location.resource)
                 return true
             }
         }
-        guard navigationHistory.isPending(move), documents.contains(where: { $0 === document }) else { return false }
-        navigationReplays.insert(location.window)
-        defer { navigationReplays.remove(location.window) }
-        controlPanel?.dismiss(restoreFocus: false)
-        if !isAgentCheck && !document.window.isKeyWindow { document.present() }
+        guard isCurrent() else { return false }
+        document.isReplayingNavigation = true
+        defer { document.isReplayingNavigation = false }
+        controlPanel?.dismiss(in: document, restoreFocus: false)
         if let markdown = location.markdown { document.restoreMarkdownState(markdown) }
         if let selection = location.selection, document.hasTextDocument, location.markdown?.showsPreview != true {
             document.restoreNavigationSelection(selection)
@@ -754,8 +764,9 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             let layer: HighlightingLayer = item.action == #selector(toggleLSPHighlight(_:)) ? .lsp : .treeSitter
             (item as? NSMenuItem)?.state = activeDocument?.isHighlightingEnabled(layer) == true ? .on : .off
             return activeDocument?.canToggleHighlighting ?? false
-        case #selector(goBack(_:)): return canNavigate(.back)
-        case #selector(goForward(_:)): return canNavigate(.forward)
+        case #selector(goBack(_:)), #selector(goForward(_:)):
+            guard let document = currentNavigationDocument else { return false }
+            return canNavigate(item.action == #selector(goBack(_:)) ? .back : .forward, in: document)
         case #selector(newDocument(_:)): return activeDocument?.canReplaceBuffer ?? false
         case #selector(closeDocument(_:)): return activeDocument?.canCloseDocument ?? false
         case #selector(closeWorkspace(_:)): return activeDocument?.canCloseWorkspace ?? false
@@ -894,7 +905,6 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     }
 
     func didClose(_ document: DocumentWindow) {
-        navigationHistory.remove(window: ObjectIdentifier(document))
         if openPanelDocument === document { openFilePanel?.cancel() }
         lastPlacement = document.placement
         pendingFullScreen.removeAll { $0 === document }

@@ -100,14 +100,9 @@ final class NavigationHistory {
     }
 
     struct Location: Equatable {
-        let window: ObjectIdentifier
         let resource: Resource
         let selection: Selection?
         var markdown: MarkdownViewState? = nil
-
-        fileprivate func matchesEditor(_ other: Location) -> Bool {
-            window == other.window && resource == other.resource
-        }
     }
 
     struct Move: Equatable {
@@ -123,11 +118,13 @@ final class NavigationHistory {
     private var moveID: UInt64 = 0
     private var pending: Move?
 
+    var isEmpty: Bool { entries.isEmpty }
+
     func record(_ location: Location, reason: Reason) {
         guard !entries.indices.contains(index) || entries[index] != location else { return }
         pending = nil
         if let current = entries.indices.contains(index) ? entries[index] : nil,
-           current.matchesEditor(location) {
+           current.resource == location.resource {
             if let old = current.selection, let new = location.selection {
                 let distance = abs(old.line - new.line)
                 if distance == 0 || (distance < Self.nearbyLineCount && reason != .jump) {
@@ -167,10 +164,8 @@ final class NavigationHistory {
         self.pending = nil
     }
 
-    func remove(window: ObjectIdentifier, resource: Resource? = nil) {
-        remove { location in
-            location.window == window && (resource == nil || location.resource == resource)
-        }
+    func remove(resource: Resource) {
+        remove { $0.resource == resource }
     }
 
     func removeFiles(matching isRemoved: (URL) -> Bool) {
@@ -184,7 +179,7 @@ final class NavigationHistory {
         for index in entries.indices {
             let location = entries[index]
             guard case .file(let url) = location.resource, let moved = destination(url) else { continue }
-            entries[index] = Location(window: location.window, resource: .file(moved), selection: location.selection,
+            entries[index] = Location(resource: .file(moved), selection: location.selection,
                                       markdown: location.markdown)
             if pending?.index == index { pending = nil }
         }

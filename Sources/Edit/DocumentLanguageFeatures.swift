@@ -430,7 +430,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
                 await open(matches[results[0].index], id: id, source: word, navigationOrigin: navigationOrigin)
                 return
             }
-            if let navigationOrigin { app.recordNavigation(navigationOrigin, reason: .selection) }
+            if let navigationOrigin { app.recordNavigation(navigationOrigin, in: document, reason: .selection) }
             document.sidebar.showReferences(symbol: symbol, originURL: query.url,
                                             originLine: origin.line, originColumn: origin.character,
                                             results: results, preview: { [weak self] row, retained in

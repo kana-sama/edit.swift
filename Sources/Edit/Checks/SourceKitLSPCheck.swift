@@ -199,13 +199,13 @@ enum SourceKitLSPCheck {
         try await wait("follow the definition into another file") { document.fileURL == helper }
         try require(document.editor.selectedRange().location == (helperText as NSString).range(of: "identify").location,
                     "place the caret at the Swift definition")
-        await app.navigate(.back)
+        await app.navigate(.back, in: document)
         try await wait("return to the caller") { document.fileURL == main && swift.supportsDefinition }
 
         let hit = EditorLanguageInteraction.Hit(offset: offset, word: use)
         try performMenu("Go to Definition", at: hit, in: document)
         try await wait("follow Swift Go to Definition") { document.fileURL == helper }
-        await app.navigate(.back)
+        await app.navigate(.back, in: document)
         try await wait("return to the caller after context-menu navigation") { document.fileURL == main && swift.supportsDefinition }
         try performMenu("Find References", at: hit, in: document)
         try await wait("show grouped cross-file references") { document.isSidebarVisible && document.sidebarMode == .references }

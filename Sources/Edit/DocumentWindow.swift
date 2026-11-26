@@ -132,6 +132,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.onFindViewportChange = { [weak decorations] in decorations?.layout() }
         return decorations
     }()
+    let navigationHistory = NavigationHistory()
+    var isReplayingNavigation = false
     private var navigationBufferID = UUID()
     private var navigationSelectionAnchor: NavigationHistory.Selection.Anchor?
     private var restoringNavigationSelection = false
@@ -238,7 +240,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         } else {
             selection = nil
         }
-        return .init(window: ObjectIdentifier(self), resource: resource, selection: selection,
+        return .init(resource: resource, selection: selection,
                      markdown: resolvedSyntaxLanguage == .markdown ? markdownState : nil)
     }
 
@@ -248,7 +250,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func navigate(to caret: NSRange, from origin: NavigationHistory.Location?) {
-        if let origin { app.recordNavigation(origin, reason: .selection) }
+        if let origin { app.recordNavigation(origin, in: self, reason: .selection) }
         applyNavigationSelection(caret)
         app.recordNavigation(in: self, reason: .jump)
     }
@@ -897,7 +899,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         jjDocumentChanges?.recheck()
         app.jjChanges.refreshSoon(sourceControlFileSubscription)
         app.updateJujutsuShortcut()
-        if !isBusy, displayedFileURL != nil || (hasTextDocument && !editor.string.isEmpty) {
+        if navigationHistory.isEmpty, !isBusy, displayedFileURL != nil || (hasTextDocument && !editor.string.isEmpty) {
             app.recordNavigation(in: self, reason: .selection)
         }
     }
@@ -2128,7 +2130,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             window.close()
         }
         if case .buffer(let id) = previousResource, navigationResource != .buffer(id) {
-            app.removeNavigationResource(.buffer(id), in: self)
+            navigationHistory.remove(resource: .buffer(id))
         }
         return true
     }
@@ -3135,7 +3137,7 @@ extension DocumentWindow {
                 guard try await app.openFile(canonical, in: self, focusEditor: false, markdownLink: opening) != nil else { return }
             }
             guard openRequestGeneration == initialGeneration &+ 1 else { return }
-            if let origin { app.recordNavigation(origin, reason: .selection) }
+            if let origin { app.recordNavigation(origin, in: self, reason: .selection) }
             if resolvedSyntaxLanguage == .markdown && hasTextDocument {
                 focusContent()
                 if let fragment {
@@ -3165,7 +3167,7 @@ extension DocumentWindow {
                 return
             }
             if await preview.jump(to: fragment) {
-                if let origin { app.recordNavigation(origin, reason: .selection) }
+                if let origin { app.recordNavigation(origin, in: self, reason: .selection) }
                 recordMarkdownAnchorJump(fragment)
                 return
             }
@@ -3185,7 +3187,7 @@ extension DocumentWindow {
 
     private func recordMarkdownAnchorJump(_ fragment: String) {
         let range = markdownPage?.document.anchors[fragment].map { NSRange(location: $0, length: 0) }
-        if let location = navigationLocation(at: range) { app.recordNavigation(location, reason: .jump) }
+        if let location = navigationLocation(at: range) { app.recordNavigation(location, in: self, reason: .jump) }
     }
 
     private func loadMarkdownImage(_ index: Int, activate: Bool) async {

@@ -110,7 +110,7 @@ enum LanguageServerCheck {
         try await wait("open cross-file definition at its start") {
             document.fileURL == helper && document.editor.selectedRange().location == declaration.location
         }
-        await app.navigate(.back)
+        await app.navigate(.back, in: document)
         try expect(document.fileURL == main && NSLocationInRange(document.editor.selectedRange().location, use),
                    "Go Back returns to the clicked symbol")
         try await wait("synchronize the caller for context-menu navigation") { lsp.session.supportsDefinition }
@@ -121,10 +121,10 @@ enum LanguageServerCheck {
         try await wait("Go to Definition opens the target from the context menu") {
             document.fileURL == helper && document.editor.selectedRange().location == declaration.location
         }
-        await app.navigate(.back)
+        await app.navigate(.back, in: document)
         try expect(document.fileURL == main && NSLocationInRange(document.editor.selectedRange().location, use),
                    "Go Back returns to the context-menu symbol")
-        await app.navigate(.forward)
+        await app.navigate(.forward, in: document)
         try expect(document.fileURL == helper && document.editor.selectedRange().location == declaration.location,
                    "Go Forward restores the original definition target")
 
@@ -157,7 +157,7 @@ enum LanguageServerCheck {
         document.window.makeFirstResponder(table)
         table.keyDown(with: try key(36, character: "\r", in: document.window))
         try await wait("Return also transfers focus to the reference") { document.window.firstResponder === document.editor }
-        await app.navigate(.back)
+        await app.navigate(.back, in: document)
         try expect(document.fileURL == helper && document.editor.selectedRange().location == declaration.location + 2,
                    "Go Back returns to the symbol that produced the references")
 
@@ -216,7 +216,7 @@ enum LanguageServerCheck {
         try await checkHoverDefinitionLink(in: document, word: variant, file: font, lineOffset: typeLine) { view in
             try captureHover(view, "hover")
         }
-        await app.navigate(.back)
+        await app.navigate(.back, in: document)
         try expect(document.fileURL == typed && document.editor.selectedRange().location == variant.location,
                    "Go Back returns to the word whose hover was followed")
 

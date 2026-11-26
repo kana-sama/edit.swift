@@ -230,6 +230,10 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
     }
 
+    func dismiss(in document: DocumentWindow, restoreFocus: Bool) {
+        if self.document === document { dismiss(restoreFocus: restoreFocus) }
+    }
+
     func dismiss(restoreFocus: Bool) {
         guard let document else { return }
         self.document = nil
@@ -1184,7 +1188,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
               document.window.firstResponder === document.editor else {
             throw CheckFailure.invalidSymbols("open the workspace symbol at its location in the same window")
         }
-        await app.navigate(.back)
+        await app.navigate(.back, in: document)
         guard document.fileURL == originalFile, document.editor.selectedRange() == localCaret else {
             throw CheckFailure.invalidSymbols("return to the originating file and caret using Go Back")
         }
