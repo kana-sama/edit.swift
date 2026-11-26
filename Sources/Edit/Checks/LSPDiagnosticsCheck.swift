@@ -7,8 +7,9 @@ enum LSPDiagnosticsCheck {
         var errorDescription: String? { "LSP diagnostics check: \(detail)" }
     }
 
-    static func run(in app: Edit, document: DocumentWindow, capture: (NSWindow) throws -> Void) async throws {
+    static func run(in app: Edit, document: DocumentWindow, capture: (NSWindow, String?) throws -> Void) async throws {
         try checkPublications()
+        try checkSelectionAndOverscroll()
         let files = FileManager.default
         let root = FileBuffer.canonicalURL(files.temporaryDirectory.appending(path: "LSP Diagnostics # \(UUID())"))
         let sources = root.appending(path: "Sources/Fixture")
@@ -83,7 +84,7 @@ enum LSPDiagnosticsCheck {
            let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
             view.cacheDisplay(in: view.bounds, to: bitmap)
             let color = bitmap.colorAt(x: 12, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.sRGB)
-            try require(color.map(isRed) == true, "tint the diagnostic card red")
+            try require(color.map(isRed) == false, "use a neutral diagnostic card surface")
         } else {
             throw Failure(detail: "capture the diagnostic card")
         }
@@ -109,12 +110,13 @@ enum LSPDiagnosticsCheck {
         editor.setDiagnostics([first, LSPError(range: first.range, lineEnd: end, message: detail)])
         let extraWidth = editor.diagnosticMinimumWidth - singleWidth
         try require(extraWidth > 0 && extraWidth < 30, "reserve room for the count and keep only the first message inline")
-        try capture(document.window)
+        try capture(document.window, nil)
         editor.mouseMoved(with: move)
         try await wait("show both full errors when hovering their row") {
             guard let view = editor.languageHoverWindowForCheck?.contentView else { return false }
-            return hoverContains(first.message, in: view) && hoverContains(detail, in: view)
+            return hoverRows(in: view) == [first.message, detail] && errorIconCount(in: view) == 2
         }
+        if let card = editor.languageHoverWindowForCheck { try capture(card, "hover") }
         editor.setDiagnostics([])
         editor.languageInteractionEnabled = false
         features.perform(.start)
@@ -186,8 +188,68 @@ enum LSPDiagnosticsCheck {
     }
 
     private static func hoverContains(_ message: String, in view: NSView) -> Bool {
-        if let text = view as? NSTextView, text.isSelectable && text.string.contains(message) { return true }
-        return view.subviews.contains { hoverContains(message, in: $0) }
+        hoverRows(in: view).contains { $0.contains(message) }
+    }
+
+    private static func hoverRows(in view: NSView) -> [String] {
+        if let text = view as? NSTextView, text.isSelectable { return [text.string] }
+        return view.subviews.flatMap(hoverRows(in:))
+    }
+
+    private static func errorIconCount(in view: NSView) -> Int {
+        if let icon = view as? NSImageView, icon.image != nil, icon.contentTintColor == .systemRed { return 1 }
+        return view.subviews.reduce(0) { $0 + errorIconCount(in: $1) }
+    }
+
+    private static func checkSelectionAndOverscroll() throws {
+        let bounds = NSRect(x: 0, y: 0, width: 600, height: 360)
+        let window = EditorFocusCheckWindow(contentRect: bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        let (scroll, editor) = EditorTextView.scrollingEditor(in: bounds)
+        window.contentView = scroll
+        defer { window.close() }
+        try require(window.makeFirstResponder(editor) && editor.hasBufferFocus, "focus the quiet diagnostic fixture")
+        let line = "let value = missing"
+        editor.string = line + "\n" + String(repeating: "return value ", count: 24) + "\n"
+        let end = line.utf16.count
+        editor.setDiagnostics([LSPError(range: (line as NSString).range(of: "missing"), lineEnd: end,
+                                        message: "Cannot find 'missing' in scope")])
+        window.layoutIfNeeded()
+        scroll.layoutSubtreeIfNeeded()
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        guard let row = editor.laidOutLineBounds(at: end) else { throw Failure(detail: "lay out the quiet diagnostic row") }
+        let text = NSRect(x: row.maxX + 35, y: row.minY, width: 135, height: row.height)
+        editor.setSelectedRange(NSRange(location: 0, length: editor.string.utf16.count - 1))
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        let selectedMessage = try hasPixels(in: [text], editor: editor, scroll: scroll, matching: isRed)
+        editor.setSelectedRange(NSRange(location: end + 1, length: 0))
+
+        let clip = scroll.contentView
+        var edgeColors: [NSColor] = []
+        for left in [true, false] {
+            var viewport = clip.bounds
+            viewport.origin.x = left ? editor.frame.minX - 24 : editor.frame.maxX + 24 - viewport.width
+            clip.bounds = viewport
+            scroll.reflectScrolledClipView(clip)
+            let x = left ? clip.bounds.minX : clip.bounds.maxX - 1
+            let point = editor.convert(NSPoint(x: 0, y: row.midY), to: clip)
+            let sample = NSRect(x: x, y: point.y, width: 1, height: 1)
+            try require(clip.bounds.contains(sample) && !editor.frame.intersects(sample),
+                        "sample outside the editor during horizontal overscroll (left \(left), clip \(clip.bounds), editor \(editor.frame), sample \(sample))")
+            let rect = scroll.convert(sample, from: clip)
+            guard let bitmap = scroll.bitmapImageRepForCachingDisplay(in: rect) else {
+                throw Failure(detail: "capture the exposed overscroll strip")
+            }
+            scroll.cacheDisplay(in: rect, to: bitmap)
+            guard let pixel = bitmap.colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB) else {
+                throw Failure(detail: "sample the exposed overscroll strip")
+            }
+            edgeColors.append(pixel)
+        }
+        try require(selectedMessage && edgeColors.allSatisfy(isLineTint),
+                    "keep the message visible under selection and paint both overscroll edges (selection \(selectedMessage), edges \(edgeColors))")
     }
 
     private static func checkHorizontalScroll(in document: DocumentWindow, lineEnd: Int) throws {
@@ -235,7 +297,7 @@ enum LSPDiagnosticsCheck {
         try require(!scroll.hasHorizontalScroller && abs(editor.frame.width - wrappedWidth) < 1,
                     "keep word wrap within the viewport (editor \(editor.frame.width), expected \(wrappedWidth), scroller \(scroll.hasHorizontalScroller))")
         try require(editor.laidOutLineBounds(at: lineEnd)?.height == row.height
-                    && editor.diagnosticHover(at: NSPoint(x: 16, y: row.midY))?.text.hasSuffix("END") == true,
+                    && editor.diagnosticHover(at: NSPoint(x: 16, y: row.midY))?.messages.last?.hasSuffix("END") == true,
                     "keep the message on one row and reveal its full text on hover in word wrap")
 
         editor.setWordWrap(false)
@@ -259,13 +321,18 @@ enum LSPDiagnosticsCheck {
     }
 
     private static func hasPixels(in rects: [NSRect], document: DocumentWindow, matching: (NSColor) -> Bool) throws -> Bool {
-        let clip = document.scrollView.contentView
+        try hasPixels(in: rects, editor: document.editor, scroll: document.scrollView, matching: matching)
+    }
+
+    private static func hasPixels(in rects: [NSRect], editor: EditorTextView, scroll: NSScrollView,
+                                  matching: (NSColor) -> Bool) throws -> Bool {
+        let clip = scroll.contentView
         let bounds = clip.bounds
         guard let bitmap = clip.bitmapImageRepForCachingDisplay(in: bounds) else { throw Failure(detail: "capture editor pixels") }
         clip.cacheDisplay(in: bounds, to: bitmap)
         let scale = CGFloat(bitmap.pixelsWide) / bounds.width
         for rect in rects {
-            let frame = clip.convert(rect, from: document.editor)
+            let frame = clip.convert(rect, from: editor)
             let x = Int(((frame.minX - bounds.minX) * scale).rounded(.down))..<Int(((frame.maxX - bounds.minX) * scale).rounded(.up))
             let y = Int(((frame.minY - bounds.minY) * scale).rounded(.down))..<Int(((frame.maxY - bounds.minY) * scale).rounded(.up))
             for row in y where (0..<bitmap.pixelsHigh).contains(row) {

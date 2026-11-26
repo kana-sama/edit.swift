@@ -3,7 +3,7 @@ import CoreText
 
 struct EditorDiagnosticHover: Equatable {
     let anchor: NSRect
-    let text: String
+    let messages: [String]
 }
 
 extension EditorTextView {
@@ -25,8 +25,8 @@ extension EditorTextView {
             let messages = diagnosticMessages(errors)
             guard let first = messages.first else { return nil }
             let summary = first.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-            let preview = messages.count > 1 ? "\(messages.count)  \(summary)" : summary
-            return DiagnosticMessage(text: messages.joined(separator: "\n\n"), line: textLine(preview))
+            let suffix = messages.count > 1 ? "  +\(messages.count - 1)" : ""
+            return DiagnosticMessage(messages: messages, line: textLine(summary + suffix), truncation: textLine("…" + suffix))
         }
         updateDiagnosticWidth()
     }
@@ -62,8 +62,9 @@ extension EditorTextView {
     }
 
     struct DiagnosticMessage {
-        let text: String
+        let messages: [String]
         let line: CTLine
+        let truncation: CTLine
     }
 
     private var diagnosticViewport: NSRange? {
@@ -116,7 +117,8 @@ extension EditorTextView {
         let naturalWidth = messageWidth(row.message)
         // In wrap mode the text view already tracks the unobscured editor width.
         let width = wrapsWords ? min(naturalWidth, bounds.maxX - Self.diagnosticTrailingSpace - x) : naturalWidth
-        guard width > 0, !wrapsWords || width == naturalWidth || width >= gap else { return .zero }
+        let tokenWidth = ceil(CTLineGetTypographicBounds(row.message.truncation, nil, nil, nil))
+        guard width > 0, width == naturalWidth || width >= max(gap, tokenWidth) else { return .zero }
         return NSRect(x: x, y: row.bounds.minY, width: width, height: row.bounds.height)
     }
 
@@ -132,7 +134,7 @@ extension EditorTextView {
                 ? NSRect(x: message.minX + min(7, message.width / 2), y: message.minY, width: 1, height: message.height)
                 : row.bounds
             let clipped = anchor.intersection(visibleRect)
-            if !clipped.isEmpty { return EditorDiagnosticHover(anchor: clipped, text: row.message.text) }
+            if !clipped.isEmpty { return EditorDiagnosticHover(anchor: clipped, messages: row.message.messages) }
         }
         // An underline can be on an earlier wrapped row or span several source lines.
         let matching = diagnostics.compactMap { error -> (LSPError, NSRect)? in
@@ -143,31 +145,37 @@ extension EditorTextView {
         }
         let messages = diagnosticMessages(matching.map(\.0))
         guard let anchor = matching.first?.1, !messages.isEmpty else { return nil }
-        return EditorDiagnosticHover(anchor: anchor.intersection(visibleRect), text: messages.joined(separator: "\n\n"))
+        return EditorDiagnosticHover(anchor: anchor.intersection(visibleRect), messages: messages)
     }
 
-    private func drawDiagnosticMessages(in clip: NSRect, visible: NSRange) {
-        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    private var usesDarkDiagnosticColors: Bool {
+        effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    }
+
+    func drawDiagnosticBackground(in clip: NSRect) {
+        guard let visible = diagnosticViewport, !clip.isEmpty else { return }
         let lineTint = NSColor(srgbRed: 228 / 255, green: 84 / 255, blue: 84 / 255,
-                               alpha: (dark ? 27 : 32) / 255)
-        // Dark uses Error Lens's foreground. Use a deeper red against the tinted light background.
-        let foreground = dark
-            ? NSColor(srgbRed: 1, green: 100 / 255, blue: 100 / 255, alpha: 1)
-            : NSColor(srgbRed: 174 / 255, green: 49 / 255, blue: 49 / 255, alpha: 1)
-        guard let context = NSGraphicsContext.current?.cgContext else { return }
+                               alpha: (usesDarkDiagnosticColors ? 27 : 32) / 255)
         lineTint.setFill()
         for row in diagnosticRows(in: visible) where row.bounds.minY < clip.maxY && row.bounds.maxY > clip.minY {
             let band = NSRect(x: clip.minX, y: row.bounds.minY, width: clip.width, height: row.bounds.height)
             band.intersection(clip).fill()
+        }
+    }
 
+    private func drawDiagnosticMessages(in clip: NSRect, visible: NSRange) {
+        // Dark uses Error Lens's foreground. Use a deeper red against the tinted light background.
+        let foreground = usesDarkDiagnosticColors
+            ? NSColor(srgbRed: 1, green: 100 / 255, blue: 100 / 255, alpha: 1)
+            : NSColor(srgbRed: 174 / 255, green: 49 / 255, blue: 49 / 255, alpha: 1)
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        for row in diagnosticRows(in: visible) where row.bounds.minY < clip.maxY && row.bounds.maxY > clip.minY {
             let area = messageFrame(for: row)
             guard area.intersects(clip) else { continue }
             let line = row.message.line
             let displayed: CTLine
             if wrapsWords, messageWidth(row.message) > area.width {
-                let token = CTLineCreateWithAttributedString(NSAttributedString(string: "…", attributes: [
-                    .font: font ?? Self.defaultFont, NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true
-                ]))
+                let token = row.message.truncation
                 displayed = CTLineCreateTruncatedLine(line, area.width, .end, token) ?? token
             } else {
                 displayed = line
@@ -185,7 +193,7 @@ extension EditorTextView {
         }
     }
 
-    func drawDiagnostics(in dirtyRect: NSRect) {
+    func drawDiagnosticForeground(in dirtyRect: NSRect) {
         guard let visible = diagnosticViewport else { return }
         let clip = dirtyRect.intersection(bounds)
         guard !clip.isEmpty else { return }

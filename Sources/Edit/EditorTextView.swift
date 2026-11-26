@@ -1396,6 +1396,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     override func textViewportLayoutControllerDidLayout(_ controller: NSTextViewportLayoutController) {
         super.textViewportLayoutControllerDidLayout(controller)
+        if !diagnostics.isEmpty {
+            refreshDiagnosticForeground(redraw: true)
+            invalidateOverscrollBackground()
+        }
         bracketNavigation.layoutHighlights()
         if let range = renameRange, range.length > 0 { renameShade?.update() }
         requestLineRefresh()
@@ -1497,6 +1501,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     fileprivate func drawOverscrollBackground(in dirtyRect: NSRect) {
         jjInlineDiff?.drawBackground(in: dirtyRect, includesText: false)
         jjConflictDecorations?.draw(in: dirtyRect, includesDetails: false)
+        drawDiagnosticBackground(in: dirtyRect)
         let line = currentLineHighlight.frame
         let band = NSRect(x: dirtyRect.minX, y: line.minY, width: dirtyRect.width, height: line.height)
         CurrentLineHighlight.color.setFill()
@@ -1640,7 +1645,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         super.drawBackground(in: dirtyRect)
         jjInlineDiff?.drawBackground(in: dirtyRect.intersection(bounds))
         jjConflictDecorations?.draw(in: dirtyRect.intersection(bounds))
-        drawDiagnostics(in: dirtyRect)
+        drawDiagnosticBackground(in: dirtyRect.intersection(bounds))
         occurrenceHighlighting.draw(in: dirtyRect)
         bracketNavigation.draw(in: dirtyRect)
         onDrawFindHighlights?(dirtyRect)
@@ -1650,13 +1655,66 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     private(set) var diagnostics: [LSPError] = []
     var diagnosticMessagesByLineEnd: [Int: DiagnosticMessage] = [:]
     var diagnosticMinimumWidth: CGFloat = 0
+    private var diagnosticForeground: EditorDiagnosticForeground?
 
     func setDiagnostics(_ errors: [LSPError]) {
         guard errors != diagnostics else { return }
         diagnostics = errors
         rebuildDiagnosticMessages()
         languageInteraction.diagnosticsDidChange()
+        refreshDiagnosticForeground(redraw: true)
         setNeedsDisplay(visibleRect)
+        invalidateOverscrollBackground()
+    }
+
+    fileprivate func refreshDiagnosticForeground(redraw: Bool = false) {
+        guard !diagnostics.isEmpty else {
+            diagnosticForeground?.removeFromSuperview()
+            diagnosticForeground = nil
+            return
+        }
+        let viewport = visibleRect
+        let foreground: EditorDiagnosticForeground
+        if let existing = diagnosticForeground {
+            foreground = existing
+        } else {
+            foreground = EditorDiagnosticForeground(frame: viewport)
+            addSubview(foreground, positioned: .above, relativeTo: nil)
+            diagnosticForeground = foreground
+        }
+        let moved = foreground.frame != viewport
+        if moved { foreground.frame = viewport }
+        if moved || redraw { foreground.needsDisplay = true }
+    }
+}
+
+/// TextKit draws its selection above the editor background.
+@MainActor
+private final class EditorDiagnosticForeground: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        setAccessibilityElement(false)
+        clipsToBounds = true
+        wantsLayer = true
+        layer?.zPosition = 1
+    }
+
+    required init?(coder: NSCoder) { fatalError("Diagnostic decorations are created in code.") }
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let editor = superview as? EditorTextView, let context = NSGraphicsContext.current?.cgContext else { return }
+        context.saveGState()
+        context.translateBy(x: -frame.minX, y: -frame.minY)
+        editor.drawDiagnosticForeground(in: dirtyRect.offsetBy(dx: frame.minX, dy: frame.minY))
+        context.restoreGState()
     }
 }
 
@@ -1748,6 +1806,7 @@ private final class EditorScrollView: NSScrollView {
 
     private func refreshScrollDecorations() {
         guard let editor = documentView as? EditorTextView else { return }
+        if !editor.diagnostics.isEmpty { editor.refreshDiagnosticForeground() }
         if editor.renameRange != nil { editor.requestLineRefresh() }
         editor.jjDecorations?.layout(in: self)
         editor.jjConflictDecorations?.alignActionsHorizontally(in: self)

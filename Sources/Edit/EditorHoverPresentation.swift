@@ -18,11 +18,13 @@ enum EditorHoverPresentation: Sendable {
 
     case markdown(EditorHoverContent)
     case structured([Section])
+    case diagnostics([String])
 
     var maximumWidth: CGFloat {
         switch self {
         case .markdown: 460
         case .structured: 560
+        case .diagnostics: 520
         }
     }
 
@@ -78,8 +80,73 @@ struct EditorHoverLayout {
             guard let contents = HoverSectionsView(sections, maximumWidth: maximumWidth) else { return nil }
             view = contents
             textViews = contents.textViews
+        case .diagnostics(let messages):
+            guard let contents = DiagnosticHoverRows(messages: messages, maximumWidth: maximumWidth) else { return nil }
+            view = contents
+            textViews = contents.textViews
         }
     }
+}
+
+@MainActor
+private final class DiagnosticHoverRows: NSView {
+    let textViews: [HoverTextView]
+
+    override var isFlipped: Bool { true }
+
+    init?(messages: [String], maximumWidth: CGFloat) {
+        let inset: CGFloat = 12
+        let rowPadding: CGFloat = 8
+        let iconSize: CGFloat = 14
+        let textLeading = inset + iconSize + 9
+        let spaceForText = maximumWidth - textLeading - inset
+        guard spaceForText > 0, !messages.isEmpty else { return nil }
+
+        let font = NSFont.systemFont(ofSize: 13)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byWordWrapping
+        paragraph.lineSpacing = 2
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph
+        ]
+        let rows = messages.map { message in
+            HoverTextView(width: spaceForText, text: NSAttributedString(string: message, attributes: attributes), inset: .zero)
+        }
+        let naturalWidth = rows.compactMap { $0.measure(at: spaceForText)?.width }.max() ?? 0
+        let textWidth = min(spaceForText, max(120, naturalWidth))
+        let width = textLeading + textWidth + inset
+        textViews = rows
+        super.init(frame: .zero)
+
+        let icon = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: iconSize, weight: .medium))
+        var top: CGFloat = 0
+        for (index, text) in rows.enumerated() {
+            if index > 0 {
+                let separator = NSBox(frame: NSRect(x: textLeading, y: top, width: textWidth, height: 1))
+                separator.boxType = .separator
+                separator.setAccessibilityElement(false)
+                addSubview(separator)
+                top += 1
+            }
+            guard let size = text.measure(at: textWidth), let baseline = text.firstTextBaseline else { return nil }
+            let bodyTop = top + rowPadding
+            let symbol = NSImageView(frame: NSRect(x: inset, y: bodyTop + baseline - font.capHeight / 2 - iconSize / 2,
+                                                   width: iconSize, height: iconSize))
+            symbol.image = icon
+            symbol.contentTintColor = .systemRed
+            symbol.setAccessibilityElement(false)
+            addSubview(symbol)
+
+            text.setAccessibilityLabel("Error")
+            text.frame = NSRect(x: textLeading, y: bodyTop, width: textWidth, height: size.height)
+            addSubview(text)
+            top = max(symbol.frame.maxY, text.frame.maxY) + rowPadding
+        }
+        setFrameSize(NSSize(width: width, height: top))
+    }
+
+    required init?(coder: NSCoder) { fatalError("Diagnostic hover rows are created in code.") }
 }
 
 @MainActor

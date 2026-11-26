@@ -301,7 +301,7 @@ final class EditorLanguageInteraction: NSObject {
             guard let self, hoverTarget == key else { return }
             hoverTask = nil
             closePopover(restoreFocus: true)
-            show(EditorHoverPresentation(text: diagnostic.text, isMarkdown: false), at: diagnostic.anchor, isDiagnostic: true)
+            show(.diagnostics(diagnostic.messages), at: diagnostic.anchor)
             if popover != nil { popoverTarget = key }
         }
     }
@@ -370,14 +370,12 @@ final class EditorLanguageInteraction: NSObject {
         show(presentation, at: rect, symbol: fallback)
     }
 
-    private func show(_ presentation: EditorHoverPresentation, at rect: NSRect, symbol: NSRange? = nil,
-                      isDiagnostic: Bool = false) {
+    private func show(_ presentation: EditorHoverPresentation, at rect: NSRect, symbol: NSRange? = nil) {
         guard let editor, let window = editor.window else { return }
         let windowRect = editor.convert(rect.intersection(editor.visibleRect), to: nil)
         let anchor = window.convertToScreen(windowRect.intersection(window.contentLayoutRect))
         popover = EditorHoverPopover(
             owner: window, appearance: editor.effectiveAppearance, anchor: anchor, presentation: presentation,
-            isDiagnostic: isDiagnostic,
             onNavigate: { [weak self] location in
                 guard let self, let symbol, popoverTarget == .symbol(symbol),
                       let follow = self.editor?.languageFollowHoverLink else { return }
