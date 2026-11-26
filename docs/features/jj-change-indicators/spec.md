@@ -32,6 +32,8 @@ Use the same status colors in Worktree and the editor, with red reserved for lin
 
 Batch text edits in 150 ms windows. If the comparison for the current file and operation is still loading, let it finish and analyze the latest buffer text. Keep the previous gutter marks, scrollbar marks, and buffer-based Worktree status visible until a current result replaces them. Move the retained gutter marks with their source rows as text offsets change. Stale scrollbar marks are passive. Retire the previous result after 750 ms even if editing continues. Clear it immediately when the document is replaced or the workspace or disk version is known to be invalid. Follow the [asynchronous update rules](../../design.md#asynchronous-updates).
 
+Use 2 pt wide gutter stripes and 50% opacity for marks without an expanded inline diff. An expanded hunk's stripe is opaque. Keep the clickable gutter wider than the paint.
+
 | Text change | Marker |
 | --- | --- |
 | Lines inserted | Green vertical bar across the inserted lines. |
@@ -44,6 +46,8 @@ A newly added file has only its Worktree status unless it contains a confirmed c
 When an ordinary line change can have several equivalent positions within repeated lines, retain the earliest matching copies and mark the change after them. Use those same ranges for editor markers, the expanded inline diff, and Restore.
 
 ## Scrollbar markers
+
+The painted scrollbar marks are at most 2⅔ pt wide, with extra click tolerance around them.
 
 Draw change marks inside the native vertical scrollbar track, within its existing width. Center overlay marks on the scrollbar's resting thumb and make them narrower than the thumb. Keep that center as the thumb expands on hover or fades. Keep the track at the exposed edge of the editor pane as a sidebar opens or the window resizes. Position marks over the full document's laid-out height, including changes outside the visible text and excluding empty space beyond the document. For example, a conflict three quarters of the way through the file has a purple mark three quarters of the way down the track. The native thumb sits above the marks and can cover them. When the whole file fits, marks in that area are passive. Preserve a visible minimum size for a one-line mark. When marks overlap, display conflict before deletion, deletion before replacement, and replacement before insertion.
 

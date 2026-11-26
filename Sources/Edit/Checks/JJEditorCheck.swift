@@ -453,8 +453,8 @@ enum JJEditorCheck {
         let scale = CGFloat(painted.pixelsWide) / strip.width
         let width = CGFloat(last + 1 - first) / scale
         let center = CGFloat(first + last + 1) / (2 * scale)
-        guard abs(width - 4) <= 0.5, abs(center - strip.width / 2) <= 0.5 else {
-            throw Failure("paint a four-point mark centered on the resting scrollbar (width \(width), center \(center))")
+        guard abs(width - 8.0 / 3.0) <= 1 / scale, abs(center - strip.width / 2) <= 0.5 else {
+            throw Failure("paint a slim mark centered on the resting scrollbar (width \(width), center \(center))")
         }
     }
 

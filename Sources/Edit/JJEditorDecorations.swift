@@ -34,6 +34,7 @@ final class JJEditorDecorations {
         let bounds: NSRect
         let stripes: [NSRect]
         var isDeletionBoundary = false
+        var isExpanded = false
     }
 
     private weak var editor: EditorTextView?
@@ -56,7 +57,9 @@ final class JJEditorDecorations {
     private var trackNeedsUpdate = true
     private var trackMarks: [PositionedMark] = []
     private static var restingOverlaySlots: [NSControl.ControlSize: NSRect] = [:]
-    private let gutterWidth: CGFloat = 7
+    private let gutterHitWidth: CGFloat = 12
+    private let gutterStripeWidth: CGFloat = 2
+    private let collapsedGutterOpacity: CGFloat = 0.5
     private let gutter = JJEditorMarkerView()
     private let track = JJEditorMarkerView()
 
@@ -132,7 +135,7 @@ final class JJEditorDecorations {
         }
         let clip = scroll.contentView.frame
         let exposedOrigin = editor.convert(scroll.visibleContentOrigin, to: scroll)
-        let gutterFrame = NSRect(x: max(clip.minX, exposedOrigin.x), y: clip.minY, width: gutterWidth + 5,
+        let gutterFrame = NSRect(x: max(clip.minX, exposedOrigin.x), y: clip.minY, width: gutterHitWidth,
                                  height: clip.height)
         // Compose the gutter with the text so both pass under the same native titlebar material.
         if gutter.superview !== editor {
@@ -255,7 +258,7 @@ final class JJEditorDecorations {
         let geometry = EditorOverviewGeometry(editor: editor, lineStarts: lineStarts, wrappedOffsets: offsets)
         let height = trackSize.height
         let sideClearance: CGFloat = scrollerStyle == .overlay ? 2 : 0
-        let width = min(4, max(0, trackSize.width - sideClearance))
+        let width = min(4, max(0, trackSize.width - sideClearance)) * (2.0 / 3.0)
         let minimumHeight = min(3, height)
         trackMarks = marks.map { mark in
             let reservation = removedBlocks[mark]
@@ -316,7 +319,8 @@ final class JJEditorDecorations {
         }
         // Choose visible paint before hit slop so the visible priority always wins collisions.
         return trackMarks.reversed().first { $0.rect.contains(point) }
-            ?? trackMarks.reversed().first { $0.rect.insetBy(dx: -3, dy: -1).contains(point) }
+            // Include the space removed from each side when narrowing the paint to two thirds.
+            ?? trackMarks.reversed().first { $0.rect.insetBy(dx: -(3 + $0.rect.width / 4), dy: -1).contains(point) }
     }
 
     private func clickTrack(_ event: NSEvent) {
@@ -380,6 +384,7 @@ final class JJEditorDecorations {
     private func drawGutter(in dirtyRect: NSRect) {
         guard let editor else { return }
         for marker in visibleGutterMarks(in: editor) where marker.bounds.intersects(dirtyRect) {
+            let opacity: CGFloat = marker.isExpanded ? 1 : collapsedGutterOpacity
             if marker.isDeletionBoundary {
                 let rect = marker.bounds
                 let path = NSBezierPath()
@@ -387,11 +392,11 @@ final class JJEditorDecorations {
                 path.line(to: NSPoint(x: rect.minX, y: rect.maxY))
                 path.line(to: NSPoint(x: rect.maxX, y: rect.midY))
                 path.close()
-                marker.mark.kind.color.setFill()
+                marker.mark.kind.color.withAlphaComponent(opacity).setFill()
                 path.fill()
             } else {
                 for stripe in marker.stripes where stripe.intersects(dirtyRect) {
-                    fill(stripe, kind: marker.mark.kind)
+                    fill(stripe, kind: marker.mark.kind, opacity: opacity)
                 }
             }
         }
@@ -410,8 +415,8 @@ final class JJEditorDecorations {
             while offset < range.upperBound {
                 if let row = editor.laidOutLineBounds(at: offset) {
                     let rect = gutter.convert(row, from: editor)
-                    let stripe = NSRect(x: 2, y: rect.minY, width: 3, height: rect.height)
-                    if stripe.intersects(dirtyRect) { fill(stripe, kind: .conflict) }
+                    let stripe = NSRect(x: 2, y: rect.minY, width: gutterStripeWidth, height: rect.height)
+                    if stripe.intersects(dirtyRect) { fill(stripe, kind: .conflict, opacity: collapsedGutterOpacity) }
                 }
                 let next = LineEditing.line(at: offset, in: text).end
                 guard next > offset else { break }
@@ -492,13 +497,13 @@ final class JJEditorDecorations {
     private func gutterMark(_ mark: JJLineMark, firstLine: Int, lastLine: Int, in editor: EditorTextView) -> GutterMark? {
         if let expanded = editor.jjInlineDiff?.expandedRegion(for: mark) {
             let rect = gutter.convert(expanded, from: editor)
-            let stripe = NSRect(x: 2, y: rect.minY, width: 3, height: rect.height)
-            return GutterMark(mark: mark, bounds: stripe, stripes: [stripe])
+            let stripe = NSRect(x: 2, y: rect.minY, width: gutterStripeWidth, height: rect.height)
+            return GutterMark(mark: mark, bounds: stripe, stripes: [stripe], isExpanded: true)
         }
         if mark.kind == .deletion {
             guard mark.lines.lowerBound >= firstLine, let y = boundary(mark.lines.lowerBound, editor: editor) else { return nil }
             let axis = gutter.convert(NSPoint(x: 0, y: y), from: editor).y
-            let triangle = NSRect(x: 1, y: axis - 3, width: 5, height: 6)
+            let triangle = NSRect(x: 1, y: axis - 3, width: 10.0 / 3.0, height: 6)
             return GutterMark(mark: mark, bounds: triangle, stripes: [], isDeletionBoundary: true)
         }
         let start = max(mark.lines.lowerBound, firstLine)
@@ -509,7 +514,7 @@ final class JJEditorDecorations {
         for line in start..<end {
             guard let row = laidOutLine(at: line, editor: editor) else { continue }
             let rect = gutter.convert(row, from: editor)
-            let stripe = NSRect(x: 2, y: rect.minY, width: 3, height: rect.height)
+            let stripe = NSRect(x: 2, y: rect.minY, width: gutterStripeWidth, height: rect.height)
             stripes.append(stripe)
             bounds = bounds.union(stripe)
         }
@@ -538,8 +543,9 @@ final class JJEditorDecorations {
         return line > 0 ? laidOutLine(at: line - 1, editor: editor)?.maxY : nil
     }
 
-    private func fill(_ rect: NSRect, kind: JJLineMark.Kind, conflictBackground: NSColor? = nil) {
-        kind.color.setFill()
+    private func fill(_ rect: NSRect, kind: JJLineMark.Kind, opacity: CGFloat = 1, conflictBackground: NSColor? = nil) {
+        let color = kind.color.withAlphaComponent(opacity)
+        color.setFill()
         if kind != .conflict || rect.height < 4 {
             rect.fill()
             return
@@ -551,7 +557,7 @@ final class JJEditorDecorations {
         }
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(rect: rect).addClip()
-        kind.color.setStroke()
+        color.setStroke()
         let stripes = NSBezierPath()
         stripes.lineWidth = 1
         var y = rect.minY
