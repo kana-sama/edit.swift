@@ -400,6 +400,8 @@ enum FilesCheck {
                        "the image remains in the visible scroll area beneath the toolbar")
         }
 
+        try checkPreviewWithTerminal(in: document, scroll: scroll, content: try resolve(previewImage.superview))
+
         document.setFolder(directory)
         document.toggleSidebarFocus(.worktree)
         let worktree = try resolve(document.worktreeSidebar)
@@ -429,6 +431,48 @@ enum FilesCheck {
                    && document.editor.selectedRange() == selection && document.window.firstResponder === document.editor,
                    "returning to text restores editability, selection and focus")
         document.window.close()
+    }
+
+    private static func checkPreviewWithTerminal(in document: DocumentWindow, scroll: NSScrollView,
+                                                 content: NSView) throws {
+        let window = document.window
+        let expandedSize = NSSize(width: 880, height: 960)
+        window.setContentSize(expandedSize)
+        func checkCenter(above bottom: CGFloat) throws {
+            let expected = (window.contentLayoutRect.maxY + bottom) / 2
+            let actual = content.convert(content.bounds, to: nil).midY
+            try expect(abs(actual - expected) < 2,
+                       "center the file preview in the exposed area (center \(actual), expected \(expected), scroll insets \(scroll.contentInsets))")
+        }
+
+        window.layoutIfNeeded()
+        scroll.scrollToVisibleContentOrigin(.zero)
+        try checkCenter(above: scroll.convert(scroll.bounds, to: nil).minY)
+        document.showTerminal()
+        let dock = try resolve(views(in: document.editorContentView, ofType: TerminalDockView.self).first)
+        let holder = try resolve(dock.arrangedSubviews.last)
+        window.layoutIfNeeded()
+        try checkCenter(above: holder.convert(holder.bounds, to: nil).maxY)
+
+        dock.setPosition(dock.bounds.height - dock.dividerThickness - 310, ofDividerAt: 0)
+        window.layoutIfNeeded()
+        try checkCenter(above: holder.convert(holder.bounds, to: nil).maxY)
+
+        window.setContentSize(NSSize(width: 880, height: 460))
+        window.layoutIfNeeded()
+        let lastControl = try resolve(views(in: content, ofType: NSButton.self).first { !$0.isHidden })
+        let terminalTop = holder.convert(holder.bounds, to: nil).maxY
+        try expect(lastControl.convert(lastControl.bounds, to: nil).minY < terminalTop,
+                   "exercise a file preview taller than the exposed area")
+        scroll.scrollToVisibleContentOrigin(NSPoint(x: 0, y: try resolve(scroll.documentView).bounds.height))
+        let controlFrame = lastControl.convert(lastControl.bounds, to: nil)
+        try expect(controlFrame.minY >= terminalTop && controlFrame.maxY <= window.contentLayoutRect.maxY,
+                   "scroll the final preview action fully into view above the terminal (action \(controlFrame), terminal top \(terminalTop))")
+
+        document.toggleTerminal()
+        window.setContentSize(expandedSize)
+        window.layoutIfNeeded()
+        try checkCenter(above: scroll.convert(scroll.bounds, to: nil).minY)
     }
 
     private static func views<T: NSView>(in root: NSView, ofType type: T.Type) -> [T] {

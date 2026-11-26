@@ -30,6 +30,10 @@ final class FilePreviewView: NSView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    override var additionalSafeAreaInsets: NSEdgeInsets {
+        didSet { needsLayout = true }
+    }
+
     func stop() {
         video?.stop()
     }
@@ -44,7 +48,7 @@ final class FilePreviewView: NSView {
         let viewport = scrollView.contentSize
         let width = min(544, max(1, viewport.width - 48))
         contentWidth.constant = width
-        let insets = scrollView.contentInsets
+        let insets = safeAreaInsets
         let visibleHeight = max(0, viewport.height - insets.top - insets.bottom)
         mediaHeightLimit?.constant = min(330, max(108, floor(visibleHeight * 0.52)))
         let height = max(visibleHeight, ceil(content.fittingSize.height) + 48)

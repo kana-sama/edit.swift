@@ -6,6 +6,8 @@ Place media at the top of the preview, followed by the filename, a type and size
 
 Prepare the metadata and media in the background while the current buffer and title stay visible. Install the complete preview and its title together when preparation finishes. If a newer open request supersedes it, discard the prepared result. The preview uses the current system appearance and can scroll when the document area is small. At the top of the scroll range the preview starts below the titlebar. While scrolling, let the media and metadata pass beneath its native scroll-edge material. Save, Save As, and text-editing commands are unavailable for previews. An existing previewed file appears in recent files and in its folder's history. Restore a preview in its original window from the file on disk. Reopening a preview rereads the file, so a now-readable document can open as text.
 
+Center a preview that fits between the titlebar and the bottom terminal dock while it is open. Recalculate the layout as the dock opens, resizes, or closes. When the preview is taller than the exposed area, scrolling can bring the final metadata and action above the dock.
+
 Use Finder’s Preview pane for the media-first layout and Quick Look as a reference for playback. Edit places these in the existing document window. [Finder Preview pane](https://support.apple.com/guide/mac-help/mchl1e4644c2/mac) · [Quick Look](https://support.apple.com/guide/mac-help/preview-a-file-in-quick-look-mh14119/mac) · [AVPlayerView](https://developer.apple.com/documentation/avkit/avplayerview)
 
 ## Acceptance
@@ -13,5 +15,6 @@ Use Finder’s Preview pane for the media-first layout and Quick Look as a refer
 - Open a non-text file from an existing text buffer. Check the same window, inline reason, filename and metadata, and absence of an error dialog. Check that Save and Save As cannot write the file. Repeat with a dirty buffer and cancel.
 - Open an image and a video. Check that the preview and dimensions are visible. Leave the video untouched and check that it remains on its first frame. Press Play and check that the system controls work. Switch files and verify that playback stops.
 - Switch back to the original text document and check that it is editable with its previous position. Restore a window that held a preview and check that it reopens paused. Resize a preview window and verify that its metadata remains reachable by scrolling. Scroll an image up under the titlebar and check that it remains visible through the native material, with the sidebar both open and closed. Check that the path shares the metadata values’ trailing edge.
+- Open, resize, and hide the bottom terminal while an image preview is open. Check that the preview stays centered in the exposed space when it fits. Shrink the window and scroll the last preview action into view above the dock.
 
 - Switch quickly between files in Worktree. The old preview stays in place until a complete preview can replace it. Check that metadata and media are present when the title changes and that a superseded preview never appears later.
