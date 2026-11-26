@@ -309,6 +309,7 @@ final class EditorHoverPopover {
     var isSelecting: Bool { content.selecting }
 
     init?(owner: NSWindow, appearance: NSAppearance, anchor: NSRect, presentation: EditorHoverPresentation,
+          isDiagnostic: Bool = false,
           onNavigate: @escaping (LSPLocation) -> Void, onEnter: @escaping () -> Void, onExit: @escaping () -> Void) {
         guard !anchor.isEmpty, let screen = owner.screen ?? NSScreen.main else { return nil }
         let screenFrame = screen.visibleFrame
@@ -319,7 +320,7 @@ final class EditorHoverPopover {
 
         self.anchor = anchor
         panel = HoverPanel(contentRect: placement.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        content = HoverSurface(placement: placement, layout: layout,
+        content = HoverSurface(placement: placement, layout: layout, isDiagnostic: isDiagnostic,
                                onNavigate: onNavigate, onEnter: onEnter, onExit: onExit)
         panel.contentView = content
         panel.setFrame(placement.frame, display: false)
@@ -356,18 +357,26 @@ private final class HoverSurface: AnchoredPopoverSurface, NSTextViewDelegate {
     private let onExit: () -> Void
     private var area: NSTrackingArea?
     private let textViews: [HoverTextView]
+    private let diagnosticBackground: CAShapeLayer?
 
     var selecting: Bool { textViews.contains(where: \.selecting) }
 
-    init(placement: EditorHoverPlacement, layout: EditorHoverLayout,
+    init(placement: EditorHoverPlacement, layout: EditorHoverLayout, isDiagnostic: Bool,
          onNavigate: @escaping (LSPLocation) -> Void, onEnter: @escaping () -> Void, onExit: @escaping () -> Void) {
         self.onNavigate = onNavigate
         self.onEnter = onEnter
         self.onExit = onExit
         textViews = layout.textViews
+        diagnosticBackground = isDiagnostic ? CAShapeLayer() : nil
         super.init(frame: NSRect(origin: .zero, size: placement.frame.size))
         identifier = .init("EditorLanguageHover")
         applyOutline(placement.shape)
+        if let diagnosticBackground {
+            diagnosticBackground.frame = bounds
+            diagnosticBackground.path = placement.shape.outline()
+            layer?.insertSublayer(diagnosticBackground, at: 0)
+            updateDiagnosticColor()
+        }
 
         for text in textViews { text.delegate = self }
 
@@ -381,6 +390,19 @@ private final class HoverSurface: AnchoredPopoverSurface, NSTextViewDelegate {
     }
 
     required init?(coder: NSCoder) { fatalError("Language hover surfaces are created in code.") }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateDiagnosticColor()
+    }
+
+    private func updateDiagnosticColor() {
+        guard let diagnosticBackground else { return }
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        diagnosticBackground.fillColor = dark
+            ? NSColor(srgbRed: 0.45, green: 0.16, blue: 0.20, alpha: 1).cgColor
+            : NSColor(srgbRed: 1, green: 0.82, blue: 0.84, alpha: 1).cgColor
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()

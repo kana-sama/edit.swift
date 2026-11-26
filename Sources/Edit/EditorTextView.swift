@@ -218,6 +218,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         }
     }
 
+    override func setFrameSize(_ size: NSSize) {
+        // An unwrapped annotation is part of the scroll extent, outside TextKit's layout.
+        super.setFrameSize(NSSize(width: max(size.width, diagnosticMinimumWidth), height: size.height))
+    }
+
     override var undoManager: UndoManager? { renameDraft?.undoManager ?? editorUndoManager }
 
     func beginSymbolRename(in range: NSRange, source: String) -> Bool {
@@ -980,6 +985,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
               let container = textContainer else { return }
         let anchor = preservingViewport ? zoomAnchor() : nil
         wrapsWords = enabled
+        if enabled { updateDiagnosticWidth() }
         isHorizontallyResizable = !enabled
         autoresizingMask = enabled ? [.height] : [.width, .height]
         container.widthTracksTextView = enabled
@@ -990,6 +996,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         scroll.horizontalScrollElasticity = enabled ? .none : .automatic
         scroll.hasHorizontalScroller = !enabled
         scroll.updateWordWrapWidth()
+        if !enabled { updateDiagnosticWidth() }
         if enabled {
             scroll.scrollToVisibleContentOrigin(NSPoint(x: 0, y: scroll.visibleContentOrigin.y))
         }
@@ -1097,6 +1104,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         paragraph.tabStops = []
         paragraph.defaultTabInterval = ("    " as NSString).size(withAttributes: [.font: font]).width
         defaultParagraphStyle = paragraph
+        rebuildDiagnosticMessages()
         let range = NSRange(location: 0, length: textStorage?.length ?? 0)
         if range.length > 0 {
             textStorage?.addAttribute(.paragraphStyle, value: paragraph, range: range)
@@ -1640,10 +1648,13 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     private(set) var diagnostics: [LSPError] = []
+    var diagnosticMessagesByLineEnd: [Int: DiagnosticMessage] = [:]
+    var diagnosticMinimumWidth: CGFloat = 0
 
     func setDiagnostics(_ errors: [LSPError]) {
         guard errors != diagnostics else { return }
         diagnostics = errors
+        rebuildDiagnosticMessages()
         languageInteraction.diagnosticsDidChange()
         setNeedsDisplay(visibleRect)
     }
@@ -1721,6 +1732,7 @@ private final class EditorScrollView: NSScrollView {
         let width = max(1, contentView.bounds.width - contentInsets.left - contentInsets.right)
         guard editor.frame.width != width else { return }
         editor.setFrameSize(NSSize(width: width, height: editor.frame.height))
+        if !editor.diagnostics.isEmpty { editor.setNeedsDisplay(editor.visibleRect) }
     }
 
     override func reflectScrolledClipView(_ clipView: NSClipView) {

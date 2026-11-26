@@ -58,8 +58,11 @@ enum LSPDiagnosticsCheck {
         try require(try hasRedPixels(in: underlines, document: document), "paint the underline in the native editor")
         let end = (zigText as NSString).range(of: "\r\n").location
         guard let row = editor.laidOutLineBounds(at: end) else { throw Failure(detail: "find the diagnosed row") }
-        let messageArea = NSRect(x: row.maxX + 22, y: row.minY, width: 100, height: row.height)
+        let messageArea = NSRect(x: row.maxX + 35, y: row.minY, width: 100, height: row.height)
         try require(try hasRedPixels(in: [messageArea], document: document), "paint the message background after the code")
+        let iconArea = NSRect(x: row.maxX + 17, y: row.midY - 5, width: 12, height: 10)
+        try require(try hasPixels(in: [iconArea], document: document, matching: isLabel),
+                    "draw the error icon at the vertical center of the row")
         try require(try hasPixels(in: [messageArea], document: document) { pixel in
             max(pixel.redComponent, pixel.greenComponent, pixel.blueComponent)
                 - min(pixel.redComponent, pixel.greenComponent, pixel.blueComponent) < 0.2
@@ -77,6 +80,15 @@ enum LSPDiagnosticsCheck {
             guard let message, !message.isEmpty, let view = editor.languageHoverWindowForCheck?.contentView else { return false }
             return hoverContains(message, in: view)
         }
+        if let view = editor.languageHoverWindowForCheck?.contentView,
+           let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            let color = bitmap.colorAt(x: 12, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.sRGB)
+            try require(color.map(isRed) == true, "tint the diagnostic card red")
+        } else {
+            throw Failure(detail: "capture the diagnostic card")
+        }
+        try checkHorizontalScroll(in: document, lineEnd: end)
 
         editor.insertText("1", replacementRange: zigError)
         try require(editor.diagnosticRanges.isEmpty, "clear the old revision immediately after the edit")
@@ -163,10 +175,73 @@ enum LSPDiagnosticsCheck {
         return view.subviews.contains { hoverContains(message, in: $0) }
     }
 
-    private static func hasRedPixels(in rects: [NSRect], document: DocumentWindow) throws -> Bool {
-        try hasPixels(in: rects, document: document) { pixel in
-            pixel.redComponent > pixel.greenComponent + 0.15 && pixel.redComponent > pixel.blueComponent + 0.15
+    private static func checkHorizontalScroll(in document: DocumentWindow, lineEnd: Int) throws {
+        let editor = document.editor
+        let scroll = document.scrollView
+        let original = editor.diagnostics
+        let origin = scroll.visibleContentOrigin
+        let viewportWidth = editor.visibleRect.width
+        let wasWrapped = editor.wrapsWords
+        guard let first = original.first else { throw Failure(detail: "use a live range for the long diagnostic") }
+        let long = LSPError(range: first.range, lineEnd: lineEnd,
+                            message: String(repeating: "An error with a long explanation. ", count: 8) + "END")
+        defer {
+            editor.setDiagnostics(original)
+            editor.setWordWrap(wasWrapped)
+            scroll.scrollToVisibleContentOrigin(origin)
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         }
+        editor.setWordWrap(false)
+        editor.setDiagnostics([long])
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        try require(scroll.contentView.documentRect.width > viewportWidth + 400,
+                    "include the full message in the unwrapped document width")
+
+        guard let row = editor.laidOutLineBounds(at: lineEnd) else { throw Failure(detail: "lay out the long diagnostic") }
+        let oldEdge = editor.visibleRect.maxX - 4
+        let acrossEdge = NSRect(x: oldEdge - 10, y: row.minY + 2, width: 20, height: 1)
+        for distance: CGFloat in [32, 120, 48] {
+            scroll.scrollToVisibleContentOrigin(NSPoint(x: origin.x + distance, y: origin.y))
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            try require(try !hasPixels(in: [acrossEdge], document: document, matching: { !isRed($0) }),
+                        "paint continuously across an earlier viewport edge after scrolling")
+        }
+
+        let documentEnd = scroll.contentView.documentRect.maxX
+        scroll.scrollToVisibleContentOrigin(NSPoint(x: documentEnd, y: origin.y))
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        let tail = NSRect(x: documentEnd - 48, y: row.midY - 4, width: 36, height: 8)
+        try require(try hasPixels(in: [tail], document: document, matching: isLabel),
+                    "scroll far enough to draw the last glyphs of the message")
+
+        editor.setWordWrap(true)
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        let wrappedWidth = scroll.contentView.bounds.width - scroll.contentInsets.left - scroll.contentInsets.right
+        try require(!scroll.hasHorizontalScroller && abs(editor.frame.width - wrappedWidth) < 1,
+                    "keep word wrap within the viewport (editor \(editor.frame.width), expected \(wrappedWidth), scroller \(scroll.hasHorizontalScroller))")
+        try require(editor.laidOutLineBounds(at: lineEnd)?.height == row.height
+                    && editor.diagnosticHover(at: NSPoint(x: 16, y: row.midY))?.text.hasSuffix("END") == true,
+                    "keep the message on one row and reveal its full text on hover in word wrap")
+
+        editor.setWordWrap(false)
+        try require(editor.frame.width > viewportWidth + 400, "restore the message's full width after disabling Word Wrap")
+        editor.setDiagnostics([])
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        try require(editor.frame.width <= viewportWidth + 1, "release the extra scroll extent when the report clears")
+    }
+
+    private static func hasRedPixels(in rects: [NSRect], document: DocumentWindow) throws -> Bool {
+        try hasPixels(in: rects, document: document, matching: isRed)
+    }
+
+    private static func isRed(_ pixel: NSColor) -> Bool {
+        pixel.redComponent > pixel.greenComponent + 0.15 && pixel.redComponent > pixel.blueComponent + 0.15
+    }
+
+    private static func isLabel(_ pixel: NSColor) -> Bool {
+        let highest = max(pixel.redComponent, pixel.greenComponent, pixel.blueComponent)
+        let lowest = min(pixel.redComponent, pixel.greenComponent, pixel.blueComponent)
+        return highest - lowest < 0.15 && (lowest > 0.6 || highest < 0.18)
     }
 
     private static func hasPixels(in rects: [NSRect], document: DocumentWindow, matching: (NSColor) -> Bool) throws -> Bool {
