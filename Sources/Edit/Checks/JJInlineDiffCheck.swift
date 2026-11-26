@@ -113,6 +113,21 @@ enum JJInlineDiffCheck {
         guard window.firstResponder === editor, controller.hasProjectedCaret else {
             throw Failure("move the editor caret into removed rows")
         }
+        let afterMode = (replacement.removedText as NSString).range(of: "let mode").upperBound
+        let wordAnchor = JJInlineDiffSelection.Position.removed(key: replacement.baseRange, offset: afterMode)
+        let wordClipboard = NSPasteboard.withUniqueName()
+        defer { wordClipboard.releaseGlobally() }
+        guard controller.select(from: wordAnchor, to: wordAnchor) else {
+            throw Failure("place a word-selection anchor in the removed text")
+        }
+        for expected in [" =", " = .legacy"] {
+            editor.doCommand(by: #selector(NSResponder.moveWordRightAndModifySelection(_:)))
+            guard controller.copyProjectedSelection(to: wordClipboard, cutting: false),
+                  wordClipboard.string(forType: .string) == expected else {
+                throw Failure("extend a word selection in a removed row through \(expected)")
+            }
+        }
+
         let lastRemovedStart = JJInlineDiffSelection.Position.removed(key: replacement.baseRange,
                                                                       offset: NSMaxRange(firstRemovedLine))
         guard controller.select(from: lastRemovedStart, to: lastRemovedStart) else {

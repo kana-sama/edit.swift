@@ -327,7 +327,8 @@ extension EditorTextView {
         direction: NSTextSelectionNavigation.Direction,
         destination: NSTextSelectionNavigation.Destination,
         extending: Bool,
-        steps: Int = 1
+        steps: Int = 1,
+        multipleWordCarets: Bool = false
     ) -> (range: NSRange, selection: NSTextSelection)? {
         guard let layout = textLayoutManager, let textRange = textRange(range, in: layout) else { return nil }
         let previous = multiCaret.navigation[range]
@@ -340,7 +341,11 @@ extension EditorTextView {
             selection.anchorPositionOffset = caret.minX - textContainerOrigin.x
         }
         for _ in 0..<steps {
-            guard let next = layout.textSelectionNavigation.destinationSelection(
+            let navigation = layout.textSelectionNavigation
+            let word = destination == .word ? (navigation as? EditorWordNavigation)?.moveWord(
+                from: selection, direction: direction, extending: extending, multipleCarets: multipleWordCarets
+            ) : nil
+            guard let next = word ?? navigation.destinationSelection(
                 for: selection, direction: direction, destination: destination, extending: extending, confined: false
             ) else { break }
             selection = next
@@ -416,8 +421,9 @@ extension EditorTextView {
         let singleVerticalCaret = !hasSecondarySelections && focusRanges == nil && primary.length == 0 &&
             (command == #selector(moveUp(_:)) || command == #selector(moveDown(_:)))
         let hasBackwardSelection = primary.length > 0 && multiCaret.navigation[primary]?.affinity == .upstream
-        guard (hasSecondarySelections || focusRanges != nil || hasBackwardSelection || singleVerticalCaret), !hasMarkedText(),
-              let movement = selectionMovement(for: command) else { return false }
+        guard !hasMarkedText(), let movement = selectionMovement(for: command),
+              hasSecondarySelections || focusRanges != nil || hasBackwardSelection || singleVerticalCaret
+                  || movement.destination == .word else { return false }
         if singleVerticalCaret {
             guard let result = navigationResult(primary, direction: movement.direction, destination: movement.destination,
                                                 extending: false) else { return false }
@@ -426,23 +432,33 @@ extension EditorTextView {
             scrollRangeToVisible(result.range)
             return true
         }
-        if focusRanges != nil {
+        if let scope = focusRanges {
+            let multiple = focusedSelections(in: scope).count > 1
             moveFocusedSelections(direction: movement.direction, destination: movement.destination,
                                   extending: movement.extending, steps: movement.steps) {
-                navigate(NSRange(location: $0, length: 0), direction: movement.direction,
-                         destination: movement.destination)?.location
+                navigationResult(NSRange(location: $0, length: 0), direction: movement.direction,
+                                 destination: movement.destination, extending: false,
+                                 multipleWordCarets: multiple)?.range.location
             }
             return true
         }
         var navigation: [NSRange: NSTextSelection] = [:]
+        let multiple = hasSecondarySelections
         let ranges = caretSelections.map { range in
             guard let result = navigationResult(range, direction: movement.direction, destination: movement.destination,
-                                                extending: movement.extending, steps: movement.steps) else { return range }
+                                                extending: movement.extending, steps: movement.steps,
+                                                multipleWordCarets: multiple) else { return range }
             navigation[result.range] = result.selection
             return result.range
         }
-        setCaretSelections(ranges, navigation: navigation)
-        if let primary = caretSelections.last { scrollRangeToVisible(primary) }
+        let word = movement.destination == .word
+        let affinity = ranges.last.flatMap { navigation[$0] }?.affinity
+        let primaryAffinity: NSSelectionAffinity? = word ? (affinity == .upstream ? .upstream : .downstream) : nil
+        setCaretSelections(ranges, navigation: navigation, primaryAffinity: primaryAffinity)
+        if let primary = caretSelections.last {
+            let visible = word ? NSRange(location: activeEnd(of: primary), length: 0) : primary
+            scrollRangeToVisible(visible)
+        }
         return true
     }
 

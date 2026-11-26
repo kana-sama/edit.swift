@@ -40,21 +40,19 @@ extension EditorTextView {
             return groups != nil && !hasMarkedText()
         }
         let direction: NSTextSelectionNavigation.Direction = backward ? .backward : .forward
-        if !hasSecondarySelections && groups == nil {
-            let caret = selectedRange()
-            guard word, isEditable, caret.length == 0, let range = textRange(caret, in: layout),
-                  let navigation = layout.textSelectionNavigation as? EditorWordNavigation,
-                  let adjusted = navigation.dottedDeletion(for: NSTextSelection(range: range, affinity: .downstream,
-                      granularity: .character), direction: direction) else { return false }
-            deleteRanges([charRange(adjusted, in: layout)])
-            return true
-        }
+        guard word || hasSecondarySelections || groups != nil else { return false }
+        guard !word || isEditable else { return true }
+        let source = textStorage?.mutableString
         func deletions(at caret: NSRange) -> [NSRange] {
+            if word, let source {
+                guard 0...source.length ~= caret.location else { return [] }
+                return [EditorWordBoundary.deletion(from: caret.location, backward: backward, in: source)]
+            }
             guard let text = textRange(caret, in: layout) else { return [] }
             let selection = NSTextSelection(range: text, affinity: .downstream, granularity: .character)
             return layout.textSelectionNavigation.deletionRanges(
                 for: selection, direction: direction,
-                destination: word ? .word : .character, allowsDecomposition: false
+                destination: .character, allowsDecomposition: false
             ).map { charRange($0, in: layout) }
         }
         if let groups {

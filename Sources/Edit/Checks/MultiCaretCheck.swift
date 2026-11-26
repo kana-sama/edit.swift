@@ -118,6 +118,51 @@ enum MultiCaretCheck {
             if !editor.performKeyEquivalent(with: event) { editor.keyDown(with: event) }
         }
 
+        let procedure = "main :: proc() {\n    \n}"
+        let leftArrow = "\u{F702}"
+        let rightArrow = "\u{F703}"
+        set(procedure, [range(0)])
+        for stop in [4, 7, 12, 14, 16, 21, 23, 23] {
+            try arrow(124, rightArrow, .option)
+            try expect(editor.caretSelections == [range(stop)], "Option-Right in the procedure stops at \(stop)")
+        }
+        for stop in [22, 17, 15, 12, 8, 5, 0, 0] {
+            try arrow(123, leftArrow, .option)
+            try expect(editor.caretSelections == [range(stop)], "Option-Left in the procedure stops at \(stop)")
+        }
+
+        set(procedure, [range(21)])
+        for stop in [17, 15, 12, 8, 5, 0] {
+            try arrow(123, leftArrow, [.option, .shift])
+            try expect(editor.caretSelections == [range(stop, 21 - stop)],
+                       "Shift-Option-Left extends from the indented line to \(stop)")
+        }
+
+        set(procedure, [range(12)])
+        for (key, glyph, result) in [
+            (124 as UInt16, rightArrow, range(12, 2)),
+            (123, leftArrow, range(12)),
+            (123, leftArrow, range(8, 4)),
+            (123, leftArrow, range(5, 7)),
+            (124, rightArrow, range(7, 5)),
+            (124, rightArrow, range(12)),
+            (124, rightArrow, range(12, 2)),
+        ] {
+            try arrow(key, glyph, [.option, .shift])
+            try expect(editor.caretSelections == [result], "Shift-Option moves the active end across the anchor")
+        }
+        try arrow(123, leftArrow, .option)
+        try expect(editor.caretSelections == [range(12)], "Option movement starts at the active end, not the near edge")
+        try arrow(123, leftArrow, [.option, .shift])
+        try arrow(124, rightArrow, .option)
+        try expect(editor.caretSelections == [range(12)], "Option-Right starts at the active end of a backward selection")
+
+        set("main :: proc() {\r\n\r\n\t}", [range(16)])
+        for stop in [18, 22] {
+            try arrow(124, rightArrow, .option)
+            try expect(editor.caretSelections == [range(stop)], "Option-Right crosses one logical line at a time over CRLF")
+        }
+
         set("if item.action", [range(3)])
         try arrow(124, "\u{F703}", .option)
         try expect(editor.caretSelections == [range(7)], "Option-Right stops before the dot")
@@ -134,8 +179,10 @@ enum MultiCaretCheck {
         try arrow(124, "\u{F703}", [.option, .shift])
         try expect(editor.caretSelections == [range(0, 11), range(12, 11)], "Shift-Option-Right extends to the end of action")
         try arrow(123, "\u{F702}", [.option, .shift])
-        try expect(editor.caretSelections == [range(0, 5), range(12, 5)], "Shift-Option-Left shrinks the selections at both dots")
-        try arrow(123, "\u{F702}", [.option, .shift])
+        try expect(editor.caretSelections == [range(0, 5), range(12, 5)], "Shift-Option-Left reaches the start of action")
+        try arrow(123, leftArrow, [.option, .shift])
+        try expect(editor.caretSelections == [range(0, 4), range(12, 4)], "Option-Left does not skip a lone separator with multiple carets")
+        try arrow(123, leftArrow, [.option, .shift])
         try expect(editor.caretSelections == [range(0), range(12)], "reversed word movement returns to both anchors")
 
         set("item.action", [range(11)])
@@ -146,6 +193,22 @@ enum MultiCaretCheck {
         editor.setCaretSelections([range(0)])
         edit { editor.deleteWordForward(nil) }
         try expect(editor.string == ".action", "Option-Forward Delete stops before the dot")
+
+        set("item.action\nitem.action", [range(4), range(16)])
+        edit { editor.deleteWordForward(nil) }
+        try expect(editor.string == "itemaction\nitemaction", "word deletion keeps the separator stop that movement skips")
+        undo.undo()
+        try expect(editor.string == "item.action\nitem.action", "one Undo restores both separators")
+
+        set("main :: proc() {\n    \n}", [range(7), range(20)])
+        edit { editor.deleteWordBackward(nil) }
+        try expect(editor.string == "main  proc() {\n \n}", "word deletion removes a punctuation run and an indentation run separately")
+        set("a\r\n  b", [range(1)])
+        edit { editor.deleteWordForward(nil) }
+        try expect(editor.string == "ab", "forward word deletion at end of line removes the newline and following indentation")
+        set("a\r\n  b", [range(3)])
+        edit { editor.deleteWordBackward(nil) }
+        try expect(editor.string == "a  b", "backward word deletion at start of line removes just CRLF")
 
         let movementText = "zero one\ntwo three\nfour five\nsix seven\n"
         let originalCarets = [range(2), range(12)]
