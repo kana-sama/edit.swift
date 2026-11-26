@@ -18,6 +18,7 @@ The source archive contains Tree-sitter 0.25.10 and the generated parser and sca
 | Lua | 0.5.0 |
 | Markdown and inline Markdown | `9a23c1a96c0513d8fc6520972beedd419a973539` |
 | Objective-C and Objective-C++ | [tree-sitter-objcpp `f744aa49e05971a2177f9b993f81a494744df7f5`](https://tangled.org/dunkirk.sh/dots/commit/f744aa49e05971a2177f9b993f81a494744df7f5) |
+| Odin | [tree-sitter-odin `d2ca8efb4487e156a60d5bd6db2598b872629403`](https://github.com/tree-sitter-grammars/tree-sitter-odin/commit/d2ca8efb4487e156a60d5bd6db2598b872629403) |
 | Python | 0.25.0 |
 | Ruby | 0.23.1 |
 | Rust | 0.24.0 |

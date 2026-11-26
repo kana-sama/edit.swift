@@ -26,6 +26,7 @@ DECLARE(lua);
 DECLARE(markdown);
 DECLARE(markdown_inline);
 DECLARE(objcpp);
+DECLARE(odin);
 DECLARE(python);
 DECLARE(ruby);
 DECLARE(rust);
@@ -51,7 +52,7 @@ static const struct Grammar grammars[] = {
     {"html", tree_sitter_html}, {"javascript", tree_sitter_tsx}, {"javascript-jsx", tree_sitter_tsx},
     {"json", tree_sitter_json}, {"lua", tree_sitter_lua}, {"markdown", tree_sitter_markdown},
     {"markdown-inline", tree_sitter_markdown_inline}, {"objective-c", tree_sitter_objcpp},
-    {"objective-cpp", tree_sitter_objcpp}, {"python", tree_sitter_python},
+    {"objective-cpp", tree_sitter_objcpp}, {"odin", tree_sitter_odin}, {"python", tree_sitter_python},
     {"ruby", tree_sitter_ruby}, {"rust", tree_sitter_rust}, {"shell", tree_sitter_bash},
     {"solidity", tree_sitter_solidity}, {"swift", tree_sitter_swift}, {"toml", tree_sitter_toml},
     {"typescript", tree_sitter_typescript}, {"tsx", tree_sitter_tsx}, {"yaml", tree_sitter_yaml},

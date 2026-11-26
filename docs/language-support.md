@@ -7,6 +7,7 @@ Track highlighting quality separately for each bundled language mode. **✅** me
 | Zig | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Ruby | ✅ | ✅ | ✅ | ❌ | ❓ |
 | Swift | ✅ | ✅ | ❓ | ✅ | ❌ |
+| Odin | ✅ | ✅ | ❓ | ❌ | ❓ |
 | Shell Script | ✅ | ✅ | ❓ | ❌ | ❓ |
 | C | ✅ | ❓ | ❓ | ❓ | ❌ |
 | C++ | ✅ | ❓ | ❓ | ❓ | ❌ |
@@ -33,7 +34,7 @@ Track highlighting quality separately for each bundled language mode. **✅** me
 ## What to verify
 
 1. **Tree-sitter highlighting** requires a bundled grammar, an active highlight query, and a passing capture check. The [native syntax checks](../Sources/Edit/Checks/SyntaxCheck.swift) cover all listed modes.
-2. **Tokenizer and flicker-free editing** requires language-aware token boundaries and responsive typing without intermediate color flashes. Verify the rendered frames with LSP off and the fresh parse held, per the [editing requirements](features/syntax-highlighting/spec.md#tokenization-during-editing). Ruby, Bash, Swift, and Zig pass those checks. The Zig cases cover numbers, comments, quoted and multiline strings, editing a large file, and typing in ZON.
+2. **Tokenizer and flicker-free editing** requires language-aware token boundaries and responsive typing without intermediate color flashes. Verify the rendered frames with LSP off and the fresh parse held, per the [editing requirements](features/syntax-highlighting/spec.md#tokenization-during-editing). Odin, Ruby, Bash, Swift, and Zig pass those checks. The [Odin fixtures](features/odin/spec.md) cover a Unicode procedure name, a hexadecimal number, a multiline raw string, and commenting out a declaration. The Zig cases cover numbers, comments, quoted and multiline strings, editing a large file, and typing in ZON.
 3. **Unclosed strings** requires string color from the opening delimiter while typing, through the boundary defined by the language, and a clean transition after closing the string. The native check covers Ruby through EOF and Zig up to the line break, with a ZON capture fixture.
 4. **LSP highlighting** requires Edit to render semantic tokens from the server. [Native LSP highlighting checks](../Sources/Edit/Checks/LSPSemanticHighlightCheck.swift) confirm this for Swift with SourceKit-LSP and Zig with ZLS. C, C++, Objective-C, and Objective-C++ route to SourceKit-LSP with clangd. Their current native test verifies [LSP integration](../Sources/Edit/Checks/SourceKitLSPCheck.swift), and semantic color rendering for those modes is still unverified. The [LSP feature checklist](lsp-checklist.md) tracks individual methods.
 5. **Tree-sitter as a base for LSP** requires Tree-sitter to color roles the grammar can establish, leave ambiguous names to the server, and agree in color where both layers classify the same syntax. The native Zig test checks that division of responsibility. Known gaps include name-based type guesses in [Swift](../resources/syntax/queries/swift.scm#L155) and uppercase-constant guesses in the [shared C-family query](../resources/syntax/queries/c.scm#L3). See the [rules for both layers](features/syntax-highlighting/spec.md#tree-sitter-and-semantic-tokens).

@@ -16,6 +16,7 @@ enum SyntaxLanguage: String, CaseIterable, Sendable {
     case markdown
     case objectiveC = "objective-c"
     case objectiveCPP = "objective-cpp"
+    case odin
     case python
     case ruby
     case rust
@@ -45,6 +46,7 @@ enum SyntaxLanguage: String, CaseIterable, Sendable {
         case .markdown: "Markdown"
         case .objectiveC: "Objective-C"
         case .objectiveCPP: "Objective-C++"
+        case .odin: "Odin"
         case .python: "Python"
         case .ruby: "Ruby"
         case .rust: "Rust"
@@ -70,7 +72,7 @@ enum SyntaxLanguage: String, CaseIterable, Sendable {
 
     var lineCommentPrefix: String? {
         switch self {
-        case .c, .cpp, .go, .javascript, .javascriptJSX, .objectiveC, .objectiveCPP, .rust, .solidity, .swift,
+        case .c, .cpp, .go, .javascript, .javascriptJSX, .objectiveC, .objectiveCPP, .odin, .rust, .solidity, .swift,
              .typescript, .tsx, .zig: "//"
         case .python, .ruby, .shell, .toml, .yaml: "#"
         case .clojure: ";"
@@ -114,6 +116,7 @@ enum SyntaxLanguage: String, CaseIterable, Sendable {
             (.markdown, ["markdown", "md", "mdown", "mkd"]),
             (.objectiveC, ["m"]),
             (.objectiveCPP, ["mm"]),
+            (.odin, ["odin"]),
             (.python, ["py", "pyi", "pyw"]),
             (.ruby, ["gemspec", "podspec", "rake", "rb", "rbi", "ru"]),
             (.rust, ["rs"]),
