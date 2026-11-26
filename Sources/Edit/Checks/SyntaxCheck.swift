@@ -84,6 +84,9 @@ enum SyntaxCheck {
                     suffix: "() {}\n", typed: ["N", "o", "w"], color: .function, comment: ("// ", 5)),
             Fixture(filename: "Empty.rb", language: .ruby, prefix: "", initial: "",
                     suffix: "", typed: ["b", "r"], color: .function, comment: nil),
+            Fixture(filename: "String.zig", language: .zig, prefix: "const value = ", initial: "",
+                    suffix: ";\nconst next = 1;\n", typed: ["\"", "h", "e", "l", "l", "o", "\""],
+                    color: .string, comment: nil),
         ]
         if expiresProjectedQuery {
             fixtures.append(Fixture(filename: "Large.swift", language: .swift, prefix: "func ", initial: "café",
@@ -157,7 +160,7 @@ enum SyntaxCheck {
                 }
             } else {
                 for character in fixture.typed {
-                    let pending: SyntaxColor? = expiresForegroundParse && token.length == 0 ? .plain : nil
+                    let pending: SyntaxColor? = expiresForegroundParse && token.length == 0 && fixture.language != .zig ? .plain : nil
                     try await checkEdit(fixture.color, pending: pending) { type(character) }
                 }
             }
@@ -607,6 +610,13 @@ enum SyntaxCheck {
             (.yaml, "name: Edit\n", "name", .property),
             (.zig, ".{ .version = \"0.1.0\" }", "version", .property),
             (.zig, ".{ .version = \"0.1.0\", .id = 0x0123456789abcdef }", "\"0.1.0\"", .string),
+            (.zig, "const value = \"", "\"", .string),
+            (.zig, "const value = \"hello", "\"hello", .string),
+            (.zig, "\"hello\nconst next = 1;", "\"hello", .string),
+            (.zig, "\"hello\nconst next = 1;", "const", .keyword),
+            (.zig, ".{ .name = \"hello", "\"hello", .string),
+            (.zig, #"const s = "escaped \" tail"#, #""escaped \" tail"#, .string),
+            (.zig, #"const s = "escape\"#, #""escape\"#, .string),
             (.zig, "fn use(arg: u32) void {}", "u32", .type),
             (.zig, #"const @"quoted\nname" = "ordinary\ntext";"#, #""ordinary\ntext""#, .string),
         ]
@@ -615,6 +625,11 @@ enum SyntaxCheck {
             guard let spans = SyntaxEngine.spans(in: source, language: mode),
                   spans.contains(where: { $0.start <= token.location && $0.end >= NSMaxRange(token) && $0.color == color }) else {
                 throw Failure("Missing \(mode.displayName) capture for \(text).")
+            }
+        }
+        for source in [#"const @"open"#, #"const @"escape\"#, #"// "comment"#] {
+            guard let spans = SyntaxEngine.spans(in: source, language: .zig), !spans.contains(where: { $0.color == .string }) else {
+                throw Failure("Recovered Zig string highlighting leaked into \(source).")
             }
         }
         for literal in ["null", "undefined", "unreachable", "true", "false"] {

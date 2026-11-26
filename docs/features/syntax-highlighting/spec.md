@@ -35,6 +35,8 @@ In Markdown, apply inline code highlighting inside table cells and color heading
 
 In Ruby, when a quoted or percent string is missing its closing delimiter, highlight its body through EOF, including subsequent lines. Complete interpolations and escapes keep their usual Ruby highlighting. A real closing delimiter ends the string, and code after it resumes normal highlighting.
 
+In Zig and ZON, a double-quoted string gets string highlighting from the first opening quote, including while its body or closing quote is still being typed. The color of an unfinished string stops at the line break or EOF. Escapes retain their string color, and quoted identifiers retain identifier highlighting. While a full parse is pending, classify an ordinary string on the short edited line using the Zig grammar.
+
 [Grammar versions and licenses](../../../resources/syntax/README.md)
 
 ## Acceptance

@@ -37,7 +37,7 @@ Initial inventory as of November 26, 2026, based on the bundled modes, server ro
 | TypeScript | Unverified | — | |
 | TypeScript JSX | Unverified | — | |
 | YAML | Unverified | — | |
-| Zig | Partial verification | ZLS | The [native highlight check](../Sources/Edit/Checks/LSPSemanticHighlightCheck.swift) covers typing and Backspace with held results and includes a Tree-sitter-only typing case. Full Tree-sitter-only editing coverage, including ZON, is pending. |
+| Zig | Partial verification | ZLS | Native checks cover Tree-sitter string color from the first quote with a held parse, plus [typing and Backspace with ZLS](../Sources/Edit/Checks/LSPSemanticHighlightCheck.swift). Full Tree-sitter-only editing coverage, including ZON, is pending. |
 
 The [native typing check](../Sources/Edit/Checks/SyntaxCheck.swift) runs with `./script/check --only syntax`. For Ruby, Bash, and Swift it holds the background result with LSP off. It covers regular typing, a forced foreground parse timeout, and a timeout of both the foreground parse and the query of the previous tree. It checks every glyph in the edited token before, during, and after the held result, including when a token changes color.
 

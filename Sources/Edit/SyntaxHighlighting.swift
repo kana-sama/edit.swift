@@ -440,6 +440,8 @@ final class SyntaxHighlighting {
                 invalidated = invalidated.map { NSUnionRange($0, range) } ?? range
             } else if let typingText, edits.count == 1, let range = refreshZigEdit(edit, in: typingText) {
                 invalidated = invalidated.map { NSUnionRange($0, range) } ?? range
+            } else if let typingText, edits.count == 1, let range = refreshZigString(edit, in: typingText) {
+                invalidated = invalidated.map { NSUnionRange($0, range) } ?? range
             } else if let typingText, edits.count == 1, let edit = edits.first,
                       let localWord = classifyZigWord(after: edit, previous: previousTree, in: typingText) {
                 let cached = spans(overlapping: localWord.range, from: treeSpans)
@@ -558,6 +560,9 @@ final class SyntaxHighlighting {
     }
 
     private func refreshZigEdit(_ edit: NSRange, in text: NSString) -> NSRange? {
+#if EDIT_AGENT_CHECKS
+        if expireForegroundParseForCheck { return nil }
+#endif
         guard treeSitterEnabled, treeLanguage == .zig, let editor, editor.syntaxLanguage == .zig,
               text.length > 0, SyntaxEngine.supportsIncremental(.zig) else { return nil }
         let line = LineEditing.line(at: edit.location, in: text).contentRange
@@ -581,6 +586,29 @@ final class SyntaxHighlighting {
         zigImmediateUpdatesForCheck += 1
 #endif
         return line
+    }
+
+    private func refreshZigString(_ edit: NSRange, in text: NSString) -> NSRange? {
+        guard treeSitterEnabled, treeLanguage == .zig, editor?.syntaxLanguage == .zig else { return nil }
+        let line = LineEditing.line(at: edit.location, in: text).contentRange
+        // Ordinary Zig strings and their escapes have only line-local lexical context. Classify
+        // the first quote and its body even while the whole-buffer parse is busy or over budget.
+        guard edit.upperBound <= line.upperBound, line.length <= 2_048,
+              text.range(of: "\"", options: .literal, range: line).location != NSNotFound,
+              let analysis = SyntaxEngine.analysis(in: text.substring(with: line), language: .zig,
+                                                   includesBrackets: false) else { return nil }
+        let start = max(line.location, edit.location - 1) - line.location
+        let end = min(line.upperBound, edit.upperBound + 1) - line.location
+        let touched = NSRange(location: start, length: end - start)
+        guard let span = analysis.spans.first(where: { $0.color == .string && NSIntersectionRange($0.range, touched).length > 0 }) else {
+            return nil
+        }
+        let fresh = SyntaxSpan(start: span.start + line.location, end: span.end + line.location, color: .string)
+        let old = spans(overlapping: fresh.range, from: treeSpans)
+        guard old.allSatisfy({ $0.start >= fresh.start && $0.end <= fresh.end }) else { return nil }
+        treeSpans.replaceSubrange(old.startIndex..<old.endIndex, with: [fresh])
+        semanticSpans.removeAll { NSIntersectionRange($0.range, fresh.range).length > 0 }
+        return fresh.range
     }
 
     private func classifyZigWord(after edit: EditorTextChange, previous: [SyntaxSpan], in text: NSString) -> SyntaxSpan? {

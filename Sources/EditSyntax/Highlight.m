@@ -503,10 +503,31 @@ static uint32_t unclosedMarkdownComment(Input *input, TSNode root) {
 
 static bool zigQuotedIdentifierString(TSNode node, const char *capture) {
     // The Zig grammar represents @"name" as an identifier containing a string.
-    if (strcmp(capture, "string.escape") == 0) node = ts_node_parent(node);
-    else if (strcmp(capture, "string") != 0) return false;
-    if (ts_node_is_null(node) || strcmp(ts_node_type(node), "string") != 0) return false;
+    bool escape = strcmp(capture, "string.escape") == 0;
+    bool incomplete = strncmp(capture, "string.incomplete", sizeof("string.incomplete") - 1) == 0;
+    if (!escape && !incomplete && strcmp(capture, "string") != 0) return false;
     TSNode parent = ts_node_parent(node);
+    if (incomplete || (escape && !ts_node_is_null(parent) && ts_node_is_error(parent))) {
+        // Recovery can flatten a quoted identifier's @, quote, and body into siblings.
+        while (!ts_node_is_null(node)) {
+            const char *type = ts_node_type(node);
+            if (strcmp(type, "\"") == 0) {
+                TSNode prefix = ts_node_prev_sibling(node);
+                return !ts_node_is_null(prefix) && strcmp(ts_node_type(prefix), "@") == 0 &&
+                    ts_node_end_byte(prefix) == ts_node_start_byte(node);
+            }
+            if (strcmp(type, "string_content") != 0 && strcmp(type, "escape_sequence") != 0 &&
+                !ts_node_is_error(node)) break;
+            TSNode previous = ts_node_prev_sibling(node);
+            if (ts_node_is_null(previous) || ts_node_end_byte(previous) != ts_node_start_byte(node)) break;
+            node = previous;
+        }
+        // Incomplete escapes belong to this string only when adjacent to its quote or body.
+        return strcmp(capture, "string.incomplete.escape") == 0;
+    }
+    if (escape) node = parent;
+    if (ts_node_is_null(node) || strcmp(ts_node_type(node), "string") != 0) return false;
+    parent = ts_node_parent(node);
     return !ts_node_is_null(parent) && strcmp(ts_node_type(parent), "identifier") == 0;
 }
 

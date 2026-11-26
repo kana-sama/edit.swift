@@ -228,6 +228,14 @@
 ] @string
   (#set! "priority" 95))
 
+; Recovery can leave the opening quote and string pieces directly under ERROR.
+(ERROR ["\"" (string_content)] @string.incomplete)
+
+((ERROR
+  ["\"" (string_content) (escape_sequence)] @_string_piece
+  . (ERROR) @string.incomplete.escape)
+ (#eq? @string.incomplete.escape "\\"))
+
 (integer) @number
 
 (float) @number.float
