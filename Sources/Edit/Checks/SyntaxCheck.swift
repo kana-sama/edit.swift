@@ -13,7 +13,9 @@ enum SyntaxCheck {
         app.workspaceHighlighting.setEnabled(false, for: .lsp, in: nil)
         defer { app.workspaceHighlighting.setEnabled(wasEnabled, for: .lsp, in: nil) }
 
-        try await checkTyping(in: app)
+        try await checkTyping(in: app, expiresForegroundParse: false)
+        try await checkTyping(in: app, expiresForegroundParse: true)
+        try await checkTyping(in: app, expiresForegroundParse: true, expiresProjectedQuery: true)
         try await checkFirstDraw(in: app, appearance: .aqua)
         try await checkFirstDraw(in: app, appearance: .darkAqua)
         try await checkSwiftDrawing(in: app, requiresFirstFrame: true)
@@ -53,7 +55,7 @@ enum SyntaxCheck {
         }
     }
 
-    private static func checkTyping(in app: Edit) async throws {
+    private static func checkTyping(in app: Edit, expiresForegroundParse: Bool, expiresProjectedQuery: Bool = false) async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -68,7 +70,7 @@ enum SyntaxCheck {
             let color: SyntaxColor
             let comment: (marker: String, beforeToken: Int)?
         }
-        let fixtures = [
+        var fixtures = [
             Fixture(filename: "Brewfile", language: .ruby, prefix: "brew \"café\"\n\n", initial: "b",
                     suffix: "\n", typed: ["r", "e", "w"], color: .function, comment: ("# ", 0)),
             Fixture(filename: "Method.rb", language: .ruby, prefix: "def ", initial: "ready?",
@@ -82,6 +84,11 @@ enum SyntaxCheck {
             Fixture(filename: "Empty.rb", language: .ruby, prefix: "", initial: "",
                     suffix: "", typed: ["b", "r"], color: .function, comment: nil),
         ]
+        if expiresProjectedQuery {
+            fixtures.append(Fixture(filename: "Large.swift", language: .swift, prefix: "func ", initial: "café",
+                                    suffix: "() {}\n" + String(repeating: "// padding\n", count: 25_000), typed: ["N", "o"],
+                                    color: .function, comment: ("// ", 5)))
+        }
 
         for fixture in fixtures {
             let file = directory.appendingPathComponent(fixture.filename)
@@ -98,6 +105,8 @@ enum SyntaxCheck {
             }
             window.layoutIfNeeded()
             let editor = document.editor
+            highlighting.expireForegroundParseForCheck = expiresForegroundParse
+            highlighting.expireProjectedQueryForCheck = expiresProjectedQuery
             var hold = false
             var waiting = false
             highlighting.beforeInstallTreeTokensForCheck = {
@@ -117,26 +126,38 @@ enum SyntaxCheck {
                 do {
                     try requireGlyphColors(in: token, document: document, expected: color)
                 } catch {
-                    throw Failure("\(fixture.filename) \(phase), token \(token): \(error.localizedDescription)")
+                    throw Failure("\(fixture.filename) \(phase), expired parse \(expiresForegroundParse), expired query \(expiresProjectedQuery), token \(token): \(error.localizedDescription)")
                 }
             }
-            func checkEdit(_ color: SyntaxColor, _ edit: () -> Void) async throws {
+            func checkEdit(_ color: SyntaxColor, pending: SyntaxColor? = nil, _ edit: () throws -> Void) async throws {
                 hold = true
-                edit()
-                try expect(color, "first edited frame")
+                try edit()
+                try expect(pending ?? color, "first edited frame")
                 try await waitForFrame("background result pending for \(fixture.filename)") { waiting }
-                try expect(color, "pending frame")
+                try expect(pending ?? color, "pending frame")
                 hold = false
                 try await waitForFrame("background result applied for \(fixture.filename)") { !waiting }
                 try expect(color, "first updated frame")
             }
 
             if token.length > 0 { try expect(fixture.color, "opening frame") }
-            for character in fixture.typed {
+            func type(_ character: String) {
+                editor.setSelectedRange(NSRange(location: token.upperBound, length: 0))
+                editor.insertText(character, replacementRange: NSRange(location: NSNotFound, length: 0))
+                token.length += character.utf16.count
+            }
+            if expiresForegroundParse, token.length > 0, fixture.typed.count > 1 {
+                // Inspect successive edits before the background parser can publish any of them.
                 try await checkEdit(fixture.color) {
-                    editor.setSelectedRange(NSRange(location: token.upperBound, length: 0))
-                    editor.insertText(character, replacementRange: NSRange(location: NSNotFound, length: 0))
-                    token.length += character.utf16.count
+                    for character in fixture.typed {
+                        type(character)
+                        try expect(fixture.color, "typing burst")
+                    }
+                }
+            } else {
+                for character in fixture.typed {
+                    let pending: SyntaxColor? = expiresForegroundParse && token.length == 0 ? .plain : nil
+                    try await checkEdit(fixture.color, pending: pending) { type(character) }
                 }
             }
             try await checkEdit(fixture.color) {
@@ -145,7 +166,7 @@ enum SyntaxCheck {
                 token.length -= 1
             }
             if let comment = fixture.comment {
-                try await checkEdit(.comment) {
+                try await checkEdit(.comment, pending: expiresForegroundParse ? fixture.color : nil) {
                     editor.setSelectedRange(NSRange(location: token.location - comment.beforeToken, length: 0))
                     editor.insertText(comment.marker, replacementRange: NSRange(location: NSNotFound, length: 0))
                     token.location += comment.marker.utf16.count

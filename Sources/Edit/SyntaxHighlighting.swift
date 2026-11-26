@@ -3,6 +3,8 @@ import AppKit
 @MainActor
 final class SyntaxHighlighting {
     private static let bareWordSeparators = Set(" \t\n\r\u{0B}\u{0C}!%&()*+,-./:;<=>?[]^{|}~".utf16)
+    // The native tree currently takes a contiguous UTF-16 snapshot. Defer that copy for large buffers.
+    private static let foregroundSyntaxSnapshotLimit = 256 * 1_024
 
     private struct SemanticRequest: Equatable {
         let session: ObjectIdentifier
@@ -43,6 +45,8 @@ final class SyntaxHighlighting {
     private(set) var zigImmediateUpdatesForCheck = 0
     var beforeInstallTreeTokensForCheck: (() async -> Void)?
     var beforeInstallSemanticTokensForCheck: (() async -> Void)?
+    var expireForegroundParseForCheck = false
+    var expireProjectedQueryForCheck = false
 #endif
 
     init(editor: EditorTextView) {
@@ -431,7 +435,8 @@ final class SyntaxHighlighting {
             let previousTree = treeSpans
             treeSpans = remappedSpans(treeSpans, in: visible, after: edits, typingText: typingText)
             semanticSpans = remappedSpans(semanticSpans, in: visible, after: edits, typingText: typingText)
-            if let typingText, treeLanguage != .zig, let range = refreshEditedViewport(edit, visible: visible, in: typingText) {
+            if let typingText, treeLanguage != .zig,
+               let range = refreshEditedViewport(edit, visible: visible, previous: previousTree, edits: edits, in: typingText) {
                 invalidated = invalidated.map { NSUnionRange($0, range) } ?? range
             } else if let typingText, edits.count == 1, let range = refreshZigEdit(edit, in: typingText) {
                 invalidated = invalidated.map { NSUnionRange($0, range) } ?? range
@@ -462,15 +467,45 @@ final class SyntaxHighlighting {
         return invalidated
     }
 
-    private func refreshEditedViewport(_ edit: NSRange, visible: NSRange, in text: NSString) -> NSRange? {
+    private func refreshEditedViewport(_ edit: NSRange, visible: NSRange, previous: [SyntaxSpan],
+                                       edits: [EditorTextChange], in text: NSString) -> NSRange? {
         guard treeSitterEnabled, let language = treeLanguage, SyntaxEngine.supportsIncremental(language),
               let editor, editor.syntaxLanguage == language, text.length > 0 else { return nil }
         let document = NSRange(location: 0, length: text.length)
-        let range = text.lineRange(for: NSUnionRange(NSIntersectionRange(visible, document), edit))
-        let deadline = ContinuousClock.now + .milliseconds(6)
-        guard let tree = editor.syntaxAnalysis.treeForEdit(in: editor.string, language: language, length: text.length,
-                                                          deadline: deadline),
-              let fresh = tree.highlights(in: range, deadline: deadline) else { return nil }
+        let affectedViewport = NSUnionRange(NSIntersectionRange(visible, document), edit)
+        guard text.length <= Self.foregroundSyntaxSnapshotLimit else {
+            treeSpans = carryPreviousColors(previous, after: edits)
+            return affectedViewport
+        }
+        let range = text.lineRange(for: affectedViewport)
+        let source = editor.string
+        let deadline: ContinuousClock.Instant
+#if EDIT_AGENT_CHECKS
+        deadline = expireForegroundParseForCheck ? .now : .now + .milliseconds(6)
+#else
+        deadline = .now + .milliseconds(6)
+#endif
+        let tree = editor.syntaxAnalysis.treeForEdit(in: source, language: language, length: text.length, deadline: deadline)
+        guard let fresh = tree?.highlights(in: range, deadline: deadline) else {
+            // The projected tree tracks this revision's text positions while retaining the previous syntax.
+            let fallbackDeadline: ContinuousClock.Instant
+#if EDIT_AGENT_CHECKS
+            fallbackDeadline = expireProjectedQueryForCheck ? .now : .now + .milliseconds(6)
+#else
+            fallbackDeadline = .now + .milliseconds(6)
+#endif
+            if edits.count == 1, fallbackDeadline > .now,
+               let tree = editor.syntaxAnalysis.projectedTree(in: source, language: language, length: text.length,
+                                                               deadline: fallbackDeadline),
+               let colors = tree.highlights(in: range, deadline: fallbackDeadline) {
+                treeSpans = colors
+            } else {
+                // Batched edits use separate display ranges, even when the parser coalesces them internally.
+                // Also keep already drawn colors when the range query itself exceeds the budget.
+                treeSpans = carryPreviousColors(previous, after: edits)
+            }
+            return range
+        }
 
         // All edited viewport colors come from the current tree, including tokens that span lines.
         // Retire a cached semantic color if it competes with the new syntax at the edit.
@@ -483,6 +518,43 @@ final class SyntaxHighlighting {
         treeSpans = fresh
         treeSpansAreStale = false
         return range
+    }
+
+    private func carryPreviousColors(_ previous: [SyntaxSpan], after edits: [EditorTextChange]) -> [SyntaxSpan] {
+        // Work in the old coordinates. At an insertion between two spans, the preceding span owns the new text.
+        var scan = 0
+        var shift = 0
+        var result: [SyntaxSpan] = []
+        for span in previous {
+            while scan < edits.count, edits[scan].range.upperBound <= span.start {
+                shift += edits[scan].delta
+                scan += 1
+            }
+            var start = span.start + shift
+            var end = span.end + shift
+            var localShift = shift
+            for edit in edits[scan...] {
+                if edit.range.location > span.end { break }
+                let editStart = edit.range.location + localShift
+                let replacementEnd = editStart + edit.replacementLength
+                if edit.range.location == span.end {
+                    if edit.range.length == 0 { end = replacementEnd }
+                    break
+                }
+                if edit.range.location <= span.start { start = replacementEnd }
+                if edit.range.upperBound <= span.end {
+                    end += edit.delta
+                } else {
+                    end = replacementEnd
+                    break
+                }
+                localShift += edit.delta
+            }
+            if start < end {
+                result.append(SyntaxSpan(start: start, end: end, color: span.color, provisional: true))
+            }
+        }
+        return result
     }
 
     private func refreshZigEdit(_ edit: NSRange, in text: NSString) -> NSRange? {

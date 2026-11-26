@@ -153,12 +153,14 @@ enum SyntaxEngine {
         return unsafeBitCast(entry, to: EditSyntaxAnalyze.self)
     }()
 
-    private static let treeAPI: (parse: EditSyntaxTreeParse, query: EditSyntaxTreeQuery, release: EditSyntaxTreeRelease)? = {
-        guard let library, let parse = dlsym(library, "edit_syntax_tree_parse_v1"),
+    private static let treeAPI: (project: EditSyntaxTreeProject, parse: EditSyntaxTreeParse,
+                                 query: EditSyntaxTreeQuery, release: EditSyntaxTreeRelease)? = {
+        guard let library, let project = dlsym(library, "edit_syntax_tree_project_v1"),
+              let parse = dlsym(library, "edit_syntax_tree_parse_v2"),
               let query = dlsym(library, "edit_syntax_tree_query_v1"),
               let release = dlsym(library, "edit_syntax_tree_release_v1") else { return nil }
-        return (unsafeBitCast(parse, to: EditSyntaxTreeParse.self), unsafeBitCast(query, to: EditSyntaxTreeQuery.self),
-                unsafeBitCast(release, to: EditSyntaxTreeRelease.self))
+        return (unsafeBitCast(project, to: EditSyntaxTreeProject.self), unsafeBitCast(parse, to: EditSyntaxTreeParse.self),
+                unsafeBitCast(query, to: EditSyntaxTreeQuery.self), unsafeBitCast(release, to: EditSyntaxTreeRelease.self))
     }()
 
     static func supportsIncremental(_ language: SyntaxLanguage) -> Bool {
@@ -175,33 +177,76 @@ enum SyntaxEngine {
         private let tree: UnsafeMutableRawPointer
         var length: Int { units.count }
 
-        init?(source: String, language: SyntaxLanguage, previous: Tree?, prefix: Int = 0, suffix: Int = 0,
-              deadline: ContinuousClock.Instant? = nil) {
-            guard let api = treeAPI, deadline.map({ ContinuousClock.now < $0 }) ?? true else { return nil }
+        private init(language: SyntaxLanguage, units: [UInt16], tree: UnsafeMutableRawPointer) {
             self.language = language
+            self.units = units
+            self.tree = tree
+        }
+
+        convenience init?(source: String, language: SyntaxLanguage, previous: Tree?, prefix: Int = 0, suffix: Int = 0,
+                          deadline: ContinuousClock.Instant? = nil) {
+            guard deadline.map({ ContinuousClock.now < $0 }) ?? true else { return nil }
             let units = Array(source.utf16)
-            guard let count = UInt32(exactly: units.count) else { return nil }
+            let projected: Tree?
+            if let previous, previous.language == language {
+                guard let result = previous.projected(on: units, prefix: prefix, suffix: suffix, deadline: deadline) else {
+                    return nil
+                }
+                projected = result
+            } else {
+                projected = nil
+            }
+            guard let tree = Self.parse(language: language, units: units, previous: projected, deadline: deadline) else {
+                return nil
+            }
+            self.init(language: language, units: units, tree: tree)
+        }
+
+        func projected(on source: String, prefix: Int, suffix: Int, deadline: ContinuousClock.Instant) -> Tree? {
+            projected(on: Array(source.utf16), prefix: prefix, suffix: suffix, deadline: deadline)
+        }
+
+        private func projected(on units: [UInt16], prefix: Int, suffix: Int, deadline: ContinuousClock.Instant?) -> Tree? {
+            guard let api = treeAPI, let count = UInt32(exactly: units.count),
+                  let prefix = UInt32(exactly: prefix), let suffix = UInt32(exactly: suffix),
+                  deadline.map({ ContinuousClock.now < $0 }) ?? true else { return nil }
             let sink = Captures(length: units.count, deadline: deadline)
             let context = Unmanaged.passUnretained(sink).toOpaque()
-            let check: EditSyntaxCancelled = { context in
-                guard let context else { return true }
-                return Unmanaged<Captures>.fromOpaque(context).takeUnretainedValue().cancelled
-            }
-            let parsed: UnsafeMutableRawPointer? = withExtendedLifetime(sink) {
-                units.withUnsafeBufferPointer { buffer in
-                    guard let base = buffer.baseAddress else { return nil }
-                    if let previous, previous.language == language {
-                        return previous.units.withUnsafeBufferPointer { old in
-                            api.parse(language.rawValue, base, count, UnsafeRawPointer(previous.tree), old.baseAddress, UInt32(old.count),
-                                      UInt32(prefix), UInt32(suffix), check, context)
-                        }
+            let previousCount = UInt32(self.units.count)
+            let projected = withExtendedLifetime(sink) {
+                self.units.withUnsafeBufferPointer { old in
+                    units.withUnsafeBufferPointer { new in
+                        guard let oldBuffer = old.baseAddress, let newBuffer = new.baseAddress else { return nil as UnsafeMutableRawPointer? }
+                        return api.project(UnsafeRawPointer(tree), oldBuffer, previousCount, newBuffer, count, prefix, suffix,
+                                           Self.cancelled, context)
                     }
-                    return api.parse(language.rawValue, base, count, nil, nil, 0, 0, 0, check, context)
                 }
             }
-            guard let parsed else { return nil }
-            self.units = units
-            tree = parsed
+            return projected.map { Tree(language: language, units: units, tree: $0) }
+        }
+
+        func reparsed(deadline: ContinuousClock.Instant?) -> Tree? {
+            Self.parse(language: language, units: units, previous: self, deadline: deadline)
+                .map { Tree(language: language, units: units, tree: $0) }
+        }
+
+        private static let cancelled: EditSyntaxCancelled = { context in
+            guard let context else { return true }
+            return Unmanaged<Captures>.fromOpaque(context).takeUnretainedValue().cancelled
+        }
+
+        private static func parse(language: SyntaxLanguage, units: [UInt16], previous: Tree?,
+                                  deadline: ContinuousClock.Instant?) -> UnsafeMutableRawPointer? {
+            guard let api = treeAPI, let count = UInt32(exactly: units.count), count > 0,
+                  deadline.map({ ContinuousClock.now < $0 }) ?? true else { return nil }
+            let sink = Captures(length: units.count, deadline: deadline)
+            let context = Unmanaged.passUnretained(sink).toOpaque()
+            return withExtendedLifetime((sink, previous)) {
+                units.withUnsafeBufferPointer { buffer in
+                    guard let base = buffer.baseAddress else { return nil }
+                    return api.parse(language.rawValue, base, count, previous.map { UnsafeRawPointer($0.tree) }, Self.cancelled, context)
+                }
+            }
         }
 
         deinit { treeAPI?.release(tree) }

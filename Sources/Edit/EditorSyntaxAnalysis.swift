@@ -71,6 +71,11 @@ final class EditorSyntaxAnalysis {
         incremental.parseImmediately(source, language: language, length: length, deadline: deadline)
     }
 
+    func projectedTree(in source: String, language: SyntaxLanguage, length: Int,
+                       deadline: ContinuousClock.Instant) -> SyntaxEngine.Tree? {
+        incremental.project(source, language: language, length: length, deadline: deadline)
+    }
+
     func cancel() {
         cancelJob()
         incremental.reset()
@@ -108,6 +113,8 @@ private final class IncrementalSyntaxSession {
     private var length: Int?
     private var tree: SyntaxEngine.Tree?
     private var pending: EditBounds?
+    private var projected: SyntaxEngine.Tree?
+    private var projectedEdits: EditBounds?
     private var worker: Worker?
     private(set) var reuses = 0
 
@@ -117,6 +124,8 @@ private final class IncrementalSyntaxSession {
         self.tree = tree
         language = tree.language
         length = tree.length
+        projected = nil
+        projectedEdits = nil
     }
 
     func resetIfLanguageChanged(to language: SyntaxLanguage) {
@@ -132,6 +141,8 @@ private final class IncrementalSyntaxSession {
         length = nil
         tree = nil
         pending = nil
+        projected = nil
+        projectedEdits = nil
     }
 
     func record(_ edited: NSRange, delta: Int, length: Int) {
@@ -145,12 +156,28 @@ private final class IncrementalSyntaxSession {
         self.length = length
         let edit = EditBounds(prefix: edited.location, suffix: length - edited.upperBound)
         if tree != nil { pending = pending?.combining(edit) ?? edit }
+        if projected != nil { projectedEdits = projectedEdits?.combining(edit) ?? edit }
         if let previous = worker?.laterEdits { worker?.laterEdits = previous.combining(edit) }
         else { worker?.laterEdits = edit }
     }
 
+    func project(_ source: String, language: SyntaxLanguage, length: Int,
+                 deadline: ContinuousClock.Instant) -> SyntaxEngine.Tree? {
+        guard self.language == language, self.length == length, let tree else { return nil }
+        guard let pending else { return tree }
+        let previous = projected ?? tree
+        guard let bounds = projected == nil ? pending : projectedEdits else { return previous }
+        guard let next = previous.projected(on: source, prefix: bounds.prefix, suffix: bounds.suffix, deadline: deadline) else {
+            return nil
+        }
+        projected = next
+        projectedEdits = nil
+        return next
+    }
+
     func parseImmediately(_ source: String, language: SyntaxLanguage, length: Int,
                           deadline: ContinuousClock.Instant) -> SyntaxEngine.Tree? {
+        guard ContinuousClock.now < deadline else { return nil }
         let previous = tree?.language == language && self.length == length ? tree : nil
         if language == .zig {
             guard previous != nil, worker == nil, length <= 64 * 1_024 else { return nil }
@@ -159,10 +186,14 @@ private final class IncrementalSyntaxSession {
             guard length <= 16 * 1_024 else { return nil }
         }
         if let previous, pending == nil { return previous }
-        let bounds = pending
-        guard let parsed = SyntaxEngine.Tree(source: source, language: language, previous: previous,
-                                             prefix: bounds?.prefix ?? 0, suffix: bounds?.suffix ?? 0,
-                                             deadline: deadline) else { return nil }
+        let parsed: SyntaxEngine.Tree?
+        if language != .zig, previous != nil {
+            parsed = project(source, language: language, length: length, deadline: deadline)?.reparsed(deadline: deadline)
+        } else {
+            parsed = SyntaxEngine.Tree(source: source, language: language, previous: previous,
+                                       prefix: pending?.prefix ?? 0, suffix: pending?.suffix ?? 0, deadline: deadline)
+        }
+        guard let parsed else { return nil }
         worker?.task.cancel()
         worker = nil
         install(parsed)
@@ -186,9 +217,11 @@ private final class IncrementalSyntaxSession {
             if worker == nil {
                 let previous = tree
                 let changes = pending
+                let projected = projectedEdits == nil ? projected : nil
                 let task = Task.detached(priority: .userInitiated) {
-                    SyntaxEngine.Tree(source: source, language: language, previous: previous, prefix: changes?.prefix ?? 0,
-                                         suffix: changes?.suffix ?? 0)
+                    if let projected { return projected.reparsed(deadline: nil) }
+                    return SyntaxEngine.Tree(source: source, language: language, previous: previous, prefix: changes?.prefix ?? 0,
+                                             suffix: changes?.suffix ?? 0)
                 }
                 workerID &+= 1
                 worker = Worker(id: workerID, revision: revision, task: task, reusedTree: previous != nil)
@@ -201,6 +234,10 @@ private final class IncrementalSyntaxSession {
                 if let parsed {
                     tree = parsed
                     pending = finished.laterEdits
+                    if pending == nil {
+                        projected = nil
+                        projectedEdits = nil
+                    }
                     if finished.reusedTree { reuses += 1 }
                 } else if finished.revision == requested {
                     return nil

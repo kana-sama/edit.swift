@@ -659,27 +659,34 @@ static TSPoint advancePoint(TSPoint point, const uint16_t *units, uint32_t start
     return point;
 }
 
-EDIT_VISIBLE EditSyntaxTreeParseFunction edit_syntax_tree_parse_v1;
-void *edit_syntax_tree_parse_v1(const char *name, const uint16_t *units, uint32_t count, const void *previous,
-                        const uint16_t *previousUnits, uint32_t previousCount, uint32_t prefix, uint32_t suffix,
-                        EditSyntaxCancelled check, void *context) {
-    const TSLanguage *language = languageForName(name);
-    if (!language || count > UINT32_MAX / 2u || previousCount > UINT32_MAX / 2u) return NULL;
+EDIT_VISIBLE EditSyntaxTreeProjectFunction edit_syntax_tree_project_v1;
+void *edit_syntax_tree_project_v1(const void *previous, const uint16_t *previousUnits, uint32_t previousCount,
+                                  const uint16_t *units, uint32_t count, uint32_t prefix, uint32_t suffix,
+                                  EditSyntaxCancelled check, void *context) {
+    if (count > UINT32_MAX / 2u || previousCount > UINT32_MAX / 2u || prefix > count || prefix > previousCount ||
+        suffix > count - prefix || suffix > previousCount - prefix) return NULL;
     Input input = {.units = units, .bytes = count * 2u, .cancelled = check, .context = context};
-    TSTree *old = NULL;
-    if (previous && previousUnits && ts_tree_language(previous) == language && prefix <= count && prefix <= previousCount &&
-        suffix <= count - prefix && suffix <= previousCount - prefix) {
-        uint32_t oldEnd = previousCount - suffix;
-        uint32_t newEnd = count - suffix;
-        TSPoint start = advancePoint((TSPoint){0, 0}, previousUnits, 0, prefix, &input);
-        TSPoint oldPoint = advancePoint(start, previousUnits, prefix, oldEnd, &input);
-        TSPoint newPoint = advancePoint(start, units, prefix, newEnd, &input);
-        if (cancelled(&input)) return NULL;
-        old = ts_tree_copy(previous);
-        if (!old) return NULL;
-        TSInputEdit edit = {prefix * 2u, oldEnd * 2u, newEnd * 2u, start, oldPoint, newPoint};
-        ts_tree_edit(old, &edit);
-    }
+    uint32_t oldEnd = previousCount - suffix;
+    uint32_t newEnd = count - suffix;
+    TSPoint start = advancePoint((TSPoint){0, 0}, previousUnits, 0, prefix, &input);
+    TSPoint oldPoint = advancePoint(start, previousUnits, prefix, oldEnd, &input);
+    TSPoint newPoint = advancePoint(start, units, prefix, newEnd, &input);
+    if (cancelled(&input)) return NULL;
+    TSTree *tree = ts_tree_copy(previous);
+    if (!tree) return NULL;
+    TSInputEdit edit = {prefix * 2u, oldEnd * 2u, newEnd * 2u, start, oldPoint, newPoint};
+    ts_tree_edit(tree, &edit);
+    return tree;
+}
+
+EDIT_VISIBLE EditSyntaxTreeParseFunction edit_syntax_tree_parse_v2;
+void *edit_syntax_tree_parse_v2(const char *name, const uint16_t *units, uint32_t count, const void *previous,
+                               EditSyntaxCancelled check, void *context) {
+    const TSLanguage *language = languageForName(name);
+    if (!language || count > UINT32_MAX / 2u || (previous && ts_tree_language(previous) != language)) return NULL;
+    Input input = {.units = units, .bytes = count * 2u, .cancelled = check, .context = context};
+    TSTree *old = previous ? ts_tree_copy(previous) : NULL;
+    if (previous && !old) return NULL;
 
     TSParser *parser = ts_parser_new();
     TSTree *tree = NULL;

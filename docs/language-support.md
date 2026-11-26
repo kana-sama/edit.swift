@@ -28,17 +28,17 @@ Initial inventory as of November 26, 2026, based on the bundled modes, server ro
 | Objective-C | Unverified | SourceKit-LSP (clangd) | |
 | Objective-C++ | Unverified | SourceKit-LSP (clangd) | |
 | Python | Unverified | — | |
-| Ruby | Partial verification | — | The native typing check covers `Brewfile`, an empty file, and Backspace on a method ending in `?`. |
+| Ruby | Supported | — | The native typing check covers `Brewfile`, an empty file, and Backspace in a method ending in `?`. |
 | Rust | Unverified | — | Existing first-frame check covers opening a file. |
-| Shell Script | Partial verification | — | The native typing check covers Bash commands, comments, and a multiline heredoc. |
+| Shell Script | Supported | — | The native typing check covers Bash commands, comments, and a multiline heredoc. |
 | Solidity | Unverified | — | |
-| Swift | Partial verification | SourceKit-LSP | Native checks cover file opening and typing, Backspace, and commenting a Unicode function declaration. |
+| Swift | Supported | SourceKit-LSP | Native checks cover opening, Unicode function names, and edits in a large file. |
 | TOML | Unverified | — | |
 | TypeScript | Unverified | — | |
 | TypeScript JSX | Unverified | — | |
 | YAML | Unverified | — | |
 | Zig | Partial verification | ZLS | The [native highlight check](../Sources/Edit/Checks/LSPSemanticHighlightCheck.swift) covers typing and Backspace with held results and includes a Tree-sitter-only typing case. Full Tree-sitter-only editing coverage, including ZON, is pending. |
 
-The [native typing check](../Sources/Edit/Checks/SyntaxCheck.swift) runs with `./script/check --only syntax`. For Ruby, Bash, and Swift, broader coverage is still pending, including edits that exceed the synchronous parse and query budget.
+The [native typing check](../Sources/Edit/Checks/SyntaxCheck.swift) runs with `./script/check --only syntax`. For Ruby, Bash, and Swift it holds the background result with LSP off. It covers regular typing, a forced foreground parse timeout, and a timeout of both the foreground parse and the query of the previous tree. It checks every glyph in the edited token before, during, and after the held result, including when a token changes color.
 
 Inventory sources: [bundled modes](../Sources/Edit/SyntaxLanguage.swift), [bundled grammar versions](../resources/syntax/README.md), and [server routing](../Sources/Edit/LanguageServer.swift).
