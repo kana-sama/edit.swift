@@ -29,6 +29,7 @@ final class LanguageServerSession {
     var onProgressChange: (() -> Void)?
     var onSemanticTokensRefresh: (() -> Void)?
     var onDiagnosticsChange: (() -> Void)?
+    private(set) var pathsWithErrors: Set<String> = []
     var diagnostics: [LSPError] {
         guard isReady, documentErrors?.revision == revision else { return [] }
         return documentErrors?.errors ?? []
@@ -403,11 +404,19 @@ final class LanguageServerSession {
             }
         }
         diagnosticsTask = Task { [weak self, updates = connection.diagnostics] in
-            for await errors in updates {
+            for await update in updates {
                 guard !Task.isCancelled, let self, self.generation == generation else { return }
-                guard self.isReady, self.revision == errors.revision else { continue }
-                self.documentErrors = errors
-                self.onDiagnosticsChange?()
+                let isActive = self.document.url.map(WorktreeFileOperations.path) == update.path
+                var changed = false
+                if isActive, let errors = update.documentErrors {
+                    guard self.isReady, self.revision == errors.revision else { continue }
+                    self.documentErrors = errors
+                    changed = true
+                }
+                let badgeChanged = update.hasErrors
+                    ? self.pathsWithErrors.insert(update.path).inserted
+                    : self.pathsWithErrors.remove(update.path) != nil
+                if changed || badgeChanged { self.onDiagnosticsChange?() }
             }
         }
         do {
@@ -443,6 +452,7 @@ final class LanguageServerSession {
         diagnosticsTask?.cancel()
         diagnosticsTask = nil
         documentErrors = nil
+        pathsWithErrors.removeAll()
     }
 
     private func setPhase(_ phase: State) {

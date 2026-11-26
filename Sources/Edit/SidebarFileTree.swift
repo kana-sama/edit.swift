@@ -120,6 +120,8 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     private var currentScratchID: UUID?
     private var pendingScratchFiles: [ScratchFile]?
     private var jjDecorations: JJWorktreeDecorations?
+    private var diagnosticPaths: Set<String> = []
+    private var diagnosticDirectories: Set<String> = []
     private var revisionSelection: RevisionSelection?
     private var revisionFiles: [JJSourceControlFile] = []
     private var revisionItems: [RowID: Item] = [:]
@@ -688,13 +690,17 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     func outlineViewItemDidExpand(_ notification: Notification) {
-        guard !reloading, let item = notification.userInfo?["NSObject"] as? Item else { return }
+        guard let item = notification.userInfo?["NSObject"] as? Item else { return }
+        refreshDiagnosticBadge(for: item, row: tree.row(forItem: item))
+        guard !reloading else { return }
         expanded.insert(item.id)
         load(item, force: item.isLoaded)
     }
 
     func outlineViewItemDidCollapse(_ notification: Notification) {
-        guard !reloading, let item = notification.userInfo?["NSObject"] as? Item else { return }
+        guard let item = notification.userInfo?["NSObject"] as? Item else { return }
+        refreshDiagnosticBadge(for: item, row: tree.row(forItem: item))
+        guard !reloading else { return }
         expanded.remove(item.id)
     }
 
@@ -723,7 +729,37 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
             file.sourcePath.map { "\(file.statusName) from \($0)" } ?? file.statusName
         }
         cell.setJJStatus(jjStatus(for: item), detail: detail)
+        cell.setDiagnosticBadge(hasDiagnosticBadge(for: item))
         return cell
+    }
+
+    func setDiagnosticPaths(_ paths: Set<String>) {
+        guard mode == .worktree, paths != diagnosticPaths else { return }
+        diagnosticPaths = paths
+        diagnosticDirectories.removeAll(keepingCapacity: true)
+        for path in paths {
+            var directory = (path as NSString).deletingLastPathComponent
+            while !directory.isEmpty, directory != "/", diagnosticDirectories.insert(directory).inserted {
+                directory = (directory as NSString).deletingLastPathComponent
+            }
+        }
+        let rows = tree.rows(in: tree.visibleRect)
+        guard rows.location != NSNotFound, rows.length > 0 else { return }
+        for row in rows.location..<NSMaxRange(rows) {
+            if let item = tree.item(atRow: row) as? Item { refreshDiagnosticBadge(for: item, row: row) }
+        }
+    }
+
+    private func refreshDiagnosticBadge(for item: Item, row: Int) {
+        guard mode == .worktree, row >= 0,
+              let cell = tree.view(atColumn: 0, row: row, makeIfNecessary: false) as? WorktreeCell else { return }
+        cell.setDiagnosticBadge(hasDiagnosticBadge(for: item))
+    }
+
+    private func hasDiagnosticBadge(for item: Item) -> Bool {
+        guard mode == .worktree, item !== provisionalEntry, let path = item.id.filePath else { return false }
+        if item.isDirectory { return diagnosticDirectories.contains(path) && !tree.isItemExpanded(item) }
+        return diagnosticPaths.contains(path)
     }
 
     func setJJDecorations(_ decorations: JJWorktreeDecorations?) {
@@ -1631,9 +1667,12 @@ private final class WorktreeCell: NSTableCellView {
     static let iconSize: CGFloat = 15
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
+    private let diagnosticBadge = NSImageView()
     private var muted = false
     private var jjStatus: JJPathStatus?
+    private var jjStatusDetail: String?
     private lazy var labelLeading = label.leadingAnchor.constraint(equalTo: leadingAnchor)
+    private lazy var labelTrailing = label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4)
 
     init() {
         super.init(frame: .zero)
@@ -1643,7 +1682,13 @@ private final class WorktreeCell: NSTableCellView {
         icon.imageScaling = .scaleProportionallyDown
         label.lineBreakMode = .byTruncatingMiddle
         label.font = .systemFont(ofSize: NSFont.systemFontSize)
-        for view in [icon, label] {
+        diagnosticBadge.identifier = NSUserInterfaceItemIdentifier("Edit.WorktreeDiagnostic")
+        diagnosticBadge.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        diagnosticBadge.contentTintColor = .systemRed
+        diagnosticBadge.setAccessibilityElement(false)
+        diagnosticBadge.isHidden = true
+        for view in [icon, label, diagnosticBadge] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -1653,8 +1698,12 @@ private final class WorktreeCell: NSTableCellView {
             icon.widthAnchor.constraint(equalToConstant: Self.iconSize),
             icon.heightAnchor.constraint(equalTo: icon.widthAnchor),
             labelLeading,
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            labelTrailing,
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            diagnosticBadge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            diagnosticBadge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            diagnosticBadge.widthAnchor.constraint(equalToConstant: 14),
+            diagnosticBadge.heightAnchor.constraint(equalTo: diagnosticBadge.widthAnchor),
         ])
     }
 
@@ -1666,6 +1715,7 @@ private final class WorktreeCell: NSTableCellView {
         field.font = label.font
         field.usesSingleLineMode = true
         label.isHidden = true
+        setDiagnosticBadge(false)
         addSubview(field)
         NSLayoutConstraint.activate([
             field.leadingAnchor.constraint(equalTo: label.leadingAnchor, constant: -4),
@@ -1693,7 +1743,6 @@ private final class WorktreeCell: NSTableCellView {
 
     func setJJStatus(_ status: JJPathStatus?, detail changeType: String? = nil) {
         jjStatus = status
-        let name = label.stringValue
         let detail: String?
         switch status {
         case .added: detail = "Added"
@@ -1701,8 +1750,21 @@ private final class WorktreeCell: NSTableCellView {
         case .conflict: detail = "Unresolved conflict"
         case nil: detail = nil
         }
-        label.setAccessibilityLabel((changeType ?? detail).map { "\(name), \($0)" })
+        jjStatusDetail = changeType ?? detail
+        updateAccessibilityLabel()
         updateJJTextColor()
+    }
+
+    func setDiagnosticBadge(_ visible: Bool) {
+        let shown = visible && !label.isHidden
+        diagnosticBadge.isHidden = !shown
+        labelTrailing.constant = shown ? -23 : -4
+        updateAccessibilityLabel()
+    }
+
+    private func updateAccessibilityLabel() {
+        let details = [jjStatusDetail, diagnosticBadge.isHidden ? nil : "Contains errors"].compactMap { $0 }
+        label.setAccessibilityLabel(details.isEmpty ? nil : ([label.stringValue] + details).joined(separator: ", "))
     }
 
     override func viewDidChangeEffectiveAppearance() {

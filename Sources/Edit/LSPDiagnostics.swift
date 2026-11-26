@@ -5,11 +5,13 @@ struct LSPPublishedDiagnostics: Decodable {
         let range: LSPRange
         let severity: Int?
         let message: String?
+        var isError: Bool { severity == nil || severity == 1 }
     }
 
     let url: URL
     let version: Int?
     let diagnostics: [Diagnostic]
+    var hasErrors: Bool { diagnostics.contains(where: \.isError) }
 
     private enum CodingKeys: String, CodingKey { case uri, version, diagnostics }
 
@@ -26,7 +28,7 @@ struct LSPPublishedDiagnostics: Decodable {
                 || FileBuffer.canonicalURL(url) == FileBuffer.canonicalURL(documentURL) else { return nil }
         var seen: Set<LSPError> = []
         let errors: [LSPError] = diagnostics.compactMap { diagnostic in
-            guard diagnostic.severity == nil || diagnostic.severity == 1,
+            guard diagnostic.isError,
                   let range = index.nsRange(diagnostic.range),
                   let lineEnd = index.lineContentEnd(at: diagnostic.range.start.line) else { return nil }
             let displayRange = index.diagnosticDisplayRange(range, on: diagnostic.range.start.line)
@@ -54,4 +56,10 @@ struct LSPError: Hashable, Sendable {
 struct LSPDocumentErrors: Sendable {
     let revision: Int
     let errors: [LSPError]
+}
+
+struct LSPDiagnosticUpdate: Sendable {
+    let path: String
+    let hasErrors: Bool
+    let documentErrors: LSPDocumentErrors?
 }

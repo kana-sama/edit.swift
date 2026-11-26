@@ -8,6 +8,8 @@ Hover an underline to read the error at that location. Where underlines overlap,
 
 Use [`textDocument/publishDiagnostics`][publish] for named, editable files. Render Error diagnostics and entries without a severity, which the protocol leaves to the client. Warnings, information, and hints are outside this feature's scope. Map UTF-16 positions against the synchronized document and discard invalid ranges. Each report replaces the previous marks, including reports with an empty list.
 
+The [Worktree error indicators](../lsp-worktree-diagnostics/spec.md) also reflect publications for files outside the active editor.
+
 Apply versioned reports only when their URI and version match the active synchronized document. For servers that omit the version, associate the report with the synchronized revision at receipt. Discard queued updates if the buffer changes before display. Clear marks when text changes, when the replacement document is installed, or when the server stops, restarts, or fails. While another file is opening, keep the outgoing marks with its text and title.
 
 ## Acceptance

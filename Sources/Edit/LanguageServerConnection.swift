@@ -211,8 +211,9 @@ final class LanguageServerConnection: @unchecked Sendable {
     private let onSemanticTokensRefresh: @Sendable () -> Void
     let progress: AsyncStream<[LSPWorkDoneActivity]>
     private let progressUpdates: AsyncStream<[LSPWorkDoneActivity]>.Continuation
-    let diagnostics: AsyncStream<LSPDocumentErrors>
-    private let diagnosticUpdates: AsyncStream<LSPDocumentErrors>.Continuation
+    let diagnostics: AsyncStream<LSPDiagnosticUpdate>
+    private let diagnosticUpdates: AsyncStream<LSPDiagnosticUpdate>.Continuation
+    private var diagnosticRevisions: [String: Int] = [:]
     private let decoder = JSONDecoder()
     private var process: Process?
     private var input: DispatchIO?
@@ -243,7 +244,7 @@ final class LanguageServerConnection: @unchecked Sendable {
         self.onFailure = onFailure
         self.onSemanticTokensRefresh = onSemanticTokensRefresh
         (progress, progressUpdates) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
-        (diagnostics, diagnosticUpdates) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
+        (diagnostics, diagnosticUpdates) = AsyncStream.makeStream()
         decoder.userInfo[LSPDocumentURI.serverKey] = server
     }
 
@@ -528,6 +529,7 @@ final class LanguageServerConnection: @unchecked Sendable {
         }
         document = snapshot
         index = snapshot.url.map { _ in LSPTextIndex(snapshot.text) }
+        if let url = snapshot.url { diagnosticRevisions[WorktreeFileOperations.path(url)] = snapshot.revision }
     }
 
     private func launch() throws {
@@ -652,10 +654,9 @@ final class LanguageServerConnection: @unchecked Sendable {
                 if method == "$/progress",
                    let notification = try? decoder.decode(Parameters<ProgressNotification>.self, from: data) {
                     updateProgress(notification.params)
-                } else if method == "textDocument/publishDiagnostics", let document, let index,
-                          let notification = try? decoder.decode(Parameters<LSPPublishedDiagnostics>.self, from: data),
-                          let errors = notification.params.errors(for: document, index: index) {
-                    diagnosticUpdates.yield(LSPDocumentErrors(revision: document.revision, errors: errors))
+                } else if method == "textDocument/publishDiagnostics",
+                          let notification = try? decoder.decode(Parameters<LSPPublishedDiagnostics>.self, from: data) {
+                    publishDiagnostics(notification.params)
                 }
                 return
             }
@@ -689,6 +690,21 @@ final class LanguageServerConnection: @unchecked Sendable {
                     request.continuation.resume(returning: data)
                 }
             }
+        }
+    }
+
+    private func publishDiagnostics(_ report: LSPPublishedDiagnostics) {
+        guard report.url.isFileURL else { return }
+        let activePath = document?.url.map(WorktreeFileOperations.path)
+        let reportedPath = WorktreeFileOperations.path(report.url)
+        let path = reportedPath == activePath ? reportedPath : WorktreeFileOperations.path(FileBuffer.canonicalURL(report.url))
+        if let version = report.version, let revision = diagnosticRevisions[path], version != revision { return }
+        if let document, path == activePath, let index {
+            guard let errors = report.errors(for: document, index: index) else { return }
+            diagnosticUpdates.yield(.init(path: path, hasErrors: !errors.isEmpty,
+                                          documentErrors: .init(revision: document.revision, errors: errors)))
+        } else {
+            diagnosticUpdates.yield(.init(path: path, hasErrors: report.hasErrors, documentErrors: nil))
         }
     }
 

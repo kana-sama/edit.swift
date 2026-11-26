@@ -157,6 +157,7 @@ enum LSPDiagnosticsCheck {
         }
         try require(try await app.openFile(swiftParser, in: document) === document, "open the Swift parser fixture")
         try await checkSwiftParserDiagnostics(in: document, text: swiftParserText)
+        try await checkWorktreeDiagnostics(in: app, source: document, root: root, capture: capture)
 
         try require(try await app.openFile(odin, in: document) === document, "open the OLS fixture")
         let odinError = (odinText as NSString).range(of: "main ::")
@@ -171,6 +172,65 @@ enum LSPDiagnosticsCheck {
         }
         document.window.close()
         try await wait("stop the fixture servers") { features.serversStoppedForCheck }
+    }
+
+    private static func checkWorktreeDiagnostics(
+        in app: Edit, source: DocumentWindow, root: URL, capture: (NSWindow, String?) throws -> Void
+    ) async throws {
+        // Keep the diagnosed file closed in the observer so its folders start collapsed.
+        let observer = app.makeDocument()
+        defer { observer.window.close() }
+        observer.setFolder(root)
+        observer.toggleSidebarFocus(.worktree)
+        guard let tree = observer.worktreeSidebar?.outline else { throw Failure(detail: "open the observer's Worktree") }
+        func cell(_ name: String) -> (row: Int, view: NSTableCellView)? {
+            for row in 0..<tree.numberOfRows {
+                guard let view = tree.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSTableCellView,
+                      view.textField?.stringValue == name else { continue }
+                return (row, view)
+            }
+            return nil
+        }
+        func marked(_ name: String) -> Bool {
+            cell(name)?.view.subviews.contains { view in
+                guard let badge = view as? NSImageView, badge.identifier?.rawValue == "Edit.WorktreeDiagnostic" else {
+                    return false
+                }
+                return !badge.isHidden && badge.image != nil && badge.contentTintColor == .systemRed
+            } == true
+        }
+        func item(_ name: String) -> Any? {
+            cell(name).flatMap { tree.item(atRow: $0.row) }
+        }
+
+        try await wait("show a red error triangle on the unloaded Sources folder in the second window") {
+            marked("Sources") && cell("Clean.txt") != nil && !marked("Clean.txt") && cell("Fixture") == nil
+        }
+        guard let sources = item("Sources") else { throw Failure(detail: "find Sources in the Worktree") }
+        tree.expandItem(sources)
+        try await wait("move the triangle from Sources to the collapsed Fixture folder") {
+            !marked("Sources") && marked("Fixture") && cell("Parser.swift") == nil
+        }
+        guard let fixture = item("Fixture") else { throw Failure(detail: "find Fixture in the Worktree") }
+        tree.expandItem(fixture)
+        try await wait("mark the Swift file and not either expanded folder") {
+            !marked("Sources") && !marked("Fixture") && marked("Parser.swift")
+        }
+        try capture(observer.window, "worktree")
+        tree.collapseItem(sources)
+        try await wait("restore the aggregate triangle when collapsing Sources") {
+            marked("Sources") && cell("Parser.swift") == nil
+        }
+
+        let editor = source.editor
+        let originalText = editor.string
+        editor.insertText("func parserFixture() {}\n", replacementRange: NSRange(location: 0, length: originalText.utf16.count))
+        try await wait("clear the Worktree file mark when SourceKit-LSP publishes the repaired document") {
+            !source.languageFeatures.pathsWithErrors.contains { $0.hasSuffix("/Parser.swift") }
+        }
+        source.languageFeatures.perform(.stop)
+        try await wait("clear any remaining folder marks when the Swift server stops") { !marked("Sources") }
+        try require(source.editor.diagnosticRanges.isEmpty, "clear the same source's editor marks")
     }
 
     private static func checkSwiftParserDiagnostics(in document: DocumentWindow, text: String) async throws {
@@ -262,11 +322,13 @@ enum LSPDiagnosticsCheck {
         let second = error.replacingOccurrences(of: "First error", with: "Second error")
         let warning = #"{"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":5}},"severity":2}"#
         let invalid = #"{"range":{"start":{"line":0,"character":1},"end":{"line":0,"character":2}}}"#
-        func decode(_ uri: URL, _ version: Int?, _ items: [String]) throws -> [LSPError]? {
+        func publication(_ uri: URL, _ version: Int?, _ items: [String]) throws -> LSPPublishedDiagnostics {
             let versionField = version.map { "\"version\":\($0)," } ?? ""
             let json = "{\"uri\":\"\(uri.absoluteString)\",\(versionField)\"diagnostics\":[\(items.joined(separator: ","))]}"
             return try JSONDecoder().decode(LSPPublishedDiagnostics.self, from: Data(json.utf8))
-                .errors(for: document, index: index)
+        }
+        func decode(_ uri: URL, _ version: Int?, _ items: [String]) throws -> [LSPError]? {
+            try publication(uri, version, items).errors(for: document, index: index)
         }
         let errors = try decode(url, 7, [warning, error, error, second, invalid])
         try require(errors?.map(\.message) == ["First error", "Second error"]
@@ -276,6 +338,11 @@ enum LSPDiagnosticsCheck {
                     "ignore both stale versions and other documents")
         try require(try decode(url, nil, [error])?.count == 1 && decode(url, 7, []) == [],
                     "accept unversioned reports and an empty replacement")
+        let background = url.appendingPathExtension("other")
+        try require(try publication(background, nil, [warning, error]).hasErrors
+                    && !publication(background, nil, [warning]).hasErrors
+                    && !publication(background, nil, []).hasErrors,
+                    "classify background publications without the source text and ignore warning-only or empty reports")
 
         let point = NSRange(location: 4, length: 0)
         let explicit = NSRange(location: 4, length: 1)

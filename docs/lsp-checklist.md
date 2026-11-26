@@ -11,6 +11,7 @@ Edit ranks comparable [workspace symbol matches](features/lsp-symbol-navigation/
 Edit uses full [semantic token results](features/lsp-highlighting/spec.md) for scrolling and a concurrent visible-range preview for large ZLS files. It also supports range-only providers and deltas.
 
 Edit [underlines published errors and shows their messages after the affected lines](features/lsp-diagnostics/spec.md).
+The [Worktree marks files and collapsed folders with published errors](features/lsp-worktree-diagnostics/spec.md).
 
 | Method                                                                       | ZLS   | SourceKit-LSP | OLS   |
 | ---------------------------------------------------------------------------- | :---: | :-----------: | :---: |

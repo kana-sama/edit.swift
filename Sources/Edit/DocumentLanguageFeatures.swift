@@ -77,6 +77,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     private var referenceTask: Task<Void, Never>?
     private var referenceID: UInt64 = 0
     private var isClosed = false
+    private(set) var pathsWithErrors: Set<String> = []
 
     init(document: DocumentWindow, app: Edit) {
         self.document = document
@@ -194,6 +195,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
             session.onDiagnosticsChange = nil
             session.close()
         }
+        updateWorktreeDiagnostics()
     }
 
     private func stateChanged() {
@@ -212,6 +214,14 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         document.editor.setDiagnostics(isCurrent ? session.diagnostics : [])
         document.editor.languageInteractionEnabled = sourceURL != nil && (session.supportsDefinition || session.supportsHover
             || session.supportsReferences || session.supportsRename || !document.editor.diagnostics.isEmpty)
+        updateWorktreeDiagnostics()
+    }
+
+    private func updateWorktreeDiagnostics() {
+        let paths = sessions.reduce(into: Set<String>()) { $0.formUnion($1.pathsWithErrors) }
+        guard paths != pathsWithErrors else { return }
+        pathsWithErrors = paths
+        app.worktreeDiagnosticsDidChange()
     }
 
     private func updateServerStatus() {

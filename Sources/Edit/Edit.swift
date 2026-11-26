@@ -395,6 +395,15 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         controlPanel?.languageServerStateDidChange(in: document)
     }
 
+    var pathsWithLanguageErrors: Set<String> {
+        documents.reduce(into: Set<String>()) { $0.formUnion($1.languageFeatures.pathsWithErrors) }
+    }
+
+    func worktreeDiagnosticsDidChange() {
+        let paths = pathsWithLanguageErrors
+        for document in documents { document.worktreeSidebar?.setDiagnosticPaths(paths) }
+    }
+
     func scratchesDidChange(updated: [ScratchFile] = []) {
         let byID = Dictionary(uniqueKeysWithValues: updated.map { ($0.id, $0) })
         for document in documents {

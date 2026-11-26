@@ -339,6 +339,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         } else {
             browser = SidebarFileTree(document: document, app: app, mode: .worktree)
             worktree = browser
+            browser.setDiagnosticPaths(app.pathsWithLanguageErrors)
             if restoredWorktreeShowsHidden { browser.setShowsHidden(true) }
             installContent(browser.view)
         }
