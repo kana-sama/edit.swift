@@ -7,6 +7,14 @@ struct WindowPlacement: Codable, Sendable {
     var isFullScreen: Bool
 
     @MainActor
+    var openingHeight: CGFloat {
+        let screens = NSScreen.screens
+        let maximumHeight = screens.map(\.frame.height).max() ?? 480
+        if isFullScreen { return maximumHeight }
+        return frame.height.isFinite && frame.height > 0 ? min(frame.height, maximumHeight) : 480
+    }
+
+    @MainActor
     func restoreFrame(on window: NSWindow) {
         guard frame.minX.isFinite, frame.minY.isFinite,
               frame.maxX.isFinite, frame.maxY.isFinite,

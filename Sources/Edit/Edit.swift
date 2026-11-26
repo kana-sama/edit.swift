@@ -60,6 +60,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
 #if EDIT_AGENT_CHECKS
     let isAgentCheck = CommandLine.arguments.dropFirst().first == "--agent-check"
+    var holdSessionFileReadForCheck: ((URL) async -> Void)?
+    var observeStartupPresentationForCheck: ((DocumentWindow) -> Void)?
 #else
     let isAgentCheck = false
 #endif
@@ -128,14 +130,16 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let app = NSApplication.shared
+        // Begin reading the one atomic session file before building the launch UI.
+        let saved = isAgentCheck ? nil : readStartupSession(from: sessionStore)
         installMenus(in: app)
         windowEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
             guard let self else { return event }
             return routeWindowEvent(event)
         }
-        let initial = makeDocument()
 #if EDIT_AGENT_CHECKS
         if isAgentCheck {
+            let initial = makeDocument()
             Task { @MainActor in
                 do {
                     let arguments = CommandLine.arguments.dropFirst(2)
@@ -180,6 +184,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try await ScratchTreeCheck.run(in: self)
                     try MultiCaretCheck.checkBlink()
                     try await OpenFilePanelCheck.run(in: self)
+                    try await StartupRestoreCheck.run(in: self)
                     print("Edit passed its native editing and file-session checks without activation.")
                     exit(EXIT_SUCCESS)
                 } catch {
@@ -191,7 +196,6 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         }
 
 #endif
-        initial.present()
         app.activate()
 
         let arguments = CommandLine.arguments.dropFirst().filter { $0 != "--" && !$0.hasPrefix("-psn_") }
@@ -200,42 +204,56 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             pendingFiles.append((urls, true, nil))
         }
 
+        guard let saved else { return }
         startup = Task { @MainActor in
-            await recentFiles.load()
-            Task { await recentFiles.prune() }
-            let store = sessionStore
-            var saved: EditorSession?
-            do {
-                saved = try await Task.detached(operation: { try store.read() }).value
-            } catch {
-                sessionReadFailed = true
-                if !isQuitting {
-                    Task { await activeDocument?.showError("Could Not Restore Session", detail: error.localizedDescription) }
-                }
-            }
-            var checkpoints: [DraftCheckpoint] = []
-            var recoveryError: String?
-            do {
-                let result = try await draftRecovery.read()
-                checkpoints = result.checkpoints
-                if result.unreadable > 0 { recoveryError = "Some draft recovery files could not be read." }
-            } catch {
-                recoveryError = error.localizedDescription
-            }
-            let activeDraftIDs = Set(documents.compactMap(\.draftRecoveryID))
-            checkpoints.removeAll { activeDraftIDs.contains($0.revision.id) }
-            if let previous = EditorSession.recovering(checkpoints, into: saved) {
-                await restore(previous, reusing: initial)
-            }
-            if let recoveryError, !isQuitting {
-                Task { await activeDocument?.showError("Could Not Recover Some Drafts", detail: recoveryError) }
-            }
+            await restoreStartupSession(from: saved)
             startup = nil
             receivedInitialSession = true
             let requests = pendingFiles
             pendingFiles.removeAll()
             for request in requests where !isQuitting {
                 await openFiles(request.urls, allowMissing: request.allowMissing, in: request.document)
+            }
+        }
+    }
+
+    func readStartupSession(from store: SessionStore) -> Task<EditorSession?, any Error> {
+        Task.detached(priority: .userInitiated) { try store.read() }
+    }
+
+    func restoreStartupSession(from sessionRead: Task<EditorSession?, any Error>) async {
+        async let recovery = draftRecovery.read()
+        Task { await recentFiles.prune() }
+
+        var saved: EditorSession?
+        var sessionError: String?
+        do {
+            saved = try await sessionRead.value
+        } catch {
+            sessionReadFailed = true
+            sessionError = error.localizedDescription
+        }
+        var checkpoints: [DraftCheckpoint] = []
+        var recoveryError: String?
+        do {
+            let result = try await recovery
+            checkpoints = result.checkpoints
+            if result.unreadable > 0 { recoveryError = "Some draft recovery files could not be read." }
+        } catch {
+            recoveryError = error.localizedDescription
+        }
+        let activeDraftIDs = Set(documents.compactMap(\.draftRecoveryID))
+        checkpoints.removeAll { activeDraftIDs.contains($0.revision.id) }
+        let previous = EditorSession.recovering(checkpoints, into: saved)
+            ?? EditorSession(documents: [], activeIndex: nil, lastWindow: nil)
+        await restore(previous)
+
+        if !isQuitting, let document = activeDocument {
+            if let sessionError {
+                Task { await document.showError("Could Not Restore Session", detail: sessionError) }
+            }
+            if let recoveryError {
+                Task { await document.showError("Could Not Recover Some Drafts", detail: recoveryError) }
             }
         }
     }
@@ -782,7 +800,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
               !documents.contains(where: { $0.isBusy || $0.window.attachedSheet != nil }) else {
             return .terminateCancel
         }
-        // The temporary startup window can be closed before restoration reads the saved session.
+        // Quitting before any window has opened must not overwrite the saved session.
         if startup != nil && documents.isEmpty { return .terminateNow }
         isQuitting = true
         openFilePanel?.cancel()
@@ -944,137 +962,227 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         )
     }
 
-    func restore(_ previous: EditorSession, reusing placeholder: DocumentWindow) async {
+    // Preparing a window does not touch its live AppKit presentation.
+    private struct SessionOpening: Sendable {
+        let record: SessionDocument
+        let url: URL?
+        let folder: URL?
+        let isScratch: Bool
+        let scratch: ScratchFile?
+        let historical: MarkdownRevisionRecord.Loaded?
+        let opened: OpenedFile?
+        let identity: FileIdentity?
+        let syntax: SyntaxSnapshot?
+        let openingConflicts: JJOpeningConflicts?
+        let restoredConflicts: (text: String, edits: [JJConflictEdit])?
+    }
+
+    private func prepareSessionOpening(_ savedRecord: SessionDocument) async -> (SessionOpening?, [String]) {
+        var warnings: [String] = []
+        var record = savedRecord
+        let historical: MarkdownRevisionRecord.Loaded?
+        if let revision = record.markdownRevision {
+            do { historical = try await revision.load() }
+            catch {
+                historical = nil
+                warnings.append("“\(revision.path)” — \(error.localizedDescription)")
+            }
+        } else {
+            historical = nil
+        }
+        let url = record.path.map { URL(fileURLWithPath: $0) }
+        let isScratch = url.map(scratchStore.identifiesScratch(at:)) ?? false
+        let scratch: ScratchFile?
+        if isScratch, let url {
+            scratch = try? await scratchStore.file(at: url)
+        } else {
+            scratch = nil
+        }
+        let opened: OpenedFile?
+        if record.draft == nil, let url {
+#if EDIT_AGENT_CHECKS
+            await holdSessionFileReadForCheck?(url)
+#endif
+            do {
+                opened = try await Self.readForOpening(
+                    url,
+                    allowsPreview: !isScratch && record.isFilePreview == true
+                )
+            } catch {
+                warnings.append("“\(scratch?.name ?? url.lastPathComponent)” — \(error.localizedDescription)")
+                guard record.folderPath != nil || record.terminal != nil else { return (nil, warnings) }
+                opened = nil
+            }
+        } else {
+            opened = nil
+        }
+        let folder = record.folderPath.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        let identity: FileIdentity?
+        let syntax: SyntaxSnapshot?
+        let openingConflicts: JJOpeningConflicts?
+        let restoredConflicts: (text: String, edits: [JJConflictEdit])?
+        if let draft = record.draft {
+            if let drafts = record.conflictDrafts, !drafts.isEmpty {
+                restoredConflicts = await JJConflictEdit.restore(drafts, in: draft)
+                if restoredConflicts == nil {
+                    let name = url?.lastPathComponent ?? "Untitled"
+                    warnings.append("“\(name)” opened as untitled because its conflict draft could not be restored.")
+                    record.path = nil
+                    record.revision = nil
+                }
+            } else {
+                restoredConflicts = nil
+            }
+            let draftURL = record.path == nil ? nil : url
+            let conflictURL = isScratch || restoredConflicts != nil ? nil : draftURL
+            async let conflicts = JJOpeningConflicts.prepare(draft, at: conflictURL)
+            identity = await Task.detached { draftURL.flatMap { FileIdentity.at($0) } }.value
+            syntax = nil
+            openingConflicts = await conflicts
+        } else {
+            identity = nil
+            restoredConflicts = nil
+            if case .text(let file) = opened, folder == nil || file.identity != nil {
+                async let conflicts = JJOpeningConflicts.prepare(file.text, at: isScratch ? nil : file.url)
+                syntax = await DocumentWindow.prepareOpeningSyntax(
+                    file, position: record.editorPosition, folder: folder,
+                    storedSyntaxLanguage: record.syntaxLanguage, scratch: scratch, app: self,
+                    visibleLines: Int(ceil(record.placement.openingHeight / 18)) + 2
+                )
+                openingConflicts = await conflicts
+            } else {
+                syntax = nil
+                openingConflicts = nil
+            }
+        }
+
+        return (SessionOpening(record: record, url: url, folder: folder, isScratch: isScratch, scratch: scratch,
+                               historical: historical, opened: opened, identity: identity, syntax: syntax,
+                               openingConflicts: openingConflicts, restoredConflicts: restoredConflicts), warnings)
+    }
+
+    private func installSessionOpening(_ opening: SessionOpening, in document: DocumentWindow) {
+        let record = opening.record
+        let folder = opening.folder
+        let scratch = opening.scratch
+        if let folder { document.setFolder(folder) }
+        if let historical = opening.historical {
+            document.restoreMarkdownRevision(historical, syntax: record.syntaxLanguage)
+        } else if let draft = record.draft {
+            document.restoreDraft(record, text: opening.restoredConflicts?.text ?? draft, identity: opening.identity, scratch: scratch,
+                                  openingConflicts: opening.openingConflicts, restoredConflicts: opening.restoredConflicts?.edits ?? [])
+        } else if let opened = opening.opened, document.folderURL == nil || opened.identity != nil {
+            switch opened {
+            case .text(let file):
+                document.load(file, storedSyntaxLanguage: record.syntaxLanguage, preparedSyntax: opening.syntax,
+                              openingConflicts: opening.openingConflicts, scratch: scratch)
+            case .preview(let preview):
+                document.loadPreview(preview)
+                document.focusContent()
+            }
+        } else if document.folderURL != nil && (record.path != nil || record.showsEmptyFolder != false) {
+            document.loadEmptyFolder()
+            document.focusContent()
+        } else if record.path == nil, record.syntaxLanguage != nil {
+            document.restoreDraft(record, text: "")
+        }
+        document.restoreSidebar(record)
+        document.restoreTerminal(record.terminal)
+        document.restoreEditorPosition(record.editorPosition)
+    }
+
+    func restore(_ previous: EditorSession, reusing placeholder: DocumentWindow? = nil) async {
         lastPlacement = previous.lastWindow
         var restored: [(index: Int, document: DocumentWindow)] = []
         var warnings: [String] = []
-        for (index, savedRecord) in previous.documents.enumerated() {
-            var record = savedRecord
-            let historical: MarkdownRevisionRecord.Loaded?
-            if let revision = record.markdownRevision {
-                do { historical = try await revision.load() }
-                catch {
-                    historical = nil
-                    warnings.append("“\(revision.path)” — \(error.localizedDescription)")
-                }
-            } else {
-                historical = nil
-            }
-            let url = record.path.map { URL(fileURLWithPath: $0) }
-            let isScratch = url.map(scratchStore.identifiesScratch(at:)) ?? false
-            let scratch: ScratchFile?
-            if isScratch, let url {
-                scratch = try? await scratchStore.file(at: url)
-            } else {
-                scratch = nil
-            }
-            let opened: OpenedFile?
-            if record.draft == nil, let url {
-                do {
-                    opened = try await Self.readForOpening(
-                        url,
-                        allowsPreview: !isScratch && record.isFilePreview == true
-                    )
-                } catch {
-                    warnings.append("“\(scratch?.name ?? url.lastPathComponent)” — \(error.localizedDescription)")
-                    guard record.folderPath != nil || record.terminal != nil else { continue }
-                    opened = nil
-                }
-            } else {
-                opened = nil
-            }
-            let folder = record.folderPath.map { URL(fileURLWithPath: $0, isDirectory: true) }
-            let identity: FileIdentity?
-            let syntax: SyntaxSnapshot?
-            let openingConflicts: JJOpeningConflicts?
-            let restoredConflicts: (text: String, edits: [JJConflictEdit])?
-            if let draft = record.draft {
-                if let drafts = record.conflictDrafts, !drafts.isEmpty {
-                    restoredConflicts = await JJConflictEdit.restore(drafts, in: draft)
-                    if restoredConflicts == nil {
-                        let name = url?.lastPathComponent ?? "Untitled"
-                        warnings.append("“\(name)” opened as untitled because its conflict draft could not be restored.")
-                        record.path = nil
-                        record.revision = nil
-                    }
-                } else {
-                    restoredConflicts = nil
-                }
-                let draftURL = record.path == nil ? nil : url
-                let conflictURL = isScratch || restoredConflicts != nil ? nil : draftURL
-                async let conflicts = JJOpeningConflicts.prepare(draft, at: conflictURL)
-                identity = await Task.detached { draftURL.flatMap { FileIdentity.at($0) } }.value
-                syntax = nil
-                openingConflicts = await conflicts
-            } else {
-                identity = nil
-                restoredConflicts = nil
-                if case .text(let file) = opened, folder == nil || file.identity != nil {
-                    async let conflicts = JJOpeningConflicts.prepare(file.text, at: isScratch ? nil : file.url)
-                    syntax = await placeholder.prepareOpeningSyntax(file, position: record.editorPosition, folder: folder,
-                                                                    storedSyntaxLanguage: record.syntaxLanguage, scratch: scratch)
-                    openingConflicts = await conflicts
-                } else {
-                    syntax = nil
-                    openingConflicts = nil
-                }
-            }
+        var recent: [(index: Int, url: URL?, folder: URL?, scratch: ScratchFile?)] = []
 
-            // Reserve the placeholder only once the restored state can be installed without suspending.
-            let document = restored.isEmpty && documents.contains(where: { $0 === placeholder }) && placeholder.canRestoreSession
-                ? placeholder : makeDocument()
-            document.restorePlacement(record.placement)
-            if let folder { document.setFolder(folder) }
-            if let historical {
-                document.restoreMarkdownRevision(historical, syntax: record.syntaxLanguage)
-            } else if let draft = record.draft {
-                document.restoreDraft(record, text: restoredConflicts?.text ?? draft, identity: identity, scratch: scratch,
-                                      openingConflicts: openingConflicts, restoredConflicts: restoredConflicts?.edits ?? [])
-            } else if let opened, document.folderURL == nil || opened.identity != nil {
-                switch opened {
-                case .text(let file):
-                    document.load(file, storedSyntaxLanguage: record.syntaxLanguage, preparedSyntax: syntax,
-                                  openingConflicts: openingConflicts, scratch: scratch)
-                case .preview(let preview):
-                    document.loadPreview(preview)
-                    document.focusContent()
-                }
-            } else if document.folderURL != nil && (record.path != nil || record.showsEmptyFolder != false) {
-                document.loadEmptyFolder()
-                document.focusContent()
-            } else if record.path == nil, record.syntaxLanguage != nil {
-                document.restoreDraft(record, text: "")
+        func install(_ opening: SessionOpening?, at index: Int) {
+            guard let opening else { return }
+            let document: DocumentWindow
+            if let placeholder, restored.isEmpty, documents.contains(where: { $0 === placeholder }),
+               placeholder.canRestoreSession {
+                document = placeholder
+                document.restorePlacement(opening.record.placement)
+            } else {
+                document = DocumentWindow(app: self, placement: opening.record.placement)
+                let successor = restored.first { $0.index > index }?.document
+                let insertion = successor.flatMap { successor in documents.firstIndex { $0 === successor } }
+                documents.insert(document, at: insertion ?? documents.endIndex)
             }
-            document.restoreSidebar(record)
-            document.restoreTerminal(record.terminal)
-            document.restoreEditorPosition(record.editorPosition)
-            if let scratch = document.scratchFile {
-                await recordScratchOpen(scratch)
-            } else if !isScratch, let url, record.path != nil {
-                await recentFiles.record(url, in: document.folderURL, rememberInFolder: false)
-            }
+            installSessionOpening(opening, in: document)
             if isQuitting { document.editor.isEditable = false }
-            restored.append((index, document))
+            let insertion = restored.firstIndex { $0.index > index } ?? restored.endIndex
+            restored.insert((index, document), at: insertion)
+            if let scratch = opening.scratch {
+                recent.append((index, nil, opening.folder, scratch))
+            } else if !opening.isScratch, let url = opening.url, opening.record.path != nil {
+                recent.append((index, url, opening.folder, nil))
+            }
+            let key = NSApp.keyWindow
+            let isRestoredKey = restored.contains { $0.document.window === key }
+            let preferred = index == previous.activeIndex && isRestoredKey
+            presentRestoredWindow(document, behind: preferred ? nil : key)
         }
 
-        if restored.isEmpty && documents.contains(where: { $0 === placeholder }) &&
-            placeholder.canRestoreSession, let placement = previous.lastWindow {
-            placeholder.restorePlacement(placement)
-        }
-        if !isAgentCheck && !isQuitting {
-            let active = activeDocument.flatMap { document in
-                document.window.isKeyWindow && !document.canRestoreSession && !restored.contains { $0.document === document }
-                    ? document : nil
+        await withTaskGroup(of: (Int, SessionOpening?, [String]).self) { group in
+            for (index, record) in previous.documents.enumerated() {
+                group.addTask {
+                    let (opening, warnings) = await self.prepareSessionOpening(record)
+                    return (index, opening, warnings)
+                }
             }
-            let preferred = active ?? restored.first { $0.index == previous.activeIndex }?.document ?? restored.last?.document
-            for entry in restored where entry.document !== preferred { entry.document.present() }
-            if let preferred { preferred.present() }
-            else if documents.contains(where: { $0 === placeholder }) { placeholder.present() }
-            if !warnings.isEmpty {
-                let detail = warnings.joined(separator: "\n")
-                Task { await activeDocument?.showError("Could Not Reopen Some Files", detail: detail) }
+            var waiting: [Int: (SessionOpening?, [String])] = [:]
+            var next = 0
+            for await (index, opening, issues) in group {
+                if placeholder == nil {
+                    warnings += issues
+                    install(opening, at: index)
+                } else {
+                    // A caller supplying a reusable window expects it to receive the first surviving record.
+                    waiting[index] = (opening, issues)
+                    while let (opening, issues) = waiting.removeValue(forKey: next) {
+                        warnings += issues
+                        install(opening, at: next)
+                        next += 1
+                    }
+                }
             }
         }
+
+        if restored.isEmpty {
+            if let placeholder, documents.contains(where: { $0 === placeholder }), placeholder.canRestoreSession {
+                if let placement = previous.lastWindow { placeholder.restorePlacement(placement) }
+            } else if documents.isEmpty && !isQuitting {
+                let document = makeDocument(placement: previous.lastWindow)
+                presentRestoredWindow(document)
+            }
+        }
+        if !isAgentCheck && !isQuitting && !warnings.isEmpty {
+            let detail = warnings.joined(separator: "\n")
+            Task { await activeDocument?.showError("Could Not Reopen Some Files", detail: detail) }
+        }
+        // Persist recency after ordering the windows, never on the path to their first frame.
+        for entry in recent.sorted(by: { $0.index < $1.index }) {
+            if let scratch = entry.scratch {
+                await recordScratchOpen(scratch)
+            } else if let url = entry.url {
+                await recentFiles.record(url, in: entry.folder, rememberInFolder: false)
+            }
+        }
+    }
+
+    private func presentRestoredWindow(_ document: DocumentWindow, behind frontWindow: NSWindow? = nil) {
+        guard !isQuitting else { return }
+#if EDIT_AGENT_CHECKS
+        if isAgentCheck {
+            guard let observeStartupPresentationForCheck else { return }
+            document.present(behind: frontWindow)
+            observeStartupPresentationForCheck(document)
+            return
+        }
+#endif
+        document.present(behind: frontWindow)
     }
 
     @discardableResult
@@ -1430,6 +1538,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 let target = screenshot.map { URL(fileURLWithPath: $0).deletingPathExtension().path + "-\(suffix).png" }
                 try checkWindow(window, screenshot: target)
             }
+            try await StartupRestoreCheck.run(in: self)
         case "markdown":
             try await MarkdownCheck.run(in: self, screenshot: screenshot)
         case "results":

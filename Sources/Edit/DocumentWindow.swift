@@ -815,16 +815,38 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                         referencesTreeMode: record.referencesTreeMode ?? false)
     }
 
-    func present() {
-        window.makeKeyAndOrderFront(nil)
-        if pendingFullScreen { app.scheduleFullScreenRestore(for: self) }
+    func present(behind frontWindow: NSWindow? = nil) {
+        if pendingFullScreen {
+            app.scheduleFullScreenRestore(for: self)
+        } else if let frontWindow {
+            window.order(.below, relativeTo: frontWindow.windowNumber)
+        } else {
+            window.makeKeyAndOrderFront(nil)
+        }
     }
 
     func restoreFullScreen() -> Bool {
-        guard pendingFullScreen && window.isVisible else { return false }
+        guard pendingFullScreen else { return false }
         normalFrame = window.frame
-        window.toggleFullScreen(nil)
+        // Native fullscreen requires an ordered window. Do not expose its normal frame.
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        window.orderFront(nil)
+        if !app.isAgentCheck { window.toggleFullScreen(nil) }
         return true
+    }
+
+    private func finishFullScreenEntry() {
+        let wasRestoring = pendingFullScreen
+        pendingFullScreen = false
+        restoreVisibleTerminalIfReady()
+        resizeTitleBars()
+        titleBar.fullScreenTransitionDidFinish()
+        if wasRestoring && !app.isAgentCheck {
+            window.ignoresMouseEvents = false
+            window.alphaValue = 1
+        }
+        app.didFinishFullScreenRestore(for: self)
     }
 
     func restorePlacement(_ placement: WindowPlacement) {
@@ -848,18 +870,12 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     func windowDidEnterFullScreen(_ notification: Notification) {
-        pendingFullScreen = false
-        restoreVisibleTerminalIfReady()
-        resizeTitleBars()
-        titleBar.fullScreenTransitionDidFinish()
-        app.didFinishFullScreenRestore(for: self)
+        finishFullScreenEntry()
     }
 
     func windowDidFailToEnterFullScreen(_ window: NSWindow) {
-        pendingFullScreen = false
-        restoreVisibleTerminalIfReady()
-        titleBar.fullScreenTransitionDidFinish()
-        app.didFinishFullScreenRestore(for: self)
+        normalFrame = nil
+        finishFullScreenEntry()
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
@@ -950,13 +966,22 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         _ file: FileBuffer, position: EditorPosition?, folder: URL?, storedSyntaxLanguage: String? = nil,
         scratch: ScratchFile? = nil
     ) async -> SyntaxSnapshot? {
+        let lineHeight = max(1, editor.defaultParagraphStyle?.maximumLineHeight ?? 18)
+        return await Self.prepareOpeningSyntax(
+            file, position: position, folder: folder, storedSyntaxLanguage: storedSyntaxLanguage, scratch: scratch,
+            app: app, visibleLines: Int(ceil(scrollView.bounds.height / lineHeight)) + 2
+        )
+    }
+
+    static func prepareOpeningSyntax(
+        _ file: FileBuffer, position: EditorPosition?, folder: URL?, storedSyntaxLanguage: String?,
+        scratch: ScratchFile?, app: Edit, visibleLines: Int
+    ) async -> SyntaxSnapshot? {
         let language = storedSyntaxLanguage.flatMap(SyntaxLanguage.init(rawValue:))
             ?? app.syntaxOverrides.language(for: file.url) ?? SyntaxLanguage.detected(at: scratch?.filenameURL ?? file.url)
         guard app.workspaceHighlighting.isEnabled(.treeSitter, in: folder), language != .plainText,
               position?.topLine != nil || (position?.verticalOffset ?? 0) <= 0 else { return nil }
         let topOffset = position?.topLine?.textOffset ?? 0
-        let lineHeight = max(1, editor.defaultParagraphStyle?.maximumLineHeight ?? 18)
-        let visibleLines = Int(ceil(scrollView.bounds.height / lineHeight)) + 2
         let task = Task.detached(priority: .userInitiated) {
             SyntaxEngine.prepareOpening(file.text, language: language, topOffset: topOffset, visibleLines: visibleLines)
         }
