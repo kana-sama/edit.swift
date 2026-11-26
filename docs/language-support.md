@@ -1,44 +1,41 @@
 # Language support
 
-This matrix tracks the language modes shipped in Edit. Each row records the quality of Tree-sitter highlighting when editing and whether Edit integrates a language server for that mode. Plain Text is outside the matrix.
+Track highlighting quality separately for each bundled language mode. **✅** means confirmed, **❌** means missing or known to fail, and **❓** means unverified. In the last column, **❓** also covers modes with no LSP highlighting to compare against.
 
-- **Supported** means the mode meets the [Tree-sitter editing requirements](features/syntax-highlighting/spec.md#tokenization-during-editing) and has a passing native check with LSP off. Link the check in the row.
-- **Partial verification** means existing checks cover some of the editing requirements. The mode has yet to qualify as Supported.
-- **Unverified** means a grammar and highlight query ship, and flicker-free editing still needs acceptance coverage.
-- **Failing** means a known editing defect prevents the mode from qualifying as Supported.
+| Language mode | Tree-sitter highlighting | Tokenizer and flicker-free editing | Unclosed strings | LSP highlighting | Tree-sitter as a base for LSP |
+| --- | :---: | :---: | :---: | :---: | :---: |
+| Zig | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Ruby | ✅ | ✅ | ✅ | ❌ | ❓ |
+| Swift | ✅ | ✅ | ❓ | ✅ | ❌ |
+| Shell Script | ✅ | ✅ | ❓ | ❌ | ❓ |
+| C | ✅ | ❓ | ❓ | ❓ | ❌ |
+| C++ | ✅ | ❓ | ❓ | ❓ | ❌ |
+| Clojure | ✅ | ❓ | ❓ | ❌ | ❓ |
+| CSS | ✅ | ❓ | ❓ | ❌ | ❓ |
+| Erlang | ✅ | ❓ | ❓ | ❌ | ❓ |
+| Go | ✅ | ❓ | ❓ | ❌ | ❓ |
+| HTML | ✅ | ❓ | ❓ | ❌ | ❓ |
+| JavaScript | ✅ | ❓ | ❓ | ❌ | ❓ |
+| JavaScript JSX | ✅ | ❓ | ❓ | ❌ | ❓ |
+| JSON | ✅ | ❓ | ❓ | ❌ | ❓ |
+| Lua | ✅ | ❓ | ❓ | ❌ | ❓ |
+| Markdown | ✅ | ❓ | ❓ | ❌ | ❓ |
+| Objective-C | ✅ | ❓ | ❓ | ❓ | ❌ |
+| Objective-C++ | ✅ | ❓ | ❓ | ❓ | ❌ |
+| Python | ✅ | ❓ | ❓ | ❌ | ❓ |
+| Rust | ✅ | ❓ | ❓ | ❌ | ❓ |
+| Solidity | ✅ | ❓ | ❓ | ❌ | ❓ |
+| TOML | ✅ | ❓ | ❓ | ❌ | ❓ |
+| TypeScript | ✅ | ❓ | ❓ | ❌ | ❓ |
+| TypeScript JSX | ✅ | ❓ | ❓ | ❌ | ❓ |
+| YAML | ✅ | ❓ | ❓ | ❌ | ❓ |
 
-The LSP column names the server integrated in Edit. A dash means Edit has no server integration for that mode. Whether a particular capability works depends on the server and project. The [LSP checklist](lsp-checklist.md) tracks individual capabilities.
+## What to verify
 
-Initial inventory as of November 26, 2026, based on the bundled modes, server routing, and existing checks. Update the affected rows when adding a mode, changing integration, finding a regression, or verifying a fix.
+1. **Tree-sitter highlighting** requires a bundled grammar, an active highlight query, and a passing capture check. The [native syntax checks](../Sources/Edit/Checks/SyntaxCheck.swift) cover all listed modes.
+2. **Tokenizer and flicker-free editing** requires language-aware token boundaries and responsive typing without intermediate color flashes. Verify the rendered frames with LSP off and the fresh parse held, per the [editing requirements](features/syntax-highlighting/spec.md#tokenization-during-editing). Ruby, Bash, Swift, and Zig pass those checks. The Zig cases cover numbers, comments, quoted and multiline strings, editing a large file, and typing in ZON.
+3. **Unclosed strings** requires string color from the opening delimiter while typing, through the boundary defined by the language, and a clean transition after closing the string. The native check covers Ruby through EOF and Zig up to the line break, with a ZON capture fixture.
+4. **LSP highlighting** requires Edit to render semantic tokens from the server. [Native LSP highlighting checks](../Sources/Edit/Checks/LSPSemanticHighlightCheck.swift) confirm this for Swift with SourceKit-LSP and Zig with ZLS. C, C++, Objective-C, and Objective-C++ route to SourceKit-LSP with clangd. Their current native test verifies [LSP integration](../Sources/Edit/Checks/SourceKitLSPCheck.swift), and semantic color rendering for those modes is still unverified. The [LSP feature checklist](lsp-checklist.md) tracks individual methods.
+5. **Tree-sitter as a base for LSP** requires Tree-sitter to color roles the grammar can establish, leave ambiguous names to the server, and agree in color where both layers classify the same syntax. The native Zig test checks that division of responsibility. Known gaps include name-based type guesses in [Swift](../resources/syntax/queries/swift.scm#L155) and uppercase-constant guesses in the [shared C-family query](../resources/syntax/queries/c.scm#L3). See the [rules for both layers](features/syntax-highlighting/spec.md#tree-sitter-and-semantic-tokens).
 
-| Language mode | Tree-sitter highlighting | LSP in Edit | Evidence or known gap |
-| --- | --- | --- | --- |
-| C | Unverified | SourceKit-LSP (clangd) | |
-| C++ | Unverified | SourceKit-LSP (clangd) | |
-| Clojure | Unverified | — | Includes EDN. |
-| CSS | Unverified | — | |
-| Erlang | Unverified | — | |
-| Go | Unverified | — | |
-| HTML | Unverified | — | Includes embedded JavaScript and CSS. |
-| JavaScript | Unverified | — | |
-| JavaScript JSX | Unverified | — | |
-| JSON | Unverified | — | Includes JSONC. |
-| Lua | Unverified | — | |
-| Markdown | Unverified | — | Includes inline and fenced code. |
-| Objective-C | Unverified | SourceKit-LSP (clangd) | |
-| Objective-C++ | Unverified | SourceKit-LSP (clangd) | |
-| Python | Unverified | — | |
-| Ruby | Supported | — | Native checks cover `Brewfile`, an empty file, Backspace in a method ending in `?`, and closing or reopening a multiline string. |
-| Rust | Unverified | — | Existing first-frame check covers opening a file. |
-| Shell Script | Supported | — | The native typing check covers Bash commands, comments, and a multiline heredoc. |
-| Solidity | Unverified | — | |
-| Swift | Supported | SourceKit-LSP | Native checks cover opening, Unicode function names, and edits in a large file. |
-| TOML | Unverified | — | |
-| TypeScript | Unverified | — | |
-| TypeScript JSX | Unverified | — | |
-| YAML | Unverified | — | |
-| Zig | Partial verification | ZLS | Native checks cover Tree-sitter string color from the first quote with a held parse, plus [typing and Backspace with ZLS](../Sources/Edit/Checks/LSPSemanticHighlightCheck.swift). Full Tree-sitter-only editing coverage, including ZON, is pending. |
-
-The [native typing check](../Sources/Edit/Checks/SyntaxCheck.swift) runs with `./script/check --only syntax`. For Ruby, Bash, and Swift it holds the background result with LSP off. It covers regular typing, a forced foreground parse timeout, and a timeout of both the foreground parse and the query of the previous tree. It checks every glyph in the edited token before, during, and after the held result, including when a token changes color.
-
-Inventory sources: [bundled modes](../Sources/Edit/SyntaxLanguage.swift), [bundled grammar versions](../resources/syntax/README.md), and [server routing](../Sources/Edit/LanguageServer.swift).
+Update the affected cells when adding a mode, changing highlighting, confirming a defect, or verifying a fix. Keep modes sorted by descending ✅ count, with alphabetical order for ties. Keep evidence beneath the table and leave ❓ until the relevant behavior is verified. The [bundled modes](../Sources/Edit/SyntaxLanguage.swift), [grammar inventory](../resources/syntax/README.md), and [server routing](../Sources/Edit/LanguageServer.swift) define the scope of the checklist.

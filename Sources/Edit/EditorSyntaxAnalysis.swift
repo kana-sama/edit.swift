@@ -187,11 +187,10 @@ private final class IncrementalSyntaxSession {
         }
         if let previous, pending == nil { return previous }
         let parsed: SyntaxEngine.Tree?
-        if language != .zig, previous != nil {
+        if previous != nil {
             parsed = project(source, language: language, length: length, deadline: deadline)?.reparsed(deadline: deadline)
         } else {
-            parsed = SyntaxEngine.Tree(source: source, language: language, previous: previous,
-                                       prefix: pending?.prefix ?? 0, suffix: pending?.suffix ?? 0, deadline: deadline)
+            parsed = SyntaxEngine.Tree(source: source, language: language, previous: nil, deadline: deadline)
         }
         guard let parsed else { return nil }
         worker?.task.cancel()

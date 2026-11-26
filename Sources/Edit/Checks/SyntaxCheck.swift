@@ -87,11 +87,22 @@ enum SyntaxCheck {
             Fixture(filename: "String.zig", language: .zig, prefix: "const value = ", initial: "",
                     suffix: ";\nconst next = 1;\n", typed: ["\"", "h", "e", "l", "l", "o", "\""],
                     color: .string, comment: nil),
+            Fixture(filename: "Number.zig", language: .zig, prefix: "const value = ", initial: "123",
+                    suffix: ";\n", typed: ["4", "5"], color: .number, comment: ("// ", "const value = ".utf16.count)),
+            Fixture(filename: "Comment.zig", language: .zig, prefix: "// ", initial: "café",
+                    suffix: "\nconst value = 1;\n", typed: ["s"], color: .comment, comment: nil),
+            Fixture(filename: "Multiline.zig", language: .zig, prefix: "const value =\n\\\\first\n\\\\", initial: "second",
+                    suffix: "\n;\n", typed: ["s"], color: .string, comment: nil),
+            Fixture(filename: "build.zig.zon", language: .zig, prefix: ".{ .value = ", initial: "0x1",
+                    suffix: " }\n", typed: ["2", "a"], color: .number, comment: nil),
         ]
         if expiresProjectedQuery {
             fixtures.append(Fixture(filename: "Large.swift", language: .swift, prefix: "func ", initial: "café",
                                     suffix: "() {}\n" + String(repeating: "// padding\n", count: 25_000), typed: ["N", "o"],
                                     color: .function, comment: ("// ", 5)))
+            fixtures.append(Fixture(filename: "Large.zig", language: .zig, prefix: "const value = ", initial: "123",
+                                    suffix: ";\n" + String(repeating: "// padding\n", count: 25_000), typed: ["4", "5"],
+                                    color: .number, comment: nil))
         }
 
         for fixture in fixtures {
@@ -269,11 +280,12 @@ enum SyntaxCheck {
                     if expected == .function, (red - green).magnitude < 0.05 && green > blue + 0.12 { colors.insert(.function) }
                     if expected == .comment, green > red + 0.08 && green > blue + 0.11 { colors.insert(.comment) }
                     if expected == .string, red > green + 0.11 && green > blue + 0.04 { colors.insert(.string) }
+                    if expected == .number, green > red + 0.06 && red > blue + 0.03 { colors.insert(.number) }
                     if min(red, green, blue) > 0.7 { colors.insert(.plain) }
                 }
             }
             // The typing fixtures can have a white caret sharing a cell with a colored glyph.
-            if expected == .function || expected == .comment || expected == .string { colors.remove(.plain) }
+            if [.function, .comment, .string, .number].contains(expected) { colors.remove(.plain) }
             guard colors == [expected] else {
                 throw Failure("Glyph \(index + 1) of \(range.length) expected \(expected) paint, found \(colors).")
             }
