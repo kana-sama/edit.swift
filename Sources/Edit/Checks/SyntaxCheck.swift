@@ -434,12 +434,35 @@ enum SyntaxCheck {
                 throw Failure("Highlighting changed the text, selection, dirty state, or undo history.")
             }
         }
+        if !requiresFirstFrame {
+            let editor = document.editor
+            let edit = (source as NSString).range(of: "    let doubled = value * 2", range: NSRange(location: anchor, length: 100))
+            let caret = NSRange(location: edit.upperBound, length: 0)
+            editor.setSelectedRange(caret)
+            let bounds = clip.bounds
+            clip.postsBoundsChangedNotifications = true
+            var moved = false
+            let movement = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification,
+                                                                    object: clip, queue: nil) { _ in
+                MainActor.assumeIsolated { moved = moved || clip.bounds != bounds }
+            }
+            defer { NotificationCenter.default.removeObserver(movement) }
+            editor.doCommand(by: #selector(NSTextView.insertNewline(_:)))
+            try await Task.sleep(for: .milliseconds(100))
+            for _ in 0..<5 {
+                editor.doCommand(by: #selector(NSTextView.deleteBackward(_:)))
+                try await Task.sleep(for: .milliseconds(30))
+            }
+            guard !moved, clip.bounds == bounds, editor.string == source, editor.selectedRange() == caret else {
+                throw Failure("Return and Backspace displaced the highlighted Swift viewport.")
+            }
+        }
         print("Checked color in a \(source.utf8.count)-byte Swift file at \(start.duration(to: .now)).")
         let scrollStart = ContinuousClock.now
         let comment = (source as NSString).range(of: "// comment in a different viewport", options: .backwards)
         guard let manager = document.editor.textLayoutManager else { throw Failure("Missing Swift text layout manager.") }
         document.editor.scrollRangeToVisible(comment)
-        try await waitForColor(at: comment, in: manager)
+        try await waitForColor(at: comment, in: manager, expected: .comment)
         document.editor.scrollRangeToVisible(comment)
         try expectDrawnColor(in: clip, primaryChannel: 1, after: "scrolling to newly visible Swift comments")
         print("Scroll to colored Swift comments: \(scrollStart.duration(to: .now)).")
@@ -466,8 +489,30 @@ enum SyntaxCheck {
         scroll.scrollToVisibleContentOrigin(NSPoint(x: 0, y: 16_000))
         try await waitForPaint(in: clip, language: .plainText)
         let origin = scroll.visibleContentOrigin
+        let bounds = clip.bounds
+        let frame = document.editor.frame
+        clip.postsBoundsChangedNotifications = true
+        let center = NotificationCenter.default
+        var moved = false
+        let movement = center.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: nil) { _ in
+            MainActor.assumeIsolated { moved = moved || clip.bounds != bounds }
+        }
+        var storageChanged = false
+        let storageEdit = center.addObserver(forName: NSTextStorage.didProcessEditingNotification,
+                                             object: document.editor.textStorage, queue: nil) { _ in
+            MainActor.assumeIsolated { storageChanged = true }
+        }
+        defer {
+            center.removeObserver(movement)
+            center.removeObserver(storageEdit)
+        }
+
         document.setSyntaxLanguage(.rust)
         try await waitForPaint(in: clip, language: .rust)
+        for enabled in [false, true] {
+            document.toggleHighlighting(.treeSitter)
+            try await waitForPaint(in: clip, language: enabled ? .rust : .plainText)
+        }
         document.setSyntaxLanguage(.markdown)
         try await waitForPaint(in: clip, language: .markdown)
         document.setSyntaxLanguage(.rust)
@@ -475,8 +520,9 @@ enum SyntaxCheck {
         try await waitForPaint(in: clip, language: .plainText)
         try await Task.sleep(for: .milliseconds(100))
         guard try paintMatches(in: clip, language: .plainText),
-              scroll.visibleContentOrigin == origin, document.editor.string == source else {
-            throw Failure("Changing syntax mode did not preserve the live text viewport.")
+              scroll.visibleContentOrigin == origin, document.editor.frame == frame,
+              document.editor.string == source, !moved, !storageChanged else {
+            throw Failure("Changing syntax colors edited the text storage or moved the live viewport.")
         }
     }
 
@@ -578,19 +624,23 @@ enum SyntaxCheck {
         }
     }
 
-    static func waitForColor(at token: NSRange, in manager: NSTextLayoutManager) async throws {
+    static func renderingForeground(at offset: Int, in manager: NSTextLayoutManager) -> NSColor? {
+        guard offset != NSNotFound, let location = manager.location(manager.documentRange.location, offsetBy: offset) else { return nil }
+        var foreground: NSColor?
+        manager.enumerateRenderingAttributes(from: location, reverse: false) { _, attributes, range in
+            if range.contains(location) { foreground = attributes[.foregroundColor] as? NSColor }
+            return false
+        }
+        return foreground
+    }
+
+    static func waitForColor(at token: NSRange, in manager: NSTextLayoutManager,
+                             expected: SyntaxColor? = nil) async throws {
         let deadline = ContinuousClock.now + .seconds(4)
         repeat {
             manager.textViewportLayoutController.layoutViewport()
-            let origin = manager.documentRange.location
-            guard let start = manager.location(origin, offsetBy: token.location) else { break }
-            var colored = false
-            manager.enumerateRenderingAttributes(from: start, reverse: false) { _, attributes, range in
-                let offset = manager.offset(from: origin, to: range.location)
-                colored = offset == token.location && attributes[.foregroundColor] is NSColor
-                return false
-            }
-            if colored { return }
+            if let foreground = renderingForeground(at: token.location, in: manager),
+               foreground == expected?.nativeColor || (expected == nil && foreground != .textColor) { return }
             try await Task.sleep(for: .milliseconds(10))
         } while ContinuousClock.now < deadline
         throw Failure("TextKit did not render syntax at offset \(token.location).")

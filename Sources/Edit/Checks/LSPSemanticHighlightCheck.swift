@@ -225,8 +225,8 @@ enum LSPSemanticHighlightCheck {
     private static func paintedColor(_ token: String, in document: DocumentWindow) -> NSColor? {
         let editor = document.editor
         let range = (editor.string as NSString).range(of: token)
-        guard range.location != NSNotFound else { return nil }
-        return editor.textStorage?.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? NSColor
+        guard range.location != NSNotFound, let manager = editor.textLayoutManager else { return nil }
+        return SyntaxCheck.renderingForeground(at: range.location, in: manager) ?? .textColor
     }
 
     private static func checkWholeTokens(in app: Edit, document: DocumentWindow, folder: URL,

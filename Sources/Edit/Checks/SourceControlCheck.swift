@@ -414,8 +414,8 @@ enum SourceControlCheck {
         }
         func unchangedCommentColor() -> NSColor? {
             let range = (editor.string as NSString).range(of: "// Unchanged 1")
-            guard range.location != NSNotFound else { return nil }
-            return editor.textStorage?.attribute(.foregroundColor, at: range.upperBound - 1, effectiveRange: nil) as? NSColor
+            guard range.location != NSNotFound, let manager = editor.textLayoutManager else { return nil }
+            return SyntaxCheck.renderingForeground(at: range.upperBound - 1, in: manager)
         }
         try expect(commentTarget.location != NSNotFound, "find the line to comment out between conflict blocks")
         editor.scrollRangeToVisible(commentTarget)

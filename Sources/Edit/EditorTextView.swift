@@ -1318,7 +1318,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         bracketNavigation.sourceDidEdit(changes)
         let affectedColors = syntaxHighlighting?.storageDidEdit(storage, replacements: applyingTextEdits)
         defer {
-            if let affectedColors { syntaxHighlighting?.repaintEditedColors(in: affectedColors, storage: storage) }
+            if let affectedColors { syntaxHighlighting?.invalidateEditedColors(in: affectedColors) }
         }
         if languageInteractionEnabled { languageInteraction.invalidate(afterTextEdit: true) }
         layoutSpacing.sourceDidEdit()
@@ -1347,7 +1347,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func textDidChange(_ notification: Notification) {
-        syntaxHighlighting?.clearEditedRenderingColors()
+        syntaxHighlighting?.refreshEditedRenderingColors()
         if renameDraft != nil {
             textLayoutManager?.textViewportLayoutController.layoutViewport()
             renameShade?.update()

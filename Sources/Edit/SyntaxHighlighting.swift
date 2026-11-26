@@ -23,7 +23,6 @@ final class SyntaxHighlighting {
     private var treeSitterEnabled = true
     private var treeLanguage: SyntaxLanguage?
     private var hasRenderingColors = false
-    private var backedColorRange: NSRange?
     private var editedRenderingColorRange: NSRange?
     private var wordDeletions: Set<NSRange> = []
     private var task: Task<Void, Never>?
@@ -53,6 +52,9 @@ final class SyntaxHighlighting {
     init(editor: EditorTextView) {
         self.editor = editor
         editor.syntaxHighlighting = self
+        editor.textLayoutManager?.renderingAttributesValidator = { [weak self] manager, fragment in
+            self?.paint(fragment.rangeInElement, using: manager)
+        }
     }
 
     deinit {
@@ -272,7 +274,7 @@ final class SyntaxHighlighting {
             self.treeSpans = spans
             self.syntaxCoveredRange = range
             // Refresh the installed viewport. Scrolling will request its own slice of this tree.
-            self.refreshColors(renderingRange: range)
+            self.refreshColors()
         }
         if treeSpans.isEmpty {
             progressTask = Task { [weak self] in
@@ -293,7 +295,6 @@ final class SyntaxHighlighting {
         treeSpans = []
         semanticSpans = []
         clearColors()
-        updateBackingColors(in: nil)
     }
 
     func install(_ snapshot: SyntaxSnapshot) {
@@ -359,39 +360,30 @@ final class SyntaxHighlighting {
     }
 
     private func repaintLayers() {
-        if hasRenderingColors || backedColorRange != nil || !treeSpans.isEmpty || !semanticSpans.isEmpty {
+        if hasRenderingColors || !treeSpans.isEmpty || !semanticSpans.isEmpty {
             refreshColors()
         }
     }
 
-    func refreshColors(renderingRange: NSRange? = nil) {
+    func refreshColors() {
         guard let editor, let manager = editor.textLayoutManager else { return }
-        if let renderingRange {
-            clearEditedRenderingColors()
-            if let backedColorRange, NSIntersectionRange(backedColorRange, renderingRange) != backedColorRange,
-               let previous = editor.textRange(backedColorRange, in: manager) {
-                manager.removeRenderingAttribute(.foregroundColor, for: previous)
-            }
-            if let target = editor.textRange(renderingRange, in: manager) {
-                manager.removeRenderingAttribute(.foregroundColor, for: target)
-            }
+        clearColors()
+        let visible = manager.textViewportLayoutController.viewportRange
+        if let visible {
+            paint(visible, using: manager)
         } else {
-            clearColors()
+            manager.invalidateRenderingAttributes(for: manager.documentRange)
         }
-        let viewport = manager.textViewportLayoutController
-        let scroll = editor.enclosingScrollView
-        let origin = scroll?.visibleContentOrigin
 
-        // Rendering attributes color newly drawn fragments. A native attribute edit also tells
-        // TextKit to redraw glyphs that are already on screen, even if the viewport is stationary.
-        if viewport.viewportRange == nil { viewport.layoutViewport() }
-        let prefix = NSRange(location: 0, length: min(editor.textStorage?.length ?? 0, 4_096))
-        updateBackingColors(in: visibleRange() ?? prefix)
-        viewport.layoutViewport()
-        if let scroll, let origin, scroll.scrollToVisibleContentOrigin(origin) {
-            viewport.layoutViewport()
+        // NSTextView can back each visible text fragment with a separate view.
+        // An invalidation of the editor alone does not dirty those views.
+        func invalidateVisibleViews(_ view: NSView) {
+            let rect = view.visibleRect
+            guard !rect.isEmpty else { return }
+            view.setNeedsDisplay(rect)
+            for child in view.subviews { invalidateVisibleViews(child) }
         }
-        editor.setNeedsDisplay(editor.visibleRect)
+        invalidateVisibleViews(editor)
     }
 
     func prepareForDeletions(in ranges: [NSRange]) {
@@ -420,17 +412,16 @@ final class SyntaxHighlighting {
         let replacedLength = edit.length - delta
         guard edit.location != NSNotFound, edit.location <= storage.length,
               edit.length <= storage.length - edit.location, replacedLength >= 0 else {
-            backedColorRange = NSRange(location: 0, length: storage.length)
             treeSpans = []
             semanticSpans = []
-            return backedColorRange
+            return NSRange(location: 0, length: storage.length)
         }
 
         let edits = replacements?.map { EditorTextChange(range: $0.range, delta: $0.lengthChange) }
             ?? [EditorTextChange(range: NSRange(location: edit.location, length: replacedLength), delta: delta)]
         var invalidated = invalidatedColorRange(after: edits, lengthChange: delta)
         let firstEditRange = treeLanguage.flatMap { SyntaxEngine.supportsIncremental($0) ? edit : nil }
-        if let visible = visibleRange() ?? backedColorRange ?? firstEditRange {
+        if let visible = visibleRange() ?? firstEditRange {
             let typingText = editor?.hasMarkedText() == false && editor?.isRenamingSymbol == false
                 ? storage.mutableString : nil
             let previousTree = treeSpans
@@ -457,16 +448,6 @@ final class SyntaxHighlighting {
         } else {
             treeSpans = []
             semanticSpans = []
-        }
-        guard let backed = backedColorRange else { return invalidated }
-        let beforeEnd = edit.location + replacedLength
-        if beforeEnd < backed.location {
-            backedColorRange = NSRange(location: backed.location + delta, length: backed.length)
-        } else if edit.location <= backed.upperBound {
-            // Edits touching the cached colors can inherit them across the replaced range.
-            let start = min(backed.location, edit.location)
-            let end = max(edit.upperBound, backed.upperBound + delta)
-            backedColorRange = NSRange(location: start, length: end - start)
         }
         return invalidated
     }
@@ -797,71 +778,22 @@ final class SyntaxHighlighting {
         return SyntaxSpan(start: span.start, end: end, color: span.color, provisional: true)
     }
 
-    func repaintEditedColors(in affected: NSRange, storage: NSTextStorage) {
-        let range = NSIntersectionRange(affected, NSRange(location: 0, length: storage.length))
+    func invalidateEditedColors(in affected: NSRange) {
+        let range = NSIntersectionRange(affected, NSRange(location: 0, length: editor?.textStorage?.length ?? 0))
         guard range.length > 0 else { return }
-        if hasRenderingColors {
-            editedRenderingColorRange = editedRenderingColorRange.map { NSUnionRange($0, range) } ?? range
-        }
-        // Set only foregrounds during storage processing so inherited color is removed
-        // before TextKit lays out the edit. Keep any surviving colors in the same update.
-        applyForegroundColors(in: range, to: storage)
+        editedRenderingColorRange = editedRenderingColorRange.map { NSUnionRange($0, range) } ?? range
     }
 
-    func clearEditedRenderingColors() {
+    func refreshEditedRenderingColors() {
         guard let edited = editedRenderingColorRange, let editor, let storage = editor.textStorage,
               let manager = editor.textLayoutManager else { return }
         editedRenderingColorRange = nil
         let range = NSIntersectionRange(edited, NSRange(location: 0, length: storage.length))
         if range.length > 0, let target = editor.textRange(range, in: manager) {
-            // TextKit has rebased its rendering attributes into the new text by this point.
-            manager.removeRenderingAttribute(.foregroundColor, for: target)
+            manager.invalidateRenderingAttributes(for: target)
+            paint(target, using: manager)
+            editor.setNeedsDisplay(editor.visibleRect)
         }
-    }
-
-    private func updateBackingColors(in visible: NSRange?) {
-        guard let editor, !editor.hasMarkedText(), let storage = editor.textStorage,
-              let content = editor.textLayoutManager?.textContentManager else { return }
-        let document = NSRange(location: 0, length: storage.length)
-        let previous = backedColorRange.map { NSIntersectionRange($0, document) }
-        let visible = visible.map { NSIntersectionRange($0, document) }
-        guard (previous?.length ?? 0) > 0 || (visible?.length ?? 0) > 0 else {
-            backedColorRange = nil
-            return
-        }
-        var typingAttributes = editor.typingAttributes
-        typingAttributes[.foregroundColor] = NSColor.textColor
-        var hasColors = false
-        content.performEditingTransaction {
-            storage.beginEditing()
-            if let previous, previous.length > 0, previous != visible {
-                storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: previous)
-            }
-            if let visible, visible.length > 0 {
-                hasColors = applyForegroundColors(in: visible, to: storage)
-            }
-            storage.endEditing()
-        }
-        editor.typingAttributes = typingAttributes
-        backedColorRange = hasColors ? visible : nil
-    }
-
-    @discardableResult
-    private func applyForegroundColors(in range: NSRange, to storage: NSTextStorage) -> Bool {
-        let colors = colors(in: range)
-        let conflictColors = editor?.jjConflictDecorations?.foregrounds(in: range) ?? []
-        let link = editor?.languageDefinitionLinkRange.map { NSIntersectionRange(range, $0) }
-        storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: range)
-        for span in colors {
-            storage.addAttribute(.foregroundColor, value: span.color.nativeColor, range: NSIntersectionRange(range, span.range))
-        }
-        for (part, color) in conflictColors {
-            storage.addAttribute(.foregroundColor, value: color, range: part)
-        }
-        if let link, link.length > 0 {
-            storage.addAttribute(.foregroundColor, value: NSColor.linkColor, range: link)
-        }
-        return !colors.isEmpty || !conflictColors.isEmpty || (link?.length ?? 0) > 0
     }
 
     private func visibleRange() -> NSRange? {
@@ -871,7 +803,7 @@ final class SyntaxHighlighting {
     }
 
     func prepareForDrawing(_ fragment: NSTextLayoutFragment, using manager: NSTextLayoutManager) {
-        clearEditedRenderingColors()
+        refreshEditedRenderingColors()
         paint(fragment.rangeInElement, using: manager)
     }
 
@@ -887,14 +819,18 @@ final class SyntaxHighlighting {
 
     private func paint(_ range: NSTextRange, using manager: NSTextLayoutManager) {
         let link = editor?.languageDefinitionLinkRange
-        guard !treeSpans.isEmpty || !semanticSpans.isEmpty ||
-                editor?.jjConflictDecorations?.hasHighlights == true || link != nil else { return }
         let origin = manager.documentRange.location
         let start = manager.offset(from: origin, to: range.location)
         let end = start + manager.offset(from: range.location, to: range.endLocation)
         guard start < end else { return }
 
         let visible = NSRange(location: start, length: end - start)
+        // An already rendered fragment can retain the previous foreground. A
+        // plain run has an explicit color even when both highlighting layers are off.
+        if editor?.syntaxLanguage != .plainText {
+            manager.addRenderingAttribute(.foregroundColor, value: NSColor.textColor, for: range)
+            hasRenderingColors = true
+        }
         func paintColor(_ color: NSColor, in span: NSRange) {
             guard let from = manager.location(range.location, offsetBy: span.location - start),
                   let to = manager.location(from, offsetBy: span.length),
@@ -920,7 +856,7 @@ final class SyntaxHighlighting {
     private func colors(in range: NSRange) -> [SyntaxSpan] {
         let local = spans(overlapping: range, from: treeSpans)
         let semantic = spans(overlapping: range, from: semanticSpans)
-        // Both TextKit drawing paths apply foregrounds in order.
+        // Semantic foregrounds override Tree-sitter foregrounds.
         return Array(local) + semantic
     }
 
