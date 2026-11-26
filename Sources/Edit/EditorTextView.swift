@@ -1540,6 +1540,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
 #if EDIT_AGENT_CHECKS
     var languageHoverWindowForCheck: NSWindow? { languageInteraction.hoverWindow }
+    var languageHoverPointerScreenXForCheck: CGFloat? { languageInteraction.hoverPointerScreenXForCheck }
 
     func observeEditorUnhideForCheck(_ action: (() -> Void)?) {
         (enclosingScrollView as? EditorScrollView)?.onUnhideForCheck = action

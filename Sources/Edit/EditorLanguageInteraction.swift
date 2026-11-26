@@ -20,6 +20,7 @@ final class EditorLanguageInteraction: NSObject {
     private var probeTask: Task<Void, Never>?
     private var hoverTarget: HoverTarget?
     private var hoverTask: Task<Void, Never>?
+    private var diagnosticHoverX: CGFloat?
     private var popover: EditorHoverPopover?
     private var popoverTarget: HoverTarget?
     private var dismissTask: Task<Void, Never>?
@@ -27,6 +28,9 @@ final class EditorLanguageInteraction: NSObject {
 
     private(set) var linkRange: NSRange?
     var hoverWindow: NSWindow? { popover?.window }
+#if EDIT_AGENT_CHECKS
+    var hoverPointerScreenXForCheck: CGFloat? { popover?.pointerScreenXForCheck }
+#endif
 
     init(editor: EditorTextView) { self.editor = editor }
 
@@ -89,7 +93,7 @@ final class EditorLanguageInteraction: NSObject {
         cancelProbe()
         setLink(nil)
         if !editor.diagnostics.isEmpty, let point = editorPoint(at: location), let diagnostic = editor.diagnosticHover(at: point) {
-            updateDiagnosticHover(diagnostic)
+            updateDiagnosticHover(diagnostic, pointerX: point.x)
         } else {
             updateHover(for: hit(at: location))
         }
@@ -293,15 +297,21 @@ final class EditorLanguageInteraction: NSObject {
         }
     }
 
-    private func updateDiagnosticHover(_ diagnostic: EditorDiagnosticHover) {
+    private func updateDiagnosticHover(_ diagnostic: EditorDiagnosticHover, pointerX: CGFloat) {
         let key = HoverTarget.diagnostic(diagnostic)
+        if hoverTarget == key, hoverTask != nil {
+            diagnosticHoverX = pointerX
+            return
+        }
         guard beginHover(key) else { return }
+        diagnosticHoverX = pointerX
         hoverTask = Task { [weak self] in
             do { try await Task.sleep(for: Self.hoverDelay) } catch { return }
-            guard let self, hoverTarget == key else { return }
+            guard let self, hoverTarget == key, let x = diagnosticHoverX else { return }
             hoverTask = nil
+            diagnosticHoverX = nil
             closePopover(restoreFocus: true)
-            show(.diagnostics(diagnostic.messages), at: diagnostic.anchor)
+            show(.diagnostics(diagnostic.messages), at: diagnostic.anchor, pointerX: x)
             if popover != nil { popoverTarget = key }
         }
     }
@@ -324,6 +334,7 @@ final class EditorLanguageInteraction: NSObject {
         hoverTask?.cancel()
         hoverTask = nil
         hoverTarget = nil
+        diagnosticHoverX = nil
     }
 
     private func closePopover(restoreFocus: Bool) {
@@ -370,12 +381,16 @@ final class EditorLanguageInteraction: NSObject {
         show(presentation, at: rect, symbol: fallback)
     }
 
-    private func show(_ presentation: EditorHoverPresentation, at rect: NSRect, symbol: NSRange? = nil) {
+    private func show(_ presentation: EditorHoverPresentation, at rect: NSRect, symbol: NSRange? = nil,
+                      pointerX: CGFloat? = nil) {
         guard let editor, let window = editor.window else { return }
         let windowRect = editor.convert(rect.intersection(editor.visibleRect), to: nil)
         let anchor = window.convertToScreen(windowRect.intersection(window.contentLayoutRect))
+        let screenX = pointerX.map { x in
+            window.convertPoint(toScreen: editor.convert(NSPoint(x: x, y: rect.midY), to: nil)).x
+        }
         popover = EditorHoverPopover(
-            owner: window, appearance: editor.effectiveAppearance, anchor: anchor, presentation: presentation,
+            owner: window, appearance: editor.effectiveAppearance, anchor: anchor, presentation: presentation, pointerX: screenX,
             onNavigate: { [weak self] location in
                 guard let self, let symbol, popoverTarget == .symbol(symbol),
                       let follow = self.editor?.languageFollowHoverLink else { return }

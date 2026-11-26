@@ -275,7 +275,7 @@ struct EditorHoverPlacement {
     let frame: NSRect
     let shape: AnchoredPopoverShape
 
-    init?(anchor: NSRect, contentSize: NSSize, screen: NSRect) {
+    init?(anchor: NSRect, contentSize: NSSize, screen: NSRect, pointerX: CGFloat? = nil) {
         let available = screen.insetBy(dx: Self.screenInset, dy: Self.screenInset)
         let width = contentSize.width
         let pointerHeight = AnchoredPopoverShape.pointerHeight
@@ -286,15 +286,16 @@ struct EditorHoverPlacement {
         let height = min(wantedHeight, above ? spaceAbove : spaceBelow)
         guard height > pointerHeight else { return nil }
 
-        // Use the screen margin near an edge so the tip can stay over the symbol.
+        // Use the screen margin near an edge so the tip stays over the anchor.
+        let anchorX = min(max(pointerX ?? anchor.midX, anchor.minX), anchor.maxX)
         let pointerInset = AnchoredPopoverShape.pointerEdgeInset
-        let minX = min(available.minX, max(screen.minX, anchor.midX - pointerInset))
-        let maxX = max(available.maxX, min(screen.maxX, anchor.midX + pointerInset))
-        let x = min(max(anchor.midX - width / 2, minX), maxX - width)
+        let minX = min(available.minX, max(screen.minX, anchorX - pointerInset))
+        let maxX = max(available.maxX, min(screen.maxX, anchorX + pointerInset))
+        let x = min(max(anchorX - width / 2, minX), maxX - width)
         let y = above ? anchor.maxY + Self.gap : anchor.minY - Self.gap - height
         frame = NSRect(x: x, y: y, width: width, height: height)
         shape = AnchoredPopoverShape(contentSize: NSSize(width: width, height: height - pointerHeight),
-                                     pointerX: anchor.midX - x, pointsDown: above)
+                                     pointerX: anchorX - x, pointsDown: above)
     }
 }
 
@@ -307,17 +308,24 @@ final class EditorHoverPopover {
     var window: NSWindow { panel }
     var frame: NSRect { panel.frame }
     var isSelecting: Bool { content.selecting }
+#if EDIT_AGENT_CHECKS
+    let pointerScreenXForCheck: CGFloat
+#endif
 
-    init?(owner: NSWindow, appearance: NSAppearance, anchor: NSRect, presentation: EditorHoverPresentation,
+    init?(owner: NSWindow, appearance: NSAppearance, anchor: NSRect, presentation: EditorHoverPresentation, pointerX: CGFloat? = nil,
           onNavigate: @escaping (LSPLocation) -> Void, onEnter: @escaping () -> Void, onExit: @escaping () -> Void) {
         guard !anchor.isEmpty, let screen = owner.screen ?? NSScreen.main else { return nil }
         let screenFrame = screen.visibleFrame
         let maximumWidth = min(presentation.maximumWidth, screenFrame.width - 2 * EditorHoverPlacement.screenInset)
         guard let layout = EditorHoverLayout(presentation, maximumWidth: maximumWidth),
-              let placement = EditorHoverPlacement(anchor: anchor, contentSize: layout.view.frame.size, screen: screenFrame)
+              let placement = EditorHoverPlacement(anchor: anchor, contentSize: layout.view.frame.size,
+                                                  screen: screenFrame, pointerX: pointerX)
         else { return nil }
 
         self.anchor = anchor
+#if EDIT_AGENT_CHECKS
+        pointerScreenXForCheck = placement.frame.minX + placement.shape.pointerX
+#endif
         panel = HoverPanel(contentRect: placement.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         content = HoverSurface(placement: placement, layout: layout,
                                onNavigate: onNavigate, onEnter: onEnter, onExit: onExit)

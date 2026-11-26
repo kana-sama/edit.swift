@@ -131,8 +131,7 @@ extension EditorTextView {
         for row in diagnosticRows(in: visible) where row.bounds.minY <= point.y && point.y < row.bounds.maxY {
             let lens = messageFrame(for: row).intersection(visibleRect)
             if lens.contains(point) {
-                let anchor = NSRect(x: lens.minX + min(7, lens.width / 2), y: lens.minY, width: 1, height: lens.height)
-                return EditorDiagnosticHover(anchor: anchor, messages: row.message.messages)
+                return EditorDiagnosticHover(anchor: lens, messages: row.message.messages)
             }
         }
 

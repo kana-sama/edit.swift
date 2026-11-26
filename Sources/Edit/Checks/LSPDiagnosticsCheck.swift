@@ -28,7 +28,7 @@ enum LSPDiagnosticsCheck {
         let clean = root.appending(path: "Clean.txt")
         let zigText = "pub const label = \"🧩\"; pub const value = );\r\n"
         let swiftText = "let label = \"🧩\"; let value = missingName\r\n"
-        let swiftParserText = "func parserFixture() {\n    let let = 1; let \n}\n"
+        let swiftParserText = "func parserFixture() {\n" + String(repeating: " ", count: 32) + "let let = 1; let \n}\n"
         let odinText = "package fixture\nmain :: proc() { x := ) }\n"
         let cText = "int value(void) { return missing_name; }\n"
         try zigText.write(to: zig, atomically: true, encoding: .utf8)
@@ -214,11 +214,33 @@ enum LSPDiagnosticsCheck {
             guard let view = editor.languageHoverWindowForCheck?.contentView else { return false }
             return hoverRows(in: view) == [nested.message]
         }
-        try movePointer(to: NSPoint(x: row.maxX + gap + 8, y: row.midY), in: document)
+        try checkHoverPointer(at: lastGlyphPoint, in: document, target: "underlined code")
+        let scroll = document.scrollView
+        let origin = scroll.visibleContentOrigin
+        defer { scroll.scrollToVisibleContentOrigin(origin) }
+        try require(scroll.scrollToVisibleContentOrigin(NSPoint(x: origin.x + 100, y: origin.y)),
+                    "scroll horizontally before hovering the long Swift diagnostic lens")
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        let lensX = row.maxX + gap
+        let entry = NSPoint(x: lensX + 8, y: row.midY)
+        let pointer = NSPoint(x: lensX + 180, y: row.midY)
+        try require(editor.diagnosticHover(at: pointer)?.messages == errors.map(\.message),
+                    "reach the middle of the lens at the scrolled position")
+        try movePointer(to: entry, in: document)
+        try movePointer(to: pointer, in: document)
         try await wait("show all Swift parser errors from the lens") {
             guard let view = editor.languageHoverWindowForCheck?.contentView else { return false }
             return hoverRows(in: view) == errors.map(\.message)
         }
+        try checkHoverPointer(at: pointer, in: document, target: "scrolled lens")
+    }
+
+    private static func checkHoverPointer(at point: NSPoint, in document: DocumentWindow, target: String) throws {
+        let editor = document.editor
+        let screenX = document.window.convertPoint(toScreen: editor.convert(point, to: nil)).x
+        let tipX = editor.languageHoverPointerScreenXForCheck
+        try require(tipX.map { abs($0 - screenX) < 1 } == true,
+                    "point the card at the latest hover position on the \(target) (tip \(String(describing: tipX)), pointer \(screenX))")
     }
 
     private static func movePointer(to point: NSPoint, in document: DocumentWindow) throws {
