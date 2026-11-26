@@ -654,8 +654,8 @@ final class LanguageServerConnection: @unchecked Sendable {
                     updateProgress(notification.params)
                 } else if method == "textDocument/publishDiagnostics", let document, let index,
                           let notification = try? decoder.decode(Parameters<LSPPublishedDiagnostics>.self, from: data),
-                          let ranges = notification.params.errors(for: document, index: index) {
-                    diagnosticUpdates.yield(LSPDocumentErrors(revision: document.revision, ranges: ranges))
+                          let errors = notification.params.errors(for: document, index: index) {
+                    diagnosticUpdates.yield(LSPDocumentErrors(revision: document.revision, errors: errors))
                 }
                 return
             }

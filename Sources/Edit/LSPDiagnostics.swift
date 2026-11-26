@@ -4,6 +4,7 @@ struct LSPPublishedDiagnostics: Decodable {
     struct Diagnostic: Decodable {
         let range: LSPRange
         let severity: Int?
+        let message: String?
     }
 
     let url: URL
@@ -19,19 +20,29 @@ struct LSPPublishedDiagnostics: Decodable {
         diagnostics = try values.decode([Diagnostic].self, forKey: .diagnostics)
     }
 
-    func errors(for document: LSPDocument, index: LSPTextIndex) -> [NSRange]? {
+    func errors(for document: LSPDocument, index: LSPTextIndex) -> [LSPError]? {
         guard version == nil || version == document.revision, let documentURL = document.url, url.isFileURL,
               url.standardizedFileURL == documentURL.standardizedFileURL
                 || FileBuffer.canonicalURL(url) == FileBuffer.canonicalURL(documentURL) else { return nil }
-        let ranges: [NSRange] = diagnostics.compactMap { diagnostic in
-            guard diagnostic.severity == nil || diagnostic.severity == 1 else { return nil }
-            return index.nsRange(diagnostic.range)
+        var seen: Set<LSPError> = []
+        let errors: [LSPError] = diagnostics.compactMap { diagnostic in
+            guard diagnostic.severity == nil || diagnostic.severity == 1,
+                  let range = index.nsRange(diagnostic.range),
+                  let lineEnd = index.lineContentEnd(at: diagnostic.range.start.line) else { return nil }
+            let error = LSPError(range: range, lineEnd: lineEnd, message: diagnostic.message ?? "")
+            return seen.insert(error).inserted ? error : nil
         }
-        return Array(Set(ranges)).sorted { ($0.location, $0.length) < ($1.location, $1.length) }
+        return errors.sorted { $0.range.location < $1.range.location }
     }
+}
+
+struct LSPError: Hashable, Sendable {
+    let range: NSRange
+    let lineEnd: Int
+    let message: String
 }
 
 struct LSPDocumentErrors: Sendable {
     let revision: Int
-    let ranges: [NSRange]
+    let errors: [LSPError]
 }

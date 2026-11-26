@@ -54,12 +54,35 @@ enum LSPDiagnosticsCheck {
                     "keep diagnostics with semantic colors off")
         let rects = editor.diagnosticRects()
         try require(!rects.isEmpty, "lay out the underline in the native editor")
-        try require(try hasRedPixels(in: rects, document: document), "paint the underline in the native editor")
+        let underlines = rects.map { NSRect(x: $0.minX, y: $0.maxY - 4, width: $0.width, height: 4) }
+        try require(try hasRedPixels(in: underlines, document: document), "paint the underline in the native editor")
+        let end = (zigText as NSString).range(of: "\r\n").location
+        guard let row = editor.laidOutLineBounds(at: end) else { throw Failure(detail: "find the diagnosed row") }
+        let messageArea = NSRect(x: row.maxX + 22, y: row.minY, width: 100, height: row.height)
+        try require(try hasRedPixels(in: [messageArea], document: document), "paint the message background after the code")
+        try require(try hasPixels(in: [messageArea], document: document) { pixel in
+            max(pixel.redComponent, pixel.greenComponent, pixel.blueComponent)
+                - min(pixel.redComponent, pixel.greenComponent, pixel.blueComponent) < 0.2
+        }, "paint message glyphs over the tinted background")
+        try require(editor.string == zigText, "keep diagnostic text outside the source buffer")
         try capture(document.window)
+        guard let move = NSEvent.mouseEvent(
+            with: .mouseMoved, location: editor.convert(NSPoint(x: row.minX + 2, y: row.midY), to: nil),
+            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: document.window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: 0, pressure: 0
+        ) else { throw Failure(detail: "create a pointer event over the start of the line") }
+        editor.mouseMoved(with: move)
+        let message = editor.diagnostics.first { $0.range.location == zigError.location }?.message
+        try await wait("show the full error when hovering away from the underline on its row") {
+            guard let message, !message.isEmpty, let view = editor.languageHoverWindowForCheck?.contentView else { return false }
+            return hoverContains(message, in: view)
+        }
 
         editor.insertText("1", replacementRange: zigError)
         try require(editor.diagnosticRanges.isEmpty, "clear the old revision immediately after the edit")
-        try require(try !hasRedPixels(in: rects, document: document), "remove the underline from the native editor")
+        try require(editor.languageHoverWindowForCheck == nil, "dismiss the obsolete diagnostic card")
+        try require(try !hasRedPixels(in: underlines + [messageArea], document: document),
+                    "remove the underline and inline message from the native editor")
         editor.undoManager?.undo()
         try require(editor.string == zigText, "restore the errored source with Undo")
         try await wait("repaint the ZLS error after Undo") { !editor.diagnosticRanges.isEmpty }
@@ -115,40 +138,51 @@ enum LSPDiagnosticsCheck {
         let url = URL(filePath: "/tmp/Diagnostics.swift")
         let document = LSPDocument(url: url, language: .swift, text: text, revision: 7)
         let index = LSPTextIndex(text)
-        let error = #"{"range":{"start":{"line":0,"character":3},"end":{"line":0,"character":6}},"severity":1}"#
+        let error = #"{"range":{"start":{"line":0,"character":3},"end":{"line":0,"character":6}},"severity":1,"message":"First error"}"#
+        let second = error.replacingOccurrences(of: "First error", with: "Second error")
         let warning = #"{"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":5}},"severity":2}"#
         let invalid = #"{"range":{"start":{"line":0,"character":1},"end":{"line":0,"character":2}}}"#
-        func decode(_ uri: URL, _ version: Int?, _ items: [String]) throws -> [NSRange]? {
+        func decode(_ uri: URL, _ version: Int?, _ items: [String]) throws -> [LSPError]? {
             let versionField = version.map { "\"version\":\($0)," } ?? ""
             let json = "{\"uri\":\"\(uri.absoluteString)\",\(versionField)\"diagnostics\":[\(items.joined(separator: ","))]}"
             return try JSONDecoder().decode(LSPPublishedDiagnostics.self, from: Data(json.utf8))
                 .errors(for: document, index: index)
         }
-        try require(try decode(url, 7, [warning, error, error, invalid]) == [NSRange(location: 3, length: 3)],
-                    "filter warnings and invalid UTF-16 ranges and deduplicate errors")
+        let errors = try decode(url, 7, [warning, error, error, second, invalid])
+        try require(errors?.map(\.message) == ["First error", "Second error"]
+                    && errors?.allSatisfy { $0.range == NSRange(location: 3, length: 3) && $0.lineEnd == 6 } == true,
+                    "filter invalid reports, deduplicate repeated messages and keep distinct errors at the same location")
         try require(try decode(url, 6, [error]) == nil && decode(url.appendingPathExtension("old"), 7, [error]) == nil,
                     "ignore both stale versions and other documents")
         try require(try decode(url, nil, [error])?.count == 1 && decode(url, 7, []) == [],
                     "accept unversioned reports and an empty replacement")
     }
 
+    private static func hoverContains(_ message: String, in view: NSView) -> Bool {
+        if let text = view as? NSTextView, text.isSelectable && text.string.contains(message) { return true }
+        return view.subviews.contains { hoverContains(message, in: $0) }
+    }
+
     private static func hasRedPixels(in rects: [NSRect], document: DocumentWindow) throws -> Bool {
+        try hasPixels(in: rects, document: document) { pixel in
+            pixel.redComponent > pixel.greenComponent + 0.15 && pixel.redComponent > pixel.blueComponent + 0.15
+        }
+    }
+
+    private static func hasPixels(in rects: [NSRect], document: DocumentWindow, matching: (NSColor) -> Bool) throws -> Bool {
         let clip = document.scrollView.contentView
         let bounds = clip.bounds
         guard let bitmap = clip.bitmapImageRepForCachingDisplay(in: bounds) else { throw Failure(detail: "capture editor pixels") }
         clip.cacheDisplay(in: bounds, to: bitmap)
         let scale = CGFloat(bitmap.pixelsWide) / bounds.width
         for rect in rects {
-            let stripe = NSRect(x: rect.minX, y: rect.maxY - 4, width: rect.width, height: 4)
-            let frame = clip.convert(stripe, from: document.editor)
+            let frame = clip.convert(rect, from: document.editor)
             let x = Int(((frame.minX - bounds.minX) * scale).rounded(.down))..<Int(((frame.maxX - bounds.minX) * scale).rounded(.up))
             let y = Int(((frame.minY - bounds.minY) * scale).rounded(.down))..<Int(((frame.maxY - bounds.minY) * scale).rounded(.up))
             for row in y where (0..<bitmap.pixelsHigh).contains(row) {
                 for column in x where (0..<bitmap.pixelsWide).contains(column) {
                     guard let pixel = bitmap.colorAt(x: column, y: row)?.usingColorSpace(.sRGB) else { continue }
-                    if pixel.redComponent > pixel.greenComponent + 0.15 && pixel.redComponent > pixel.blueComponent + 0.15 {
-                        return true
-                    }
+                    if matching(pixel) { return true }
                 }
             }
         }

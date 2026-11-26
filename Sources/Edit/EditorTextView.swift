@@ -1632,18 +1632,19 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         super.drawBackground(in: dirtyRect)
         jjInlineDiff?.drawBackground(in: dirtyRect.intersection(bounds))
         jjConflictDecorations?.draw(in: dirtyRect.intersection(bounds))
+        drawDiagnostics(in: dirtyRect)
         occurrenceHighlighting.draw(in: dirtyRect)
         bracketNavigation.draw(in: dirtyRect)
         onDrawFindHighlights?(dirtyRect)
         if renameDraft == nil { drawSecondarySelections(in: dirtyRect) }
-        drawDiagnostics(in: dirtyRect)
     }
 
-    private(set) var diagnosticRanges: [NSRange] = []
+    private(set) var diagnostics: [LSPError] = []
 
-    func setDiagnosticRanges(_ ranges: [NSRange]) {
-        guard ranges != diagnosticRanges else { return }
-        diagnosticRanges = ranges
+    func setDiagnostics(_ errors: [LSPError]) {
+        guard errors != diagnostics else { return }
+        diagnostics = errors
+        languageInteraction.diagnosticsDidChange()
         setNeedsDisplay(visibleRect)
     }
 }

@@ -200,10 +200,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         document.updateLSPHighlighting()
         updateDiagnostics()
         if sourceURL == nil || session.state != .ready { symbolRename.cancel() }
-        let canInteract = sourceURL != nil && (session.supportsDefinition || session.supportsHover
-            || session.supportsReferences || session.supportsRename)
-        document.editor.languageInteractionEnabled = canInteract
-        if !canInteract { cancelLookup() }
+        if !document.editor.languageInteractionEnabled { cancelLookup() }
         document.editor.occurrenceHighlighting.setSemanticWordHighlightsEnabled(session.supportsDocumentHighlight)
         updateServerStatus()
         app.languageServerStateDidChange(in: document)
@@ -212,7 +209,9 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     private func updateDiagnostics() {
         let isCurrent = sourceURL != nil && sourceURL == document.fileURL
             && sourceLanguage == document.resolvedSyntaxLanguage && document.editor.conflictEdits.isEmpty
-        document.editor.setDiagnosticRanges(isCurrent ? session.diagnosticRanges : [])
+        document.editor.setDiagnostics(isCurrent ? session.diagnostics : [])
+        document.editor.languageInteractionEnabled = sourceURL != nil && (session.supportsDefinition || session.supportsHover
+            || session.supportsReferences || session.supportsRename || !document.editor.diagnostics.isEmpty)
     }
 
     private func updateServerStatus() {

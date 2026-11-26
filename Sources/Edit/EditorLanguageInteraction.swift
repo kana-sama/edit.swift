@@ -7,16 +7,21 @@ final class EditorLanguageInteraction: NSObject {
         let word: NSRange
     }
 
+    private enum HoverTarget: Equatable {
+        case symbol(NSRange)
+        case diagnostic(EditorDiagnosticHover)
+    }
+
     private static let hoverDelay: Duration = .milliseconds(300)
 
     private weak var editor: EditorTextView?
     private var eventMonitor: Any?
     private var probeWord: NSRange?
     private var probeTask: Task<Void, Never>?
-    private var hoverWord: NSRange?
+    private var hoverTarget: HoverTarget?
     private var hoverTask: Task<Void, Never>?
     private var popover: EditorHoverPopover?
-    private var popoverWord: NSRange?
+    private var popoverTarget: HoverTarget?
     private var dismissTask: Task<Void, Never>?
     private var feedbackTask: Task<Void, Never>?
 
@@ -74,16 +79,26 @@ final class EditorLanguageInteraction: NSObject {
 
     func track(at location: NSPoint, modifiers: NSEvent.ModifierFlags) {
         guard let editor, editor.languageInteractionEnabled, !editor.isRenamingSymbol else { return }
-        let target = hit(at: location)
-        if Self.isCommandLink(modifiers) {
+        let commandLink = Self.isCommandLink(modifiers)
+        if commandLink {
+            let target = hit(at: location)
             updateProbe(for: target)
-        } else {
-            cancelProbe()
-            setLink(nil)
+            updateHover(for: target)
+            return
         }
-        updateHover(for: target)
+        cancelProbe()
+        setLink(nil)
+        if !editor.diagnostics.isEmpty, let point = editorPoint(at: location), let diagnostic = editor.diagnosticHover(at: point) {
+            updateDiagnosticHover(diagnostic)
+        } else {
+            updateHover(for: hit(at: location))
+        }
     }
 
+    func diagnosticsDidChange() {
+        if case .diagnostic = hoverTarget { cancelHoverRequest() }
+        if case .diagnostic = popoverTarget { closePopover(restoreFocus: true) }
+    }
     func pointerExited() {
         cancelProbe()
         setLink(nil)
@@ -174,14 +189,19 @@ final class EditorLanguageInteraction: NSObject {
         modifiers.intersection([.command, .control, .option, .shift]) == .command
     }
 
-    func hit(at location: NSPoint) -> Hit? {
-        guard let editor, let window = editor.window, let source = editor.textStorage?.mutableString,
-              source.length > 0, !editor.hasMarkedText(), !editor.isHiddenOrHasHiddenAncestor,
+    private func editorPoint(at location: NSPoint) -> NSPoint? {
+        guard let editor, let window = editor.window, !editor.hasMarkedText(), !editor.isHiddenOrHasHiddenAncestor,
               window.attachedSheet == nil, window.contentLayoutRect.contains(location) else { return nil }
         let point = editor.convert(location, from: nil)
         guard editor.visibleRect.contains(point), let content = window.contentView,
               let foreground = content.hitTest(content.superview?.convert(location, from: nil) ?? location),
               foreground === editor || foreground.isDescendant(of: editor) else { return nil }
+        return point
+    }
+
+    func hit(at location: NSPoint) -> Hit? {
+        guard let editor, let point = editorPoint(at: location), let source = editor.textStorage?.mutableString,
+              source.length > 0 else { return nil }
         let offset = editor.characterIndexForInsertion(at: point)
         guard offset <= source.length else { return nil }
         let line = LineEditing.line(at: offset, in: source)
@@ -246,20 +266,13 @@ final class EditorLanguageInteraction: NSObject {
     }
 
     private func updateHover(for target: Hit?) {
-        if popoverWord != nil, target?.word == popoverWord {
-            dismissTask?.cancel()
-            dismissTask = nil
-            return
-        }
         guard let target, let request = editor?.languageHover else {
             cancelHoverRequest()
             scheduleDeparture()
             return
         }
-        guard hoverWord != target.word else { return }
-        cancelHoverRequest()
-        scheduleDeparture()
-        hoverWord = target.word
+        let key = HoverTarget.symbol(target.word)
+        guard beginHover(key) else { return }
         hoverTask = Task { [weak self] in
             do { try await Task.sleep(for: Self.hoverDelay) } catch { return }
             let response = await request(target.offset, target.word)
@@ -272,18 +285,45 @@ final class EditorLanguageInteraction: NSObject {
                 response.presentation
             }
             let content = await withTaskCancellationHandler { await parse.value } onCancel: { parse.cancel() }
-            guard !Task.isCancelled, let self, hoverWord == target.word else { return }
+            guard !Task.isCancelled, let self, hoverTarget == key else { return }
             hoverTask = nil
             closePopover(restoreFocus: true)
             show(content, at: response.range ?? target.word, fallback: target.word)
-            if popover != nil { popoverWord = target.word }
+            if popover != nil { popoverTarget = key }
         }
+    }
+
+    private func updateDiagnosticHover(_ diagnostic: EditorDiagnosticHover) {
+        let key = HoverTarget.diagnostic(diagnostic)
+        guard beginHover(key) else { return }
+        hoverTask = Task { [weak self] in
+            do { try await Task.sleep(for: Self.hoverDelay) } catch { return }
+            guard let self, hoverTarget == key else { return }
+            hoverTask = nil
+            closePopover(restoreFocus: true)
+            show(EditorHoverPresentation(text: diagnostic.text, isMarkdown: false), at: diagnostic.anchor)
+            if popover != nil { popoverTarget = key }
+        }
+    }
+
+    private func beginHover(_ target: HoverTarget) -> Bool {
+        if popoverTarget == target {
+            cancelHoverRequest()
+            dismissTask?.cancel()
+            dismissTask = nil
+            return false
+        }
+        guard hoverTarget != target else { return false }
+        cancelHoverRequest()
+        scheduleDeparture()
+        hoverTarget = target
+        return true
     }
 
     private func cancelHoverRequest() {
         hoverTask?.cancel()
         hoverTask = nil
-        hoverWord = nil
+        hoverTarget = nil
     }
 
     private func closePopover(restoreFocus: Bool) {
@@ -293,7 +333,7 @@ final class EditorLanguageInteraction: NSObject {
         feedbackTask = nil
         let previous = popover
         popover = nil
-        popoverWord = nil
+        popoverTarget = nil
         if let previous {
             NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: previous.window)
             previous.close(restoreFocus: restoreFocus)
@@ -321,20 +361,26 @@ final class EditorLanguageInteraction: NSObject {
     }
 
     private func show(_ presentation: EditorHoverPresentation, at range: NSRange, fallback: NSRange) {
-        guard let editor, let window = editor.window else { return }
+        guard let editor else { return }
         let original = editor.highlightRects(for: [fallback]).first
         let preferred = editor.highlightRects(for: [range]).first { rect in
             original.map { $0.intersects(rect) } ?? true
         }
         guard let rect = preferred ?? original else { return }
+        show(presentation, at: rect, symbol: fallback)
+    }
+
+    private func show(_ presentation: EditorHoverPresentation, at rect: NSRect, symbol: NSRange? = nil) {
+        guard let editor, let window = editor.window else { return }
         let windowRect = editor.convert(rect.intersection(editor.visibleRect), to: nil)
         let anchor = window.convertToScreen(windowRect.intersection(window.contentLayoutRect))
         popover = EditorHoverPopover(
             owner: window, appearance: editor.effectiveAppearance, anchor: anchor, presentation: presentation,
             onNavigate: { [weak self] location in
-                guard let self, popoverWord == fallback, let follow = self.editor?.languageFollowHoverLink else { return }
+                guard let self, let symbol, popoverTarget == .symbol(symbol),
+                      let follow = self.editor?.languageFollowHoverLink else { return }
                 _ = dismissHover()
-                follow(location, fallback)
+                follow(location, symbol)
             },
             onEnter: { [weak self] in self?.pointerEnteredPopover() },
             onExit: { [weak self] in self?.scheduleDeparture() }

@@ -64,6 +64,10 @@ struct LSPTextIndex: @unchecked Sendable {
                         end: LSPPosition(line: lastLine, character: text.length - lineStarts[lastLine]))
     }
 
+    func lineContentEnd(at line: Int) -> Int? {
+        lineEnds.indices.contains(line) ? lineEnds[line] : nil
+    }
+
     func position(at offset: Int) -> LSPPosition? {
         guard (0...text.length).contains(offset), isScalarBoundary(offset) else { return nil }
         let line = lineContaining(offset)

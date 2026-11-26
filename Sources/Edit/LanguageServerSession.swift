@@ -29,9 +29,9 @@ final class LanguageServerSession {
     var onProgressChange: (() -> Void)?
     var onSemanticTokensRefresh: (() -> Void)?
     var onDiagnosticsChange: (() -> Void)?
-    var diagnosticRanges: [NSRange] {
+    var diagnostics: [LSPError] {
         guard isReady, documentErrors?.revision == revision else { return [] }
-        return documentErrors?.ranges ?? []
+        return documentErrors?.errors ?? []
     }
     private(set) var semanticTokensRefresh = 0
     private(set) var progress: [LSPWorkDoneActivity] = []
