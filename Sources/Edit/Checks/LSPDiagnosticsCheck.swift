@@ -58,15 +58,12 @@ enum LSPDiagnosticsCheck {
         try require(try hasRedPixels(in: underlines, document: document), "paint the underline in the native editor")
         let end = (zigText as NSString).range(of: "\r\n").location
         guard let row = editor.laidOutLineBounds(at: end) else { throw Failure(detail: "find the diagnosed row") }
-        let messageArea = NSRect(x: row.maxX + 35, y: row.minY, width: 100, height: row.height)
-        try require(try hasRedPixels(in: [messageArea], document: document), "paint the message background after the code")
-        let iconArea = NSRect(x: row.maxX + 17, y: row.midY - 5, width: 12, height: 10)
-        try require(try hasPixels(in: [iconArea], document: document, matching: isLabel),
-                    "draw the error icon at the vertical center of the row")
-        try require(try hasPixels(in: [messageArea], document: document) { pixel in
-            max(pixel.redComponent, pixel.greenComponent, pixel.blueComponent)
-                - min(pixel.redComponent, pixel.greenComponent, pixel.blueComponent) < 0.2
-        }, "paint message glyphs over the tinted background")
+        let gap = ("0000" as NSString).size(withAttributes: [.font: editor.font ?? EditorTextView.defaultFont]).width
+        let messageArea = NSRect(x: row.maxX + gap, y: row.minY, width: 100, height: row.height)
+        try require(try hasRedPixels(in: [messageArea], document: document), "paint the message glyphs red")
+        let band = NSRect(x: row.maxX + 2, y: row.minY + 2, width: gap + 80, height: 1)
+        try require(try !hasPixels(in: [band], document: document, matching: { !isLineTint($0) }),
+                    "carry the same faint tint from the code through the inline message")
         try require(editor.string == zigText, "keep diagnostic text outside the source buffer")
 
         guard let first = editor.diagnostics.first(where: { $0.range.location == zigError.location }) else {
@@ -221,7 +218,7 @@ enum LSPDiagnosticsCheck {
         for distance: CGFloat in [32, 120, 48] {
             scroll.scrollToVisibleContentOrigin(NSPoint(x: origin.x + distance, y: origin.y))
             editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
-            try require(try !hasPixels(in: [acrossEdge], document: document, matching: { !isRed($0) }),
+            try require(try !hasPixels(in: [acrossEdge], document: document, matching: { !isLineTint($0) }),
                         "paint continuously across an earlier viewport edge after scrolling")
         }
 
@@ -229,7 +226,7 @@ enum LSPDiagnosticsCheck {
         scroll.scrollToVisibleContentOrigin(NSPoint(x: documentEnd, y: origin.y))
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
         let tail = NSRect(x: documentEnd - 48, y: row.midY - 4, width: 36, height: 8)
-        try require(try hasPixels(in: [tail], document: document, matching: isLabel),
+        try require(try hasRedPixels(in: [tail], document: document),
                     "scroll far enough to draw the last glyphs of the message")
 
         editor.setWordWrap(true)
@@ -256,10 +253,9 @@ enum LSPDiagnosticsCheck {
         pixel.redComponent > pixel.greenComponent + 0.15 && pixel.redComponent > pixel.blueComponent + 0.15
     }
 
-    private static func isLabel(_ pixel: NSColor) -> Bool {
-        let highest = max(pixel.redComponent, pixel.greenComponent, pixel.blueComponent)
-        let lowest = min(pixel.redComponent, pixel.greenComponent, pixel.blueComponent)
-        return highest - lowest < 0.15 && (lowest > 0.6 || highest < 0.18)
+    private static func isLineTint(_ pixel: NSColor) -> Bool {
+        let tint = pixel.redComponent - max(pixel.greenComponent, pixel.blueComponent)
+        return (0.04...0.13).contains(tint)
     }
 
     private static func hasPixels(in rects: [NSRect], document: DocumentWindow, matching: (NSColor) -> Bool) throws -> Bool {
