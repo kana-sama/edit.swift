@@ -73,7 +73,7 @@ struct LSPSemanticTokens: Sendable {
         "modification", "documentation", "defaultLibrary"
     ]
 
-    func spans(in index: LSPTextIndex, legend: LSPSemanticTokenOptions.Legend) throws -> [SyntaxSpan] {
+    func spans(in index: LSPTextIndex, legend: LSPSemanticTokenOptions.Legend, wholeWords: Bool = false) throws -> [SyntaxSpan] {
         guard data.count.isMultiple(of: 5) else { throw LSPFailure.invalidMessage }
         let colors = legend.tokenTypes.map(Self.color)
         let readonly = legend.tokenModifiers.firstIndex(of: "readonly")
@@ -94,6 +94,13 @@ struct LSPSemanticTokens: Sendable {
                 ? .property : colors[type]
             guard let color, let range = index.semanticTokenRange(line: line, column: column, length: Int(data[i + 2])),
                   range.location >= lastEnd else { continue }
+            if wholeWords {
+                switch color {
+                case .plain, .keyword, .control, .type, .function, .property:
+                    if index.splitsBareWord(at: range.location) || index.splitsBareWord(at: range.upperBound) { continue }
+                default: break
+                }
+            }
             spans.append(SyntaxSpan(start: range.location, end: range.upperBound, color: color))
             lastEnd = range.upperBound
         }

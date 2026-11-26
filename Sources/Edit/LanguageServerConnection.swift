@@ -341,7 +341,7 @@ final class LanguageServerConnection: @unchecked Sendable {
                 guard let index = self.index, self.document?.revision == snapshot.revision else { throw CancellationError() }
                 return index
             }
-            return (tokens, try tokens.spans(in: index, legend: options.legend))
+            return (tokens, try tokens.spans(in: index, legend: options.legend, wholeWords: snapshot.language == .zig))
         }
 
         if let priorID {

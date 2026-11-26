@@ -10,6 +10,7 @@ enum LSPSemanticHighlightCheck {
     static func run(in app: Edit, document: DocumentWindow, captureWindow: (NSWindow, String) throws -> Void,
                     captureControl: (NSView, String) throws -> Void) async throws {
         try checkTokenData()
+        try await checkIncrementalZigTree()
         let files = FileManager.default
         let root = FileBuffer.canonicalURL(files.temporaryDirectory.appending(path: "LSP highlighting \(UUID())"))
         let otherRoot = root.appending(path: "other")
@@ -231,19 +232,20 @@ enum LSPSemanticHighlightCheck {
             highlighting.beforeInstallSemanticTokensForCheck = nil
         }
         let title = window.title
+        let incrementalBefore = editor.syntaxAnalysis.zigReusesForCheck
         editor.setSelectedRange(NSRange(location: prefix.upperBound, length: 0))
         editor.insertText("r", replacementRange: NSRange(location: NSNotFound, length: 0))
         let keyword = NSRange(location: prefix.location, length: 5)
-        try require(highlighting.semanticSpansForCheck.contains { $0.range == keyword && $0.color == .plain && $0.provisional },
-                    "keep the old variable color over all five glyphs while both results are pending")
+        try require(editor.syntaxAnalysis.zigReusesForCheck > incrementalBefore,
+                    "parse the completed keyword using the previous Zig tree before drawing")
         try require(hasSemanticColor("Other", in: document), "preserve an unaffected semantic token beside the edit")
-        try requireGlyphColors(in: keyword, document: document, expected: .plain)
+        try requireGlyphColors(in: keyword, document: document, expected: .keyword)
         try capture(window, "keyword-first")
         try await wait("hold both results for the new keyword") { heldTree > 0 && heldSemantic > 0 }
-        try requireGlyphColors(in: keyword, document: document, expected: .plain)
+        try requireGlyphColors(in: keyword, document: document, expected: .keyword)
         holdTree = false
-        try await wait("use Tree-sitter's keyword color while the semantic update is held") {
-            highlighting.treeSpansForCheck.contains { $0.range == keyword && $0.color == .keyword }
+        try await wait("install the viewport colors while the semantic update is held") {
+            heldTree == 0 && highlighting.zigCoveredRangeForCheck != nil
         }
         try require(window.title == title, "preserve the title while the response is held")
         try require(!highlighting.semanticSpansForCheck.contains { NSIntersectionRange($0.range, keyword).length > 0 },
@@ -260,11 +262,16 @@ enum LSPSemanticHighlightCheck {
         for (index, character) in ".Hello".enumerated() {
             holdTree = true
             holdSemantic = true
+            let immediateBefore = highlighting.zigImmediateUpdatesForCheck
             editor.insertText(String(character), replacementRange: NSRange(location: NSNotFound, length: 0))
             let tag = NSRange(location: dot.upperBound, length: index)
             let suffix = String(".Hello".prefix(index + 1))
             let typed = NSRange(location: dot.location, length: suffix.utf16.count)
             try require((editor.string as NSString).substring(with: typed) == suffix, "type \(suffix) at the end of the keyword")
+            if index == 1 {
+                try require(highlighting.zigImmediateUpdatesForCheck > immediateBefore,
+                            "query the edited line from the incremental tree before drawing the first H")
+            }
 
             func verifyFrame(_ phase: String) throws {
                 try requireGlyphColors(in: keyword, document: document, expected: .keyword)
@@ -300,12 +307,15 @@ enum LSPSemanticHighlightCheck {
         for (index, deletion) in [4, 2, 0].enumerated() {
             holdTree = true
             holdSemantic = true
+            let immediateBefore = highlighting.zigImmediateUpdatesForCheck
             editor.setSelectedRange(NSRange(location: hello.location + deletion + 1, length: 0))
             editor.deleteBackward(nil)
             let tag = NSRange(location: hello.location, length: hello.length - index - 1)
             let shortened = ["Hell", "Hel", "el"][index]
             try require((editor.string as NSString).substring(with: tag) == shortened,
                         "shorten the error tag to \(shortened)")
+            try require(highlighting.zigImmediateUpdatesForCheck > immediateBefore,
+                        "query the shortened error tag from the updated tree before painting it")
             try requireGlyphColors(in: tag, document: document, expected: .type)
             try require(highlighting.treeSpansForCheck.contains { $0.range == tag && $0.color == .type && !$0.provisional },
                         "classify the whole shortened tag \(shortened) locally before either response")
@@ -437,10 +447,13 @@ enum LSPSemanticHighlightCheck {
         try requireGlyphColors(in: returnKeyword, document: document, expected: .keyword)
         holdTree = true
         holdSemantic = true
+        let immediateBefore = highlighting.zigImmediateUpdatesForCheck
         editor.setSelectedRange(NSRange(location: returnKeyword.upperBound, length: 0))
         editor.deleteBackward(nil)
         let shortenedReturn = NSRange(location: returnKeyword.location, length: returnKeyword.length - 1)
         try require((editor.string as NSString).substring(with: shortenedReturn) == "retur", "shorten the return keyword")
+        try require(highlighting.zigImmediateUpdatesForCheck > immediateBefore,
+                    "remove the old keyword color with a query on the updated tree")
         try requireGlyphColors(in: shortenedReturn, document: document, expected: .plain)
         try require(!highlighting.semanticSpansForCheck.contains { NSIntersectionRange($0.range, shortenedReturn).length > 0 },
                     "drop the stale semantic keyword on the first frame")
@@ -458,6 +471,28 @@ enum LSPSemanticHighlightCheck {
         try await wait("install Tree-sitter for retur") { heldTree == 0 }
         try requireGlyphColors(in: shortenedReturn, document: document, expected: .plain)
         try capture(window, "backspace-retur-settled")
+    }
+
+    private static func checkIncrementalZigTree() async throws {
+        let analysis = EditorSyntaxAnalysis()
+        let source = NSMutableString(string: "const label = \"🧩\";\r\ntest \"typing\" {\r\n    return error.Hello;\r\n}\r\n")
+        guard await analysis.zigTree(in: source as String) != nil else { throw Failure(detail: "parse the initial Zig tree") }
+        for (original, replacement) in [("🧩", "🚀!"), ("return", "retur"), ("Hello", "Hell")] {
+            let range = source.range(of: original)
+            source.replaceCharacters(in: range, with: replacement)
+            let length = replacement.utf16.count
+            analysis.recordZigEdit(NSRange(location: range.location, length: length), delta: length - range.length, length: source.length)
+        }
+        let tag = source.range(of: "Hell")
+        let insideTag = NSRange(location: tag.location + 1, length: 1)
+        guard let updated = await analysis.zigTree(in: source as String), let ranged = updated.highlights(in: insideTag),
+              let full = SyntaxEngine.spans(in: source as String, language: .zig) else {
+            throw Failure(detail: "resolve a range after several UTF-16 edits against the same Zig tree")
+        }
+        let expected = full.filter { NSIntersectionRange($0.range, insideTag).length > 0 }
+        try require(analysis.zigReusesForCheck == 1 && ranged.count == 1 && expected.count == 1
+                    && ranged[0].range == tag && ranged[0].range == expected[0].range && ranged[0].color == expected[0].color,
+                    "reuse the original tree across CRLF and emoji edits and return the whole token across query boundaries")
     }
 
     private static func requireGlyphColors(in range: NSRange, document: DocumentWindow, expected: SyntaxColor) throws {
@@ -527,11 +562,22 @@ enum LSPSemanticHighlightCheck {
             !drawing.needsFullSemanticTokensForCheck && hasSemanticColor("Offscreen", in: document)
         }
         let editor = document.editor
+        let sourceLength = source.utf16.count
+        let initialKeyword = (source as NSString).range(of: "struct")
+        try await wait("query syntax for the initial viewport without querying the whole large buffer") {
+            guard let covered = drawing.zigCoveredRangeForCheck else { return false }
+            return NSIntersectionRange(covered, initialKeyword) == initialKeyword && covered.length < sourceLength / 4
+        }
         let keyword = (source as NSString).range(of: "struct", options: .backwards)
         document.window.appearance = NSAppearance(named: .darkAqua)
         editor.setSelectedRange(NSRange(location: keyword.upperBound, length: 0))
         editor.revealNavigationSelection(editor.selectedRange())
         editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        try await wait("query Tree-sitter colors for the viewport after scrolling") {
+            guard let covered = drawing.zigCoveredRangeForCheck else { return false }
+            return NSIntersectionRange(covered, keyword) == keyword && covered.length < sourceLength / 4
+                && drawing.treeSpansForCheck.contains { $0.range == keyword && $0.color == .keyword }
+        }
         try capture(document.window, "whole-token-scrolled-before")
         try requireGlyphColors(in: keyword, document: document, expected: .keyword)
         editor.insertText("s", replacementRange: NSRange(location: NSNotFound, length: 0))
@@ -572,6 +618,10 @@ enum LSPSemanticHighlightCheck {
         let spans = try delta.tokens(updating: tokens).spans(in: index, legend: legend)
         try require(spans.count == 2 && spans[0].start == 3 && spans[0].end == 6 && spans[0].color == .type && spans[1].color == .plain,
                     "apply unordered deltas with UTF-16 and CRLF")
+        let errorTags = LSPSemanticTokens(resultID: nil, data: [0, 6, 2, 0, 0, 1, 6, 4, 0, 0])
+        let wholeTags = try errorTags.spans(in: LSPTextIndex("error.Hello\r\nerror.Hell"), legend: legend, wholeWords: true)
+        try require(wholeTags.count == 1 && wholeTags.first?.range == NSRange(location: 19, length: 4),
+                    "reject a partial semantic range without losing the next whole token")
         let invalid = LSPSemanticTokens.Response(resultId: "invalid", data: nil, edits: [
             .init(start: 0, deleteCount: 11, data: nil)
         ])

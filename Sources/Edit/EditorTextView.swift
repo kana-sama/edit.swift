@@ -1312,6 +1312,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         let changes = applyingTextEdits?.map { EditorTextChange(range: $0.range, delta: $0.lengthChange) }
             ?? (edited.location != NSNotFound && edited.length >= delta
                 ? [EditorTextChange(range: NSRange(location: edited.location, length: edited.length - delta), delta: delta)] : [])
+        if syntaxLanguage == .zig { syntaxAnalysis.recordZigEdit(edited, delta: delta, length: storage.length) }
         bracketNavigation.sourceDidEdit(changes)
         let affectedColors = syntaxHighlighting?.storageDidEdit(storage, replacements: applyingTextEdits)
         defer {
@@ -1435,6 +1436,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             guard let self else { return }
             self.refreshCurrentLine()
             self.bracketNavigation.refresh()
+            self.syntaxHighlighting?.refreshZigViewport()
             self.occurrenceHighlighting.layout()
             self.jjInlineDiff?.layout()
             self.jjConflictDecorations?.layout()

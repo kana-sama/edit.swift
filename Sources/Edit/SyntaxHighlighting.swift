@@ -27,6 +27,8 @@ final class SyntaxHighlighting {
     private var progressTask: Task<Void, Never>?
     private var activity: NSTitlebarAccessoryViewController?
     private var generation = 0
+    private var zigCoveredRange: NSRange?
+    private var zigRequestedRange: NSRange?
     private var semanticRequest: SemanticRequest?
     private var lastSemanticColors: (request: SemanticRequest, spans: [SyntaxSpan])?
     private var semanticTask: Task<Void, Never>?
@@ -37,6 +39,8 @@ final class SyntaxHighlighting {
     var treeSpansForCheck: [SyntaxSpan] { treeSpans }
     var semanticSpansForCheck: [SyntaxSpan] { semanticSpans }
     var needsFullSemanticTokensForCheck: Bool { lastSemanticColors == nil }
+    var zigCoveredRangeForCheck: NSRange? { zigCoveredRange }
+    private(set) var zigImmediateUpdatesForCheck = 0
     var beforeInstallTreeTokensForCheck: (() async -> Void)?
     var beforeInstallSemanticTokensForCheck: (() async -> Void)?
 #endif
@@ -69,6 +73,7 @@ final class SyntaxHighlighting {
             updateTreeSitter(language: language, immediate: true, keepingColors: true)
         } else {
             cancelPending()
+            zigCoveredRange = nil
             displayTree([])
         }
     }
@@ -170,7 +175,18 @@ final class SyntaxHighlighting {
     }
 
     private func updateTreeSitter(language: SyntaxLanguage, immediate: Bool, keepingColors: Bool) {
+        if language == .zig && SyntaxEngine.supportsIncrementalZig {
+            if treeLanguage != language {
+                cancelPending()
+                treeLanguage = language
+                zigCoveredRange = nil
+                if !keepingColors { displayTree([]) }
+            }
+            refreshZigViewport()
+            return
+        }
         cancelPending()
+        zigCoveredRange = nil
         let request = generation
         treeLanguage = language
         if immediate && !keepingColors { displayTree([]) }
@@ -213,12 +229,60 @@ final class SyntaxHighlighting {
         }
     }
 
+    func refreshZigViewport() {
+        guard treeSitterEnabled, treeLanguage == .zig, SyntaxEngine.supportsIncrementalZig,
+              let editor, editor.syntaxLanguage == .zig, let text = editor.textStorage?.mutableString else { return }
+        let document = NSRange(location: 0, length: text.length)
+        let visible = NSIntersectionRange(visibleRange() ?? NSRange(location: 0, length: min(4_096, text.length)), document)
+        guard visible.length > 0,
+              zigCoveredRange.map({ NSIntersectionRange($0, visible) }) != visible,
+              zigRequestedRange.map({ NSIntersectionRange($0, visible) }) != visible else { return }
+
+        cancelPending()
+        let start = max(0, visible.location - 512)
+        let end = min(text.length, visible.upperBound + 512)
+        let range = text.lineRange(for: NSRange(location: start, length: end - start))
+        zigRequestedRange = range
+        let request = generation
+        let source = editor.string
+        task = Task { [weak self, weak editor] in
+            defer {
+                if let self, self.generation == request {
+                    self.task = nil
+                    self.zigRequestedRange = nil
+                    self.stopProgress()
+                }
+            }
+            guard let editor, let tree = await editor.syntaxAnalysis.zigTree(in: source), !Task.isCancelled else { return }
+            let work = Task.detached(priority: .userInitiated) { tree.highlights(in: range) }
+            let spans = await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
+#if EDIT_AGENT_CHECKS
+            if spans != nil { await self?.beforeInstallTreeTokensForCheck?() }
+#endif
+            guard let self, !Task.isCancelled, self.generation == request, let spans else { return }
+            if self.semanticSpansAreStale { self.discardOverriddenColors(in: &self.semanticSpans, with: spans) }
+            self.treeSpansAreStale = false
+            self.treeSpans = spans
+            self.zigCoveredRange = range
+            // Refresh the installed viewport. Scrolling will request its own slice of this tree.
+            self.refreshColors(renderingRange: range)
+        }
+        if treeSpans.isEmpty {
+            progressTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(150))
+                guard let self, !Task.isCancelled, self.generation == request else { return }
+                self.showProgress()
+            }
+        }
+    }
+
     func prepareForBufferReplacement() {
         cancelSemanticTokens()
         lastSemanticColors = nil
         cancelPending()
         editor?.syntaxAnalysis.cancel()
         treeLanguage = nil
+        zigCoveredRange = nil
         treeSpans = []
         semanticSpans = []
         clearColors()
@@ -231,10 +295,12 @@ final class SyntaxHighlighting {
         cancelPending()
         treeSitterEnabled = true
         treeLanguage = snapshot.language
+        zigCoveredRange = snapshot.zigTree.map { NSRange(location: 0, length: $0.length) }
         semanticSpans = []
         displayTree(snapshot.analysis.spans)
         if snapshot.coversDocument, let editor {
-            editor.syntaxAnalysis.install(snapshot.analysis, in: editor.string, language: snapshot.language)
+            editor.syntaxAnalysis.install(snapshot.analysis, in: editor.string, language: snapshot.language, zigTree: snapshot.zigTree)
+            if snapshot.language == .zig { refreshZigViewport() }
         } else {
             updateTreeSitter(language: snapshot.language, immediate: true, keepingColors: true)
         }
@@ -245,6 +311,7 @@ final class SyntaxHighlighting {
         lastSemanticColors = nil
         cancelPending()
         editor?.syntaxAnalysis.cancel()
+        zigCoveredRange = nil
         if clearingColors {
             treeSpans = []
             semanticSpans = []
@@ -256,6 +323,7 @@ final class SyntaxHighlighting {
         generation &+= 1
         task?.cancel()
         task = nil
+        zigRequestedRange = nil
         stopProgress()
     }
 
@@ -289,9 +357,20 @@ final class SyntaxHighlighting {
         }
     }
 
-    func refreshColors() {
-        clearColors()
+    func refreshColors(renderingRange: NSRange? = nil) {
         guard let editor, let manager = editor.textLayoutManager else { return }
+        if let renderingRange {
+            clearEditedRenderingColors()
+            if let backedColorRange, NSIntersectionRange(backedColorRange, renderingRange) != backedColorRange,
+               let previous = editor.textRange(backedColorRange, in: manager) {
+                manager.removeRenderingAttribute(.foregroundColor, for: previous)
+            }
+            if let target = editor.textRange(renderingRange, in: manager) {
+                manager.removeRenderingAttribute(.foregroundColor, for: target)
+            }
+        } else {
+            clearColors()
+        }
         let viewport = manager.textViewportLayoutController
         let scroll = editor.enclosingScrollView
         let origin = scroll?.visibleContentOrigin
@@ -325,6 +404,10 @@ final class SyntaxHighlighting {
         lastSemanticColors = nil
         treeSpansAreStale = true
         semanticSpansAreStale = true
+        if treeLanguage == .zig && SyntaxEngine.supportsIncrementalZig {
+            cancelPending()
+            zigCoveredRange = nil
+        }
         let edit = storage.editedRange
         let delta = storage.changeInLength
         let replacedLength = edit.length - delta
@@ -342,12 +425,13 @@ final class SyntaxHighlighting {
         if let visible = visibleRange() ?? backedColorRange {
             let typingText = editor?.hasMarkedText() == false && editor?.isRenamingSymbol == false
                 ? storage.mutableString : nil
-            let localWord: SyntaxSpan? = if let typingText, edits.count == 1, let edit = edits.first {
-                classifyZigWord(after: edit, in: typingText)
-            } else { nil }
+            let previousTree = treeSpans
             treeSpans = remappedSpans(treeSpans, in: visible, after: edits, typingText: typingText)
             semanticSpans = remappedSpans(semanticSpans, in: visible, after: edits, typingText: typingText)
-            if let localWord {
+            if let typingText, edits.count == 1, let range = refreshZigEdit(edit, in: typingText) {
+                invalidated = invalidated.map { NSUnionRange($0, range) } ?? range
+            } else if let typingText, edits.count == 1, let edit = edits.first,
+                      let localWord = classifyZigWord(after: edit, previous: previousTree, in: typingText) {
                 let cached = spans(overlapping: localWord.range, from: treeSpans)
                 if cached.isEmpty || cached.first?.range == localWord.range {
                     treeSpans.replaceSubrange(cached.startIndex..<cached.endIndex, with: [localWord])
@@ -373,7 +457,32 @@ final class SyntaxHighlighting {
         return invalidated
     }
 
-    private func classifyZigWord(after edit: EditorTextChange, in text: NSString) -> SyntaxSpan? {
+    private func refreshZigEdit(_ edit: NSRange, in text: NSString) -> NSRange? {
+        guard treeSitterEnabled, treeLanguage == .zig, let editor, editor.syntaxLanguage == .zig,
+              text.length > 0, SyntaxEngine.supportsIncrementalZig else { return nil }
+        let line = LineEditing.line(at: edit.location, in: text).contentRange
+        guard edit.upperBound <= line.upperBound, line.length <= 2_048 else { return nil }
+        let deadline = ContinuousClock.now + .milliseconds(2)
+        guard let tree = editor.syntaxAnalysis.zigTreeForEdit(in: editor.string, deadline: deadline),
+              let fresh = tree.highlights(in: line, deadline: deadline) else { return nil }
+        let previous = spans(overlapping: line, from: treeSpans)
+        guard previous.allSatisfy({ $0.start >= line.location && $0.end <= line.upperBound }),
+              fresh.allSatisfy({ $0.start >= line.location && $0.end <= line.upperBound }) else { return nil }
+
+        let start = max(0, edit.location - 1)
+        let touched = NSRange(location: start, length: min(edit.upperBound + 1, text.length) - start)
+        let affectedSyntax = Array(spans(overlapping: touched, from: treeSpans)) + spans(overlapping: touched, from: fresh)
+        semanticSpans.removeAll { cached in
+            affectedSyntax.contains { NSIntersectionRange(cached.range, $0.range).length > 0 }
+        }
+        treeSpans.replaceSubrange(previous.startIndex..<previous.endIndex, with: fresh)
+#if EDIT_AGENT_CHECKS
+        zigImmediateUpdatesForCheck += 1
+#endif
+        return line
+    }
+
+    private func classifyZigWord(after edit: EditorTextChange, previous: [SyntaxSpan], in text: NSString) -> SyntaxSpan? {
         guard treeSitterEnabled, treeLanguage == .zig, editor?.syntaxLanguage == .zig else { return nil }
         let word: SyntaxSpan
         if edit.range.length == 0 && edit.delta > 0 {
@@ -382,7 +491,7 @@ final class SyntaxHighlighting {
         } else {
             let deletion = edit.range
             guard edit.replacementLength == 0, wordDeletions.contains(deletion),
-                  let previous = spans(overlapping: deletion, from: treeSpans).first,
+                  let previous = spans(overlapping: deletion, from: previous).first,
                   deletion.location >= previous.start, deletion.upperBound <= previous.end else { return nil }
             // The control color also paints labels whose syntax can depend on another line.
             word = SyntaxSpan(start: previous.start, end: previous.end - deletion.length, color: previous.color)

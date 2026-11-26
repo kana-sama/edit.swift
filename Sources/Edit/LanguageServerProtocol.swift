@@ -102,6 +102,13 @@ struct LSPTextIndex: @unchecked Sendable {
         return NSRange(location: start, length: end - start)
     }
 
+    func splitsBareWord(at offset: Int) -> Bool {
+        func isWord(_ unit: UInt16) -> Bool {
+            (65...90).contains(unit) || (97...122).contains(unit) || (48...57).contains(unit) || unit == 95
+        }
+        return offset > 0 && offset < text.length && isWord(text.character(at: offset - 1)) && isWord(text.character(at: offset))
+    }
+
     private func offset(of position: LSPPosition, clampingColumns: Bool) -> Int? {
         guard lineStarts.indices.contains(position.line), position.character >= 0 else { return nil }
         let start = lineStarts[position.line]
