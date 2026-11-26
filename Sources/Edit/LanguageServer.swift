@@ -1,12 +1,13 @@
 import Foundation
 
 enum LanguageServer: CaseIterable, Sendable {
-    case zig, sourceKit
+    case zig, sourceKit, odin
 
     var name: String {
         switch self {
         case .zig: "ZLS"
         case .sourceKit: "SourceKit-LSP"
+        case .odin: "OLS"
         }
     }
 
@@ -14,6 +15,7 @@ enum LanguageServer: CaseIterable, Sendable {
         switch self {
         case .zig: "zls"
         case .sourceKit: "sourcekit-lsp"
+        case .odin: "ols"
         }
     }
 
@@ -21,6 +23,7 @@ enum LanguageServer: CaseIterable, Sendable {
         switch language {
         case .zig: self = .zig
         case .swift, .c, .cpp, .objectiveC, .objectiveCPP: self = .sourceKit
+        case .odin: self = .odin
         default: return nil
         }
     }

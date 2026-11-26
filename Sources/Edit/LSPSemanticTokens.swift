@@ -118,7 +118,7 @@ struct LSPSemanticTokens: Sendable {
         case "comment": .comment
         case "string", "regexp", "character": .string
         case "number": .number
-        case "property", "enumMember", "event", "field", "parameter": .property
+        case "property", "enumMember", "event", "field", "member", "parameter": .property
         case "decorator", "attribute": .attribute
         default: nil
         }

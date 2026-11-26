@@ -6,17 +6,19 @@ extension LanguageServer {
         switch self {
         case .zig: ["build.zig", "build.zig.zon"]
         case .sourceKit: ["Package.swift", "buildServer.json", "compile_commands.json", "compile_flags.txt"]
+        case .odin: ["ols.json"]
         }
     }
 
     func projectRoot(in directory: URL, activeFile: URL?, previousRoot: URL?, searchesParents: Bool) -> URL? {
-        let folder = if self == .sourceKit {
+        let usesCanonicalPaths = self == .sourceKit || self == .odin
+        let folder = if usesCanonicalPaths {
             URL(filePath: FileBuffer.canonicalURL(directory).path, directoryHint: .isDirectory)
         } else {
             directory.resolvingSymlinksInPath().standardizedFileURL
         }
         let active = activeFile.map { file in
-            self == .sourceKit ? FileBuffer.canonicalURL(file) : file.resolvingSymlinksInPath().standardizedFileURL
+            usesCanonicalPaths ? FileBuffer.canonicalURL(file) : file.resolvingSymlinksInPath().standardizedFileURL
         }
         if let file = active,
            contains(file, in: folder), FileManager.default.fileExists(atPath: file.path) {
@@ -70,7 +72,7 @@ extension LanguageServer {
             let prefix = components.starts(with: root) ? root : alternateRoot
             guard components.starts(with: prefix), components.count > prefix.count,
                   !components.dropFirst(prefix.count).dropLast().contains(where: excludesDirectory),
-                  isSource(path) || manifests.contains(path.lastPathComponent) else { return nil }
+                  isSource(path) || (self != .odin && manifests.contains(path.lastPathComponent)) else { return nil }
             let isStructural = event.flags & structural != 0
             guard isStructural || event.flags & modified != 0 else { return nil }
             let url = folder.appending(path: components.dropFirst(prefix.count).joined(separator: "/"), directoryHint: .notDirectory)

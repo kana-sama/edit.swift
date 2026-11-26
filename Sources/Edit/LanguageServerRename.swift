@@ -36,7 +36,7 @@ struct LSPWorkspaceEdit: Decodable, Sendable {
 
     private struct VersionedEdit: Decodable {
         struct Document: Decodable {
-            let uri: URL
+            let uri: String
             let version: Int?
         }
 
@@ -47,11 +47,13 @@ struct LSPWorkspaceEdit: Decodable, Sendable {
     init(from decoder: Decoder) throws {
         let fields = try decoder.container(keyedBy: CodingKeys.self)
         if let versioned = try fields.decodeIfPresent([VersionedEdit].self, forKey: .documentChanges) {
-            documents = versioned.map { LSPDocumentEdits(url: $0.textDocument.uri, version: $0.textDocument.version, edits: $0.edits) }
+            documents = try versioned.map {
+                LSPDocumentEdits(url: try LSPDocumentURI.url($0.textDocument.uri, from: decoder),
+                                 version: $0.textDocument.version, edits: $0.edits)
+            }
         } else if let changes = try fields.decodeIfPresent([String: [LSPTextEdit]].self, forKey: .changes) {
             documents = try changes.sorted(by: { $0.key < $1.key }).map { uri, edits in
-                guard let url = URL(string: uri) else { throw LSPFailure.invalidMessage }
-                return LSPDocumentEdits(url: url, version: nil, edits: edits)
+                LSPDocumentEdits(url: try LSPDocumentURI.url(uri, from: decoder), version: nil, edits: edits)
             }
         } else {
             documents = []

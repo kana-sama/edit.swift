@@ -2,94 +2,94 @@
 
 ## Support by Language Server
 
-✓ works in Edit. A blank cell means the server supports the method and Edit could add it. ✗ means the server does not support the method. The SourceKit-LSP column describes Swift. C-family support uses clangd and can expose different methods. Implemented methods come first, then implementation candidates, then methods unavailable on both servers.
+✓ works in Edit. A blank cell means the server supports the method and Edit could add it. ✗ means the server does not support the method. The SourceKit-LSP column describes Swift. C-family support uses clangd and can expose different methods. Implemented methods come first, then implementation candidates, then methods unavailable on the listed servers.
 
-Checked November 25, 2026 against ZLS 0.17.0 and SourceKit-LSP bundled with Apple Swift 6.4 (swiftlang-6.4.0.33.1). Some methods depend on client capabilities, server settings or project indexing. The table covers [LSP 3.18][lsp] editor features and the messages that enable them. It is a catalog of options for Edit.
+Checked November 25, 2026 against ZLS 0.17.0 and SourceKit-LSP bundled with Apple Swift 6.4 (swiftlang-6.4.0.33.1). OLS was checked November 26, 2026 against dev-2026-11. Some methods depend on client capabilities, server settings or project indexing. The table covers [LSP 3.18][lsp] editor features and the messages that enable them. It is a catalog of options for Edit. [OLS request handlers][ols-handlers]
 
-Edit ranks comparable [workspace symbol matches](features/lsp-symbol-navigation/spec.md#go-to-workspace-symbol) by their proximity to the active folder's root for both servers.
+Edit ranks comparable [workspace symbol matches](features/lsp-symbol-navigation/spec.md#go-to-workspace-symbol) by their proximity to the active folder's root across the connected servers.
 
 Edit uses full [semantic token results](features/lsp-highlighting/spec.md) for scrolling and a concurrent visible-range preview for large ZLS files. It also supports range-only providers and deltas.
 
-| Method                                                                       | ZLS   | SourceKit-LSP |
-| ---------------------------------------------------------------------------- | :---: | :-----------: |
-| [`textDocument/definition`][lsp-definition]                                  | ✓     | ✓             |
-| [`textDocument/references`][lsp-references]                                  | ✓     | ✓             |
-| [`textDocument/documentHighlight`][lsp-documenthighlight]                    | ✓     | ✓             |
-| [`textDocument/semanticTokens/full`][lsp-semantictokens-fullrequest]         | ✓     | ✓             |
-| [`textDocument/semanticTokens/range`][lsp-semantictokens-rangerequest]       | ✓     | ✓             |
-| [`workspace/semanticTokens/refresh`][lsp-semantictokens-refreshrequest]      | ✓     | ✓             |
-| [`textDocument/documentSymbol`][lsp-documentsymbol]                          | ✓     | ✓             |
-| [`workspace/symbol`][lsp-ws-symbol]                                          | ✓     | ✓             |
-| [`textDocument/hover`][lsp-hover]                                            | ✓     | ✓             |
-| [`textDocument/prepareRename`][lsp-preparerename]                            | ✓     | ✓             |
-| [`textDocument/rename`][lsp-rename]                                          | ✓     | ✓             |
-| [`window/workDoneProgress/create`][lsp-win-workdoneprogress-create]          | ✓     | ✓             |
-| [`$/progress`][lsp-progress]                                                 | ✓     | ✓             |
-| [`workspace/didChangeWorkspaceFolders`][lsp-ws-didchangeworkspacefolders]    | ✓     |               |
-| [`workspace/didChangeWatchedFiles`][lsp-ws-didchangewatchedfiles]            |       | ✓             |
-| [`textDocument/declaration`][lsp-declaration]                                |       | ✗             |
-| [`textDocument/typeDefinition`][lsp-typedefinition]                          |       |               |
-| [`textDocument/implementation`][lsp-implementation]                          | ✗     |               |
-| [`textDocument/prepareCallHierarchy`][lsp-preparecallhierarchy]              | ✗     |               |
-| [`callHierarchy/incomingCalls`][lsp-callhierarchy-incomingcalls]             | ✗     |               |
-| [`callHierarchy/outgoingCalls`][lsp-callhierarchy-outgoingcalls]             | ✗     |               |
-| [`textDocument/prepareTypeHierarchy`][lsp-preparetypehierarchy]              | ✗     |               |
-| [`typeHierarchy/supertypes`][lsp-typehierarchy-supertypes]                   | ✗     |               |
-| [`typeHierarchy/subtypes`][lsp-typehierarchy-subtypes]                       | ✗     |               |
-| [`textDocument/completion`][lsp-completion]                                  |       |               |
-| [`completionItem/resolve`][lsp-completionitem-resolve]                       | ✗     |               |
-| [`textDocument/signatureHelp`][lsp-signaturehelp]                            |       |               |
-| [`textDocument/inlayHint`][lsp-inlayhint]                                    |       |               |
-| [`inlayHint/resolve`][lsp-inlayhint-resolve]                                 | ✗     |               |
-| [`workspace/inlayHint/refresh`][lsp-ws-inlayhint-refresh]                    |       | ✗             |
-| [`textDocument/codeLens`][lsp-codelens]                                      | ✗     |               |
-| [`textDocument/foldingRange`][lsp-foldingrange]                              |       |               |
-| [`textDocument/selectionRange`][lsp-selectionrange]                          |       |               |
-| [`textDocument/documentColor`][lsp-documentcolor]                            | ✗     |               |
-| [`textDocument/colorPresentation`][lsp-colorpresentation]                    | ✗     |               |
-| [`textDocument/publishDiagnostics`][lsp-publishdiagnostics]                  |       |               |
-| [`textDocument/diagnostic`][lsp-diagnostic]                                  | ✗     |               |
-| [`workspace/diagnostic/refresh`][lsp-diagnostic-refresh]                     | ✗     |               |
-| [`textDocument/codeAction`][lsp-codeaction]                                  |       |               |
-| [`codeAction/resolve`][lsp-codeaction-resolve]                               | ✗     |               |
-| [`textDocument/formatting`][lsp-formatting]                                  |       |               |
-| [`textDocument/rangeFormatting`][lsp-rangeformatting]                        | ✗     |               |
-| [`textDocument/onTypeFormatting`][lsp-ontypeformatting]                      | ✗     |               |
-| [`textDocument/willSave`][lsp-willsave]                                      | ✗     |               |
-| [`textDocument/willSaveWaitUntil`][lsp-willsavewaituntil]                    |       | ✗             |
-| [`textDocument/didSave`][lsp-didsave]                                        |       |               |
-| [`workspace/configuration`][lsp-ws-configuration]                            |       | ✗             |
-| [`workspace/didChangeConfiguration`][lsp-ws-didchangeconfiguration]          |       | ✗             |
-| [`workspace/executeCommand`][lsp-ws-executecommand]                          | ✗     |               |
-| [`workspace/applyEdit`][lsp-ws-applyedit]                                    |       |               |
-| [`window/showMessage`][lsp-win-showmessage]                                  |       | ✗             |
-| [`window/logMessage`][lsp-win-logmessage]                                    |       |               |
-| [`textDocument/documentLink`][lsp-documentlink]                              | ✗     | ✗             |
-| [`documentLink/resolve`][lsp-documentlink-resolve]                           | ✗     | ✗             |
-| [`textDocument/moniker`][lsp-moniker]                                        | ✗     | ✗             |
-| [`workspaceSymbol/resolve`][lsp-ws-symbolresolve]                            | ✗     | ✗             |
-| [`workspace/textDocumentContent`][lsp-ws-textdocumentcontent]                | ✗     | ✗             |
-| [`workspace/textDocumentContent/refresh`][lsp-ws-textdocumentcontentrefresh] | ✗     | ✗             |
-| [`textDocument/inlineCompletion`][lsp-inlinecompletion]                      | ✗     | ✗             |
-| [`textDocument/inlineValue`][lsp-inlinevalue]                                | ✗     | ✗             |
-| [`workspace/inlineValue/refresh`][lsp-ws-inlinevalue-refresh]                | ✗     | ✗             |
-| [`codeLens/resolve`][lsp-codelens-resolve]                                   | ✗     | ✗             |
-| [`workspace/codeLens/refresh`][lsp-codelens-refresh]                         | ✗     | ✗             |
-| [`textDocument/semanticTokens/full/delta`][lsp-semantictokens-deltarequest]  | ✗     | ✗             |
-| [`workspace/foldingRange/refresh`][lsp-ws-foldingrange-refresh]              | ✗     | ✗             |
-| [`workspace/diagnostic`][lsp-ws-diagnostic]                                  | ✗     | ✗             |
-| [`textDocument/rangesFormatting`][lsp-documentrangesformattingparams]        | ✗     | ✗             |
-| [`textDocument/linkedEditingRange`][lsp-linkededitingrange]                  | ✗     | ✗             |
-| [`textDocument/didRename`][lsp-didrename]                                    | ✗     | ✗             |
-| [`workspace/willCreateFiles`][lsp-ws-willcreatefiles]                        | ✗     | ✗             |
-| [`workspace/didCreateFiles`][lsp-ws-didcreatefiles]                          | ✗     | ✗             |
-| [`workspace/willRenameFiles`][lsp-ws-willrenamefiles]                        | ✗     | ✗             |
-| [`workspace/didRenameFiles`][lsp-ws-didrenamefiles]                          | ✗     | ✗             |
-| [`workspace/willDeleteFiles`][lsp-ws-willdeletefiles]                        | ✗     | ✗             |
-| [`workspace/didDeleteFiles`][lsp-ws-diddeletefiles]                          | ✗     | ✗             |
-| [`window/showMessageRequest`][lsp-win-showmessagerequest]                    | ✗     | ✗             |
-| [`window/showDocument`][lsp-win-showdocument]                                | ✗     | ✗             |
-| [`window/workDoneProgress/cancel`][lsp-win-workdoneprogress-cancel]          | ✗     | ✗             |
+| Method                                                                       | ZLS   | SourceKit-LSP | OLS   |
+| ---------------------------------------------------------------------------- | :---: | :-----------: | :---: |
+| [`textDocument/definition`][lsp-definition]                                  | ✓     | ✓             | ✓     |
+| [`textDocument/references`][lsp-references]                                  | ✓     | ✓             | ✓     |
+| [`textDocument/documentHighlight`][lsp-documenthighlight]                    | ✓     | ✓             | ✓     |
+| [`textDocument/semanticTokens/full`][lsp-semantictokens-fullrequest]         | ✓     | ✓             | ✓     |
+| [`textDocument/semanticTokens/range`][lsp-semantictokens-rangerequest]       | ✓     | ✓             |       |
+| [`workspace/semanticTokens/refresh`][lsp-semantictokens-refreshrequest]      | ✓     | ✓             | ✗     |
+| [`textDocument/documentSymbol`][lsp-documentsymbol]                          | ✓     | ✓             | ✓     |
+| [`workspace/symbol`][lsp-ws-symbol]                                          | ✓     | ✓             | ✓     |
+| [`textDocument/hover`][lsp-hover]                                            | ✓     | ✓             | ✓     |
+| [`textDocument/prepareRename`][lsp-preparerename]                            | ✓     | ✓             | ✓     |
+| [`textDocument/rename`][lsp-rename]                                          | ✓     | ✓             | ✓     |
+| [`window/workDoneProgress/create`][lsp-win-workdoneprogress-create]          | ✓     | ✓             | ✗     |
+| [`$/progress`][lsp-progress]                                                 | ✓     | ✓             | ✗     |
+| [`workspace/didChangeWorkspaceFolders`][lsp-ws-didchangeworkspacefolders]    | ✓     |               | ✗     |
+| [`workspace/didChangeWatchedFiles`][lsp-ws-didchangewatchedfiles]            |       | ✓             | ✓     |
+| [`textDocument/declaration`][lsp-declaration]                                |       | ✗             | ✗     |
+| [`textDocument/typeDefinition`][lsp-typedefinition]                          |       |               |       |
+| [`textDocument/implementation`][lsp-implementation]                          | ✗     |               | ✗     |
+| [`textDocument/prepareCallHierarchy`][lsp-preparecallhierarchy]              | ✗     |               | ✗     |
+| [`callHierarchy/incomingCalls`][lsp-callhierarchy-incomingcalls]             | ✗     |               | ✗     |
+| [`callHierarchy/outgoingCalls`][lsp-callhierarchy-outgoingcalls]             | ✗     |               | ✗     |
+| [`textDocument/prepareTypeHierarchy`][lsp-preparetypehierarchy]              | ✗     |               | ✗     |
+| [`typeHierarchy/supertypes`][lsp-typehierarchy-supertypes]                   | ✗     |               | ✗     |
+| [`typeHierarchy/subtypes`][lsp-typehierarchy-subtypes]                       | ✗     |               | ✗     |
+| [`textDocument/completion`][lsp-completion]                                  |       |               |       |
+| [`completionItem/resolve`][lsp-completionitem-resolve]                       | ✗     |               | ✗     |
+| [`textDocument/signatureHelp`][lsp-signaturehelp]                            |       |               |       |
+| [`textDocument/inlayHint`][lsp-inlayhint]                                    |       |               |       |
+| [`inlayHint/resolve`][lsp-inlayhint-resolve]                                 | ✗     |               | ✗     |
+| [`workspace/inlayHint/refresh`][lsp-ws-inlayhint-refresh]                    |       | ✗             | ✗     |
+| [`textDocument/codeLens`][lsp-codelens]                                      | ✗     |               | ✗     |
+| [`textDocument/foldingRange`][lsp-foldingrange]                              |       |               | ✗     |
+| [`textDocument/selectionRange`][lsp-selectionrange]                          |       |               | ✗     |
+| [`textDocument/documentLink`][lsp-documentlink]                              | ✗     | ✗             |       |
+| [`textDocument/documentColor`][lsp-documentcolor]                            | ✗     |               | ✗     |
+| [`textDocument/colorPresentation`][lsp-colorpresentation]                    | ✗     |               | ✗     |
+| [`textDocument/publishDiagnostics`][lsp-publishdiagnostics]                  |       |               |       |
+| [`textDocument/diagnostic`][lsp-diagnostic]                                  | ✗     |               | ✗     |
+| [`workspace/diagnostic/refresh`][lsp-diagnostic-refresh]                     | ✗     |               | ✗     |
+| [`textDocument/codeAction`][lsp-codeaction]                                  |       |               |       |
+| [`codeAction/resolve`][lsp-codeaction-resolve]                               | ✗     |               | ✗     |
+| [`textDocument/formatting`][lsp-formatting]                                  |       |               |       |
+| [`textDocument/rangeFormatting`][lsp-rangeformatting]                        | ✗     |               | ✗     |
+| [`textDocument/onTypeFormatting`][lsp-ontypeformatting]                      | ✗     |               | ✗     |
+| [`textDocument/willSave`][lsp-willsave]                                      | ✗     |               | ✗     |
+| [`textDocument/willSaveWaitUntil`][lsp-willsavewaituntil]                    |       | ✗             | ✗     |
+| [`textDocument/didSave`][lsp-didsave]                                        |       |               |       |
+| [`workspace/configuration`][lsp-ws-configuration]                            |       | ✗             | ✗     |
+| [`workspace/didChangeConfiguration`][lsp-ws-didchangeconfiguration]          |       | ✗             |       |
+| [`workspace/executeCommand`][lsp-ws-executecommand]                          | ✗     |               | ✗     |
+| [`workspace/applyEdit`][lsp-ws-applyedit]                                    |       |               | ✗     |
+| [`window/showMessage`][lsp-win-showmessage]                                  |       | ✗             | ✗     |
+| [`window/logMessage`][lsp-win-logmessage]                                    |       |               |       |
+| [`documentLink/resolve`][lsp-documentlink-resolve]                           | ✗     | ✗             | ✗     |
+| [`textDocument/moniker`][lsp-moniker]                                        | ✗     | ✗             | ✗     |
+| [`workspaceSymbol/resolve`][lsp-ws-symbolresolve]                            | ✗     | ✗             | ✗     |
+| [`workspace/textDocumentContent`][lsp-ws-textdocumentcontent]                | ✗     | ✗             | ✗     |
+| [`workspace/textDocumentContent/refresh`][lsp-ws-textdocumentcontentrefresh] | ✗     | ✗             | ✗     |
+| [`textDocument/inlineCompletion`][lsp-inlinecompletion]                      | ✗     | ✗             | ✗     |
+| [`textDocument/inlineValue`][lsp-inlinevalue]                                | ✗     | ✗             | ✗     |
+| [`workspace/inlineValue/refresh`][lsp-ws-inlinevalue-refresh]                | ✗     | ✗             | ✗     |
+| [`codeLens/resolve`][lsp-codelens-resolve]                                   | ✗     | ✗             | ✗     |
+| [`workspace/codeLens/refresh`][lsp-codelens-refresh]                         | ✗     | ✗             | ✗     |
+| [`textDocument/semanticTokens/full/delta`][lsp-semantictokens-deltarequest]  | ✗     | ✗             | ✗     |
+| [`workspace/foldingRange/refresh`][lsp-ws-foldingrange-refresh]              | ✗     | ✗             | ✗     |
+| [`workspace/diagnostic`][lsp-ws-diagnostic]                                  | ✗     | ✗             | ✗     |
+| [`textDocument/rangesFormatting`][lsp-documentrangesformattingparams]        | ✗     | ✗             | ✗     |
+| [`textDocument/linkedEditingRange`][lsp-linkededitingrange]                  | ✗     | ✗             | ✗     |
+| [`textDocument/didRename`][lsp-didrename]                                    | ✗     | ✗             | ✗     |
+| [`workspace/willCreateFiles`][lsp-ws-willcreatefiles]                        | ✗     | ✗             | ✗     |
+| [`workspace/didCreateFiles`][lsp-ws-didcreatefiles]                          | ✗     | ✗             | ✗     |
+| [`workspace/willRenameFiles`][lsp-ws-willrenamefiles]                        | ✗     | ✗             | ✗     |
+| [`workspace/didRenameFiles`][lsp-ws-didrenamefiles]                          | ✗     | ✗             | ✗     |
+| [`workspace/willDeleteFiles`][lsp-ws-willdeletefiles]                        | ✗     | ✗             | ✗     |
+| [`workspace/didDeleteFiles`][lsp-ws-diddeletefiles]                          | ✗     | ✗             | ✗     |
+| [`window/showMessageRequest`][lsp-win-showmessagerequest]                    | ✗     | ✗             | ✗     |
+| [`window/showDocument`][lsp-win-showdocument]                                | ✗     | ✗             | ✗     |
+| [`window/workDoneProgress/cancel`][lsp-win-workdoneprogress-cancel]          | ✗     | ✗             | ✗     |
 
 SourceKit-LSP advertises `textDocument/declaration` for C-family languages. Its Swift handler reports that the method is unsupported. To enable Swift on-type formatting, opt in to `on-type-formatting`. [Swift declaration handler][swift-service] · [SourceKit-LSP configuration][swift-config]
 
@@ -138,6 +138,16 @@ Method names above use the audited toolchain’s spelling. Newer releases add th
 ## Maintenance
 
 Update this checklist in the same change as an Edit LSP feature or server integration. Move implemented rows or items to the top of their lists. When updating the server versions recorded here, recheck their `initialize` capabilities, conditional registrations and language-specific handlers before changing a blank or a ✗. Add extension candidates when they become available in a supported toolchain.
+
+## OLS
+
+- [x] Discover Odin projects from ols.json and launch the OLS executable on PATH. [Edit specification](features/odin-lsp/spec.md)
+- [x] Display full-document semantic tokens when OLS enables them. [Edit specification](features/odin-lsp/spec.md)
+- [ ] Surface Odin compiler diagnostics and checker profiles. [OLS configuration][ols-config]
+- [ ] Show inferred types, parameter names, and default arguments through OLS inlay hints. [OLS configuration][ols-config]
+
+[ols-config]: https://github.com/DanielGavin/ols#configuration
+[ols-handlers]: https://github.com/DanielGavin/ols/blob/master/src/server/requests.odin
 
 [lsp]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/
 [lsp-definition]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_definition

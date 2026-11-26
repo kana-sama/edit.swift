@@ -292,13 +292,13 @@ final class LanguageServerConnection: @unchecked Sendable {
 
     func definition(at offset: Int, in snapshot: LSPDocument) async throws -> [LSPLocation] {
         let response = try await request(.definition(offset), document: snapshot)
-        let locations = try JSONDecoder().decode(Reply<Definitions>.self, from: response).result?.locations ?? []
+        let locations = try decodeReply(Definitions.self, from: response)?.locations ?? []
         return fileLocations(locations)
     }
 
     func references(at offset: Int, includeDeclaration: Bool, in snapshot: LSPDocument) async throws -> [LSPLocation] {
         let response = try await request(.references(offset, includeDeclaration), document: snapshot)
-        let locations = try JSONDecoder().decode(Reply<[LSPLocation]>.self, from: response).result ?? []
+        let locations = try decodeReply([LSPLocation].self, from: response) ?? []
         return fileLocations(locations)
     }
 
@@ -320,8 +320,9 @@ final class LanguageServerConnection: @unchecked Sendable {
     func documentSymbols(in snapshot: LSPDocument) async throws -> [LSPSymbol] {
         guard let url = snapshot.url else { throw LSPFailure.unavailable }
         let response = try await request(.documentSymbols, document: snapshot)
-        let result = try JSONDecoder().decode(Reply<LSPDocumentSymbols>.self, from: response).result
-        return result?.symbols(in: url).filter { $0.location.url.standardizedFileURL == url } ?? []
+        let result = try decodeReply(LSPDocumentSymbols.self, from: response)
+        let normalizedURL = url.standardizedFileURL
+        return result?.symbols(in: url).filter { $0.location.url.standardizedFileURL == normalizedURL } ?? []
     }
 
     @concurrent func semanticTokens(in snapshot: LSPDocument, options: LSPSemanticTokenOptions,
@@ -354,7 +355,7 @@ final class LanguageServerConnection: @unchecked Sendable {
 
     func workspaceSymbols(query: String, synchronizing snapshot: LSPDocument) async throws -> [LSPSymbol] {
         let response = try await request(.workspaceSymbols(query), document: snapshot, timeout: 15)
-        let result = try JSONDecoder().decode(Reply<[LSPDocumentSymbols.SymbolInformation]>.self, from: response).result
+        let result = try decodeReply([LSPDocumentSymbols.SymbolInformation].self, from: response)
         return result?.map(\.symbol).filter { $0.location.url.isFileURL } ?? []
     }
 
@@ -365,7 +366,13 @@ final class LanguageServerConnection: @unchecked Sendable {
 
     func rename(at offset: Int, to name: String, in snapshot: LSPDocument) async throws -> LSPWorkspaceEdit? {
         let response = try await request(.rename(offset, name), document: snapshot, timeout: 15)
-        return try JSONDecoder().decode(Reply<LSPWorkspaceEdit>.self, from: response).result
+        return try decodeReply(LSPWorkspaceEdit.self, from: response)
+    }
+
+    private func decodeReply<Value: Decodable>(_ type: Value.Type, from response: Data) throws -> Value? {
+        let decoder = JSONDecoder()
+        decoder.userInfo[LSPDocumentURI.serverKey] = server
+        return try decoder.decode(Reply<Value>.self, from: response).result
     }
 
     private func fileLocations(_ locations: [LSPLocation]) -> [LSPLocation] {
@@ -375,7 +382,7 @@ final class LanguageServerConnection: @unchecked Sendable {
             guard location.url.isFileURL, location.range.start.line >= 0, location.range.start.character >= 0,
                   location.range.start <= location.range.end else { return nil }
             let url: URL
-            if server == .sourceKit {
+            if server == .sourceKit || server == .odin {
                 if let cached = canonicalURLs[location.url] {
                     url = cached
                 } else {
@@ -463,6 +470,7 @@ final class LanguageServerConnection: @unchecked Sendable {
                                                       ],
                                                       "rename": ["prepareSupport": true]]]]
             if server == .sourceKit { params["initializationOptions"] = ["reportSyntacticHighlightInSemanticTokens": true] }
+            if server == .odin { params["initializationOptions"] = ["enable_semantic_tokens": true] }
             return params
         }
         if case .workspaceSymbols(let query) = request { return ["query": query] }

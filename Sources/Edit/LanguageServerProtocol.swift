@@ -125,6 +125,24 @@ struct LSPTextIndex: @unchecked Sendable {
     }
 }
 
+enum LSPDocumentURI {
+    static let serverKey = CodingUserInfoKey(rawValue: "Edit.LSPDocumentURI.server")!
+
+    static func url(_ uri: String, from decoder: Decoder) throws -> URL {
+        if decoder.userInfo[serverKey] as? LanguageServer == .odin, uri.hasPrefix("file:///") {
+            // OLS leaves '#' and '?' unescaped in local paths. Keep them in the filename.
+            let path = String(uri.dropFirst("file://".count))
+            let decoded = path.removingPercentEncoding ?? path
+                .replacingOccurrences(of: "%(?![0-9A-Fa-f]{2})", with: "%25", options: .regularExpression)
+                .removingPercentEncoding
+            if let decoded { return URL(filePath: decoded) }
+            throw LSPFailure.invalidMessage
+        }
+        guard let url = URL(string: uri) else { throw LSPFailure.invalidMessage }
+        return url
+    }
+}
+
 struct LSPLocation: Decodable, Hashable, Sendable {
     let url: URL
     let range: LSPRange
@@ -142,12 +160,12 @@ struct LSPLocation: Decodable, Hashable, Sendable {
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        if let target = try values.decodeIfPresent(URL.self, forKey: .targetUri) {
-            url = target
+        if let target = try values.decodeIfPresent(String.self, forKey: .targetUri) {
+            url = try LSPDocumentURI.url(target, from: decoder)
             range = try values.decode(LSPRange.self, forKey: .targetSelectionRange)
             originRange = try values.decodeIfPresent(LSPRange.self, forKey: .originSelectionRange)
         } else {
-            url = try values.decode(URL.self, forKey: .uri)
+            url = try LSPDocumentURI.url(values.decode(String.self, forKey: .uri), from: decoder)
             range = try values.decode(LSPRange.self, forKey: .range)
             originRange = nil
         }

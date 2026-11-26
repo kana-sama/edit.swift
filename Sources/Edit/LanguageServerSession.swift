@@ -104,7 +104,8 @@ final class LanguageServerSession {
 
     /// A non-nil URL denotes an eligible named buffer for this server.
     func setDocument(url: URL?, language: SyntaxLanguage?, folder: URL?, searchesParentProjects: Bool, text: String) {
-        let url = url?.standardizedFileURL
+        // Keep the canonical file path for OLS so it agrees with the workspace path it scans for references.
+        let url = server == .odin ? url : url?.standardizedFileURL
         let scope = folder.map { Scope(directory: $0.standardizedFileURL, searchesParentProjects: searchesParentProjects) }
         let scopeChanged = scope != self.scope
         let urlChanged = url != document.url
@@ -363,7 +364,7 @@ final class LanguageServerSession {
         let launch = await Self.resolveExecutable(for: server, in: root)
         guard !Task.isCancelled, self.generation == generation else { return }
         guard let launch else {
-            setPhase(server == .zig ? .notOnPATH : .toolchainUnavailable)
+            setPhase(server == .sourceKit ? .toolchainUnavailable : .notOnPATH)
             return
         }
         let connection = LanguageServerConnection(server: server, executable: launch.executable, root: root,
@@ -396,9 +397,9 @@ final class LanguageServerSession {
             let capabilities = try await connection.start()
             guard !Task.isCancelled, self.generation == generation, self.connection === connection else { return }
             self.capabilities = capabilities
-            if server == .sourceKit {
-                indexMonitor = FileSystemEvents(directory: root) { [weak connection] events in
-                    connection?.updateWatchedFiles(LanguageServer.sourceKit.indexChanges(events, in: root))
+            if server == .sourceKit || server == .odin {
+                indexMonitor = FileSystemEvents(directory: root) { [weak connection, server] events in
+                    connection?.updateWatchedFiles(server.indexChanges(events, in: root))
                 }
             }
             if canControl { connection.updateDocument(document) }

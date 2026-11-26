@@ -41,9 +41,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
 
     private unowned let document: DocumentWindow
     private unowned let app: Edit
-    private let zig: LanguageServerSession
-    private let sourceKit: LanguageServerSession
-    private var sessions: [LanguageServerSession] { [zig, sourceKit] }
+    private let sessions: [LanguageServerSession]
     var workspaceSessions: [LanguageServerSession] { sessions.filter(\.supportsWorkspaceSymbols) }
     var highlightingSession: LanguageServerSession? {
         guard !isClosed, document.isHighlightingEnabled(.lsp), document.editor.conflictEdits.isEmpty,
@@ -52,11 +50,12 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         return session
     }
     var session: LanguageServerSession {
-        switch sourceServer {
-        case .zig: zig
-        case .sourceKit: sourceKit
-        case nil: workspaceSessions.first ?? sessions.first(where: \.isEligible) ?? zig
-        }
+        sourceServer.flatMap { session(for: $0) }
+            ?? workspaceSessions.first ?? sessions.first(where: \.isEligible) ?? sessions[0]
+    }
+
+    private func session(for server: LanguageServer) -> LanguageServerSession? {
+        sessions.first { $0.server == server }
     }
     private lazy var symbolRename = DocumentSymbolRename(document: document, app: app)
     private lazy var status = LanguageServerStatusPopover { [weak self] server, command in
@@ -82,8 +81,9 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     init(document: DocumentWindow, app: Edit) {
         self.document = document
         self.app = app
-        zig = LanguageServerSession(server: .zig, workspacePreferences: app.workspaceLanguageServers)
-        sourceKit = LanguageServerSession(server: .sourceKit, workspacePreferences: app.workspaceLanguageServers)
+        sessions = LanguageServer.allCases.map {
+            LanguageServerSession(server: $0, workspacePreferences: app.workspaceLanguageServers)
+        }
         super.init()
     }
 
@@ -151,9 +151,14 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     }
 
     func workspaceSymbols(query: String) async throws -> [LSPSymbol] {
-        async let zigResult = workspaceSymbolResult(in: zig, query: query)
-        async let sourceKitResult = workspaceSymbolResult(in: sourceKit, query: query)
-        let results = await [zigResult, sourceKitResult].compactMap { $0 }
+        let results = await withTaskGroup(of: (Int, Result<[LSPSymbol], Error>).self) { group in
+            for (index, session) in workspaceSessions.enumerated() {
+                group.addTask { (index, await self.workspaceSymbolResult(in: session, query: query)) }
+            }
+            var results: [(Int, Result<[LSPSymbol], Error>)] = []
+            for await result in group { results.append(result) }
+            return results.sorted { $0.0 < $1.0 }.map(\.1)
+        }
         try Task.checkCancellation()
         var matches: [[LSPSymbol]] = []
         var firstError: Error?
@@ -167,8 +172,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         return matches.flatMap { $0 }
     }
 
-    private func workspaceSymbolResult(in session: LanguageServerSession, query: String) async -> Result<[LSPSymbol], Error>? {
-        guard session.supportsWorkspaceSymbols else { return nil }
+    private func workspaceSymbolResult(in session: LanguageServerSession, query: String) async -> Result<[LSPSymbol], Error> {
         do { return .success(try await session.workspaceSymbols(query: query)) }
         catch { return .failure(error) }
     }
@@ -227,8 +231,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     }
 
     private func perform(_ command: LanguageServerCommand, for server: LanguageServer) {
-        let target = server == .zig ? zig : sourceKit
-        guard canPerform(command, in: target) else { return }
+        guard let target = session(for: server), canPerform(command, in: target) else { return }
         if command != .start, target === session {
             navigationID &+= 1
             cancelLookup()
@@ -242,8 +245,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         for peer in app.documents where peer !== document {
             let features = peer.languageFeatures
             guard !features.isClosed else { continue }
-            let peerSession = server == .zig ? features.zig : features.sourceKit
-            peerSession.workspacePreferenceDidChange()
+            features.session(for: server)?.workspacePreferenceDidChange()
         }
     }
 

@@ -34,6 +34,7 @@ Use separate fresh directories via `EDIT_BUILD_DIR` and `EDIT_SDK_CACHE_DIR` to 
 - `./script/check --only lsp-state [screenshot-path]` checks workspace-scoped Stop, Start, and Restart across two app launches using one disposable profile. The optional PNG shows local coloring in a C header with SourceKit-LSP stopped.
 - `./script/check --only lsp-highlight [screenshot-path]` checks both highlighting layers, their priority, workspace preferences, Command Mode switches, and ZLS viewport and whole-file results. The optional captures show the switches and the editor with a held semantic update.
 - `./script/check --only lsp-swift [screenshot-path]` uses the installed SourceKit-LSP toolchain to check Swift navigation, hover, highlights, symbol search, rename, indexing progress, and independent controls in a mixed Swift and Zig folder.
+- `./script/check --only lsp-odin` checks project discovery, navigation, symbol queries, rename, semantic paint, and server lifecycle with OLS from PATH.
 - `./script/check --only lsp-c-family [screenshot-path]` uses SourceKit-LSP and a compilation database to check definitions, hover, and symbols in C, C++, Objective-C, and Objective-C++. It also checks inline C rename and changing an open file’s language mode within the same server session. The optional PNG shows the first Objective-C++ frame, and `-pending.png` shows the Objective-C file while the transition is held.
 - `./script/check --only worktree` checks the outline and its file operations, including Undo and Redo.
 
