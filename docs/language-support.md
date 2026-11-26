@@ -5,7 +5,7 @@ Track highlighting quality separately for each bundled language mode. **✅** me
 | Language mode | Tree-sitter highlighting | Tokenizer and flicker-free editing | Unclosed strings | LSP highlighting | Tree-sitter as a base for LSP |
 | --- | :---: | :---: | :---: | :---: | :---: |
 | Zig | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Odin | ✅ | ✅ | ✅ | ✅ | ❓ |
+| Odin | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Ruby | ✅ | ✅ | ✅ | ❌ | ❓ |
 | Swift | ✅ | ✅ | ❓ | ✅ | ❌ |
 | Shell Script | ✅ | ✅ | ❓ | ❌ | ❓ |
@@ -38,5 +38,7 @@ Track highlighting quality separately for each bundled language mode. **✅** me
 3. **Unclosed strings** requires string color from the opening delimiter while typing, through the boundary defined by the language, and a clean transition after closing the string. The native check covers Odin and Zig up to the line break and Ruby through EOF. Capture fixtures also cover Odin triple-quoted strings and ZON.
 4. **LSP highlighting** requires Edit to render semantic tokens from the server. [Native LSP highlighting checks](../Sources/Edit/Checks/LSPSemanticHighlightCheck.swift) confirm this for Swift with SourceKit-LSP and Zig with ZLS. The [native OLS check](../Sources/Edit/Checks/OdinLSPCheck.swift) verifies Odin semantic colors with the Tree-sitter layer disabled. C, C++, Objective-C, and Objective-C++ route to SourceKit-LSP with clangd. Their current native test verifies [LSP integration](../Sources/Edit/Checks/SourceKitLSPCheck.swift), and semantic color rendering for those modes is still unverified. The [LSP feature checklist](lsp-checklist.md) tracks individual methods.
 5. **Tree-sitter as a base for LSP** requires Tree-sitter to color roles the grammar can establish, leave ambiguous names to the server, and agree in color where both layers classify the same syntax. The native Zig test checks that division of responsibility. Known gaps include name-based type guesses in [Swift](../resources/syntax/queries/swift.scm#L155) and uppercase-constant guesses in the [shared C-family query](../resources/syntax/queries/c.scm#L3). See the [rules for both layers](features/syntax-highlighting/spec.md#tree-sitter-and-semantic-tokens).
+
+The [native Odin comparison](../Sources/Edit/Checks/OdinLSPCheck.swift) checks all shared colors on a fixture with live OLS. It also checks that Tree-sitter leaves call targets, qualified member accesses, initializer and attribute values, and procedure headers without a parsed body to OLS.
 
 Update the affected cells when adding a mode, changing highlighting, confirming a defect, or verifying a fix. Keep modes sorted by descending ✅ count, with alphabetical order for ties. Keep evidence beneath the table and leave ❓ until the relevant behavior is verified. The [bundled modes](../Sources/Edit/SyntaxLanguage.swift), [grammar inventory](../resources/syntax/README.md), and [server routing](../Sources/Edit/LanguageServer.swift) define the scope of the checklist.

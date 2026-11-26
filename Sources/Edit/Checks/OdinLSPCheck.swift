@@ -142,6 +142,7 @@ enum OdinLSPCheck {
             await lsp.hover(at: renamedUse.location + 1, word: renamedUse)?.text.contains("Updated on disk.") == true
         }
 
+        try await checkTreeSitterBase(in: app, document: document, root: root)
         lsp.perform(.stop)
         try await wait("stop OLS") { session.state == .stopped }
         try require(app.workspaceLanguageServers.isStopped(.odin, in: root)
@@ -156,6 +157,97 @@ enum OdinLSPCheck {
                     "respect the project's semantic token setting and clear the stopped preference")
         try require(!document.window.isVisible && document.window.alphaValue == 0 && !NSApp.isActive,
                     "keep the isolated OLS check hidden")
+    }
+
+    private static func checkTreeSitterBase(in app: Edit, document: DocumentWindow, root: URL) async throws {
+        let file = root.appending(path: "SemanticBase.odin")
+        let text = #"""
+            package semantic_base
+            import format "core:fmt"
+            Scalar :: distinct int
+            Direction :: enum { Left, Right = Left }
+            Callback :: #type proc(value: int) -> int
+            Bare_Callback :: proc(value: int) -> int
+            Record :: struct { field: int, callback: Callback, dir: Direction }
+            Constant :: 3
+            @(private = "file", require_results)
+            twice :: proc(value: int) -> int { return value * 2 }
+            callback_value: Callback = twice
+            C_NAME :: "puts"
+            foreign import libc "system:c"
+            foreign libc {
+                @(link_name=C_NAME)
+                print_c :: proc "c" (value: cstring) -> i32 ---
+            }
+            demo :: proc() {
+                item := Record{field = Constant, callback = twice, dir = .Left}
+                _ = Record{Constant, twice, .Left}
+                _ = Scalar(2)
+                _ = item.callback(3)
+                _ = callback_value(4)
+                _ = Direction.Right
+                _ = format.println
+                format.println(item.field)
+            }
+            pending :: proc(value: int) -> int {
+                return
+
+            """#
+        try text.write(to: file, atomically: true, encoding: .utf8)
+        try require(try await app.openFile(file, in: document) === document, "open the highlighting comparison fixture")
+        let session = document.languageFeatures.session
+        try await wait("start OLS highlighting for the comparison fixture", session: session) {
+            session.supportsSemanticTokens
+        }
+        guard let tree = SyntaxEngine.spans(in: text, language: .odin),
+              let semantic = try await session.semanticTokens() else {
+            throw Failure(detail: "read Tree-sitter and live OLS colors")
+        }
+
+        let source = text as NSString
+        let examples: [(context: String, token: String, tree: SyntaxColor?, ols: SyntaxColor)] = [
+            ("Callback :: #type", "Callback", .type, .type),
+            ("Bare_Callback :: proc", "Bare_Callback", nil, .type),
+            ("Left, Right", "Right", .property, .property),
+            ("Right = Left", "Left", nil, .property),
+            ("field: int", "field", .property, .property),
+            ("field = Constant", "field", .property, .property),
+            ("callback = twice", "twice", nil, .function),
+            ("dir = .Left", "Left", .property, .property),
+            ("Record{Constant, twice", "Constant", nil, .property),
+            ("Record{Constant, twice", "twice", nil, .function),
+            ("Scalar(2)", "Scalar", nil, .type),
+            ("item.callback(3)", "callback", nil, .property),
+            ("callback_value(4)", "callback_value", nil, .plain),
+            ("Direction.Right", "Right", nil, .property),
+            ("_ = format.println", "println", nil, .function),
+            ("format.println(item.field)", "println", nil, .function),
+            ("format.println(item.field)", "field", nil, .property),
+            (#"private = "file", require_results"#, "require_results", .property, .property),
+            ("link_name=C_NAME", "link_name", .property, .property),
+            ("link_name=C_NAME", "C_NAME", nil, .property),
+            ("print_c :: proc", "print_c", .function, .function),
+            ("pending :: proc", "pending", nil, .function),
+        ]
+        for example in examples {
+            let context = source.range(of: example.context)
+            try require(context.location != NSNotFound, "find \(example.context) in the fixture")
+            let token = source.range(of: example.token, options: [], range: context)
+            try require(token.location != NSNotFound, "find \(example.token) in \(example.context)")
+            let captures = tree.filter { NSIntersectionRange($0.range, token).length > 0 }
+            if let expected = example.tree {
+                try require(captures.count == 1 && captures.first?.color == expected && captures.first?.range == token,
+                            "paint \(example.token) as \(expected) in \(example.context)")
+            } else {
+                try require(captures.isEmpty, "leave \(example.token) in \(example.context) to OLS")
+            }
+            try require(semantic.contains { $0.range == token && $0.color == example.ols },
+                        "receive the \(example.ols) OLS color for \(example.token) in \(example.context)")
+        }
+        for token in semantic {
+            try require(!tree.contains { $0.color != token.color && NSIntersectionRange($0.range, token.range).length > 0 },
+                        "agree on the color of \(source.substring(with: token.range)) wherever the layers overlap")
+        }
     }
 
     private static func checkImportHover(_ importPath: String, in document: DocumentWindow,

@@ -18,24 +18,26 @@
 (package_declaration (identifier) @namespace)
 (import_declaration alias: (identifier) @namespace)
 
-(procedure_declaration (identifier) @function (procedure (block)))
-(procedure_declaration (identifier) @function (procedure (uninitialized)))
-(procedure_declaration (identifier) @type)
+(procedure_declaration (identifier) @function (procedure [(block) (uninitialized)]))
 (overloaded_procedure_declaration (identifier) @function)
-(call_expression function: (identifier) @function.call)
+
+; A bare proc signature can also be the recovered header of an unfinished body.
+((const_declaration (identifier) @type "::" (tag) @_type (type (procedure_type)))
+ (#eq? @_type "#type"))
 
 (type (identifier) @type)
 (struct_declaration (identifier) @type "::")
 (enum_declaration (identifier) @type "::")
+(enum_declaration ["{" ","] . (identifier) @property)
 (union_declaration (identifier) @type "::")
 (bit_field_declaration (identifier) @type "::")
 (const_declaration (identifier) @type "::" [(array_type) (distinct_type) (bit_set_type) (pointer_type)])
 
-(member_expression "." (identifier) @property)
-(call_expression function: (member_expression "." (identifier) @function.call))
-(struct_field (identifier) @property)
+; Only the implicit selector and the key of a named initializer prove a field role.
+(member_expression . "." (identifier) @property)
+(struct_field . (identifier) @property "=")
 (field (identifier) @property)
-(attribute (identifier) @attribute)
+(attribute ["@" "(" ","] . (identifier) @property)
 
 [(string_literal) (raw_string_literal) (character)] @string
 [(number) (float)] @number
