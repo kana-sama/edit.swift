@@ -193,6 +193,7 @@ final class EditorLanguageAssistance {
         let range = Self.prefix(in: text, endingAt: caret)
         let prefix = text.substring(with: range)
         let offersDocumentWords = prefix.utf16.count >= 2 && Self.isBarePrefix(at: range.location, in: text)
+        let enumReceiver = state.session.server == .solidity ? Self.memberReceiver(before: range.location, in: text) : nil
         let previous = completion.flatMap { previous in
             previous.range.location == range.location && previous.context.session === state.session
                 && previous.context.opening == state.opening && previous.context.generation == state.generation ? previous : nil
@@ -230,10 +231,15 @@ final class EditorLanguageAssistance {
             let result = try? await state.session.completion(at: caret, trigger: trigger, retriggering: incomplete)
             guard !Task.isCancelled, isCurrent(state, caret: caret) else { return }
             var items = result?.items.map(Candidate.server) ?? []
-            if offersDocumentWords, !items.contains(where: { Self.matchRank(for: $0.filterText, prefix: prefix) < 2 }) {
+            if (enumReceiver != nil || offersDocumentWords),
+               !items.contains(where: { Self.matchRank(for: $0.filterText, prefix: prefix) < 2 }) {
                 // Solar can lose the current source's semantic index on an incomplete statement.
                 // Recover with fresh text replacements from the buffer, independent of diagnostics or stale edits.
-                let words = await Self.documentWords(matching: prefix, excluding: range, in: source)
+                let words = if let enumReceiver {
+                    await Self.enumMembers(in: source, receiver: enumReceiver)
+                } else {
+                    await Self.documentWords(matching: prefix, excluding: range, in: source)
+                }
                 guard isCurrent(state, caret: caret), !Task.isCancelled else { return }
                 let labels = Set(items.map(\.filterText))
                 items += words.filter { !labels.contains($0.name) }.map(Candidate.word)
@@ -483,6 +489,14 @@ final class EditorLanguageAssistance {
         return ![46, 47, 34, 39].contains(previous)
     }
 
+    private static func memberReceiver(before start: Int, in text: NSString) -> NSRange? {
+        guard start > 1, text.character(at: start - 1) == 46 else { return nil }
+        var end = start - 1
+        while end > 0, [32, 9].contains(text.character(at: end - 1)) { end -= 1 }
+        let receiver = prefix(in: text, endingAt: end)
+        return receiver.length > 0 && isBarePrefix(at: receiver.location, in: text) ? receiver : nil
+    }
+
     private static func orderedItems(_ items: [Candidate], prefix: String) -> [Candidate] {
         let ranked = items.enumerated().compactMap { index, item -> (Int, String, Int, Candidate)? in
             let rank = matchRank(for: item.filterText, prefix: prefix)
@@ -521,6 +535,14 @@ final class EditorLanguageAssistance {
             matches.append(DocumentWord(name: name, line: line))
         }
         return matches
+    }
+
+    @concurrent private static func enumMembers(in source: String, receiver: NSRange) async -> [DocumentWord] {
+        let text = source as NSString
+        return SyntaxEngine.enumMembers(in: source, receiver: receiver).map { member in
+            let line = text.substring(with: text.lineRange(for: member)).trimmingCharacters(in: .whitespacesAndNewlines)
+            return DocumentWord(name: text.substring(with: member), line: line)
+        }
     }
 
     private static func parameterRange(_ signature: LSPSignatureHelp.Signature, active: Int) -> NSRange? {

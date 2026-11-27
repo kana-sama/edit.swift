@@ -763,6 +763,96 @@ void edit_syntax_tree_release_v1(void *tree) {
     dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), tree, releaseSyntaxTree);
 }
 
+static bool solidityNameMatches(Input *input, TSNode name, uint32_t start, uint32_t end) {
+    if (ts_node_is_null(name)) return false;
+    uint32_t nameStart = ts_node_start_byte(name);
+    uint32_t nameEnd = ts_node_end_byte(name);
+    return nameEnd <= input->bytes && nameEnd - nameStart == end - start &&
+        memcmp((const char *)input->units + nameStart, (const char *)input->units + start, end - start) == 0;
+}
+
+static TSNode solidityEnumInScope(Input *input, TSNode scope, uint32_t start, uint32_t end, bool *declared) {
+    TSNode found = {0};
+    for (uint32_t i = 0, count = ts_node_named_child_count(scope); i < count && !cancelled(input); ++i) {
+        TSNode child = ts_node_named_child(scope, i);
+        TSNode name = ts_node_child_by_field_name(child, "name", 4);
+        if (!solidityNameMatches(input, name, start, end)) continue;
+        bool duplicate = *declared;
+        *declared = true;
+        if (duplicate || strcmp(ts_node_type(child), "enum_declaration") != 0) return (TSNode){0};
+        found = child;
+    }
+    return found;
+}
+
+static bool solidityHasLocalBinding(Input *input, TSNode receiver, uint32_t start, uint32_t end) {
+    TSNode body = ts_node_parent(receiver);
+    while (!ts_node_is_null(body) && strcmp(ts_node_type(body), "function_body") != 0) body = ts_node_parent(body);
+    if (ts_node_is_null(body)) return false;
+
+    TSTreeCursor cursor = ts_tree_cursor_new(ts_node_parent(body));
+    bool found = false;
+    for (bool hasNode = true; hasNode && !cancelled(input);) {
+        TSNode node = ts_tree_cursor_current_node(&cursor);
+        if (ts_node_start_byte(node) < start) {
+            const char *type = ts_node_type(node);
+            if ((strcmp(type, "variable_declaration") == 0 || strcmp(type, "parameter") == 0) &&
+                solidityNameMatches(input, ts_node_child_by_field_name(node, "name", 4), start, end)) {
+                found = true;
+                break;
+            }
+            if (ts_tree_cursor_goto_first_child(&cursor)) continue;
+        }
+        while (!ts_tree_cursor_goto_next_sibling(&cursor)) {
+            if (!ts_tree_cursor_goto_parent(&cursor)) {
+                hasNode = false;
+                break;
+            }
+        }
+    }
+    ts_tree_cursor_delete(&cursor);
+    return found;
+}
+
+// An identifier in an unfinished member expression may outlive Solar's semantic index.
+// Look only at its enclosing contract and source unit for an enum with that name.
+EDIT_VISIBLE EditSolidityEnumMembersFunction edit_solidity_enum_members_v1;
+bool edit_solidity_enum_members_v1(const uint16_t *units, uint32_t count, uint32_t receiverStart, uint32_t receiverEnd,
+                                  EditSyntaxCapture member, EditSyntaxCancelled check, void *context) {
+    if (receiverStart >= receiverEnd || receiverEnd > count || count > UINT32_MAX / 2u) return false;
+    TSTree *tree = edit_syntax_tree_parse_v2("solidity", units, count, NULL, check, context);
+    if (!tree) return false;
+    Input input = {.units = units, .bytes = count * 2u, .cancelled = check, .context = context};
+    const uint32_t start = receiverStart * 2u;
+    const uint32_t end = receiverEnd * 2u;
+    TSNode root = ts_tree_root_node(tree);
+    TSNode receiver = ts_node_named_descendant_for_byte_range(root, start, end);
+    TSNode scope = receiver;
+    while (!ts_node_is_null(scope) && strcmp(ts_node_type(scope), "contract_body") != 0) {
+        scope = ts_node_parent(scope);
+    }
+    bool found = false;
+    if (!ts_node_is_null(receiver) && strcmp(ts_node_type(receiver), "identifier") == 0 &&
+        ts_node_start_byte(receiver) == start && ts_node_end_byte(receiver) == end &&
+        !solidityHasLocalBinding(&input, receiver, start, end)) {
+        bool declared = false;
+        TSNode type = solidityEnumInScope(&input, ts_node_is_null(scope) ? root : scope, start, end, &declared);
+        if (!declared && !ts_node_is_null(scope))
+            type = solidityEnumInScope(&input, root, start, end, &declared);
+        TSNode body = ts_node_is_null(type) ? (TSNode){0} : ts_node_child_by_field_name(type, "body", 4);
+        if (!ts_node_is_null(body) && !ts_node_has_error(body)) {
+            for (uint32_t i = 0, count = ts_node_named_child_count(body); i < count && !cancelled(&input); ++i) {
+                TSNode value = ts_node_named_child(body, i);
+                if (strcmp(ts_node_type(value), "enum_value") != 0 || ts_node_is_missing(value)) continue;
+                member(context, ts_node_start_byte(value) / 2u, ts_node_end_byte(value) / 2u, NULL);
+                found = true;
+            }
+        }
+    }
+    ts_tree_delete(tree);
+    return found && !cancelled(&input);
+}
+
 EDIT_VISIBLE bool edit_markdown_table_v1(const uint16_t *units, uint32_t count, uint32_t caret,
                                          EditSyntaxCapture row, void *context) {
     if (count > UINT32_MAX / 2u || caret > count) return false;

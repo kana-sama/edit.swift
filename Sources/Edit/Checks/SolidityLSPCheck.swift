@@ -132,6 +132,8 @@ enum SolidityLSPCheck {
         document.window.makeFirstResponder(editor)
         try await checkTyping(in: document, original: mainText)
         try await checkIncompleteStatement(in: document, before: "        /* 🌿 */ return Math.add")
+        try await checkIncompleteEnum(in: document, before: "        /* 🌿 */ return Math.add",
+                                      members: ["Leverage", "Deleverage"])
         try await checkDiagnostics(in: document, file: main, original: mainText)
         try await checkFormatting(in: document, file: main, original: mainText, caretWord: "count(") {
             $0.contains("\n  function count()") && $0.contains("Math.add(2, 3)")
@@ -307,6 +309,54 @@ enum SolidityLSPCheck {
         }
     }
 
+    private static func checkIncompleteEnum(in document: DocumentWindow, before nextStatement: String,
+                                            members: Set<String>) async throws {
+        let editor = document.editor
+        let original = editor.string
+        let insertion = try range(nextStatement, in: original).location
+        let dot = "        Operation."
+        let caret = insertion + dot.utf16.count
+        for terminator in [";", ""] {
+            let added = dot + terminator + "\n"
+            editor.insertText("        Operation" + terminator + "\n", replacementRange: NSRange(location: insertion, length: 0))
+            select(caret - 1, in: editor)
+            try key(47, ".", in: document)
+            if terminator.isEmpty {
+                try await wait("let Solar diagnose Operation. before the following return") {
+                    !editor.diagnosticRanges.isEmpty
+                }
+            }
+            try await wait("complete all Operation members on typing the dot with terminator \(terminator.debugDescription)") {
+                Set(editor.completionLabelsForCheck) == members
+            }
+            try key(53, "\u{1B}", in: document)
+            if terminator.isEmpty {
+                editor.complete(nil)
+                try await wait("reopen enum completion after Solar has analyzed the incomplete statement") {
+                    Set(editor.completionLabelsForCheck) == members
+                }
+                try key(53, "\u{1B}", in: document)
+                editor.insertText("Lev", replacementRange: NSRange(location: caret, length: 0))
+                select(caret + 3, in: editor)
+                editor.complete(nil)
+                try await wait("complete the partial enum member without a semicolon") {
+                    editor.completionLabelsForCheck.first == "Leverage"
+                }
+                try key(36, "\r", in: document)
+                let accepted = dot + "Leverage\n"
+                let expected = (original as NSString).replacingCharacters(in: NSRange(location: insertion, length: 0),
+                                                                          with: accepted)
+                try await wait("insert only the enum value, leaving the following return intact") {
+                    editor.string == expected
+                }
+                editor.insertText("", replacementRange: NSRange(location: insertion, length: accepted.utf16.count))
+            } else {
+                editor.insertText("", replacementRange: NSRange(location: insertion, length: added.utf16.count))
+            }
+            try require(editor.string == original, "restore the disposable enum completion fixture")
+        }
+    }
+
     private static func checkFormatting(in document: DocumentWindow, file: URL, original: String, caretWord: String? = nil,
                                         isFormatted: (String) -> Bool) async throws {
         let editor = document.editor
@@ -455,6 +505,8 @@ enum SolidityLSPCheck {
         try await wait("synchronize LeverageRouter.sol", session: session) { session.supportsCompletion }
         document.window.makeFirstResponder(editor)
         try await checkIncompleteStatement(in: document, before: "        return FlashLoanContext({")
+        try await checkIncompleteEnum(in: document, before: "        return FlashLoanContext({",
+                                      members: ["Leverage", "Deleverage", "ReducePosition"])
     }
 
     private static func checkParameter(_ text: String, in document: DocumentWindow) async throws {

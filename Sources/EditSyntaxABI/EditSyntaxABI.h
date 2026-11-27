@@ -43,4 +43,10 @@ typedef bool EditMarkdownTableFunction(const uint16_t * _Nonnull units, uint32_t
 typedef EditMarkdownTableFunction *EditMarkdownTable;
 extern EditMarkdownTableFunction edit_markdown_table_v1;
 
+typedef bool EditSolidityEnumMembersFunction(
+    const uint16_t * _Nonnull units, uint32_t count, uint32_t receiverStart, uint32_t receiverEnd,
+    EditSyntaxCapture _Nonnull member, EditSyntaxCancelled _Nullable cancelled, void * _Null_unspecified context);
+typedef EditSolidityEnumMembersFunction *EditSolidityEnumMembers;
+extern EditSolidityEnumMembersFunction edit_solidity_enum_members_v1;
+
 #endif

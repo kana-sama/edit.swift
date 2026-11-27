@@ -159,6 +159,7 @@ Update this checklist in the same change as an Edit LSP feature or server integr
 - [x] Run `textDocument/definition`, `textDocument/references`, `textDocument/hover`, `textDocument/documentHighlight`, `textDocument/documentSymbol`, `workspace/symbol`, `textDocument/prepareRename`, and `textDocument/rename`.
 - [x] Display `textDocument/publishDiagnostics` errors and send `textDocument/didSave` and `workspace/didChangeWatchedFiles`.
 - [x] Display `textDocument/completion` results and accept edits, using `completionItem/resolve` when supported.
+- [x] Recover values from a visible local enum when an unfinished member access prevents Solar from returning completion results. [Shared completion behavior](features/lsp-editing/spec.md#completion)
 - [x] Show `textDocument/signatureHelp` with the active parameter and apply `textDocument/formatting` as an undoable document edit.
 - [ ] Surface Solar's type definition, implementation, hierarchies, and inlay hints.
 - [ ] Support pull and workspace diagnostics in addition to the push diagnostics used by Edit.

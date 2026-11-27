@@ -288,6 +288,30 @@ enum SyntaxEngine {
         return unsafeBitCast(entry, to: EditMarkdownTable.self)
     }()
 
+    private static let solidityEnumMembers: EditSolidityEnumMembers? = {
+        guard let library, let entry = dlsym(library, "edit_solidity_enum_members_v1") else { return nil }
+        return unsafeBitCast(entry, to: EditSolidityEnumMembers.self)
+    }()
+
+    static func enumMembers(in source: String, receiver: NSRange) -> [NSRange] {
+        guard let solidityEnumMembers, let start = UInt32(exactly: receiver.location),
+              let end = UInt32(exactly: receiver.upperBound), start < end, !Task.isCancelled else { return [] }
+        let units = Array(source.utf16)
+        guard let count = UInt32(exactly: units.count), end <= count else { return [] }
+        var members: [NSRange] = []
+        let found = withUnsafeMutablePointer(to: &members) { output in
+            units.withUnsafeBufferPointer { buffer in
+                guard let base = buffer.baseAddress else { return false }
+                return solidityEnumMembers(base, count, start, end, { context, start, end, _ in
+                    context?.assumingMemoryBound(to: [NSRange].self).pointee.append(
+                        NSRange(location: Int(start), length: Int(end - start))
+                    )
+                }, { _ in Task.isCancelled }, output)
+            }
+        }
+        return found ? members : []
+    }
+
     static func markdownTableRows(in source: String, caret: Int) -> [NSRange] {
         guard let markdownTable, let caret = UInt32(exactly: caret), !source.isEmpty else { return [] }
         let units = Array(source.utf16)
