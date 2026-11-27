@@ -43,15 +43,16 @@ final class TerminalPanel: NSObject {
     private var spaceActionButtons: [NSButton] = []
     private let directory: () -> URL
     private let onDockChange: (TerminalDock) -> Void
-    private let onLastShellExit: (Bool) -> Void
+    private let onLastShellExit: (TerminalPanel, Bool) -> Void
     private let shell: String?
     private var spaces: [TerminalSpace] = []
     private var selectedSpace: TerminalSpace?
     private var refreshSpaceNames: Task<Void, Never>?
     private var closed = false
+    var hasSpaces: Bool { !spaces.isEmpty }
 
     init(directory: @escaping () -> URL, onDockChange: @escaping (TerminalDock) -> Void,
-         onLastShellExit: @escaping (Bool) -> Void,
+         onLastShellExit: @escaping (TerminalPanel, Bool) -> Void,
          shell: String?, restoredState: TerminalPanelState? = nil) {
         self.directory = directory
         self.onDockChange = onDockChange
@@ -354,7 +355,7 @@ final class TerminalPanel: NSObject {
         } else {
             updatePicker()
         }
-        if spaces.isEmpty { onLastShellExit(responder?.isDescendant(of: view) == true || paneHadFocus) }
+        if spaces.isEmpty { onLastShellExit(self, responder?.isDescendant(of: view) == true || paneHadFocus) }
     }
 
     private func select(_ space: TerminalSpace?) {

@@ -63,6 +63,11 @@ struct DocumentTerminalState: Codable, Sendable {
     let wasFocused: Bool
 }
 
+struct SessionFolderTerminal: Codable, Sendable {
+    let folderPath: String?
+    let state: DocumentTerminalState
+}
+
 // Keep the existing session fields while search and sidebar state are managed separately at runtime.
 struct SessionFindSettings: Codable, Equatable, Sendable {
     static let defaultWidth: Double = 280
@@ -108,6 +113,7 @@ struct SessionDocument: Codable, Sendable {
     var isFilePreview: Bool? = nil
     var showsEmptyFolder: Bool? = nil
     var terminal: DocumentTerminalState? = nil
+    var inactiveTerminals: [SessionFolderTerminal]? = nil
     var draftRecovery: DraftRecoveryRevision? = nil
     var conflictDrafts: [JJConflictEdit.SavedDraft]? = nil
     var markdownRevision: MarkdownRevisionRecord? = nil

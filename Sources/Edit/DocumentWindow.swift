@@ -110,6 +110,23 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         case emptyFolder(focusContent: Bool, folder: URL? = nil)
     }
 
+    @MainActor
+    private enum InactiveTerminal {
+        // Keep running shells in memory and defer shells read from disk until the folder opens.
+        case live(TerminalPanel, sizes: TerminalDockSizes, isVisible: Bool, wasFocused: Bool)
+        case saved(DocumentTerminalState)
+
+        var snapshot: DocumentTerminalState {
+            switch self {
+            case .live(let panel, let sizes, let isVisible, let wasFocused):
+                return DocumentTerminalState(panel: panel.snapshot(), sizes: sizes,
+                                             isVisible: isVisible && panel.hasSpaces, wasFocused: wasFocused && panel.hasSpaces)
+            case .saved(let state):
+                return state
+            }
+        }
+    }
+
     let window: EditorDocumentWindow
     let editor: EditorTextView
     let scrollView: NSScrollView
@@ -117,6 +134,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     let documentSplitView = NSSplitView(frame: .zero)
     private var documentSplit: NSSplitViewController?
     private var terminalPanel: TerminalPanel?
+    private var inactiveTerminals: [String?: InactiveTerminal] = [:]
     private var terminalDockView: TerminalDockView?
     private var terminalSidebar: NSSplitViewItem?
     private var terminalSidebarPanelConstraints: [NSLayoutConstraint] = []
@@ -275,17 +293,18 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func setFolder(_ url: URL?) {
         guard folderURL != url else { return }
-        folderURL = url
-        if url == nil && showsEmptyFolder {
-            let wasFocused = contentHasFocus
-            removeEmptyFolder()
-            activity.restoreEditabilityAfterMutation()
-            editor.isEditable = !isBusy && !app.isQuitting
-            if wasFocused { focusContent() }
+        changeFolder(to: url) {
+            if url == nil && showsEmptyFolder {
+                let wasFocused = contentHasFocus
+                removeEmptyFolder()
+                activity.restoreEditabilityAfterMutation()
+                editor.isEditable = !isBusy && !app.isQuitting
+                if wasFocused { focusContent() }
+            }
+            updateTitle()
+            updateTreeSitterHighlighting()
+            sidebar.folderChanged()
         }
-        updateTitle()
-        updateTreeSitterHighlighting()
-        sidebar.folderChanged()
     }
 
     private var detectedSyntaxLanguage: SyntaxLanguage = .plainText
@@ -401,7 +420,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     var canRequestOpen: Bool { window.attachedSheet == nil && activity.acceptsOpenRequest }
     var canRestoreSession: Bool {
-        folderURL == nil && displayedFileURL == nil && !sidebar.hasContent && terminalPanel == nil &&
+        folderURL == nil && displayedFileURL == nil && !sidebar.hasContent && terminalPanel == nil && inactiveTerminals.isEmpty &&
             !window.isDocumentEdited && autosave.generation == 0 && openRequestGeneration == 0 &&
             !editor.hasMarkedText() && canReplaceBuffer
     }
@@ -544,12 +563,21 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     func restoreTerminal(_ state: DocumentTerminalState?) {
         guard let state else { return }
         let panel = prepareTerminal(restoring: state)
-        if state.isVisible {
-            pendingTerminalFocus = state.wasFocused
-            if pendingFullScreen && state.panel.dock == .right { _ = installDocumentSplit() }
-            restoreVisibleTerminalIfReady()
-        }
+        if state.isVisible { restoreVisibleTerminal(focusing: state.wasFocused) }
         panel.startSavedShells()
+    }
+
+    func restoreTerminals(from record: SessionDocument) {
+        for terminal in record.inactiveTerminals ?? [] where terminal.folderPath != folderURL?.path {
+            inactiveTerminals[terminal.folderPath] = .saved(terminal.state)
+        }
+        restoreTerminal(record.terminal)
+    }
+
+    private func restoreVisibleTerminal(focusing: Bool) {
+        pendingTerminalFocus = focusing
+        if pendingFullScreen && terminalPanel?.dock == .right { _ = installDocumentSplit() }
+        restoreVisibleTerminalIfReady()
     }
 
     private func restoreVisibleTerminalIfReady() {
@@ -566,21 +594,24 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                     ?? FileManager.default.homeDirectoryForCurrentUser
             },
             onDockChange: { [weak self] dock in self?.moveTerminal(to: dock) },
-            onLastShellExit: { [weak self] panelHadFocus in
-                guard let self, !self.app.isQuitting else { return }
+            onLastShellExit: { [weak self] panel, panelHadFocus in
+                guard let self, self.terminalPanel === panel, !self.app.isQuitting else { return }
                 self.pendingTerminalFocus = nil
                 self.hideTerminal(restoringContentFocus: panelHadFocus)
             },
             shell: TerminalPanel.loginShell(forAgentCheck: app.isAgentCheck),
             restoredState: saved?.panel
         )
+        installTerminal(panel, sizes: saved?.sizes ?? TerminalDockSizes())
+        return panel
+    }
+
+    private func installTerminal(_ panel: TerminalPanel, sizes: TerminalDockSizes) {
         terminalPanel = panel
-        let sizes = saved?.sizes ?? TerminalDockSizes()
         terminalDockView = TerminalDockView(terminal: panel.view, height: sizes.belowHeight) { [weak self] height in
             self?.setEditorBottomInset(height)
         }
-        if sizes.rightWidth.isFinite && sizes.rightWidth > 0 { terminalSidebarWidth = sizes.rightWidth }
-        return panel
+        terminalSidebarWidth = sizes.rightWidth.isFinite && sizes.rightWidth > 0 ? sizes.rightWidth : TerminalDockSizes().rightWidth
     }
 
     private func attachTerminal(focusing: Bool) {
@@ -597,11 +628,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func terminalSessionState() -> DocumentTerminalState? {
         guard let terminalPanel, let terminalDockView else { return nil }
-        let rightWidth = currentTerminalSidebarWidth
-        let sizes = TerminalDockSizes(belowHeight: terminalDockView.savedHeight, rightWidth: rightWidth)
-        return DocumentTerminalState(panel: terminalPanel.snapshot(), sizes: sizes,
+        return DocumentTerminalState(panel: terminalPanel.snapshot(), sizes: terminalDockSizes(terminalDockView),
                                      isVisible: isTerminalVisible || pendingTerminalFocus != nil,
                                      wasFocused: pendingTerminalFocus ?? terminalHasFocus(window.firstResponder))
+    }
+
+    private func terminalDockSizes(_ dockView: TerminalDockView) -> TerminalDockSizes {
+        TerminalDockSizes(belowHeight: dockView.savedHeight, rightWidth: currentTerminalSidebarWidth)
     }
 
     private func moveTerminal(to dock: TerminalDock) {
@@ -754,6 +787,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func closeTerminalSessions() {
         terminalPanel?.close()
+        for terminal in inactiveTerminals.values {
+            if case .live(let panel, _, _, _) = terminal { panel.close() }
+        }
     }
 
     func canPerformFind(_ command: FindCommand) -> Bool {
@@ -1352,6 +1388,9 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             isFilePreview: displayedFileURL != nil && isShowingFilePreview ? true : nil,
             showsEmptyFolder: folderURL != nil && displayedFileURL == nil ? showsEmptyFolder || sourceControlRevision != nil : nil,
             terminal: terminalSessionState(),
+            inactiveTerminals: inactiveTerminals.isEmpty ? nil : inactiveTerminals.map { path, terminal in
+                SessionFolderTerminal(folderPath: path, state: terminal.snapshot)
+            }.sorted { ($0.folderPath ?? "") < ($1.folderPath ?? "") },
             draftRecovery: draftRecoveryRevision,
             conflictDrafts: conflictDrafts.isEmpty ? nil : conflictDrafts,
             markdownRevision: markdownRevisionRecord
@@ -2029,64 +2068,71 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             rememberFileUndoHistory()
             app.recordClosedFile(in: self)
             sidebar.hideWorkspacePanel()
-            folderURL = nil
-            installUntitled()
-            focusContent()
+            changeFolder(to: nil) {
+                installUntitled()
+                focusContent()
+            }
         case .buffer(let file, let focusEditor, let scratch, let folder):
             let restoreFocus = focusEditor || contentHasFocus
+            let previousFolder = folderURL
+            // Saving the outgoing draft to the target already installed the latest revision.
+            let incoming = file?.url == fileURL ? nil : file
             editor.breakUndoCoalescing()
             var position: EditorPosition?
             var undoHistory: FileUndoHistory?
+            var preparedSyntax: SyntaxSnapshot?
+            var openingConflicts: JJOpeningConflicts?
             var preparedMarkdown: PreparedMarkdownOpening?
-            if let file {
-                // Saving the outgoing draft to the target already installed the latest revision.
-                if file.url != fileURL {
-                    rememberFilePosition()
-                    position = await app.recentFiles.position(for: file.url, identity: file.identity)
-                    if let state = markdownFiles.first(where: { $0.url == file.url || $0.identity == file.identity })?.state {
-                        if position == nil { position = EditorPosition(selections: [], horizontalOffset: 0, verticalOffset: 0, topLine: nil) }
-                        position?.markdown = state
-                    }
-                    guard isCurrent(), !Task.isCancelled else { return false }
-                    let openingPosition = position
-                    let openingFolder = folder ?? folderURL
-                    async let syntax = prepareOpeningSyntax(file, position: openingPosition,
-                                                            folder: openingFolder, scratch: scratch)
-                    async let conflicts = JJOpeningConflicts.prepare(file.text, at: scratch == nil ? file.url : nil)
-                    let (preparedSyntax, openingConflicts) = await (syntax, conflicts)
-                    guard isCurrent(), !Task.isCancelled else { return false }
-                    let language = app.syntaxOverrides.language(for: file.url) ?? .detected(at: scratch?.filenameURL ?? file.url)
-                    if language == .markdown, (markdownLink?.showsPreview ?? position?.markdown?.showsPreview) == true {
-                        let source = JJConflictEdit.project(openingConflicts?.blocks ?? [], in: file.text).text
-                        guard let prepared = await prepareMarkdownOpening(source, position: position, fragment: markdownLink?.fragment,
-                            writable: file.revision == .missing || FileManager.default.isWritableFile(atPath: file.url.path),
-                            while: isCurrent) else { return false }
-                        guard isCurrent(), !Task.isCancelled else { prepared.view.removeFromSuperview(); return false }
-                        preparedMarkdown = prepared
-                    }
-                    #if EDIT_AGENT_CHECKS
-                    if let beforeInstallFileForCheck {
-                        await beforeInstallFileForCheck(file)
-                        guard isCurrent(), !Task.isCancelled else { preparedMarkdown?.view.removeFromSuperview(); return false }
-                    }
-                    #endif
-                    rememberFileUndoHistory()
-                    installContent(in: folder) {
-                        load(file, preparedSyntax: preparedSyntax, openingConflicts: openingConflicts, scratch: scratch,
-                             keepingMarkdownPresentation: preparedMarkdown != nil)
-                    }
-                    undoHistory = takeFileUndoHistory(for: file)
-                    if let undoHistory { editor.editorUndoManager = undoHistory.manager }
-                } else if let folder {
-                    setFolder(folder)
+            if let file = incoming {
+                rememberFilePosition()
+                position = await app.recentFiles.position(for: file.url, identity: file.identity)
+                if let state = markdownFiles.first(where: { $0.url == file.url || $0.identity == file.identity })?.state {
+                    if position == nil { position = EditorPosition(selections: [], horizontalOffset: 0, verticalOffset: 0, topLine: nil) }
+                    position?.markdown = state
                 }
-            } else {
+                guard isCurrent(), !Task.isCancelled else { return false }
+                let openingPosition = position
+                let openingFolder = folder ?? folderURL
+                async let syntax = prepareOpeningSyntax(file, position: openingPosition,
+                                                        folder: openingFolder, scratch: scratch)
+                async let conflicts = JJOpeningConflicts.prepare(file.text, at: scratch == nil ? file.url : nil)
+                (preparedSyntax, openingConflicts) = await (syntax, conflicts)
+                guard isCurrent(), !Task.isCancelled else { return false }
+                let language = app.syntaxOverrides.language(for: file.url) ?? .detected(at: scratch?.filenameURL ?? file.url)
+                if language == .markdown, (markdownLink?.showsPreview ?? position?.markdown?.showsPreview) == true {
+                    let source = JJConflictEdit.project(openingConflicts?.blocks ?? [], in: file.text).text
+                    guard let prepared = await prepareMarkdownOpening(source, position: position, fragment: markdownLink?.fragment,
+                        writable: file.revision == .missing || FileManager.default.isWritableFile(atPath: file.url.path),
+                        while: isCurrent) else { return false }
+                    guard isCurrent(), !Task.isCancelled else { prepared.view.removeFromSuperview(); return false }
+                    preparedMarkdown = prepared
+                }
+                #if EDIT_AGENT_CHECKS
+                if let beforeInstallFileForCheck {
+                    await beforeInstallFileForCheck(file)
+                    guard isCurrent(), !Task.isCancelled else { preparedMarkdown?.view.removeFromSuperview(); return false }
+                }
+                #endif
+                rememberFileUndoHistory()
+            } else if file == nil {
                 rememberFilePosition()
                 rememberFileUndoHistory()
-                installContent(in: folder) { installUntitled() }
             }
-            autosave.clearFailure()
-            finishOpeningPresentation(preparedMarkdown, position: position, focus: restoreFocus, markdownLink: markdownLink)
+            changeFolder(to: folder ?? folderURL) {
+                if let file = incoming {
+                    load(file, preparedSyntax: preparedSyntax, openingConflicts: openingConflicts, scratch: scratch,
+                         keepingMarkdownPresentation: preparedMarkdown != nil)
+                    undoHistory = takeFileUndoHistory(for: file)
+                    if let undoHistory { editor.editorUndoManager = undoHistory.manager }
+                } else if file == nil {
+                    installUntitled()
+                } else if folderURL != previousFolder {
+                    updateTitle()
+                    updateTreeSitterHighlighting()
+                }
+                autosave.clearFailure()
+                finishOpeningPresentation(preparedMarkdown, position: position, focus: restoreFocus, markdownLink: markdownLink)
+            }
             if let undoHistory, let focusHistory = undoHistory.focusHistory, editor.focusRanges == undoHistory.focusRanges,
                editor.focusRanges != nil {
                 undoHistory.manager.restoreFocusHistory(focusHistory)
@@ -2097,8 +2143,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             autosave.clearFailure()
             rememberFilePosition()
             rememberFileUndoHistory()
-            installContent(in: folder) { loadPreview(preview) }
-            if restoreFocus { focusContent() }
+            changeFolder(to: folder ?? folderURL) {
+                loadPreview(preview)
+                if restoreFocus { focusContent() }
+            }
             if focusEditor { app.recordNavigation(in: self, reason: .selection) }
         case .sourceControlPreview(let preview, let selection):
             let restoreFocus = contentHasFocus
@@ -2124,8 +2172,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             rememberFilePosition()
             rememberFileUndoHistory()
             if folder == nil { app.recordClosedFile(in: self) }
-            installContent(in: folder) { loadEmptyFolder() }
-            if restoreFocus { focusContent() }
+            changeFolder(to: folder ?? folderURL) {
+                loadEmptyFolder()
+                if restoreFocus { focusContent() }
+            }
         case .window:
             window.close()
         }
@@ -2135,9 +2185,31 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         return true
     }
 
-    private func installContent(in folder: URL?, _ install: () -> Void) {
-        if let folder { folderURL = folder }
+    private func changeFolder(to folder: URL?, _ install: () -> Void) {
+        guard folderURL?.path != folder?.path else { install(); return }
+        let terminalHadFocus = terminalHasFocus(window.firstResponder)
+        if let panel = terminalPanel, let dock = terminalDockView {
+            inactiveTerminals[folderURL?.path] = .live(
+                panel, sizes: terminalDockSizes(dock), isVisible: isTerminalVisible || pendingTerminalFocus != nil,
+                wasFocused: pendingTerminalFocus ?? terminalHadFocus
+            )
+            pendingTerminalFocus = nil
+            hideTerminal(restoringContentFocus: false)
+            terminalPanel = nil
+            terminalDockView = nil
+        }
+        folderURL = folder
         install()
+        if terminalHadFocus { focusContent() }
+        switch inactiveTerminals.removeValue(forKey: folder?.path) {
+        case .live(let panel, let sizes, let isVisible, let wasFocused):
+            installTerminal(panel, sizes: sizes)
+            if isVisible && panel.hasSpaces { restoreVisibleTerminal(focusing: wasFocused) }
+        case .saved(let state):
+            restoreTerminal(state)
+        case nil:
+            break
+        }
     }
 
     private func installUntitled() {

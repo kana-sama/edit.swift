@@ -137,6 +137,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         }
 #if EDIT_AGENT_CHECKS
         if isAgentCheck {
+            receivedInitialSession = true
             let initial = makeDocument()
             Task { @MainActor in
                 do {
@@ -170,7 +171,6 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try await WordWrapCheck.run(in: self) { window, _ in
                         try checkWindow(window, screenshot: nil)
                     }
-                    receivedInitialSession = true
                     let folderWindow = try await FolderCheck.run(in: self)
                     try checkWindow(folderWindow, screenshot: nil)
                     try await FolderCheck.checkCloseWorkspace(in: self) { _, _ in }
@@ -1029,7 +1029,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 )
             } catch {
                 warnings.append("“\(scratch?.name ?? url.lastPathComponent)” — \(error.localizedDescription)")
-                guard record.folderPath != nil || record.terminal != nil else { return (nil, warnings) }
+                guard record.folderPath != nil || record.terminal != nil || record.inactiveTerminals?.isEmpty == false
+                else { return (nil, warnings) }
                 opened = nil
             }
         } else {
@@ -1106,7 +1107,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             document.restoreDraft(record, text: "")
         }
         document.restoreSidebar(record)
-        document.restoreTerminal(record.terminal)
+        document.restoreTerminals(from: record)
         document.restoreEditorPosition(record.editorPosition)
     }
 
@@ -1561,6 +1562,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 try checkWindow(window, screenshot: target)
             }
             try await StartupRestoreCheck.run(in: self)
+        case "terminal":
+            try await TerminalCheck.run(in: self)
         case "markdown":
             try await MarkdownCheck.run(in: self, screenshot: screenshot)
         case "results":
