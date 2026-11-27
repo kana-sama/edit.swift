@@ -1593,6 +1593,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var completionDocumentationForCheck: String? { languageAssistance?.completionDocumentationForCheck }
     var completionDocumentationFrameForCheck: NSRect? { languageAssistance?.completionDocumentationFrameForCheck }
     var completionListFrameForCheck: NSRect? { languageAssistance?.completionListFrameForCheck }
+    var completionListForCheck: NSTableView? { languageAssistance?.completionListForCheck }
     var signatureFrameForCheck: NSRect? { languageAssistance?.signatureFrameForCheck }
 #endif
 

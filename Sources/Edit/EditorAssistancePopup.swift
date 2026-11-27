@@ -198,7 +198,6 @@ final class EditorCompletionChoices: NSObject, NSTableViewDataSource, NSTableVie
         let list = NSRect(x: 0, y: 4, width: listWidth, height: height - 8)
         if scroll.frame != list {
             scroll.frame = list
-            table.setFrameSize(list.size)
             column.width = listWidth
             if table.selectedRow >= 0 { table.scrollRowToVisible(table.selectedRow) }
         }
@@ -245,6 +244,7 @@ final class EditorCompletionChoices: NSObject, NSTableViewDataSource, NSTableVie
     var documentationForCheck: String? { (documentation.documentView as? NSTextView)?.string }
     var documentationFrameForCheck: NSRect? { screenFrame(of: documentation) }
     var listFrameForCheck: NSRect? { screenFrame(of: scroll) }
+    var listForCheck: NSTableView? { panel == nil ? nil : table }
 
     private func screenFrame(of child: NSView) -> NSRect? {
         panel?.convertToScreen(surface.convert(child.frame, to: nil))

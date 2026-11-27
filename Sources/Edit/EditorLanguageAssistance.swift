@@ -684,6 +684,7 @@ final class EditorLanguageAssistance {
     var completionDocumentationForCheck: String? { choices.documentationForCheck }
     var completionDocumentationFrameForCheck: NSRect? { choices.documentationFrameForCheck }
     var completionListFrameForCheck: NSRect? { choices.listFrameForCheck }
+    var completionListForCheck: NSTableView? { choices.listForCheck }
     var signatureFrameForCheck: NSRect? { signaturePopup.frame }
 #endif
 }

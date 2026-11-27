@@ -120,7 +120,54 @@ enum LanguageServerEditingCheck {
         editor.undoManager?.undo()
         try require(editor.string == fixture.text && editor.selectedRange() == position,
                     "undo the \(label) formatter's edits and restore the selection in one action")
+        if fixture.language == .zig {
+            try await checkCompletionScrolling(in: document, session: session)
+        }
         print("LSP editing passed for \(label) with \(session.server.name).")
+    }
+
+    private static func checkCompletionScrolling(in document: DocumentWindow, session: LanguageServerSession) async throws {
+        let editor = document.editor
+        let member = try range("elf.ready", in: editor.string)
+        let name = NSRange(location: member.location + "elf.".utf16.count, length: "ready".utf16.count)
+        editor.insertText("", replacementRange: name)
+        select(name.location, in: editor)
+        editor.complete(nil)
+        try await wait("show a long Zig member completion list", session: session) {
+            (editor.completionListForCheck?.numberOfRows ?? 0) > 8
+        }
+        guard let table = editor.completionListForCheck, let scroll = table.enclosingScrollView else {
+            throw Failure(detail: "find the native completion list")
+        }
+        let last = table.numberOfRows - 1
+        func isVisible(_ row: Int) -> Bool {
+            scroll.documentVisibleRect.contains(table.rect(ofRow: row))
+        }
+        try require(table.selectedRow == 0 && isVisible(0) && !isVisible(last),
+                    "show the first selection in a list longer than its viewport")
+        guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                                  wheel1: -1000, wheel2: 0, wheel3: 0).flatMap(NSEvent.init(cgEvent:)) else {
+            throw Failure(detail: "create an isolated completion scroll event")
+        }
+        table.scrollWheel(with: event)
+        try await wait("reach the last completion row with the scroll wheel") { isVisible(last) }
+        try require(table.selectedRow == 0 && document.window.firstResponder === editor,
+                    "preserve the selection and editor focus while scrolling the list")
+
+        for row in 1...last {
+            try key(125, "\u{F701}", in: document)
+            try require(table.selectedRow == row && isVisible(row), "reveal completion row \(row) on Down")
+        }
+        try key(125, "\u{F701}", in: document)
+        try require(table.selectedRow == last && isVisible(last), "stop at the last completion row")
+        for row in (0..<last).reversed() {
+            try key(126, "\u{F700}", in: document)
+            try require(table.selectedRow == row && isVisible(row), "reveal completion row \(row) on Up")
+        }
+        try key(126, "\u{F700}", in: document)
+        try require(table.selectedRow == 0 && isVisible(0), "stop at the first completion row")
+        try key(53, "\u{1B}", in: document)
+        editor.insertText("ready", replacementRange: NSRange(location: name.location, length: 0))
     }
 
     private static let fixtures: [Fixture] = [
@@ -132,6 +179,22 @@ enum LanguageServerEditingCheck {
             }
             export fn total() u32 {
                 return addAmounts(1,2) + combined_amount;
+            }
+            const Flags = struct {
+                ready: bool,
+                first: bool,
+                second: bool,
+                third: bool,
+                fourth: bool,
+                fifth: bool,
+                sixth: bool,
+                seventh: bool,
+                eighth: bool,
+                ninth: bool,
+                tenth: bool,
+            };
+            fn isReady(elf: Flags) bool {
+                return elf.ready;
             }
 
             """, completionName: "combined_amount", partialName: "combined_am",
