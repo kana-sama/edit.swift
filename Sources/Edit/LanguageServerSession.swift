@@ -66,6 +66,13 @@ final class LanguageServerSession {
     var supportsDocumentSymbols: Bool { isReady && capabilities?.documentSymbols == true }
     var supportsWorkspaceSymbols: Bool { isServerReady && capabilities?.workspaceSymbols == true }
     var supportsRename: Bool { isReady && capabilities?.rename == true }
+    var supportsCompletion: Bool { server == .solidity && isReady && capabilities?.completion != nil }
+    var supportsCompletionResolve: Bool { supportsCompletion && capabilities?.completion?.resolveProvider == true }
+    var completionTriggers: Set<String> { Set(capabilities?.completion?.triggerCharacters ?? []) }
+    var supportsSignatureHelp: Bool { server == .solidity && isReady && capabilities?.signature != nil }
+    var signatureTriggers: Set<String> { Set(capabilities?.signature?.triggerCharacters ?? []) }
+    var signatureRetriggers: Set<String> { Set(capabilities?.signature?.retriggerCharacters ?? []) }
+    var supportsFormatting: Bool { server == .solidity && isReady && capabilities?.formatting == true }
     var workspaceRoot: URL? { root }
 
     private var canControl: Bool { isEligible && rootLookup?.blocksServer != true }
@@ -112,8 +119,8 @@ final class LanguageServerSession {
 
     /// A non-nil URL denotes an eligible named buffer for this server.
     func setDocument(url: URL?, language: SyntaxLanguage?, folder: URL?, searchesParentProjects: Bool, text: String) {
-        // Keep the canonical file path for OLS so it agrees with the workspace path it scans for references.
-        let url = server == .odin ? url : url?.standardizedFileURL
+        // OLS and Solar use the canonical path when scanning the workspace for references.
+        let url = server == .odin || server == .solidity ? url : url?.standardizedFileURL
         let scope = folder.map { Scope(directory: $0.standardizedFileURL, searchesParentProjects: searchesParentProjects) }
         let scopeChanged = scope != self.scope
         let urlChanged = url != document.url
@@ -192,6 +199,12 @@ final class LanguageServerSession {
             guard self.isReady else { return }
             self.connection?.updateDocument(self.document)
         }
+    }
+
+    func didSave(_ url: URL, text: String) {
+        guard server == .solidity, isReady, document.url?.path == url.path,
+              document.text.utf8.elementsEqual(text.utf8) else { return }
+        connection?.didSave(document)
     }
 
     func start() {
@@ -321,6 +334,44 @@ final class LanguageServerSession {
         return result
     }
 
+    func completion(at offset: Int, trigger: String? = nil, retriggering: Bool = false) async throws -> LSPCompletionList {
+        guard supportsCompletion, let connection else { throw LSPFailure.unavailable }
+        let snapshot = document
+        let generation = generation
+        let result = try await connection.completion(at: offset, trigger: trigger, retriggering: retriggering,
+                                                     canResolve: supportsCompletionResolve, in: snapshot)
+        try validate(revision: snapshot.revision, generation: generation)
+        return result
+    }
+
+    func resolveCompletion(_ item: LSPCompletionItem) async throws -> LSPCompletionItem {
+        guard supportsCompletion, let connection else { throw LSPFailure.unavailable }
+        guard supportsCompletionResolve else { return item }
+        let snapshot = document
+        let generation = generation
+        let result = try await connection.resolveCompletion(item, in: snapshot)
+        try validate(revision: snapshot.revision, generation: generation)
+        return result
+    }
+
+    func signatureHelp(at offset: Int, trigger: String? = nil, retriggering: Bool = false) async throws -> LSPSignatureHelp? {
+        guard supportsSignatureHelp, let connection else { throw LSPFailure.unavailable }
+        let snapshot = document
+        let generation = generation
+        let result = try await connection.signatureHelp(at: offset, trigger: trigger, retriggering: retriggering, in: snapshot)
+        try validate(revision: snapshot.revision, generation: generation)
+        return result
+    }
+
+    func formatting(tabSize: Int, insertSpaces: Bool) async throws -> [LSPTextEdit] {
+        guard supportsFormatting, let connection else { throw LSPFailure.unavailable }
+        let snapshot = document
+        let generation = generation
+        let result = try await connection.formatting(tabSize: tabSize, insertSpaces: insertSpaces, in: snapshot)
+        try validate(revision: snapshot.revision, generation: generation)
+        return result
+    }
+
     private func validate(revision: Int, generation: Int) throws {
         try Task.checkCancellation()
         guard self.revision == revision, self.generation == generation else { throw CancellationError() }
@@ -423,7 +474,7 @@ final class LanguageServerSession {
             let capabilities = try await connection.start()
             guard !Task.isCancelled, self.generation == generation, self.connection === connection else { return }
             self.capabilities = capabilities
-            if server == .sourceKit || server == .odin {
+            if server.usesCanonicalFileURLs {
                 indexMonitor = FileSystemEvents(directory: root) { [weak connection, server] events in
                     connection?.updateWatchedFiles(server.indexChanges(events, in: root))
                 }

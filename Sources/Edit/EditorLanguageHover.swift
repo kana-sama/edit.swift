@@ -275,14 +275,18 @@ struct EditorHoverPlacement {
     let frame: NSRect
     let shape: AnchoredPopoverShape
 
-    init?(anchor: NSRect, contentSize: NSSize, screen: NSRect, pointerX: CGFloat? = nil) {
+    init?(anchor: NSRect, contentSize: NSSize, screen: NSRect, pointerX: CGFloat? = nil, prefersAbove: Bool = true) {
         let available = screen.insetBy(dx: Self.screenInset, dy: Self.screenInset)
         let width = contentSize.width
         let pointerHeight = AnchoredPopoverShape.pointerHeight
         let wantedHeight = min(contentSize.height, 320) + pointerHeight
         let spaceAbove = available.maxY - anchor.maxY - Self.gap
         let spaceBelow = anchor.minY - available.minY - Self.gap
-        let above = spaceAbove >= wantedHeight || spaceAbove >= spaceBelow
+        let above = if prefersAbove {
+            spaceAbove >= wantedHeight || spaceAbove >= spaceBelow
+        } else {
+            spaceBelow < wantedHeight && spaceAbove > spaceBelow
+        }
         let height = min(wantedHeight, above ? spaceAbove : spaceBelow)
         guard height > pointerHeight else { return nil }
 

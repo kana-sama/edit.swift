@@ -7,21 +7,30 @@ extension LanguageServer {
         case .zig: ["build.zig", "build.zig.zon"]
         case .sourceKit: ["Package.swift", "buildServer.json", "compile_commands.json", "compile_flags.txt"]
         case .odin: ["ols.json"]
+        case .solidity: ["foundry.toml", "remappings.txt"]
         }
     }
 
     func projectRoot(in directory: URL, activeFile: URL?, previousRoot: URL?, searchesParents: Bool) -> URL? {
-        let usesCanonicalPaths = self == .sourceKit || self == .odin
-        let folder = if usesCanonicalPaths {
+        let folder = if usesCanonicalFileURLs {
             URL(filePath: FileBuffer.canonicalURL(directory).path, directoryHint: .isDirectory)
         } else {
             directory.resolvingSymlinksInPath().standardizedFileURL
         }
         let active = activeFile.map { file in
-            usesCanonicalPaths ? FileBuffer.canonicalURL(file) : file.resolvingSymlinksInPath().standardizedFileURL
+            usesCanonicalFileURLs ? FileBuffer.canonicalURL(file) : file.resolvingSymlinksInPath().standardizedFileURL
         }
         if let file = active,
            contains(file, in: folder), FileManager.default.fileExists(atPath: file.path) {
+            if self == .solidity, !searchesParents {
+                // A dependency can contain its own foundry.toml. Keep navigation within the owning project's index.
+                if hasManifest(in: folder) { return folder }
+                if let previousRoot, contains(file, in: previousRoot), hasManifest(in: previousRoot),
+                   let component = file.pathComponents.dropFirst(previousRoot.pathComponents.count).first,
+                   ["lib", "node_modules"].contains(component.lowercased()) {
+                    return previousRoot
+                }
+            }
             return nearestManifest(from: file.deletingLastPathComponent(), within: searchesParents ? nil : folder) ?? folder
         }
         if searchesParents, let parent = nearestManifest(from: folder, within: nil) { return parent }
@@ -38,7 +47,9 @@ extension LanguageServer {
             if Task.isCancelled { return nil }
             guard let values = try? url.resourceValues(forKeys: keys), values.isSymbolicLink != true else { continue }
             if values.isDirectory == true {
-                if excludesDirectory(url.lastPathComponent) { files.skipDescendants() }
+                if excludesDirectory(url.lastPathComponent) || (self == .solidity && url.lastPathComponent == "lib") {
+                    files.skipDescendants()
+                }
             } else if values.isRegularFile == true {
                 if manifests.contains(url.lastPathComponent) { return url.deletingLastPathComponent() }
                 if isSource(url) { hasLooseSources = true }
@@ -110,6 +121,8 @@ extension LanguageServer {
     }
 
     private func excludesDirectory(_ name: String) -> Bool {
-        name.hasPrefix(".") || ["zig-cache", "zig-out", "node_modules", "deriveddata"].contains(name.lowercased())
+        let name = name.lowercased()
+        return name.hasPrefix(".") || ["zig-cache", "zig-out", "node_modules", "deriveddata"].contains(name)
+            || (self == .solidity && ["out", "cache", "broadcast"].contains(name))
     }
 }

@@ -1442,6 +1442,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         edit.addCommand("Focus Selection", #selector(focusSelection(_:))).target = self
         edit.addCommand("Exit Focus", #selector(exitFocus(_:))).target = self
         edit.addItem(.separator())
+        edit.addCommand("Complete", #selector(EditorTextView.complete(_:)), " ", [.control])
+        edit.addCommand("Show Signature Help", #selector(EditorTextView.showSignatureHelp(_:)), " ", [.control, .shift])
+        edit.addCommand("Format Document", #selector(EditorTextView.formatDocument(_:)), "f", [.option, .shift])
+        edit.addItem(.separator())
 
         edit.addCommand("Find…", #selector(openFind(_:)), "f").target = self
         edit.addCommand("Find in Workspace", #selector(openWorkspaceFind(_:)), "f", [.command, .shift]).target = self
@@ -1639,6 +1643,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 }
                 try self.captureCheckView(view, screenshot: target)
             }
+        case "lsp-solidity":
+            try await SolidityLSPCheck.run(in: self, document: document)
         case "lsp-c-family":
             try await SourceKitLSPCheck.checkCFamily(in: self, document: document) { window, suffix in
                 let target = screenshot.flatMap { path in

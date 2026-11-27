@@ -25,6 +25,28 @@ struct LSPWatchedFileChange: Sendable {
 struct LSPCapabilities: Decodable, Sendable {
     enum Change: Int, Decodable { case none, full, incremental }
 
+    enum Save: Decodable, Equatable, Sendable {
+        case none, notification, withText
+
+        private struct Options: Decodable { let includeText: Bool? }
+
+        init(from decoder: Decoder) throws {
+            let value = try decoder.singleValueContainer()
+            if let enabled = try? value.decode(Bool.self) { self = enabled ? .notification : .none }
+            else { self = try value.decode(Options.self).includeText == true ? .withText : .notification }
+        }
+    }
+
+    struct Completion: Decodable, Sendable {
+        let triggerCharacters: [String]?
+        let resolveProvider: Bool?
+    }
+
+    struct Signature: Decodable, Sendable {
+        let triggerCharacters: [String]?
+        let retriggerCharacters: [String]?
+    }
+
     let definition: Bool
     let references: Bool
     let hover: Bool
@@ -34,18 +56,24 @@ struct LSPCapabilities: Decodable, Sendable {
     let workspaceSymbols: Bool
     let rename: Bool
     let prepareRename: Bool
+    let completion: Completion?
+    let signature: Signature?
+    let formatting: Bool
     let openClose: Bool
     let change: Change
+    let save: Save
     let positionEncoding: String
 
     private enum CodingKeys: String, CodingKey {
         case definitionProvider, referencesProvider, hoverProvider, textDocumentSync, positionEncoding
         case documentHighlightProvider, documentSymbolProvider, workspaceSymbolProvider, renameProvider, semanticTokensProvider
+        case completionProvider, signatureHelpProvider, documentFormattingProvider
     }
 
     private struct SyncOptions: Decodable {
         let openClose: Bool?
         let change: Change?
+        let save: Save?
     }
 
     private struct RenameOptions: Decodable { let prepareProvider: Bool? }
@@ -65,14 +93,19 @@ struct LSPCapabilities: Decodable, Sendable {
         workspaceSymbols = supports(.workspaceSymbolProvider)
         rename = supports(.renameProvider)
         prepareRename = (try? values.decode(RenameOptions.self, forKey: .renameProvider))?.prepareProvider == true
+        completion = try? values.decode(Completion.self, forKey: .completionProvider)
+        signature = try? values.decode(Signature.self, forKey: .signatureHelpProvider)
+        formatting = supports(.documentFormattingProvider)
         positionEncoding = try values.decodeIfPresent(String.self, forKey: .positionEncoding) ?? "utf-16"
         if let kind = try? values.decode(Change.self, forKey: .textDocumentSync) {
             openClose = kind != .none
             change = kind
+            save = .none
         } else {
             let options = try values.decodeIfPresent(SyncOptions.self, forKey: .textDocumentSync)
             openClose = options?.openClose ?? false
             change = options?.change ?? .none
+            save = options?.save ?? .none
         }
     }
 }
@@ -99,6 +132,8 @@ final class LanguageServerConnection: @unchecked Sendable {
         case documentHighlight(Int), documentSymbols, workspaceSymbols(String)
         case semanticTokensFull, semanticTokensDelta(String), semanticTokensRange(NSRange?)
         case prepareRename(Int), rename(Int, String)
+        case completion(Int, String?, Bool), resolveCompletion(Data), signatureHelp(Int, String?, Bool)
+        case formatting(Int, Bool)
 
         var method: String {
             switch self {
@@ -114,6 +149,10 @@ final class LanguageServerConnection: @unchecked Sendable {
             case .workspaceSymbols: "workspace/symbol"
             case .prepareRename: "textDocument/prepareRename"
             case .rename: "textDocument/rename"
+            case .completion: "textDocument/completion"
+            case .resolveCompletion: "completionItem/resolve"
+            case .signatureHelp: "textDocument/signatureHelp"
+            case .formatting: "textDocument/formatting"
             }
         }
     }
@@ -276,6 +315,23 @@ final class LanguageServerConnection: @unchecked Sendable {
         }
     }
 
+    func didSave(_ snapshot: LSPDocument) {
+        queue.async {
+            guard !self.stopping, !self.closed, let capabilities = self.capabilities, capabilities.save != .none,
+                  let url = snapshot.url else { return }
+            do {
+                try self.synchronize(snapshot)
+                var params: [String: Any] = ["textDocument": ["uri": url.absoluteString]]
+                if capabilities.save == .withText { params["text"] = snapshot.text }
+                try self.notify("textDocument/didSave", params)
+            } catch is CancellationError {
+                return
+            } catch {
+                self.fail(error.localizedDescription)
+            }
+        }
+    }
+
     func updateWatchedFiles(_ changes: [LSPWatchedFileChange]) {
         guard !changes.isEmpty else { return }
         queue.async {
@@ -374,6 +430,41 @@ final class LanguageServerConnection: @unchecked Sendable {
         return try decodeReply(LSPWorkspaceEdit.self, from: response)
     }
 
+    func completion(at offset: Int, trigger: String?, retriggering: Bool, canResolve: Bool,
+                    in snapshot: LSPDocument) async throws -> LSPCompletionList {
+        let response = try await request(.completion(offset, trigger, retriggering), document: snapshot)
+        guard var result = try decodeReply(LSPCompletionList.self, from: response) else {
+            return LSPCompletionList(items: [], isIncomplete: false)
+        }
+        if canResolve, !result.items.isEmpty {
+            let message = try JSONSerialization.jsonObject(with: response) as? [String: Any]
+            let payload = message?["result"]
+            let items = (payload as? [String: Any])?["items"] as? [[String: Any]] ?? payload as? [[String: Any]]
+            guard let items, items.count == result.items.count else { throw LSPFailure.invalidMessage }
+            for (index, item) in items.enumerated() {
+                result.items[index].wire = try JSONSerialization.data(withJSONObject: item)
+            }
+        }
+        return result
+    }
+
+    func resolveCompletion(_ item: LSPCompletionItem, in snapshot: LSPDocument) async throws -> LSPCompletionItem {
+        guard let wire = item.wire else { return item }
+        let response = try await request(.resolveCompletion(wire), document: snapshot)
+        return try decodeReply(LSPCompletionItem.self, from: response) ?? item
+    }
+
+    func signatureHelp(at offset: Int, trigger: String?, retriggering: Bool,
+                       in snapshot: LSPDocument) async throws -> LSPSignatureHelp? {
+        let response = try await request(.signatureHelp(offset, trigger, retriggering), document: snapshot)
+        return try decodeReply(LSPSignatureHelp.self, from: response)
+    }
+
+    func formatting(tabSize: Int, insertSpaces: Bool, in snapshot: LSPDocument) async throws -> [LSPTextEdit] {
+        let response = try await request(.formatting(tabSize, insertSpaces), document: snapshot, timeout: 15)
+        return try decodeReply([LSPTextEdit].self, from: response) ?? []
+    }
+
     private func decodeReply<Value: Decodable>(_ type: Value.Type, from response: Data) throws -> Value? {
         let decoder = JSONDecoder()
         decoder.userInfo[LSPDocumentURI.serverKey] = server
@@ -387,7 +478,7 @@ final class LanguageServerConnection: @unchecked Sendable {
             guard location.url.isFileURL, location.range.start.line >= 0, location.range.start.character >= 0,
                   location.range.start <= location.range.end else { return nil }
             let url: URL
-            if server == .sourceKit || server == .odin {
+            if server.usesCanonicalFileURLs {
                 if let cached = canonicalURLs[location.url] {
                     url = cached
                 } else {
@@ -458,34 +549,70 @@ final class LanguageServerConnection: @unchecked Sendable {
 
     private func parameters(for request: Request) throws -> [String: Any] {
         if case .initialize = request {
-            var params: [String: Any] = ["processId": ProcessInfo.processInfo.processIdentifier, "rootUri": root.absoluteString,
-                    "workspaceFolders": [workspace], "clientInfo": ["name": "Edit"],
-                    "capabilities": ["general": ["positionEncodings": ["utf-16"]],
-                                     "window": ["workDoneProgress": true],
-                                     "workspace": ["workspaceFolders": true, "workspaceEdit": ["documentChanges": true],
-                                                   "semanticTokens": ["refreshSupport": true]],
-                                     "textDocument": ["definition": ["linkSupport": true],
-                                                      "publishDiagnostics": ["versionSupport": true],
-                                                      "hover": ["contentFormat": ["markdown", "plaintext"]],
-                                                      "documentSymbol": ["hierarchicalDocumentSymbolSupport": true],
-                                                      "semanticTokens": [
-                                                          "requests": ["full": ["delta": true], "range": true],
-                                                          "tokenTypes": LSPSemanticTokens.tokenTypes,
-                                                          "tokenModifiers": LSPSemanticTokens.tokenModifiers,
-                                                          "formats": ["relative"], "augmentsSyntaxTokens": true
-                                                      ],
-                                                      "rename": ["prepareSupport": true]]]]
+            var textDocument: [String: Any] = [
+                "definition": ["linkSupport": true],
+                "publishDiagnostics": ["versionSupport": true],
+                "hover": ["contentFormat": ["markdown", "plaintext"]],
+                "documentSymbol": ["hierarchicalDocumentSymbolSupport": true],
+                "semanticTokens": [
+                    "requests": ["full": ["delta": true], "range": true],
+                    "tokenTypes": LSPSemanticTokens.tokenTypes,
+                    "tokenModifiers": LSPSemanticTokens.tokenModifiers,
+                    "formats": ["relative"], "augmentsSyntaxTokens": true
+                ],
+                "rename": ["prepareSupport": true]
+            ]
+            if server == .solidity {
+                textDocument["completion"] = [
+                    "contextSupport": true,
+                    "completionItem": [
+                        "snippetSupport": false,
+                        "insertReplaceSupport": true,
+                        "documentationFormat": ["markdown", "plaintext"],
+                        "resolveSupport": ["properties": ["documentation", "detail"]]
+                    ]
+                ]
+                textDocument["signatureHelp"] = [
+                    "contextSupport": true,
+                    "signatureInformation": [
+                        "documentationFormat": ["markdown", "plaintext"],
+                        "parameterInformation": ["labelOffsetSupport": true],
+                        "activeParameterSupport": true
+                    ]
+                ]
+                textDocument["synchronization"] = ["didSave": true]
+            }
+            var params: [String: Any] = [
+                "processId": ProcessInfo.processInfo.processIdentifier, "rootUri": root.absoluteString,
+                "workspaceFolders": [workspace], "clientInfo": ["name": "Edit"],
+                "capabilities": [
+                    "general": ["positionEncodings": ["utf-16"]],
+                    "window": ["workDoneProgress": true],
+                    "workspace": ["workspaceFolders": true, "workspaceEdit": ["documentChanges": true],
+                                  "semanticTokens": ["refreshSupport": true]],
+                    "textDocument": textDocument
+                ]
+            ]
             if server == .sourceKit { params["initializationOptions"] = ["reportSyntacticHighlightInSemanticTokens": true] }
             if server == .odin { params["initializationOptions"] = ["enable_semantic_tokens": true] }
             return params
         }
         if case .workspaceSymbols(let query) = request { return ["query": query] }
+        if case .resolveCompletion(let wire) = request {
+            guard let item = try JSONSerialization.jsonObject(with: wire) as? [String: Any] else {
+                throw LSPFailure.invalidMessage
+            }
+            return item
+        }
         guard let url = document?.url else { throw LSPFailure.invalidPosition }
         var params: [String: Any] = ["textDocument": ["uri": url.absoluteString]]
         let offset: Int
         switch request {
-        case .initialize, .workspaceSymbols: return [:]
+        case .initialize, .workspaceSymbols, .resolveCompletion: return [:]
         case .documentSymbols, .semanticTokensFull: return params
+        case .formatting(let tabSize, let insertSpaces):
+            params["options"] = ["tabSize": tabSize, "insertSpaces": insertSpaces]
+            return params
         case .semanticTokensDelta(let id):
             params["previousResultId"] = id
             return params
@@ -494,12 +621,24 @@ final class LanguageServerConnection: @unchecked Sendable {
             params["range"] = (visible.map(index.semanticRequestRange) ?? index.fullRange).parameters
             return params
         case .definition(let value), .references(let value, _), .hover(let value), .documentHighlight(let value),
-             .prepareRename(let value), .rename(let value, _): offset = value
+             .prepareRename(let value), .rename(let value, _), .completion(let value, _, _),
+             .signatureHelp(let value, _, _): offset = value
         }
         guard let position = index?.position(at: offset) else { throw LSPFailure.invalidPosition }
         params["position"] = position.parameters
         if case .references(_, let include) = request { params["context"] = ["includeDeclaration": include] }
         if case .rename(_, let name) = request { params["newName"] = name }
+        if case .completion(_, let trigger, let retriggering) = request {
+            var context: [String: Any] = ["triggerKind": trigger == nil ? (retriggering ? 3 : 1) : 2]
+            if let trigger { context["triggerCharacter"] = trigger }
+            params["context"] = context
+        }
+        if case .signatureHelp(_, let trigger, let retriggering) = request {
+            var context: [String: Any] = ["triggerKind": trigger == nil ? (retriggering ? 3 : 1) : 2,
+                                          "isRetrigger": retriggering]
+            if let trigger { context["triggerCharacter"] = trigger }
+            params["context"] = context
+        }
         return params
     }
 
@@ -543,6 +682,7 @@ final class LanguageServerConnection: @unchecked Sendable {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
         process.executableURL = executable
+        process.arguments = server.arguments
         process.currentDirectoryURL = root
         process.environment = environment
         process.standardInput = stdin

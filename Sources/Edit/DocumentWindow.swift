@@ -1561,6 +1561,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             for document in app.documents { document.worktreeSidebar?.fileReplaced(previous, with: current) }
         }
         adoptSavedFile(result.file)
+        languageFeatures.documentDidSave(result.file.url, text: text)
     }
 
     private func adoptSavedFile(_ file: FileBuffer, scratch: ScratchFile? = nil) {

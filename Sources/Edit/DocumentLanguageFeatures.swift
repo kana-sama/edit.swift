@@ -99,7 +99,10 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
             }
         }
         document.editor.languageProbe = { [weak self] offset, word in await self?.probe(at: offset, word: word) }
-        document.editor.languageHover = { [weak self] offset, word in await self?.hover(at: offset, word: word) }
+        document.editor.languageHover = { [weak self] offset, word in
+            guard let self, document.editor.languageAssistance?.isPresenting != true else { return nil }
+            return await hover(at: offset, word: word)
+        }
         document.editor.languageFollowLink = { [weak self] offset, word in self?.followLink(at: offset, word: word) }
         document.editor.languageFollowHoverLink = { [weak self] location, word in self?.followHoverLink(location, from: word) }
         document.editor.languageContextItems = { [weak self] hit in self?.contextItems(at: hit) ?? [] }
@@ -108,6 +111,11 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         document.editor.onSubmitSymbolRename = { [weak self] in self?.symbolRename.submit() }
         document.editor.occurrenceHighlighting.semanticWordHighlights = { [weak self] offset in
             await self?.documentHighlights(at: offset) ?? []
+        }
+        document.editor.languageAssistance = EditorLanguageAssistance(editor: document.editor) { [weak self] in
+            guard let self, sourceServer == .solidity, let query = query(), document.editor.isEditable,
+                  document.editor.jjInlineDiff?.projectedEditRange == nil else { return nil }
+            return .init(session: session, revision: query.revision, generation: query.generation, opening: query.openGeneration)
         }
     }
 
@@ -126,6 +134,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
             return
         }
         symbolRename.cancel()
+        document.editor.languageAssistance?.contextChanged()
         sourceURL = url
         self.sourceLanguage = sourceLanguage
         sourceFolder = folder
@@ -146,11 +155,17 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         let revision = session.revision
         session.updateText(document.textWithConflictPrefixes)
         if session.revision != revision {
+            if sourceServer == .solidity { document.editor.languageBufferChanged() }
             updateDiagnostics()
             symbolRename.cancel()
             cancelLookup()
             document.editor.invalidateLanguageInteraction()
         }
+    }
+
+    func documentDidSave(_ url: URL, text: String) {
+        guard !isClosed, sourceServer == .solidity, sourceURL == url else { return }
+        session.didSave(url, text: text)
     }
 
     func workspaceSymbols(query: String) async throws -> [LSPSymbol] {
@@ -182,6 +197,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
 
     func close() {
         isClosed = true
+        document.editor.languageAssistance?.contextChanged()
         symbolRename.cancel()
         navigationID &+= 1
         cancelLookup()
@@ -201,7 +217,10 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     private func stateChanged() {
         document.updateLSPHighlighting()
         updateDiagnostics()
-        if sourceURL == nil || session.state != .ready { symbolRename.cancel() }
+        if sourceURL == nil || session.state != .ready {
+            symbolRename.cancel()
+            document.editor.languageAssistance?.contextChanged()
+        }
         if !document.editor.languageInteractionEnabled { cancelLookup() }
         document.editor.occurrenceHighlighting.setSemanticWordHighlightsEnabled(session.supportsDocumentHighlight)
         updateServerStatus()

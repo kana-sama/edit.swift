@@ -84,6 +84,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     lazy var bracketNavigation = BracketNavigation(editor: self)
     lazy var occurrenceHighlighting = OccurrenceHighlighting(editor: self)
     private lazy var languageInteraction = EditorLanguageInteraction(editor: self)
+    var languageAssistance: EditorLanguageAssistance?
+    private var isTypingForLanguageAssistance = false
     private var languageTrackingArea: NSTrackingArea?
     var languageProbe: ((Int, NSRange) async -> NSRange?)?
     var languageHover: ((Int, NSRange) async -> EditorLanguageHover?)?
@@ -201,6 +203,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         let focused = hasBufferFocus
         if !focused {
             if renameDraft != nil { _ = onCancelSymbolRename?() }
+            if notification?.name == NSWindow.didResignKeyNotification { languageAssistance?.dismiss() }
             setCurrentLine(.zero)
             bracketNavigation.clearHighlights()
         }
@@ -354,6 +357,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     override func resignFirstResponder() -> Bool {
         guard super.resignFirstResponder() else { return false }
         if renameDraft != nil { _ = onCancelSymbolRename?() }
+        languageAssistance?.dismiss()
         multiCaret.pendingSkip = false
         if multiCaretComposition != nil { unmarkText() }
         hideCaretDecorations()
@@ -588,6 +592,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        languageAssistance?.dismiss()
         if let draft = renameDraft {
             let point = convert(event.locationInWindow, from: nil)
             let offset = characterIndexForInsertion(at: point)
@@ -647,14 +652,19 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
            insertInEmptyConflictSnapshot(plainText, at: replacementRange.location == NSNotFound ? selectedRange() : replacementRange) {
             return
         }
-        if !insertAtCarets(string, replacementRange: replacementRange) {
-            if focusSession != nil { return }
-            if hasSecondarySelections { keepPrimarySelection(nil) }
-            super.insertText(string, replacementRange: replacementRange)
+        let typed = (string as? String) ?? (string as? NSAttributedString)?.string
+        let character = typed.flatMap { $0.count == 1 && $0 != "\n" && $0 != "\r" && $0 != "\t" ? $0 : nil }
+        trackLanguageTyping(character, enabled: character != nil) {
+            if !insertAtCarets(string, replacementRange: replacementRange) {
+                if focusSession != nil { return }
+                if hasSecondarySelections { keepPrimarySelection(nil) }
+                super.insertText(string, replacementRange: replacementRange)
+            }
         }
     }
 
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        languageAssistance?.dismiss()
         if renameDraft?.isSubmitted == true { return }
         guard !updatingComposition, renameDraft == nil else {
             super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
@@ -811,7 +821,9 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     override func deleteBackward(_ sender: Any?) {
         if renameDraft != nil { super.deleteBackward(sender); return }
         if replaceProjectedSelection(with: "") { return }
-        if !deleteAtCarets(backward: true, word: false) { super.deleteBackward(sender) }
+        trackLanguageTyping(nil, enabled: languageAssistance?.isTrackingInput == true) {
+            if !deleteAtCarets(backward: true, word: false) { super.deleteBackward(sender) }
+        }
     }
 
     override func deleteForward(_ sender: Any?) {
@@ -843,6 +855,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             return
         }
         if onCancelSymbolRename?() == true { return }
+        if languageAssistance?.dismiss() == true { return }
         if languageInteractionEnabled, languageInteraction.dismissHover() { return }
         if jjInlineDiff?.collapseAll() == true { return }
 
@@ -938,6 +951,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             if isRenamingSymbol || (!event.isARepeat && onRenameSymbol?() == true) { return }
         }
         if renameDraft != nil { super.keyDown(with: event); return }
+        if !hasMarkedText(), languageAssistance?.handleKey(event) == true { return }
         if handleMultiCaretKey(event) { return }
         if modifiers == .command && event.charactersIgnoringModifiers == "\u{F728}" && !hasMarkedText() {
             deleteToEndOfLine(nil)
@@ -950,6 +964,31 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     @objc func decreaseTextSize(_ sender: Any?) { setFontSize(fontSize - 1) }
     @objc func resetTextSize(_ sender: Any?) { setFontSize(Self.defaultFontSize) }
 
+    override func complete(_ sender: Any?) {
+        if languageAssistance?.canComplete == true { languageAssistance?.complete() }
+        else { super.complete(sender) }
+    }
+
+    @objc func showSignatureHelp(_ sender: Any?) { languageAssistance?.showSignature() }
+    @objc func formatDocument(_ sender: Any?) { languageAssistance?.format() }
+
+    func languageBufferChanged() {
+        languageAssistance?.bufferChanged(whileTyping: isTypingForLanguageAssistance)
+    }
+
+    private func trackLanguageTyping(_ character: String?, enabled: Bool, editing: () -> Void) {
+        guard enabled, let languageAssistance,
+              languageAssistance.canComplete || languageAssistance.canShowSignature else {
+            editing()
+            return
+        }
+        let previous = selectedRange()
+        isTypingForLanguageAssistance = true
+        editing()
+        isTypingForLanguageAssistance = false
+        if selectedRange() != previous { languageAssistance.typed(character) }
+    }
+
     override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
         switch item.action {
         case #selector(copy(_:)):
@@ -960,6 +999,12 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             return isEditable && !hasMarkedText() && (textStorage?.length ?? 0) > 0
         case #selector(toggleLineComments(_:)):
             return isEditable && !hasMarkedText() && syntaxLanguage.lineCommentPrefix != nil
+        case #selector(complete(_:)):
+            return languageAssistance?.canComplete == true
+        case #selector(showSignatureHelp(_:)):
+            return languageAssistance?.canShowSignature == true
+        case #selector(formatDocument(_:)):
+            return languageAssistance?.canFormat == true
         case #selector(increaseTextSize(_:)):
             return fontSize < 72
         case #selector(decreaseTextSize(_:)):
@@ -1285,6 +1330,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
+        if !isTypingForLanguageAssistance { languageAssistance?.selectionChanged() }
         if renameDraft != nil {
             multiCaret.restartBlink = true
             requestLineRefresh()
@@ -1460,6 +1506,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             self.renameShade?.update()
             self.updateMarkdownToolTips()
             self.lineRefreshPending = false
+            self.languageAssistance?.viewportChanged()
             self.onFindViewportChange?()
         }
     }
@@ -1535,6 +1582,15 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     func showLanguageFeedback(_ message: String, at range: NSRange) {
         if languageInteractionEnabled { languageInteraction.showFeedback(message, at: range) }
     }
+
+#if EDIT_AGENT_CHECKS
+    var beforeApplyLanguageFormattingForCheck: (() async -> Void)?
+    var completionLabelsForCheck: [String] { languageAssistance?.completionLabelsForCheck ?? [] }
+    var signatureLabelForCheck: String? { languageAssistance?.signatureLabelForCheck }
+    var signatureParameterForCheck: NSRange? { languageAssistance?.signatureParameterForCheck }
+    var completionFrameForCheck: NSRect? { languageAssistance?.completionFrameForCheck }
+    var signatureFrameForCheck: NSRect? { languageAssistance?.signatureFrameForCheck }
+#endif
 
     func hasLanguageDefinitionLink(at point: NSPoint) -> Bool {
         languageInteractionEnabled && languageInteraction.linkContains(point)

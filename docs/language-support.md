@@ -41,4 +41,6 @@ Track highlighting quality separately for each bundled language mode. **✅** me
 
 The [native Odin comparison](../Sources/Edit/Checks/OdinLSPCheck.swift) checks all shared colors on a fixture with live OLS. It also checks that Tree-sitter leaves call targets, qualified member accesses, initializer and attribute values, and procedure headers without a parsed body to OLS.
 
+Solidity uses Tree-sitter for syntax colors and [Solar](features/solidity-lsp/spec.md) for language services. The Forge 1.10.0 Solar server does not supply semantic colors.
+
 Update the affected cells when adding a mode, changing highlighting, confirming a defect, or verifying a fix. Keep modes sorted by descending ✅ count, with alphabetical order for ties. Keep evidence beneath the table and leave ❓ until the relevant behavior is verified. The [bundled modes](../Sources/Edit/SyntaxLanguage.swift), [grammar inventory](../resources/syntax/README.md), and [server routing](../Sources/Edit/LanguageServer.swift) define the scope of the checklist.

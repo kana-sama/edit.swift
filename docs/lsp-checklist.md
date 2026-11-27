@@ -4,7 +4,7 @@
 
 ✓ works in Edit. A blank cell means the server supports the method and Edit could add it. ✗ means the server does not support the method. The SourceKit-LSP column describes Swift. C-family support uses clangd and can expose different methods. Implemented methods come first, then implementation candidates, then methods unavailable on the listed servers.
 
-Checked November 25, 2026 against ZLS 0.17.0 and SourceKit-LSP bundled with Apple Swift 6.4 (swiftlang-6.4.0.33.1). OLS was checked November 26, 2026 against dev-2026-11. Some methods depend on client capabilities, server settings or project indexing. The table covers [LSP 3.18][lsp] editor features and the messages that enable them. It is a catalog of options for Edit. [OLS request handlers][ols-handlers]
+Checked November 25, 2026 against ZLS 0.17.0 and SourceKit-LSP bundled with Apple Swift 6.4 (swiftlang-6.4.0.33.1). OLS was checked November 26, 2026 against dev-2026-11. See [Solar](#solar) for the Foundry integration checked with Forge 1.10.0. Some methods depend on client capabilities, server settings or project indexing. The table covers [LSP 3.18][lsp] editor features and the messages that enable them. It is a catalog of options for Edit. [OLS request handlers][ols-handlers]
 
 Edit ranks comparable [workspace symbol matches](features/lsp-symbol-navigation/spec.md#go-to-workspace-symbol) by their proximity to the active folder's root across the connected servers.
 
@@ -148,6 +148,18 @@ Update this checklist in the same change as an Edit LSP feature or server integr
 - [x] Display full-document semantic tokens when OLS enables them. [Edit specification](features/odin-lsp/spec.md)
 - [ ] Surface Odin compiler diagnostics and checker profiles. [OLS configuration][ols-config]
 - [ ] Show inferred types, parameter names, and default arguments through OLS inlay hints. [OLS configuration][ols-config]
+
+## Solar
+
+- [x] Discover Foundry projects and launch `forge lsp --stdio`. Respect project profiles and remappings when opening source and dependency files. [Edit specification](features/solidity-lsp/spec.md)
+- [x] Run `textDocument/definition`, `textDocument/references`, `textDocument/hover`, `textDocument/documentHighlight`, `textDocument/documentSymbol`, `workspace/symbol`, `textDocument/prepareRename`, and `textDocument/rename`.
+- [x] Display `textDocument/publishDiagnostics` errors and send `textDocument/didSave` and `workspace/didChangeWatchedFiles`.
+- [x] Display `textDocument/completion` results and accept edits, using `completionItem/resolve` when supported.
+- [x] Show `textDocument/signatureHelp` with the active parameter and apply `textDocument/formatting` as an undoable document edit.
+- [ ] Surface Solar's type definition, implementation, hierarchies, and inlay hints.
+- [ ] Support pull and workspace diagnostics in addition to the push diagnostics used by Edit.
+
+Forge 1.10.0 does not advertise semantic tokens. [Foundry editor integration](https://github.com/foundry-rs/foundry/blob/v1.10.0/editors/README.md)
 
 [ols-config]: https://github.com/DanielGavin/ols#configuration
 [ols-handlers]: https://github.com/DanielGavin/ols/blob/master/src/server/requests.odin

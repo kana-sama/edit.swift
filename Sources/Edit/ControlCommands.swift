@@ -44,6 +44,18 @@ struct ControlCommand {
             guard document.hasTextDocument, !document.isShowingMarkdownPreview, document.window.attachedSheet == nil,
                   document.editor.responds(to: action) else { return false }
             if Self.isCaseCommand(action) { return document.editor.validateUserInterfaceItem(item) }
+            switch action {
+            case #selector(EditorTextView.complete(_:)):
+                return !document.editor.hasSecondarySelections && document.editor.selectedRange().length == 0 &&
+                    document.editor.languageAssistance?.offersCompletion == true
+            case #selector(EditorTextView.showSignatureHelp(_:)):
+                return !document.editor.hasSecondarySelections && document.editor.selectedRange().length == 0 &&
+                    document.editor.languageAssistance?.offersSignatureHelp == true
+            case #selector(EditorTextView.formatDocument(_:)):
+                return document.editor.languageAssistance?.canFormat == true
+            default:
+                break
+            }
             return !Self.isBracketCommand(action) || document.editor.canNavigateBrackets
         }
         if let target = item.target as? NSUserInterfaceValidations {
@@ -249,17 +261,23 @@ struct ControlCommand {
             if prefix == "Window",
                action != #selector(NSWindow.performMiniaturize(_:)),
                action != #selector(NSWindow.performZoom(_:)) { return [] }
+            let assistance = isLanguageAssistanceCommand(action)
             let title = action == #selector(Edit.goBack(_:)) || action == #selector(Edit.goForward(_:))
                 || action == #selector(Edit.toggleMarkdownPreview(_:))
-                || highlightingLayer(for: action) != nil
+                || highlightingLayer(for: action) != nil || assistance
                 ? item.title : "\(prefix): \(item.title)"
             return [ControlCommand(id: NSStringFromSelector(action), title: title, item: item,
-                                   documentOnly: isBracketCommand(action) || isCaseCommand(action))]
+                                   documentOnly: isBracketCommand(action) || isCaseCommand(action) || assistance)]
         }
     }
 
     private static func isBracketCommand(_ action: Selector) -> Bool {
         action == #selector(EditorTextView.goToBracket(_:)) || action == #selector(EditorTextView.selectToBracket(_:))
+    }
+
+    private static func isLanguageAssistanceCommand(_ action: Selector) -> Bool {
+        action == #selector(EditorTextView.complete(_:)) || action == #selector(EditorTextView.showSignatureHelp(_:)) ||
+            action == #selector(EditorTextView.formatDocument(_:))
     }
 
     private static func highlightingLayer(for action: Selector?) -> HighlightingLayer? {
