@@ -38,7 +38,7 @@ enum HoverLink {
 
 struct EditorHoverContent: Sendable {
     private struct Run: Sendable {
-        let text: String
+        var text: String
         var emphasis = false
         var strong = false
         var code = false
@@ -53,6 +53,9 @@ struct EditorHoverContent: Sendable {
             let row: Int
             let column: Int
             let alignment: NSTextAlignment
+            var isNatSpec = false
+
+            var isHeader: Bool { row == 0 && !isNatSpec }
         }
 
         var identity: Int?
@@ -87,7 +90,7 @@ struct EditorHoverContent: Sendable {
         blocks = [Block(runs: runs)]
     }
 
-    init(text: String, isMarkdown: Bool, preservesSoftBreaks: Bool = false, formatsNatSpec: Bool = false) {
+    init(text: String, isMarkdown: Bool, preservesSoftBreaks: Bool = false) {
         let options = AttributedString.MarkdownParsingOptions(appliesSourcePositionAttributes: preservesSoftBreaks)
         guard isMarkdown, let value = try? AttributedString(markdown: text, options: options), !value.characters.isEmpty else {
             blocks = [Block(runs: [Run(text: text)])]
@@ -157,34 +160,62 @@ struct EditorHoverContent: Sendable {
                 blocks[index].alignedFields = OLSHover.alignedFields(in: blocks[index].runs.map(\.text).joined())
             }
         }
-        if formatsNatSpec { Self.formatNatSpec(in: &blocks) }
         self.blocks = blocks
     }
 
-    private static func formatNatSpec(in blocks: inout [Block]) {
-        // Solar renders NatSpec tags as standalone bold paragraphs in the Markdown response.
-        for index in blocks.indices {
-            let block = blocks[index]
-            guard block.isTopLevelParagraph, block.runs.allSatisfy({ $0.strong && !$0.code && $0.link == nil }) else { continue }
-            let tag = block.runs.map(\.text).joined()
-            let heading: String
-            switch tag {
-            case "@dev": heading = "Notes"
-            case "@param": heading = "Parameters"
-            case "@return": heading = "Returns"
-            default: continue
-            }
-            blocks[index].heading = 3
-            blocks[index].runs = [Run(text: heading)]
+    private init(blocks: [Block]) { self.blocks = blocks }
 
-            let value = index + 1
-            let following = value + 1
-            if tag == "@return", blocks.indices.contains(value), blocks[value].listMarker == "• ",
-               blocks[value].indentation == 1, !blocks.indices.contains(following) || blocks[following].indentation == 0 {
-                blocks[value].listMarker = nil
-                blocks[value].indentation = 0
+    private enum NatSpecField: String {
+        case notes = "@dev"
+        case parameter = "@param"
+        case result = "@return"
+    }
+
+    func natSpecSections() -> (description: Self?, details: Self?) {
+        var description: [Block] = []
+        var details: [Block] = []
+        var field: NatSpecField?
+        for index in blocks.indices {
+            var block = blocks[index]
+            if let tag = Self.natSpecField(in: block) {
+                if tag == .notes {
+                    block.heading = 3
+                    block.runs = [Run(text: "Notes")]
+                } else if blocks.indices.contains(index + 1), Self.isNatSpecItem(blocks[index + 1]) {
+                    field = tag
+                    continue
+                }
+            }
+            if let tag = field, Self.isNatSpecItem(block) {
+                var label = [Run(text: tag == .result ? "Returns" : "Parameter", strong: true)]
+                if let name = block.runs.first, name.code, block.runs.dropFirst().first?.text.hasPrefix(": ") == true {
+                    block.runs.removeFirst()
+                    block.runs[0].text = String(block.runs[0].text.dropFirst(2))
+                    label = tag == .result ? [Run(text: "Returns ", strong: true), name] : [name]
+                }
+                let row = details.count / 2
+                details.append(Block(cell: .init(table: 0, columnCount: 2, row: row, column: 0,
+                                                 alignment: .left, isNatSpec: true), runs: label))
+                block.cell = .init(table: 0, columnCount: 2, row: row, column: 1, alignment: .left, isNatSpec: true)
+                block.indentation = 0
+                block.listMarker = nil
+                details.append(block)
+            } else {
+                field = nil
+                description.append(block)
             }
         }
+        return (description.isEmpty ? nil : Self(blocks: description), details.isEmpty ? nil : Self(blocks: details))
+    }
+
+    private static func natSpecField(in block: Block) -> NatSpecField? {
+        // Solar renders NatSpec tags as standalone bold paragraphs in the Markdown response.
+        guard block.isTopLevelParagraph, block.runs.allSatisfy({ $0.strong && !$0.code && $0.link == nil }) else { return nil }
+        return NatSpecField(rawValue: block.runs.map(\.text).joined())
+    }
+
+    private static func isNatSpecItem(_ block: Block) -> Bool {
+        block.listMarker == "• " && block.indentation == 1 && !block.isCode && !block.isQuote && block.cell == nil
     }
 
     @MainActor
@@ -211,14 +242,20 @@ struct EditorHoverContent: Sendable {
                     table = NSTextTable()
                     table.numberOfColumns = cell.columnCount
                     table.collapsesBorders = true
+                    if cell.isNatSpec { table.layoutAlgorithm = .fixed }
                     tables[cell.table] = table
                 }
                 let box = NSTextTableBlock(table: table, startingRow: cell.row, rowSpan: 1,
                                           startingColumn: cell.column, columnSpan: 1)
                 box.setWidth(5, type: .absolute, for: .padding)
-                box.setWidth(1, type: .absolute, for: .border)
+                if cell.isNatSpec {
+                    box.setContentWidth(cell.column == 0 ? 30 : 70, type: .percentage)
+                    box.setWidth(1, type: .absolute, for: .border, rectEdge: .maxYEdge)
+                } else {
+                    box.setWidth(1, type: .absolute, for: .border)
+                }
                 box.setBorderColor(.separatorColor)
-                if cell.row == 0 { box.backgroundColor = codeBackground }
+                if cell.isHeader { box.backgroundColor = codeBackground }
                 paragraph.textBlocks = [box]
                 paragraph.alignment = cell.alignment
             }
@@ -236,7 +273,7 @@ struct EditorHoverContent: Sendable {
                 if run.code && !block.isCode {
                     attributes[.font] = EditorTextView.defaultFont
                     attributes[.backgroundColor] = codeBackground
-                } else if !block.isCode && (run.strong || block.heading != nil || block.cell?.row == 0) {
+                } else if !block.isCode && (run.strong || block.heading != nil || block.cell?.isHeader == true) {
                     attributes[.font] = NSFont.systemFont(ofSize: size, weight: .semibold)
                 }
                 if run.emphasis, let font = attributes[.font] as? NSFont {

@@ -119,17 +119,20 @@ enum SolidityLSPCheck {
         let hover = await lsp.hover(at: position, word: use)
         try require(hover?.range == use && hover?.isMarkdown == true && hover?.text.contains("Adds two numbers.") == true,
                     "return a ranged Markdown hover with the dependency's NatSpec")
-        try await checkHover(at: use, in: document) { text, view in
-            let rendered = text.string
-            try require(rendered.contains("Adds two numbers.\nNotes\nUses checked arithmetic.")
-                        && rendered.contains("Parameters\n• left: First number.\n• right: Second number.")
-                        && rendered.contains("Returns\nThe sum in input units."),
-                        "render NatSpec prose, named parameters and a single return as readable sections")
-            let link = try range("arithmetic", in: rendered)
-            let parameter = try range("left: First", in: rendered)
-            try require(text.textStorage?.attribute(.link, at: link.location, effectiveRange: nil) as? URL
+        try await checkHover(at: use, in: document) { description, table, view in
+            try require(description.string.contains("Adds two numbers.\nNotes\nUses checked arithmetic."),
+                        "render the NatSpec description before the divider")
+            try checkCell("left", in: table, row: 0, column: 0)
+            try checkCell("First number.", in: table, row: 0, column: 1)
+            try checkCell("right", in: table, row: 1, column: 0)
+            try checkCell("Second number.", in: table, row: 1, column: 1)
+            try checkCell("Returns", in: table, row: 2, column: 0)
+            try checkCell("The sum in input units.", in: table, row: 2, column: 1)
+            let link = try range("arithmetic", in: description.string)
+            let parameter = try range("left", in: table.string)
+            try require(description.textStorage?.attribute(.link, at: link.location, effectiveRange: nil) as? URL
                         == URL(string: "https://docs.soliditylang.org/")
-                        && text.textStorage?.attribute(.backgroundColor, at: parameter.location, effectiveRange: nil) != nil,
+                        && table.textStorage?.attribute(.backgroundColor, at: parameter.location, effectiveRange: nil) != nil,
                         "preserve Markdown links and inline code in the NatSpec hover")
             try captureHover(view)
         }
@@ -529,10 +532,11 @@ enum SolidityLSPCheck {
         try await wait("synchronize LeverageRouter.sol", session: session) { session.supportsCompletion }
         document.window.makeFirstResponder(editor)
         let getter = try range("getStalePriceWindow", in: editor.string)
-        try await checkHover(at: getter, in: document) { text, view in
-            try require(text.string.contains("Returns the maximum staleness of an oracle price.\n"
-                                            + "Returns\nMaximum price staleness, in seconds."),
-                        "show the return description in the BarterLend getter hover")
+        try await checkHover(at: getter, in: document) { description, table, view in
+            try require(description.string.contains("Returns the maximum staleness of an oracle price."),
+                        "show the BarterLend getter description above the table")
+            try checkCell("Returns", in: table, row: 0, column: 0)
+            try checkCell("Maximum price staleness, in seconds.", in: table, row: 0, column: 1)
             try captureHover(view)
         }
         try await checkIncompleteStatement(in: document, before: "        return FlashLoanContext({")
@@ -541,7 +545,7 @@ enum SolidityLSPCheck {
     }
 
     private static func checkHover(at word: NSRange, in document: DocumentWindow,
-                                   verify: (NSTextView, NSView) throws -> Void) async throws {
+                                   verify: (NSTextView, NSTextView, NSView) throws -> Void) async throws {
         let editor = document.editor
         select(word.location, in: editor)
         guard let rect = editor.highlightRects(for: [word]).first,
@@ -553,14 +557,27 @@ enum SolidityLSPCheck {
         editor.mouseMoved(with: event)
         defer { editor.cancelOperation(nil) }
         try await wait("show the native Solidity hover") { editor.languageHoverWindowForCheck != nil }
-        func hoverText(in view: NSView) -> HoverTextView? {
-            (view as? HoverTextView) ?? view.subviews.lazy.compactMap { hoverText(in: $0) }.first
+        func findView(_ id: String, below view: NSView) -> NSView? {
+            if view.identifier?.rawValue == id { return view }
+            return view.subviews.lazy.compactMap { findView(id, below: $0) }.first
         }
         guard let panel = editor.languageHoverWindowForCheck, let view = panel.contentView,
-              let text = hoverText(in: view) else { throw Failure(detail: "find the rendered Solidity hover") }
-        try require(!panel.isVisible && panel.alphaValue == 0 && text.isSelectable,
-                    "keep the hover selectable in the hidden native check")
-        try verify(text, view)
+              let description = findView("EditorLanguageHover.Description.body", below: view) as? NSTextView,
+              let table = findView("EditorLanguageHover.NatSpec.body", below: view) as? NSTextView,
+              let divider = findView("EditorLanguageHover.separator", below: view)
+        else { throw Failure(detail: "find the Solidity hover description, divider and table") }
+        try require(!panel.isVisible && panel.alphaValue == 0 && description.isSelectable && table.isSelectable,
+                    "keep the hover content selectable in the hidden native check")
+        try require(description.frame.maxY <= divider.frame.minY && divider.frame.maxY <= table.frame.minY,
+                    "place the divider between the description and the NatSpec table")
+        try verify(description, table, view)
+    }
+
+    private static func checkCell(_ text: String, in table: NSTextView, row: Int, column: Int) throws {
+        let range = try range(text, in: table.string)
+        let style = table.textStorage?.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle
+        let cell = style?.textBlocks.first as? NSTextTableBlock
+        try require(cell?.startingRow == row && cell?.startingColumn == column, "lay out \(text) in the NatSpec table")
     }
 
     private static func checkMultipleReturnHover() throws {
@@ -579,10 +596,15 @@ enum SolidityLSPCheck {
             ```
             """
         let presentation = EditorHoverPresentation(text: markdown, isMarkdown: true, server: .solidity)
-        let layout = EditorHoverLayout(presentation, maximumWidth: presentation.maximumWidth)
-        let rendered = layout?.textViews.first?.string ?? ""
-        try require(rendered.contains("Returns\n• lower: Lower bound.\n• upper: Upper bound.")
-                    && rendered.hasSuffix("**@return**"), "keep both named returns and the literal fenced example")
+        guard let layout = EditorHoverLayout(presentation, maximumWidth: presentation.maximumWidth),
+              let description = layout.textViews.first, let table = layout.textViews.last,
+              description !== table
+        else { throw Failure(detail: "lay out the named returns after the description") }
+        try require(description.string.hasSuffix("**@return**"), "preserve the literal fenced example")
+        try checkCell("Returns lower", in: table, row: 0, column: 0)
+        try checkCell("Lower bound.", in: table, row: 0, column: 1)
+        try checkCell("Returns upper", in: table, row: 1, column: 0)
+        try checkCell("Upper bound.", in: table, row: 1, column: 1)
     }
 
     private static func checkParameter(_ text: String, in document: DocumentWindow) async throws {

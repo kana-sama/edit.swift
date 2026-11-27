@@ -8,10 +8,10 @@ Solar provides the shared [completion, signature help, and formatting commands](
 
 ## NatSpec hover
 
-Keep the syntax-colored signature above the documentation. Show the summary as prose and present the NatSpec sections supplied by Solar under compact **Notes**, **Parameters**, and **Returns** headings. Use inline code for parameter and return names. Show a single return description as a paragraph and keep a list when the function documents multiple returns. Preserve Markdown links, emphasis, and code examples. Display inherited documentation when Solar includes it in the response. [Solidity NatSpec format](https://docs.soliditylang.org/en/stable/natspec-format.html)
+Keep the syntax-colored signature above the description and developer notes. Put a divider below the description and show documented parameters and return values in a two-column table. Place names on the left and descriptions on the right, with a row for each parameter or return value. Use inline code for names and label return rows **Returns**. Show the divider when there are rows to display. Preserve Markdown links, emphasis, and code examples. Display inherited documentation when Solar includes it in the response. [Solidity NatSpec format](https://docs.soliditylang.org/en/stable/natspec-format.html)
 
 ## Acceptance
 
 Run `./script/check --only lsp-solidity` with a compatible Forge on PATH. Check the discovered root, remapped library navigation and held source/destination frames, hover and symbols, cross-file rename, errors during unsaved edits, keyboard completion, active parameter highlighting, format and Undo, and Stop and Restart. Use `EDIT_SOLIDITY_CHECK_PROJECT` to exercise the same integration on a disposable copy of BarterLend.
 
-Hover a documented call and check the summary, notes, named parameters, return descriptions, and a Markdown link. With the BarterLend fixture, hover `getStalePriceWindow` in `LeverageRouter.sol` and check that the return description appears under **Returns**.
+Hover a documented call and check the summary, notes, and Markdown links above the divider and the parameter and return rows below it. With the BarterLend fixture, hover `getStalePriceWindow` in `LeverageRouter.sol` and check the single **Returns** row.
