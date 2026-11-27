@@ -165,7 +165,7 @@ enum SyntaxEngine {
 
     static func supportsIncremental(_ language: SyntaxLanguage) -> Bool {
         switch language {
-        case .odin, .ruby, .shell, .swift, .zig: treeAPI != nil && queries != nil
+        case .odin, .ruby, .shell, .solidity, .swift, .zig: treeAPI != nil && queries != nil
         default: false
         }
     }
