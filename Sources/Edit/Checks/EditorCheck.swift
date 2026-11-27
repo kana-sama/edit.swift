@@ -95,6 +95,41 @@ enum EditorCheck {
         editor.isEditable = true
         document.setSyntaxLanguage(nil)
 
+        guard let moveUp = lines.item(withTitle: "Move Line Up"),
+              let moveDown = lines.item(withTitle: "Move Line Down"),
+              let editMenu = lines.supermenu,
+              let undoAction = editMenu.item(withTitle: "Undo")?.action,
+              let redoAction = editMenu.item(withTitle: "Redo")?.action else {
+            throw Failure("find the Move Line, Undo, and Redo menu items")
+        }
+        moveUp.target = editor
+        moveDown.target = editor
+        defer {
+            moveUp.target = nil
+            moveDown.target = nil
+        }
+        let lineMoves: [(arrow: String, code: UInt16, before: Int, after: Int)] = [("\u{F700}", 126, 7, 1), ("\u{F701}", 125, 2, 7)]
+        for (arrow, code, before, after) in lineMoves {
+            guard let moveKey = NSEvent.keyEvent(with: .keyDown, location: .zero,
+                                                 modifierFlags: [.option, .numericPad, .function],
+                                                 timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                                 characters: arrow, charactersIgnoringModifiers: arrow,
+                                                 isARepeat: false, keyCode: code) else {
+                throw Failure("create the Move Line shortcut")
+            }
+            setBuffer("  red\nblue", at: before)
+            var moved = false
+            edit { moved = lines.performKeyEquivalent(with: moveKey) }
+            try expect(moved && editor.string == "blue\n  red" &&
+                       editor.selectedRange() == NSRange(location: after, length: 0), "move the caret with its line")
+            try expect(editor.tryToPerform(undoAction, with: nil) && editor.string == "  red\nblue", "Undo restores the line order")
+            try expect(editor.selectedRange() == NSRange(location: before, length: 0),
+                       "Undo returns the original caret after moving a line (got \(editor.selectedRange()))")
+            try expect(editor.tryToPerform(redoAction, with: nil) && editor.string == "blue\n  red" &&
+                       editor.selectedRange() == NSRange(location: after, length: 0),
+                       "Redo returns the caret to the moved line")
+        }
+
         setBuffer("  first\nsecond", at: 7)
         edit { editor.insertNewline(nil) }
         try expect(editor.string == "  first\n  \nsecond", "Return copies indentation")
@@ -115,7 +150,11 @@ enum EditorCheck {
         try expect(editor.string == "c\na\nb", "move block below final line without newline")
         try expect(editor.selectedRange() == NSRange(location: 2, length: 3), "move retains selection")
         undo.undo()
-        try expect(editor.string == "a\nb\nc", "undo restores moved block")
+        try expect(editor.string == "a\nb\nc" && editor.selectedRange() == NSRange(location: 0, length: 3),
+                   "Undo restores the moved block and the original selection")
+        undo.redo()
+        try expect(editor.string == "c\na\nb" && editor.selectedRange() == NSRange(location: 2, length: 3),
+                   "Redo restores the block and its moved selection")
 
         let pasteboard = NSPasteboard.withUniqueName()
         defer { pasteboard.releaseGlobally() }

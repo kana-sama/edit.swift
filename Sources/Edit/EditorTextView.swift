@@ -437,17 +437,19 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     @objc func moveLinesUp(_ sender: Any?) {
-        guard prepareProjectedLineCommand() else { return }
-        if editMultipleLines(.move(up: true)) { return }
-        guard let text = textStorage?.mutableString else { return }
-        apply(LineEditing.moveLines(text, selection: selectedRange(), up: true))
+        moveLines(up: true)
     }
 
     @objc func moveLinesDown(_ sender: Any?) {
-        guard prepareProjectedLineCommand() else { return }
-        if editMultipleLines(.move(up: false)) { return }
-        guard let text = textStorage?.mutableString else { return }
-        apply(LineEditing.moveLines(text, selection: selectedRange(), up: false))
+        moveLines(up: false)
+    }
+
+    private func moveLines(up: Bool) {
+        guard !hasMarkedText(), prepareProjectedLineCommand() else { return }
+        if editMultipleLines(.move(up: up)) { return }
+        guard let text = textStorage?.mutableString,
+              let move = LineEditing.moveLines(text, selection: selectedRange(), up: up) else { return }
+        applyMultiEdits([EditorTextEdit(range: move.range, text: move.replacement)], selections: [move.selection])
     }
 
     @objc func insertLineAbove(_ sender: Any?) {
