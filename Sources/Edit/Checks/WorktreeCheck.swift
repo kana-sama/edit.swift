@@ -185,6 +185,7 @@ enum WorktreeCheck {
         try expect(tree.selectedRow == active, "scroll and select the newly opened file")
         try expect(cell(at: active, in: tree)?.textField?.font == NSFont.systemFont(ofSize: NSFont.systemFontSize),
                    "the selected file uses the same font as the other files")
+        try SidebarFileTreeCheck.checkNameWidths(in: tree, rows: [active, sources, log])
         let activeItem = try require(tree.item(atRow: active), "retrieve active outline item")
         guard let writer = sidebar.outlineView(tree, pasteboardWriterForItem: activeItem) else {
             throw Failure("the active file can be dragged out")

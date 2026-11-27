@@ -58,6 +58,7 @@ enum ScratchTreeCheck {
         }
         let baselineRow = try require(row(named: members[0].name, in: tree), "Alpha is still visible")
         let beta = try require(row(named: members[1].name, in: tree), "Beta is visible")
+        try SidebarFileTreeCheck.checkNameWidths(in: tree, rows: [sourceRow, baselineRow, beta])
         try click(beta, in: tree, modifiers: .command)
         try expect(tree.selectedRowIndexes.contains(beta) && window.scratchFile?.id == members[0].id &&
                    window.window.firstResponder === tree, "Command-click changes selection without opening Beta")

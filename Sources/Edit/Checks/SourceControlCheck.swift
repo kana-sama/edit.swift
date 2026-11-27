@@ -113,6 +113,8 @@ enum SourceControlCheck {
         try expect(fileUndo.fileEffects.count == 2, "preview both working-copy file effects for Undo")
         try SourceControlPopoverCheck.run(preview: fileUndo)
         guard let currentFileRow = row(named: "Tracked.txt", in: tree) else { throw Failure("find a working file for the context menu") }
+        guard let removedFileRow = row(named: "Removed.txt", in: tree) else { throw Failure("find the unselected deleted file") }
+        try SidebarFileTreeCheck.checkNameWidths(in: tree, rows: [currentFileRow, removedFileRow])
         try expect(panel.fileTree.menu(at: currentFileRow)?.item(withTitle: "Discard File Changes…")?.isEnabled == true,
                    "offer to discard changes to a file in @")
         try open("Removed.txt", in: panel.fileTree)

@@ -34,6 +34,10 @@ Reuse the same card for the same object wherever it is described. The Jujutsu gr
 
 Use the shared mode selector for related, mutually exclusive text options in the document header and in sidebars. Give the options a single rounded-rectangle track. Make every enabled segment clickable across its full surface, including the padding around its label. Slide the highlight within the track from its current position to the new segment with a short, gently damped spring. Keep the selection paired with the visible content while a mode is preparing. Move the highlight immediately when Reduce Motion is enabled. Keep pointer, keyboard, and accessibility behavior consistent across placements. Match adjacent toggles to the track's compact corner radius.
 
+## Sidebar file trees
+
+Worktree, Scratches, and Changed Files in Jujutsu use the same outline layout. Long file and folder names truncate in the middle at the trailing edge of the selection highlight. The available width is the same for selected and unselected rows at the same depth.
+
 ## Sidebar results
 
 Use one content grid for controls and results. Align both edges of the control stack with the first-level file and folder gutter and the trailing count column. Give the [mode selector](#mode-selectors) equal segments spanning the stack. Give independent text inputs a full row each. Use a descriptive placeholder and an accessible name when the placeholder is enough to identify the field. Reuse the same field component for adjacent inputs, including single-line and multiline variants. Match their resting height, text position, focus outline, and the size and inset of any embedded buttons. Keep the text position fixed when focus changes. Check the full stack at the sidebar’s minimum width.

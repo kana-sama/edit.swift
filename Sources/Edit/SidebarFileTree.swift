@@ -98,8 +98,8 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     private let container = NSView()
-    private let scroll = WorktreeScrollView()
-    private let tree = WorktreeOutline()
+    private let scroll = SidebarFileTreeScrollView()
+    private let tree = SidebarFileTreeOutline()
     private unowned let document: DocumentWindow
     private unowned let app: Edit
     private let mode: Mode
@@ -705,14 +705,14 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
-        outlineView.makeView(withIdentifier: WorktreeRow.reuseIdentifier, owner: nil) as? WorktreeRow
-            ?? WorktreeRow()
+        outlineView.makeView(withIdentifier: SidebarFileTreeRow.reuseIdentifier, owner: nil) as? SidebarFileTreeRow
+            ?? SidebarFileTreeRow()
     }
 
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item object: Any) -> NSView? {
         guard let item = object as? Item else { return nil }
-        let cell = outlineView.makeView(withIdentifier: WorktreeCell.identifier, owner: self) as? WorktreeCell
-            ?? WorktreeCell()
+        let cell = outlineView.makeView(withIdentifier: SidebarFileTreeCell.identifier, owner: self) as? SidebarFileTreeCell
+            ?? SidebarFileTreeCell()
         let muted = item.isIgnored || isHidden(item)
         let backingURL = item.scratchFile.flatMap { scratchSource?.backingURL(for: $0) } ?? item.fileURL
         let icon: NSImage?
@@ -752,7 +752,7 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
 
     private func refreshDiagnosticBadge(for item: Item, row: Int) {
         guard mode == .worktree, row >= 0,
-              let cell = tree.view(atColumn: 0, row: row, makeIfNecessary: false) as? WorktreeCell else { return }
+              let cell = tree.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarFileTreeCell else { return }
         cell.setDiagnosticBadge(hasDiagnosticBadge(for: item))
     }
 
@@ -768,7 +768,7 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         guard rows.location != NSNotFound, rows.length > 0 else { return }
         for row in rows.location..<NSMaxRange(rows) {
             guard let item = tree.item(atRow: row) as? Item,
-                  let cell = tree.view(atColumn: 0, row: row, makeIfNecessary: false) as? WorktreeCell else { continue }
+                  let cell = tree.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarFileTreeCell else { continue }
             cell.setJJStatus(jjStatus(for: item))
         }
     }
@@ -948,7 +948,7 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
         guard row >= 0 else { finishNameEdit(edit); return }
         tree.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         tree.scrollRowToVisible(row)
-        guard let cell = tree.view(atColumn: 0, row: row, makeIfNecessary: true) as? WorktreeCell else {
+        guard let cell = tree.view(atColumn: 0, row: row, makeIfNecessary: true) as? SidebarFileTreeCell else {
             finishNameEdit(edit)
             return
         }
@@ -1349,7 +1349,7 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 
     private func drop(_ info: any NSDraggingInfo, onto target: Item?) -> (item: Item?, transfer: SidebarTreeTransfer)? {
-        let source = (info.draggingSource as? WorktreeOutline)?.owner
+        let source = (info.draggingSource as? SidebarFileTreeOutline)?.owner
         if let scratchSource {
             guard let category = scratchDestination(for: target),
                   let transfer = scratchSource.drop(info, into: category.scratchCategory, from: source?.scratchSource)
@@ -1383,7 +1383,7 @@ final class SidebarFileTree: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     }
 }
 
-private final class WorktreeScrollView: NSScrollView {
+private final class SidebarFileTreeScrollView: NSScrollView {
     override func hitTest(_ point: NSPoint) -> NSView? {
         let hit = super.hitTest(point)
         guard hit === self || hit === contentView, let documentView else { return hit }
@@ -1395,8 +1395,8 @@ private final class WorktreeScrollView: NSScrollView {
 }
 
 @MainActor
-private final class WorktreeOutline: NSOutlineView, NSMenuItemValidation {
-    private static let contentInset: CGFloat = 10
+private final class SidebarFileTreeOutline: NSOutlineView, NSMenuItemValidation {
+    private static let leadingInset: CGFloat = 10
 
     private(set) var expandsWithoutAnimation = false
     private var pointerTrackingArea: NSTrackingArea?
@@ -1453,17 +1453,20 @@ private final class WorktreeOutline: NSOutlineView, NSMenuItemValidation {
     override func frameOfOutlineCell(atRow row: Int) -> NSRect {
         let frame = super.frameOfOutlineCell(atRow: row)
         guard !frame.isEmpty else { return frame }
-        return NSRect(x: frame.maxX - WorktreeCell.iconSize + Self.contentInset, y: frame.minY,
-                      width: WorktreeCell.iconSize, height: frame.height)
+        return NSRect(x: frame.maxX - SidebarFileTreeCell.iconSize + Self.leadingInset, y: frame.minY,
+                      width: SidebarFileTreeCell.iconSize, height: frame.height)
     }
 
     override func frameOfCell(atColumn column: Int, row: Int) -> NSRect {
-        let frame = super.frameOfCell(atColumn: column, row: row).insetBy(dx: Self.contentInset, dy: 0)
+        var frame = super.frameOfCell(atColumn: column, row: row)
+        guard !frame.isEmpty else { return frame }
+        frame.origin.x += Self.leadingInset
+        frame.size.width = max(0, rect(ofRow: row).maxX - SidebarFileTreeRow.selectionInset - frame.minX)
         guard let outlineTableColumn, column == self.column(withIdentifier: outlineTableColumn.identifier),
               row >= 0, let item = item(atRow: row), !isExpandable(item) else { return frame }
         // Files put their icon in the same gutter AppKit reserves for folder disclosure.
-        return NSRect(x: frame.minX - WorktreeCell.iconSize, y: frame.minY,
-                      width: frame.width + WorktreeCell.iconSize, height: frame.height)
+        return NSRect(x: frame.minX - SidebarFileTreeCell.iconSize, y: frame.minY,
+                      width: frame.width + SidebarFileTreeCell.iconSize, height: frame.height)
     }
 
     func restoreDisclosureState(for item: Any) {
@@ -1473,7 +1476,7 @@ private final class WorktreeOutline: NSOutlineView, NSMenuItemValidation {
     private func disclosureButton(for item: Any) -> NSButton? {
         let row = row(forItem: item)
         guard row >= 0 else { return nil }
-        return (rowView(atRow: row, makeIfNecessary: false) as? WorktreeRow)?.disclosureButton
+        return (rowView(atRow: row, makeIfNecessary: false) as? SidebarFileTreeRow)?.disclosureButton
     }
 
     func setFolderExpanded(_ item: Any, expanded: Bool, animated: Bool) {
@@ -1565,8 +1568,9 @@ private final class WorktreeOutline: NSOutlineView, NSMenuItemValidation {
 }
 
 @MainActor
-private final class WorktreeRow: NSTableRowView {
-    static let reuseIdentifier = NSUserInterfaceItemIdentifier("WorktreeRow")
+private final class SidebarFileTreeRow: NSTableRowView {
+    static let reuseIdentifier = NSUserInterfaceItemIdentifier("SidebarFileTreeRow")
+    static let selectionInset: CGFloat = 6
     private static let normalChevrons = chevrons(color: .secondaryLabelColor)
     private static let selectedChevrons = chevrons(color: .alternateSelectedControlTextColor)
 
@@ -1605,7 +1609,7 @@ private final class WorktreeRow: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         let color: NSColor = isEmphasized ? .selectedContentBackgroundColor : .unemphasizedSelectedContentBackgroundColor
         color.setFill()
-        let highlight = bounds.insetBy(dx: 6, dy: 0)
+        let highlight = bounds.insetBy(dx: Self.selectionInset, dy: 0)
         let radius: CGFloat = 8
         let joinsMinY = isFlipped ? isPreviousRowSelected : isNextRowSelected
         let joinsMaxY = isFlipped ? isNextRowSelected : isPreviousRowSelected
@@ -1641,7 +1645,7 @@ private final class WorktreeRow: NSTableRowView {
     }
 
     private func updateJJTextColor() {
-        for case let cell as WorktreeCell in subviews { cell.updateJJTextColor() }
+        for case let cell as SidebarFileTreeCell in subviews { cell.updateJJTextColor() }
     }
 
     private static func chevrons(color: NSColor) -> (collapsed: NSImage?, expanded: NSImage?) {
@@ -1662,8 +1666,8 @@ private final class WorktreeRow: NSTableRowView {
 }
 
 @MainActor
-private final class WorktreeCell: NSTableCellView {
-    static let identifier = NSUserInterfaceItemIdentifier("WorktreeEntry")
+private final class SidebarFileTreeCell: NSTableCellView {
+    static let identifier = NSUserInterfaceItemIdentifier("SidebarFileTreeEntry")
     static let iconSize: CGFloat = 15
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
@@ -1672,7 +1676,7 @@ private final class WorktreeCell: NSTableCellView {
     private var jjStatus: JJPathStatus?
     private var jjStatusDetail: String?
     private lazy var labelLeading = label.leadingAnchor.constraint(equalTo: leadingAnchor)
-    private lazy var labelTrailing = label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4)
+    private lazy var labelTrailing = label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2)
 
     init() {
         super.init(frame: .zero)
@@ -1719,7 +1723,7 @@ private final class WorktreeCell: NSTableCellView {
         addSubview(field)
         NSLayoutConstraint.activate([
             field.leadingAnchor.constraint(equalTo: label.leadingAnchor, constant: -4),
-            field.trailingAnchor.constraint(equalTo: label.trailingAnchor),
+            field.trailingAnchor.constraint(equalTo: trailingAnchor),
             field.centerYAnchor.constraint(equalTo: label.centerYAnchor),
         ])
     }
@@ -1758,7 +1762,7 @@ private final class WorktreeCell: NSTableCellView {
     func setDiagnosticBadge(_ visible: Bool) {
         let shown = visible && !label.isHidden
         diagnosticBadge.isHidden = !shown
-        labelTrailing.constant = shown ? -23 : -4
+        labelTrailing.constant = shown ? -23 : -2
         updateAccessibilityLabel()
     }
 
@@ -1782,7 +1786,7 @@ private final class WorktreeCell: NSTableCellView {
             label.textColor = muted ? .secondaryLabelColor : .labelColor
             return
         }
-        let row = superview as? WorktreeRow
+        let row = superview as? SidebarFileTreeRow
         effectiveAppearance.performAsCurrentDrawingAppearance {
             let emphasized = row?.isSelected == true && row?.isEmphasized == true
             let selected: NSColor = emphasized ? .selectedContentBackgroundColor : .unemphasizedSelectedContentBackgroundColor
