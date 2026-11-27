@@ -68,24 +68,23 @@ enum SolidityLSPCheck {
             // SPDX-License-Identifier: MIT
             pragma solidity ^0.8.29;
             library Math {
-                /**
-                 * @notice Adds two numbers.
-                 * The inputs use the same scale.
-                 *
-                 * NOTE: The sum must fit the type.
-                 * @dev Uses checked [arithmetic](https://docs.soliditylang.org/).
-                 *
-                 * * A positive input.
-                 * * A zero input.
-                 *
-                 * ```text
-                 * * A literal asterisk.
-                 * ```
-                 * @param left First number,
-                 * in input units.
-                 * @param right Second number.
-                 * @return The sum in input units.
-                 */
+                /// @notice Adds two numbers.
+                /// The inputs use the same scale.
+                ///
+                /// The sum must fit the type.
+                /// @dev Uses checked [arithmetic](https://docs.soliditylang.org/).
+                /// This applies to both inputs.
+                ///
+                /// * A positive input.
+                /// * A zero input.
+                ///
+                /// ```text
+                /// * A literal asterisk.
+                /// ```
+                /// @param left First number,
+                /// in input units.
+                /// @param right Second number.
+                /// @return The sum in input units.
                 function add(uint256 left, uint256 right) internal pure returns (uint256) { return left + right; }
                 /// @notice Multiplies two numbers.
                 function multiply(uint256 left, uint256 right) internal pure returns (uint256) { return left * right; }
@@ -133,10 +132,18 @@ enum SolidityLSPCheck {
         try require(hover?.range == use && hover?.isMarkdown == true && hover?.text.contains("Adds two numbers.") == true,
                     "return a ranged Markdown hover with the dependency's NatSpec")
         try await checkHover(at: use, in: document) { description, returns, view in
-            try require(description.string.contains("Adds two numbers. The inputs use the same scale.\nNOTE: The sum must fit the type.\nNotes\nUses checked arithmetic.")
-                        && description.string.contains("• A positive input.\n• A zero input.")
-                        && description.string.contains("\n* A literal asterisk."),
-                        "preserve NatSpec paragraphs, Markdown list items and literal code without the comment margin")
+            try require(description.string == "Adds two numbers. The inputs use the same scale.\nThe sum must fit the type.",
+                        "keep the wrapped notice and its second paragraph in the description")
+            guard let note = hoverSubview("Note.body", in: view) as? NSTextView,
+                  let rail = hoverSubview("Note.rail", in: view), let divider = hoverSubview("separator", in: view)
+            else { throw Failure(detail: "show the developer note with a quote rail") }
+            try require(note.string.hasPrefix("Note\nUses checked arithmetic. This applies to both inputs.")
+                        && note.string.contains("• A positive input.\n• A zero input.")
+                        && note.string.contains("\n* A literal asterisk."),
+                        "keep the developer text, its list and code example together")
+            try require(description.frame.maxY < note.frame.minY && note.frame.maxY < divider.frame.minY
+                        && rail.frame.maxX < note.frame.minX && rail.frame.height == note.frame.height,
+                        "place the note beneath the description and above the metadata divider")
             guard let parameters = hoverSubview("Parameters.body", in: view) as? NSTextView,
                   let label = hoverSubview("Parameters.label", in: view) as? NSTextField
             else { throw Failure(detail: "show the Parameters row") }
@@ -146,9 +153,9 @@ enum SolidityLSPCheck {
                         "show the documented parameters and return value under their respective labels")
             try require(returns.map { parameters.frame.maxY < $0.frame.minY && parameters.frame.minX == $0.frame.minX } == true,
                         "align the description bodies in the labeled list")
-            let link = try range("arithmetic", in: description.string)
+            let link = try range("arithmetic", in: note.string)
             let parameter = try range("left", in: parameters.string)
-            try require(description.textStorage?.attribute(.link, at: link.location, effectiveRange: nil) as? URL
+            try require(note.textStorage?.attribute(.link, at: link.location, effectiveRange: nil) as? URL
                         == URL(string: "https://docs.soliditylang.org/")
                         && parameters.textStorage?.attribute(.backgroundColor, at: parameter.location, effectiveRange: nil) != nil,
                         "preserve Markdown links and inline code in the NatSpec hover")
@@ -560,13 +567,28 @@ enum SolidityLSPCheck {
         let approval = try range("forceApprove", in: editor.string)
         try await checkHover(at: approval, in: document) { description, _, view in
             try require(description.string.contains("such as USDT.\nNOTE: If the token implements ERC-7674")
-                        && !description.string.contains(" *"),
-                        "show the OpenZeppelin forceApprove note as a separate paragraph without comment delimiters")
-            try captureHover(view)
+                        && !description.string.contains(" *") && hoverSubview("Note.body", in: view) == nil,
+                        "use the OpenZeppelin developer comment as the main description and preserve the note paragraph")
         }
         try await checkIncompleteStatement(in: document, before: "        return FlashLoanContext({")
         try await checkIncompleteEnum(in: document, before: "        return FlashLoanContext({",
                                       members: ["Leverage", "Deleverage", "ReducePosition"])
+
+        let interface = root.appending(path: "src/interfaces/ICreditPool.sol")
+        try require(try await app.openFile(interface, in: document) === document, "open the BarterLend credit pool interface")
+        let preview = try range("previewProvideExactIn(", in: editor.string)
+        try await checkHover(at: NSRange(location: preview.location, length: preview.length - 1), in: document) { description, returns, view in
+            guard let note = hoverSubview("Note.body", in: view) as? NSTextView,
+                  let parameters = hoverSubview("Parameters.body", in: view) as? NSTextView
+            else { throw Failure(detail: "show notes and parameters for the BarterLend preview") }
+            try require(description.string == "Previews providing an exact asset amount by matching against existing borrow or reloan orders."
+                        && note.string == "Note\nRequires an active market. May return a partial result when liquidity or the crossing limit is insufficient. Does not check the account's pool balance or authorization."
+                        && parameters.string.contains("before share rounding, in loan token base units. Ignored by this preview.")
+                        && parameters.string.contains("including skipped and invalidated orders.")
+                        && returns?.string.contains("collectedLoan: Loan claim produced, net of protocol fees and before share rounding, in loan token base units.") == true,
+                        "restore each wrapped NatSpec fragment to the notice, developer note, parameter or return it documents")
+            try captureHover(view)
+        }
     }
 
     private static func checkHover(at word: NSRange, in document: DocumentWindow,

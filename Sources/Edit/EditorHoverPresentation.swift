@@ -6,6 +6,7 @@ enum EditorHoverPresentation: Sendable {
             case declaration = "Declaration"
             case type = "Type"
             case documentation = "Description"
+            case note = "Note"
             case references = "Links"
             case parameters = "Parameters"
             case returns = "Returns"
@@ -30,10 +31,10 @@ enum EditorHoverPresentation: Sendable {
         }
     }
 
-    init(text: String, isMarkdown: Bool, server: LanguageServer? = nil) {
+    init(text: String, isMarkdown: Bool, server: LanguageServer? = nil, solidityDocumentation: SolarHover.Documentation? = nil) {
         if isMarkdown, server == .solidity {
             let content = EditorHoverContent(text: SolarHover.markdownWithoutCommentMargins(text), isMarkdown: true)
-            let sections = content.natSpecSections()
+            let sections = content.natSpecSections(source: solidityDocumentation)
             self = sections.count == 1 && sections.first?.kind == .documentation
                 ? .markdown(sections[0].content) : .structured(sections)
             return
@@ -175,6 +176,7 @@ private final class HoverSectionsView: NSView {
         let inset: CGFloat = 12
         let rowSpacing: CGFloat = 8
         let columnSpacing: CGFloat = 14
+        let quoteInset: CGFloat = 12
         let codePadding = NSSize(width: 6, height: 4)
         let rows: [(label: NSTextField, body: HoverTextView, isCode: Bool)] = sections.map { section in
             let name = section.kind.rawValue
@@ -198,8 +200,9 @@ private final class HoverSectionsView: NSView {
             return ceil(row.label.fittingSize.width - insets.left - insets.right)
         }.max() ?? 0
         let labeledLeading = inset + labelWidth + columnSpacing
-        let leadingEdges = rows.map { row in
-            row.label.isHidden ? inset + (row.isCode ? codePadding.width : 0) : labeledLeading
+        let leadingEdges = zip(rows, sections).map { row, section in
+            if section.kind == .note { return inset + quoteInset }
+            return row.label.isHidden ? inset + (row.isCode ? codePadding.width : 0) : labeledLeading
         }
         let trailingInset = inset + codePadding.width
         var preferredWidth: CGFloat = 0
@@ -243,6 +246,16 @@ private final class HoverSectionsView: NSView {
                 background.fillColor = Self.codeBackgroundColor
                 background.setAccessibilityElement(false)
                 addSubview(background)
+            }
+            if sections[index].kind == .note {
+                let rail = NSBox(frame: NSRect(x: inset, y: bodyFrame.minY, width: 2, height: bodyFrame.height))
+                rail.identifier = .init("EditorLanguageHover.Note.rail")
+                rail.boxType = .custom
+                rail.borderWidth = 0
+                rail.cornerRadius = 1
+                rail.fillColor = .controlAccentColor
+                rail.setAccessibilityElement(false)
+                addSubview(rail)
             }
             row.body.frame = bodyFrame
             addSubview(row.body)

@@ -387,8 +387,29 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         let range = result.range?.nsRange(in: query.text)
         // OLS sometimes returns the package declaration range for an import hover.
         let anchor = range.flatMap { query.server == .odin && !NSLocationInRange(offset, $0) ? nil : $0 }
+        let documentation = if query.server == .solidity, result.isMarkdown, result.content.hasPrefix("```solidity\n") {
+            await solidityHoverDocumentation(at: offset, word: word, query: query)
+        } else {
+            nil as SolarHover.Documentation?
+        }
+        guard isCurrent(query) else { return nil }
         return EditorLanguageHover(text: result.content, isMarkdown: result.isMarkdown, range: anchor ?? word,
-                                   server: query.server)
+                                   server: query.server, solidityDocumentation: documentation)
+    }
+
+    private func solidityHoverDocumentation(at offset: Int, word: NSRange, query: Query) async -> SolarHover.Documentation? {
+        let text = query.text as NSString
+        guard word.location >= 0, word.length > 0, word.upperBound <= text.length,
+              let locations = try? await session.definition(at: offset), locations.count == 1,
+              let definition = locations.first, definition.url.pathExtension == "sol", isCurrent(query) else { return nil }
+        let symbol = text.substring(with: word)
+        let localSource = definition.url.standardizedFileURL == query.url.standardizedFileURL ? query.text : nil
+        let task = Task.detached(priority: .userInitiated) { () -> SolarHover.Documentation? in
+            guard !Task.isCancelled,
+                  let source = localSource ?? (try? FileBuffer.read(definition.url).text) else { return nil }
+            return SolarHover.documentation(in: source, at: definition.range, symbol: symbol)
+        }
+        return await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
     }
 
     func documentHighlights(at offset: Int) async -> [NSRange] {

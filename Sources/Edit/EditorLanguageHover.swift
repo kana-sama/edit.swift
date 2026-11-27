@@ -5,9 +5,10 @@ struct EditorLanguageHover: Sendable {
     let isMarkdown: Bool
     let range: NSRange?
     let server: LanguageServer
+    let solidityDocumentation: SolarHover.Documentation?
 
     var presentation: EditorHoverPresentation {
-        EditorHoverPresentation(text: text, isMarkdown: isMarkdown, server: server)
+        EditorHoverPresentation(text: text, isMarkdown: isMarkdown, server: server, solidityDocumentation: solidityDocumentation)
     }
 }
 
@@ -57,6 +58,7 @@ struct EditorHoverContent: Sendable {
 
         var identity: Int?
         var heading: Int?
+        var isNoteTitle = false
         var listMarker: String?
         var indentation = 0
         var isQuote = false
@@ -168,24 +170,24 @@ struct EditorHoverContent: Sendable {
         case result = "@return"
     }
 
-    func natSpecSections() -> [EditorHoverPresentation.Section] {
+    func natSpecSections(source: SolarHover.Documentation?) -> [EditorHoverPresentation.Section] {
         let declaration = blocks.first.flatMap { $0.codeLanguage == .solidity ? $0 : nil }
         var description: [Block] = []
+        var developer: [Block] = []
         var parameters: [Block] = []
         var returns: [Block] = []
         var field: NatSpecField?
         for index in blocks.indices.dropFirst(declaration == nil ? 0 : 1) {
             var block = blocks[index]
             if let tag = Self.natSpecField(in: block) {
-                if tag == .notes {
-                    block.heading = 3
-                    block.runs = [Run(text: "Notes")]
-                } else if blocks.indices.contains(index + 1), Self.isNatSpecItem(blocks[index + 1]) {
+                if tag == .notes || (blocks.indices.contains(index + 1) && Self.isNatSpecItem(blocks[index + 1])) {
                     field = tag
                     continue
                 }
             }
-            if let tag = field, Self.isNatSpecItem(block) {
+            if field == .notes {
+                developer.append(block)
+            } else if let tag = field, Self.isNatSpecItem(block) {
                 block.indentation = 0
                 block.listMarker = nil
                 if tag == .parameter { parameters.append(block) }
@@ -195,9 +197,34 @@ struct EditorHoverContent: Sendable {
                 description.append(block)
             }
         }
+        if let source {
+            description = source.notice.map { Self(text: $0, isMarkdown: true).blocks } ?? []
+            developer = source.developer.map { Self(text: $0, isMarkdown: true).blocks } ?? []
+            parameters = source.parameters.flatMap { parameter in
+                Self(text: "`\(parameter.name)`: \(parameter.text)", isMarkdown: true).blocks
+            }
+            let returnNames = Set(returns.compactMap { block -> String? in
+                guard let first = block.runs.first, first.code,
+                      block.runs.dropFirst().first?.text.hasPrefix(": ") == true else { return nil }
+                return first.text
+            })
+            returns = source.returns.flatMap { body in
+                let name = body.prefix(while: { !$0.isWhitespace })
+                let text = returnNames.contains(String(name))
+                    ? "`\(name)`: \(body[name.endIndex...].drop(while: \.isWhitespace))" : body
+                return Self(text: text, isMarkdown: true).blocks
+            }
+        }
+        if description.isEmpty {
+            description = developer
+            developer = []
+        } else if !developer.isEmpty {
+            developer.insert(Block(isNoteTitle: true, runs: [Run(text: "Note", strong: true)]), at: 0)
+        }
         let sections: [(EditorHoverPresentation.Section.Kind, [Block])] = [
             (.declaration, declaration.map { [$0] } ?? []),
             (.documentation, description),
+            (.note, developer),
             (.parameters, parameters),
             (.returns, returns)
         ]
@@ -252,7 +279,7 @@ struct EditorHoverContent: Sendable {
                 paragraph.alignment = cell.alignment
             }
             let size: CGFloat = block.heading == 1 ? 15 : block.heading != nil ? 14 : 13
-            let foreground: NSColor = block.isQuote ? .secondaryLabelColor : .labelColor
+            let foreground: NSColor = block.isNoteTitle ? .controlAccentColor : (block.isQuote ? .secondaryLabelColor : .labelColor)
             let baseFont = block.isCode ? EditorTextView.defaultFont : NSFont.systemFont(ofSize: size)
             let base = [NSAttributedString.Key.font: baseFont,
                         .foregroundColor: foreground, .paragraphStyle: paragraph] as [NSAttributedString.Key: Any]
