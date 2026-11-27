@@ -110,23 +110,6 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         case emptyFolder(focusContent: Bool, folder: URL? = nil)
     }
 
-    @MainActor
-    private enum InactiveTerminal {
-        // Keep running shells in memory and defer shells read from disk until the folder opens.
-        case live(TerminalPanel, sizes: TerminalDockSizes, isVisible: Bool, wasFocused: Bool)
-        case saved(DocumentTerminalState)
-
-        var snapshot: DocumentTerminalState {
-            switch self {
-            case .live(let panel, let sizes, let isVisible, let wasFocused):
-                return DocumentTerminalState(panel: panel.snapshot(), sizes: sizes,
-                                             isVisible: isVisible && panel.hasSpaces, wasFocused: wasFocused && panel.hasSpaces)
-            case .saved(let state):
-                return state
-            }
-        }
-    }
-
     let window: EditorDocumentWindow
     let editor: EditorTextView
     let scrollView: NSScrollView
@@ -134,7 +117,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     let documentSplitView = NSSplitView(frame: .zero)
     private var documentSplit: NSSplitViewController?
     private var terminalPanel: TerminalPanel?
-    private var inactiveTerminals: [String?: InactiveTerminal] = [:]
+    private var inactiveTerminals: [String?: DocumentTerminalState] = [:]
     private var terminalDockView: TerminalDockView?
     private var terminalSidebar: NSSplitViewItem?
     private var terminalSidebarPanelConstraints: [NSLayoutConstraint] = []
@@ -569,7 +552,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func restoreTerminals(from record: SessionDocument) {
         for terminal in record.inactiveTerminals ?? [] where terminal.folderPath != folderURL?.path {
-            inactiveTerminals[terminal.folderPath] = .saved(terminal.state)
+            inactiveTerminals[terminal.folderPath] = terminal.state
         }
         restoreTerminal(record.terminal)
     }
@@ -602,16 +585,13 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             shell: TerminalPanel.loginShell(forAgentCheck: app.isAgentCheck),
             restoredState: saved?.panel
         )
-        installTerminal(panel, sizes: saved?.sizes ?? TerminalDockSizes())
-        return panel
-    }
-
-    private func installTerminal(_ panel: TerminalPanel, sizes: TerminalDockSizes) {
         terminalPanel = panel
+        let sizes = saved?.sizes ?? TerminalDockSizes()
         terminalDockView = TerminalDockView(terminal: panel.view, height: sizes.belowHeight) { [weak self] height in
             self?.setEditorBottomInset(height)
         }
         terminalSidebarWidth = sizes.rightWidth.isFinite && sizes.rightWidth > 0 ? sizes.rightWidth : TerminalDockSizes().rightWidth
+        return panel
     }
 
     private func attachTerminal(focusing: Bool) {
@@ -628,13 +608,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private func terminalSessionState() -> DocumentTerminalState? {
         guard let terminalPanel, let terminalDockView else { return nil }
-        return DocumentTerminalState(panel: terminalPanel.snapshot(), sizes: terminalDockSizes(terminalDockView),
+        let sizes = TerminalDockSizes(belowHeight: terminalDockView.savedHeight, rightWidth: currentTerminalSidebarWidth)
+        return DocumentTerminalState(panel: terminalPanel.snapshot(), sizes: sizes,
                                      isVisible: isTerminalVisible || pendingTerminalFocus != nil,
                                      wasFocused: pendingTerminalFocus ?? terminalHasFocus(window.firstResponder))
-    }
-
-    private func terminalDockSizes(_ dockView: TerminalDockView) -> TerminalDockSizes {
-        TerminalDockSizes(belowHeight: dockView.savedHeight, rightWidth: currentTerminalSidebarWidth)
     }
 
     private func moveTerminal(to dock: TerminalDock) {
@@ -787,9 +764,6 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     func closeTerminalSessions() {
         terminalPanel?.close()
-        for terminal in inactiveTerminals.values {
-            if case .live(let panel, _, _, _) = terminal { panel.close() }
-        }
     }
 
     func canPerformFind(_ command: FindCommand) -> Bool {
@@ -1389,7 +1363,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             showsEmptyFolder: folderURL != nil && displayedFileURL == nil ? showsEmptyFolder || sourceControlRevision != nil : nil,
             terminal: terminalSessionState(),
             inactiveTerminals: inactiveTerminals.isEmpty ? nil : inactiveTerminals.map { path, terminal in
-                SessionFolderTerminal(folderPath: path, state: terminal.snapshot)
+                SessionFolderTerminal(folderPath: path, state: terminal)
             }.sorted { ($0.folderPath ?? "") < ($1.folderPath ?? "") },
             draftRecovery: draftRecoveryRevision,
             conflictDrafts: conflictDrafts.isEmpty ? nil : conflictDrafts,
@@ -2188,28 +2162,18 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private func changeFolder(to folder: URL?, _ install: () -> Void) {
         guard folderURL?.path != folder?.path else { install(); return }
         let terminalHadFocus = terminalHasFocus(window.firstResponder)
-        if let panel = terminalPanel, let dock = terminalDockView {
-            inactiveTerminals[folderURL?.path] = .live(
-                panel, sizes: terminalDockSizes(dock), isVisible: isTerminalVisible || pendingTerminalFocus != nil,
-                wasFocused: pendingTerminalFocus ?? terminalHadFocus
-            )
+        if let state = terminalSessionState() {
+            inactiveTerminals[folderURL?.path] = state
             pendingTerminalFocus = nil
             hideTerminal(restoringContentFocus: false)
+            closeTerminalSessions()
             terminalPanel = nil
             terminalDockView = nil
         }
         folderURL = folder
         install()
         if terminalHadFocus { focusContent() }
-        switch inactiveTerminals.removeValue(forKey: folder?.path) {
-        case .live(let panel, let sizes, let isVisible, let wasFocused):
-            installTerminal(panel, sizes: sizes)
-            if isVisible && panel.hasSpaces { restoreVisibleTerminal(focusing: wasFocused) }
-        case .saved(let state):
-            restoreTerminal(state)
-        case nil:
-            break
-        }
+        restoreTerminal(inactiveTerminals.removeValue(forKey: folder?.path))
     }
 
     private func installUntitled() {

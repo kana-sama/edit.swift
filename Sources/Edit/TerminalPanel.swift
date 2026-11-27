@@ -49,7 +49,6 @@ final class TerminalPanel: NSObject {
     private var selectedSpace: TerminalSpace?
     private var refreshSpaceNames: Task<Void, Never>?
     private var closed = false
-    var hasSpaces: Bool { !spaces.isEmpty }
 
     init(directory: @escaping () -> URL, onDockChange: @escaping (TerminalDock) -> Void,
          onLastShellExit: @escaping (TerminalPanel, Bool) -> Void,

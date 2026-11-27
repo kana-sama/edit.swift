@@ -8,9 +8,6 @@ enum TerminalCheck {
                                         "Edit.Terminal.SplitRight", "Edit.Terminal.SplitDown", "Edit.Terminal.Options"]
 
     static func run(in app: Edit) async throws {
-        try await checkFolderSessions(in: app)
-        await app.recentFiles.prune()
-        print("Edit passed its native terminal folder-session checks without activation.")
         let document = app.makeDocument()
         let window = document.window
         defer { window.close() }
@@ -157,7 +154,7 @@ enum TerminalCheck {
         try expect(!NSApp.isActive && !window.isVisible, "keep the entire terminal check in the background")
     }
 
-    private static func checkFolderSessions(in app: Edit) async throws {
+    static func checkFolderSessions(in app: Edit) async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "terminal-projects-\(UUID())", directoryHint: .isDirectory)
         let first = root.appending(path: "Project One", directoryHint: .isDirectory)
         let second = root.appending(path: "Project Two", directoryHint: .isDirectory)
@@ -171,7 +168,6 @@ enum TerminalCheck {
         #!/bin/sh
         printf 'Shell directory: %s\\n' "${PWD##*/}"
         while IFS= read -r line; do
-            if [ "$line" = exit ]; then exit; fi
             printf 'Shell output: %s\\n' "$line"
         done
         """.write(to: shell, atomically: true, encoding: .utf8)
@@ -211,7 +207,8 @@ enum TerminalCheck {
 
         _ = try await app.openFile(second, in: document)
         try expect(!document.isTerminalVisible && document.sessionDocument().terminal == nil &&
-                   firstPane.window == nil && firstPane.process.running, "leave the first project's running shell detached")
+                   firstPane.window == nil, "remove the first project's terminal when switching folders")
+        try await waitFor("terminate Project One's shell when switching folders") { !firstPane.process.running }
         document.showTerminal()
         let secondPane = try require(document.window.firstResponder as? LocalProcessTerminalView, "focus Project Two's terminal")
         try await waitFor("start a separate shell in Project Two") { containsText("Shell directory: Project Two", in: secondPane) }
@@ -229,8 +226,10 @@ enum TerminalCheck {
         }
         try expect(!document.isTerminalVisible && document.sessionDocument().terminal == nil && secondPane.window == nil,
                    "open a new project from the launcher with no terminal")
+        try await waitFor("terminate Project Two's shell on a launcher-driven switch") { !secondPane.process.running }
         try expect(peer.isTerminalVisible && peer.window.firstResponder === peerPane &&
-                   containsText("Shell output: peer marker", in: peerPane), "leave the other window's pane and output available")
+                   peerPane.process.running && containsText("Shell output: peer marker", in: peerPane),
+                   "leave the other window's shell and output available")
         document.showTerminal()
         let unvisitedPane = try require(document.window.firstResponder as? LocalProcessTerminalView, "open the new project's own terminal")
         try await waitFor("start the launcher project's shell in its own folder") {
@@ -252,38 +251,47 @@ enum TerminalCheck {
         try await waitFor("hold the remembered file before switching back to Project One") { staged }
         try expect(document.window.title == "Unvisited Project" && document.showsEmptyFolder &&
                    document.isTerminalVisible && document.window.firstResponder === unvisitedPane &&
-                   unvisitedPane.window === document.window && firstPane.window == nil,
+                   unvisitedPane.window === document.window && unvisitedPane.process.running && firstPane.window == nil,
                    "keep the outgoing title, content, and terminal together while opening")
         release.finish()
         let returned = try await opening.value
         document.beforeInstallFileForCheck = nil
+        let reopenedFirst = try require(document.window.firstResponder as? LocalProcessTerminalView, "focus the returned project's terminal")
+        let reopenedPanel = try require(view("Edit.Terminal.Panel", in: document.window.contentView), "find the returned project's panel")
         try expect(returned === document && document.window.title == "Project One — Note.txt" &&
-                   document.editor.string == "Project One text" && document.window.firstResponder === firstPane &&
-                   firstPane.process.shellPid == firstPID && containsText("Shell output: first marker", in: firstPane) &&
-                   unvisitedPane.window == nil, "show the returning project's document and same live shell together")
-        _ = try checkRightSidebar(in: document, panel: firstPanel)
+                   document.editor.string == "Project One text" && reopenedFirst !== firstPane &&
+                   containsText("Shell output: first marker", in: reopenedFirst) &&
+                   unvisitedPane.window == nil, "show the returning project's document and saved terminal history together")
+        _ = try checkRightSidebar(in: document, panel: reopenedPanel)
+        try await waitFor("start a new shell when returning to Project One") {
+            reopenedFirst.process.running && reopenedFirst.process.shellPid != firstPID
+        }
+        try await waitFor("terminate the outgoing shell after the folder opens") { !unvisitedPane.process.running }
+        try expect(document.window.firstResponder === reopenedFirst, "keep focus in the returned terminal after the outgoing shell exits")
 
-        unvisitedPane.send(txt: "exit\r")
-        try await waitFor("close the shell in the inactive project") { !unvisitedPane.process.running }
-        try expect(document.isTerminalVisible && document.window.firstResponder === firstPane,
-                   "an inactive shell's exit leaves the current panel and focus alone")
+        document.closeWorkspace()
+        try await waitFor("close Project One and its shell with a file open") {
+            document.folderURL == nil && !document.isTerminalVisible && !reopenedFirst.process.running
+        }
 
         _ = try await app.openFile(second, in: document)
-        try expect(document.window.firstResponder === secondPane && containsText("Shell output: second marker", in: secondPane),
-                   "return to the second project's own live terminal")
+        let reopenedSecond = try require(document.window.firstResponder as? LocalProcessTerminalView, "focus Project Two's new terminal")
+        try expect(reopenedSecond !== secondPane && containsText("Shell output: second marker", in: reopenedSecond),
+                   "return to the second project's saved terminal history")
+        try await waitFor("restart Project Two's shell") { reopenedSecond.process.running }
         document.toggleTerminal()
         document.closeWorkspace()
         try expect(document.folderURL == nil && !document.isTerminalVisible && document.sessionDocument().terminal == nil,
                    "Close Workspace returns to the standalone session")
+        try await waitFor("terminate a hidden shell when closing an empty workspace") { !reopenedSecond.process.running }
+        try expect(peerPane.process.running, "keep the other window's shell running through Close Workspace")
 
         let store = SessionStore(url: root.appending(path: "session.json"))
         try store.write(EditorSession(documents: [document.sessionDocument(), peer.sessionDocument()], activeIndex: 0, lastWindow: nil))
         let saved = try require(store.read(), "load window and folder sessions from disk")
         document.window.close()
         peer.window.close()
-        try await waitFor("close shells in both windows, including inactive projects") {
-            !firstPane.process.running && !secondPane.process.running && !peerPane.process.running
-        }
+        try await waitFor("close the other window's shell when its window closes") { !peerPane.process.running }
         let offset = app.documents.count
         await app.restore(saved)
         let restored = Array(app.documents.dropFirst(offset))
@@ -300,6 +308,7 @@ enum TerminalCheck {
         restored[0].showTerminal()
         let restoredSecond = try require(restored[0].window.firstResponder as? LocalProcessTerminalView, "show the restored second project's terminal")
         try expect(containsText("Shell output: second marker", in: restoredSecond), "restore the second project's output")
+        print("Edit passed its native terminal folder-session checks without activation.")
     }
 
     private static func checkSpaceNamesAndContextActions(in app: Edit) async throws {

@@ -183,6 +183,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                     try MultiCaretCheck.checkBlink()
                     try await OpenFilePanelCheck.run(in: self)
                     try await StartupRestoreCheck.run(in: self)
+                    try await TerminalCheck.checkFolderSessions(in: self)
                     print("Edit passed its native editing and file-session checks without activation.")
                     exit(EXIT_SUCCESS)
                 } catch {
@@ -1563,6 +1564,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
             }
             try await StartupRestoreCheck.run(in: self)
         case "terminal":
+            try await TerminalCheck.checkFolderSessions(in: self)
             try await TerminalCheck.run(in: self)
         case "markdown":
             try await MarkdownCheck.run(in: self, screenshot: screenshot)
