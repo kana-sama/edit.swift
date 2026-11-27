@@ -40,10 +40,7 @@ enum HoverLink {
 struct EditorHoverContent: Sendable {
     struct NatSpecLayout {
         let labelFont: NSFont
-        let labelWidth: CGFloat
-        let columnSpacing: CGFloat
-
-        var descriptionColumn: CGFloat? { labelWidth > 0 ? labelWidth + columnSpacing : nil }
+        let descriptionColumn: CGFloat?
     }
 
     private struct Run: Sendable {
@@ -298,8 +295,7 @@ struct EditorHoverContent: Sendable {
             let fieldName = natSpecLayout == nil ? nil : block.natSpecName
             if let natSpecLayout, let column = natSpecLayout.descriptionColumn {
                 if fieldName != nil {
-                    paragraph.tabStops = [NSTextTab(textAlignment: .right, location: natSpecLayout.labelWidth),
-                                          NSTextTab(textAlignment: .left, location: column)]
+                    paragraph.tabStops = [NSTextTab(textAlignment: .left, location: column)]
                     paragraph.headIndent = column
                 } else if block.continuesNatSpecField {
                     paragraph.firstLineHeadIndent += column
@@ -354,7 +350,7 @@ struct EditorHoverContent: Sendable {
             }
             if let fieldName, let natSpecLayout {
                 let prefix = NSRange(location: start, length: fieldName.utf16.count + 2)
-                let label = natSpecLayout.descriptionColumn == nil ? "\(fieldName)\n" : "\t\(fieldName)\t"
+                let label = natSpecLayout.descriptionColumn == nil ? "\(fieldName)\n" : "\(fieldName)\t"
                 var attributes = base
                 attributes[.font] = natSpecLayout.labelFont
                 // The selectable text view draws labels without the vibrancy of an NSTextField.

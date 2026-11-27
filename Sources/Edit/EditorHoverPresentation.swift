@@ -170,6 +170,11 @@ private final class HoverSectionsView: NSView {
         return NSColor.black.withAlphaComponent(0.075)
     }
 
+    private static let fieldHeadingColor = NSColor(name: nil) { appearance in
+        let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        return NSColor(white: isDark ? 0.76 : 0.31, alpha: 1)
+    }
+
     let textViews: [HoverTextView]
 
     override var isFlipped: Bool { true }
@@ -183,18 +188,19 @@ private final class HoverSectionsView: NSView {
         let codePadding = NSSize(width: 6, height: 4)
         let textWidth = maximumWidth - 2 * inset - codePadding.width
         let sideLabelFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
+        let fieldFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular)
         let fieldWidth = ceil(sections.lazy.filter { $0.kind.showsHeading }
-            .map { $0.content.natSpecNameWidth(using: sideLabelFont) }.max() ?? 0)
+            .map { $0.content.natSpecNameWidth(using: fieldFont) }.max() ?? 0)
+        let fieldColumn = fieldWidth + 8
         let natSpecLayout = EditorHoverContent.NatSpecLayout(
-            labelFont: sideLabelFont, labelWidth: fieldWidth + columnSpacing <= textWidth * 0.6 ? fieldWidth : 0,
-            columnSpacing: columnSpacing)
+            labelFont: fieldFont, descriptionColumn: fieldWidth > 0 && fieldColumn <= textWidth * 0.6 ? fieldColumn : nil)
         let rows: [(label: NSTextField, body: HoverTextView, isCode: Bool)] = sections.map { section in
             let kind = section.kind
             let name = kind.rawValue
             let label = NSTextField(labelWithString: name)
             label.identifier = .init("EditorLanguageHover.\(name).label")
-            label.font = kind.showsHeading ? .systemFont(ofSize: 13, weight: .semibold) : sideLabelFont
-            label.textColor = kind.showsHeading ? .labelColor : .secondaryLabelColor
+            label.font = kind.showsHeading ? .systemFont(ofSize: 12, weight: .semibold) : sideLabelFont
+            label.textColor = kind.showsHeading ? Self.fieldHeadingColor : .secondaryLabelColor
             label.alignment = kind.showsHeading ? .left : .right
             label.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
             label.isHidden = !kind.followsDivider
@@ -231,9 +237,10 @@ private final class HoverSectionsView: NSView {
         var top = inset
         for (index, row) in rows.enumerated() {
             let kind = sections[index].kind
-            if index > 0, kind.followsDivider, !sections[index - 1].kind.followsDivider {
+            if index > 0, kind.followsDivider, kind.showsHeading || !sections[index - 1].kind.followsDivider {
                 let separator = NSBox(frame: NSRect(x: inset, y: top, width: width - 2 * inset, height: 1))
-                separator.identifier = .init("EditorLanguageHover.separator")
+                let name = kind.showsHeading ? "\(kind.rawValue).separator" : "separator"
+                separator.identifier = .init("EditorLanguageHover.\(name)")
                 separator.boxType = .separator
                 addSubview(separator)
                 top += 1 + rowSpacing

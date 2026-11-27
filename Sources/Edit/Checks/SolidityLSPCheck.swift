@@ -135,7 +135,7 @@ enum SolidityLSPCheck {
             try require(description.string == "Adds two numbers. The inputs use the same scale.\nThe sum must fit the type.",
                         "keep the wrapped notice and its second paragraph in the description")
             guard let note = hoverSubview("Note.body", in: view) as? NSTextView,
-                  let rail = hoverSubview("Note.rail", in: view), let divider = hoverSubview("separator", in: view)
+                  let rail = hoverSubview("Note.rail", in: view), let divider = hoverSubview("Parameters.separator", in: view)
             else { throw Failure(detail: "show the developer note with a quote rail") }
             try require(note.string.hasPrefix("Uses checked arithmetic. This applies to both inputs.")
                         && note.string.contains("• A positive input.\n• A zero input.")
@@ -146,7 +146,7 @@ enum SolidityLSPCheck {
                         "place the note beneath the description and above the metadata divider")
             guard let parameters = hoverSubview("Parameters.body", in: view) as? NSTextView
             else { throw Failure(detail: "show the Parameters section") }
-            try require(parameters.string == "\tleft\tFirst number, in input units.\n\tright\tSecond number."
+            try require(parameters.string == "left\tFirst number, in input units.\nright\tSecond number."
                         && returns?.string == "The sum in input units.",
                         "show the documented parameters and return value under their headings")
             try require(returns.map { parameters.frame.maxY < $0.frame.minY && parameters.frame.minX == $0.frame.minX } == true,
@@ -159,9 +159,13 @@ enum SolidityLSPCheck {
                         "preserve Markdown links and draw field names as plain labels")
             let shortName = parameters.firstRect(forCharacterRange: parameter, actualRange: nil)
             let longName = parameters.firstRect(forCharacterRange: try range("right", in: parameters.string), actualRange: nil)
-            try require(!shortName.isEmpty && !longName.isEmpty && shortName.minX > longName.minX
-                        && abs(shortName.maxX - longName.maxX) < 1,
-                        "right-align the rendered field names in the label column")
+            let leading = parameters.window?.convertPoint(toScreen: parameters.convert(.zero, to: nil)).x
+            try require(!shortName.isEmpty && !longName.isEmpty && abs(shortName.minX - longName.minX) < 0.5
+                        && leading.map { abs(shortName.minX - $0) < 0.5 } == true,
+                        "align the rendered field names with the left edge of the section heading")
+            let leftDescription = try descriptionColumn(after: "left", in: parameters)
+            let rightDescription = try descriptionColumn(after: "right", in: parameters)
+            try require(abs(leftDescription - rightDescription) < 0.5, "align the rendered descriptions across parameter rows")
             try captureHover(view)
         }
         try checkSignatureWrapping()
@@ -589,7 +593,7 @@ enum SolidityLSPCheck {
                         && note.string == "Requires an active market. May return a partial result when liquidity or the crossing limit is insufficient. Does not check the account's pool balance or authorization."
                         && parameters.string.contains("before share rounding, in loan token base units. Ignored by this preview.")
                         && parameters.string.contains("including skipped and invalidated orders.")
-                        && returns.string.contains("\tcollectedLoan\tLoan claim produced, net of protocol fees and before share rounding, in loan token base units."),
+                        && returns.string.contains("collectedLoan\tLoan claim produced, net of protocol fees and before share rounding, in loan token base units."),
                         "restore each wrapped NatSpec fragment to the notice, developer note, parameter or return it documents")
             let columns = try [descriptionColumn(after: "market", in: parameters),
                                descriptionColumn(after: "minLoanAmount", in: parameters),
@@ -627,20 +631,27 @@ enum SolidityLSPCheck {
                     "keep the hover content selectable in the hidden native check")
         try require(codeBlock.frame.maxY < description.frame.minY, "show the description below the code block")
         if let returns {
-            guard let divider = hoverSubview("separator", in: view) as? NSBox
+            guard let returnsDivider = hoverSubview("Returns.separator", in: view) as? NSBox
             else { throw Failure(detail: "find the NatSpec divider") }
             let returnsHeading = try checkHeading("Returns", above: returns, in: view)
             let firstHeading: NSRect
+            let firstDivider: NSBox
             if let parameters = hoverSubview("Parameters.body", in: view) {
+                guard let parametersDivider = hoverSubview("Parameters.separator", in: view) as? NSBox
+                else { throw Failure(detail: "find the Parameters divider") }
                 firstHeading = try checkHeading("Parameters", above: parameters, in: view)
-                try require(returnsHeading.minY - parameters.frame.maxY >= 14,
-                            "leave a wider section gap before the Returns heading")
+                firstDivider = parametersDivider
+                try require(parameters.frame.maxY < returnsDivider.frame.minY && returnsDivider.frame.maxY < returnsHeading.minY
+                            && returnsDivider.boxType == .separator && returnsDivider.frame.minX == firstDivider.frame.minX
+                            && returnsDivider.frame.width == firstDivider.frame.width,
+                            "use the same divider between Parameters and Returns")
             } else {
                 firstHeading = returnsHeading
+                firstDivider = returnsDivider
             }
-            try require(description.frame.maxY < divider.frame.minY && divider.frame.maxY < firstHeading.minY
-                        && description.frame.minX == firstHeading.minX && divider.boxType == .separator
-                        && divider.frame.minX == codeBlock.frame.minX && divider.frame.width == codeBlock.frame.width,
+            try require(description.frame.maxY < firstDivider.frame.minY && firstDivider.frame.maxY < firstHeading.minY
+                        && description.frame.minX == firstHeading.minX && firstDivider.boxType == .separator
+                        && firstDivider.frame.minX == codeBlock.frame.minX && firstDivider.frame.width == codeBlock.frame.width,
                         "use the shared divider above full-width NatSpec sections")
         }
         try verify(description, returns, view)
@@ -657,13 +668,33 @@ enum SolidityLSPCheck {
     }
 
     private static func descriptionColumn(after name: String, in view: NSTextView) throws -> CGFloat {
-        let label = try range("\t\(name)\t", in: view.string)
-        let style = view.textStorage?.attribute(.paragraphStyle, at: label.upperBound, effectiveRange: nil) as? NSParagraphStyle
-        guard let style, style.tabStops.count == 2, let nameTab = style.tabStops.first, let valueTab = style.tabStops.last,
-              nameTab.alignment == .right, valueTab.alignment == .left, nameTab.location < valueTab.location,
-              valueTab.location == style.headIndent
+        let label = try range("\(name)\t", in: view.string)
+        let description = NSRange(location: label.upperBound, length: 1)
+        let style = view.textStorage?.attribute(.paragraphStyle, at: description.location, effectiveRange: nil) as? NSParagraphStyle
+        guard let style, style.tabStops.count == 1, let tab = style.tabStops.first,
+              tab.alignment == .left, tab.location == style.headIndent,
+              let layout = view.textLayoutManager
+        else { throw Failure(detail: "set the shared description tab and wrapping indent for \(name)") }
+
+        // Inspect the layout directly so rows below the scroll viewport can be checked too.
+        layout.ensureLayout(for: layout.documentRange)
+        func rect(for range: NSRange) -> NSRect? {
+            guard let start = layout.location(layout.documentRange.location, offsetBy: range.location),
+                  let end = layout.location(start, offsetBy: range.length),
+                  let textRange = NSTextRange(location: start, end: end) else { return nil }
+            var rect: NSRect?
+            layout.enumerateTextSegments(in: textRange, type: .standard, options: .rangeNotRequired) { _, frame, _, _ in
+                rect = frame
+                return false
+            }
+            return rect
+        }
+        guard let nameRect = rect(for: NSRange(location: label.location, length: label.length - 1)),
+              let descriptionRect = rect(for: description), !descriptionRect.isEmpty, !nameRect.isEmpty,
+              nameRect.maxX < descriptionRect.minX,
+              abs(nameRect.minY - descriptionRect.minY) < 1
         else { throw Failure(detail: "align the description and wrapped lines for \(name)") }
-        return view.frame.minX + valueTab.location
+        return view.frame.minX + view.textContainerOrigin.x + descriptionRect.minX
     }
 
     private static func hoverSubview(_ id: String, in view: NSView) -> NSView? {
@@ -738,7 +769,7 @@ enum SolidityLSPCheck {
         else { throw Failure(detail: "lay out the named returns after the description") }
         try require(description.string.contains("• First item.\n• Second item.")
                     && description.string.hasSuffix("A literal example:\n     * Keep this asterisk.\n     *\n**@return**")
-                    && returns.string == "\tlower\tLower bound.\n\tupper\tUpper bound.",
+                    && returns.string == "lower\tLower bound.\nupper\tUpper bound.",
                     "preserve Markdown lists, asterisks inside a fenced example and both named returns")
     }
 
