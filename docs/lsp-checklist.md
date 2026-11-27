@@ -140,6 +140,8 @@ Method names above use the audited toolchain’s spelling. Newer releases add th
 
 ## Maintenance
 
+Use this catalog to compare server support and give the owner a list of candidate editor features. Follow the [language server integration workflow](workflow.md#language-server-integrations) when deciding which features to implement.
+
 Update this checklist in the same change as an Edit LSP feature or server integration. Move implemented rows or items to the top of their lists. When updating the server versions recorded here, recheck their `initialize` capabilities, conditional registrations and language-specific handlers before changing a blank or a ✗. Add extension candidates when they become available in a supported toolchain.
 
 ## OLS

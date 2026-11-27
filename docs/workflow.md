@@ -18,6 +18,12 @@ A feature should deliver a coherent, verifiable user scenario. When a request sp
 
 Research reference software when it affects a decision. BriskEdit is useful prior art when a proposed behavior has a comparable implementation. Record the concrete requirement locally and make it possible to implement and verify from the specification. Record the inspected version or pin source links to an immutable revision where possible.
 
+## Language server integrations
+
+Adding a language server extends Edit's existing LSP features to the new language. Reuse the editor's shared commands, shortcuts, and interface. Aim for comparable behavior across servers, enable each feature where the server supports it, and record verified limitations in the [LSP checklist](lsp-checklist.md).
+
+The owner chooses new editor features individually. If a server integration request mentions a capability that Edit does not yet provide, confirm that the owner wants to add that feature to the editor as a separate decision. Specify its shared behavior and plan support across the connected servers that can provide it. Treat advertised capabilities and unimplemented entries in the checklist as candidates for the owner's selection.
+
 ## Visual design
 
 Follow the [shared design](design.md) for app-wide rules. Record feature-specific decisions in the owning specification. Record the selected option when alternatives mattered. Use a mockup when it helps the owner distinguish materially different designs. Use a small native trial when focus, scrolling, or dragging determines which design will work.
