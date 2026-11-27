@@ -1646,7 +1646,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case "lsp-editing":
             try await LanguageServerEditingCheck.run(in: self, document: document)
         case "lsp-solidity":
-            try await SolidityLSPCheck.run(in: self, document: document)
+            try await SolidityLSPCheck.run(in: self, document: document) { view in
+                guard let screenshot else { return }
+                try self.captureCheckView(view, screenshot: screenshot)
+            }
         case "lsp-c-family":
             try await SourceKitLSPCheck.checkCFamily(in: self, document: document) { window, suffix in
                 let target = screenshot.flatMap { path in

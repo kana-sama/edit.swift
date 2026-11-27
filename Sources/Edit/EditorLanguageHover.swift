@@ -87,7 +87,7 @@ struct EditorHoverContent: Sendable {
         blocks = [Block(runs: runs)]
     }
 
-    init(text: String, isMarkdown: Bool, preservesSoftBreaks: Bool = false) {
+    init(text: String, isMarkdown: Bool, preservesSoftBreaks: Bool = false, formatsNatSpec: Bool = false) {
         let options = AttributedString.MarkdownParsingOptions(appliesSourcePositionAttributes: preservesSoftBreaks)
         guard isMarkdown, let value = try? AttributedString(markdown: text, options: options), !value.characters.isEmpty else {
             blocks = [Block(runs: [Run(text: text)])]
@@ -157,7 +157,34 @@ struct EditorHoverContent: Sendable {
                 blocks[index].alignedFields = OLSHover.alignedFields(in: blocks[index].runs.map(\.text).joined())
             }
         }
+        if formatsNatSpec { Self.formatNatSpec(in: &blocks) }
         self.blocks = blocks
+    }
+
+    private static func formatNatSpec(in blocks: inout [Block]) {
+        // Solar renders NatSpec tags as standalone bold paragraphs in the Markdown response.
+        for index in blocks.indices {
+            let block = blocks[index]
+            guard block.isTopLevelParagraph, block.runs.allSatisfy({ $0.strong && !$0.code && $0.link == nil }) else { continue }
+            let tag = block.runs.map(\.text).joined()
+            let heading: String
+            switch tag {
+            case "@dev": heading = "Notes"
+            case "@param": heading = "Parameters"
+            case "@return": heading = "Returns"
+            default: continue
+            }
+            blocks[index].heading = 3
+            blocks[index].runs = [Run(text: heading)]
+
+            let value = index + 1
+            let following = value + 1
+            if tag == "@return", blocks.indices.contains(value), blocks[value].listMarker == "• ",
+               blocks[value].indentation == 1, !blocks.indices.contains(following) || blocks[following].indentation == 0 {
+                blocks[value].listMarker = nil
+                blocks[value].indentation = 0
+            }
+        }
     }
 
     @MainActor

@@ -7,7 +7,7 @@ enum SolidityLSPCheck {
         var errorDescription: String? { "Solidity LSP check: \(detail)" }
     }
 
-    static func run(in app: Edit, document: DocumentWindow) async throws {
+    static func run(in app: Edit, document: DocumentWindow, captureHover: (NSView) throws -> Void) async throws {
         let temporary = FileManager.default.temporaryDirectory.appending(
             path: "Solidity LSP \(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
@@ -16,20 +16,24 @@ enum SolidityLSPCheck {
             document.window.close()
             try? FileManager.default.removeItem(at: base)
         }
-        try await checkFixture(in: base, app: app, document: document)
-        if let project = ProcessInfo.processInfo.environment["EDIT_SOLIDITY_CHECK_PROJECT"], !project.isEmpty {
+        let project = ProcessInfo.processInfo.environment["EDIT_SOLIDITY_CHECK_PROJECT"] ?? ""
+        try await checkFixture(in: base, app: app, document: document) { view in
+            if project.isEmpty { try captureHover(view) }
+        }
+        if !project.isEmpty {
             let source = URL(filePath: project, directoryHint: .isDirectory)
             let copy = base.appending(path: "BarterLend copy", directoryHint: .isDirectory)
             try await Task.detached {
                 try FileManager.default.copyItem(at: source, to: copy)
             }.value
-            try await checkBarterLend(at: copy, app: app, document: document)
+            try await checkBarterLend(at: copy, app: app, document: document, captureHover: captureHover)
         }
         try require(!document.window.isVisible && document.window.alphaValue == 0 && !NSApp.isActive,
                     "keep the Editor instance hidden during live requests")
     }
 
-    private static func checkFixture(in base: URL, app: Edit, document: DocumentWindow) async throws {
+    private static func checkFixture(in base: URL, app: Edit, document: DocumentWindow,
+                                     captureHover: (NSView) throws -> Void) async throws {
         let root = base.appending(path: "Foundry # café", directoryHint: .isDirectory)
         let sources = root.appending(path: "contracts src", directoryHint: .isDirectory)
         let dependency = root.appending(path: "lib/math/src", directoryHint: .isDirectory)
@@ -65,6 +69,10 @@ enum SolidityLSPCheck {
             pragma solidity ^0.8.29;
             library Math {
                 /// @notice Adds two numbers.
+                /// @dev Uses checked [arithmetic](https://docs.soliditylang.org/).
+                /// @param left First number.
+                /// @param right Second number.
+                /// @return The sum in input units.
                 function add(uint256 left, uint256 right) internal pure returns (uint256) { return left + right; }
                 /// @notice Multiplies two numbers.
                 function multiply(uint256 left, uint256 right) internal pure returns (uint256) { return left * right; }
@@ -111,6 +119,21 @@ enum SolidityLSPCheck {
         let hover = await lsp.hover(at: position, word: use)
         try require(hover?.range == use && hover?.isMarkdown == true && hover?.text.contains("Adds two numbers.") == true,
                     "return a ranged Markdown hover with the dependency's NatSpec")
+        try await checkHover(at: use, in: document) { text, view in
+            let rendered = text.string
+            try require(rendered.contains("Adds two numbers.\nNotes\nUses checked arithmetic.")
+                        && rendered.contains("Parameters\n• left: First number.\n• right: Second number.")
+                        && rendered.contains("Returns\nThe sum in input units."),
+                        "render NatSpec prose, named parameters and a single return as readable sections")
+            let link = try range("arithmetic", in: rendered)
+            let parameter = try range("left: First", in: rendered)
+            try require(text.textStorage?.attribute(.link, at: link.location, effectiveRange: nil) as? URL
+                        == URL(string: "https://docs.soliditylang.org/")
+                        && text.textStorage?.attribute(.backgroundColor, at: parameter.location, effectiveRange: nil) != nil,
+                        "preserve Markdown links and inline code in the NatSpec hover")
+            try captureHover(view)
+        }
+        try checkMultipleReturnHover()
         let references = try await session.references(at: position, includeDeclaration: true)
         try require(Set(references.map { $0.url.path }) == [main.path, other.path, math.path],
                     "find usages in the open and closed files and the remapped definition")
@@ -438,7 +461,8 @@ enum SolidityLSPCheck {
         }
     }
 
-    private static func checkBarterLend(at root: URL, app: Edit, document: DocumentWindow) async throws {
+    private static func checkBarterLend(at root: URL, app: Edit, document: DocumentWindow,
+                                        captureHover: (NSView) throws -> Void) async throws {
         let file = root.appending(path: "src/PendlePtPriceOracle.sol")
         try require(FileBuffer.canonicalURL(file).path == file.path, "open the oracle source from the disposable copy")
         let original = try String(contentsOf: file, encoding: .utf8)
@@ -504,9 +528,61 @@ enum SolidityLSPCheck {
                     "open the BarterLend source shown in the screenshot")
         try await wait("synchronize LeverageRouter.sol", session: session) { session.supportsCompletion }
         document.window.makeFirstResponder(editor)
+        let getter = try range("getStalePriceWindow", in: editor.string)
+        try await checkHover(at: getter, in: document) { text, view in
+            try require(text.string.contains("Returns the maximum staleness of an oracle price.\n"
+                                            + "Returns\nMaximum price staleness, in seconds."),
+                        "show the return description in the BarterLend getter hover")
+            try captureHover(view)
+        }
         try await checkIncompleteStatement(in: document, before: "        return FlashLoanContext({")
         try await checkIncompleteEnum(in: document, before: "        return FlashLoanContext({",
                                       members: ["Leverage", "Deleverage", "ReducePosition"])
+    }
+
+    private static func checkHover(at word: NSRange, in document: DocumentWindow,
+                                   verify: (NSTextView, NSView) throws -> Void) async throws {
+        let editor = document.editor
+        select(word.location, in: editor)
+        guard let rect = editor.highlightRects(for: [word]).first,
+              let event = NSEvent.mouseEvent(with: .mouseMoved,
+                  location: editor.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil),
+                  modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                  windowNumber: document.window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)
+        else { throw Failure(detail: "create the pointer event for the Solidity hover") }
+        editor.mouseMoved(with: event)
+        defer { editor.cancelOperation(nil) }
+        try await wait("show the native Solidity hover") { editor.languageHoverWindowForCheck != nil }
+        func hoverText(in view: NSView) -> HoverTextView? {
+            (view as? HoverTextView) ?? view.subviews.lazy.compactMap { hoverText(in: $0) }.first
+        }
+        guard let panel = editor.languageHoverWindowForCheck, let view = panel.contentView,
+              let text = hoverText(in: view) else { throw Failure(detail: "find the rendered Solidity hover") }
+        try require(!panel.isVisible && panel.alphaValue == 0 && text.isSelectable,
+                    "keep the hover selectable in the hidden native check")
+        try verify(text, view)
+    }
+
+    private static func checkMultipleReturnHover() throws {
+        let markdown = """
+            ```solidity
+            function limits() returns (uint64 lower, uint64 upper)
+            ```
+
+            **@return**
+
+            - `lower`: Lower bound.
+            - `upper`: Upper bound.
+
+            ```
+            **@return**
+            ```
+            """
+        let presentation = EditorHoverPresentation(text: markdown, isMarkdown: true, server: .solidity)
+        let layout = EditorHoverLayout(presentation, maximumWidth: presentation.maximumWidth)
+        let rendered = layout?.textViews.first?.string ?? ""
+        try require(rendered.contains("Returns\n• lower: Lower bound.\n• upper: Upper bound.")
+                    && rendered.hasSuffix("**@return**"), "keep both named returns and the literal fenced example")
     }
 
     private static func checkParameter(_ text: String, in document: DocumentWindow) async throws {

@@ -29,6 +29,10 @@ enum EditorHoverPresentation: Sendable {
     }
 
     init(text: String, isMarkdown: Bool, server: LanguageServer? = nil) {
+        if server == .solidity {
+            self = .markdown(EditorHoverContent(text: text, isMarkdown: isMarkdown, formatsNatSpec: true))
+            return
+        }
         if isMarkdown, server == .odin, let hover = OLSHover(markdown: text) {
             var sections = [Section(kind: .declaration, content: EditorHoverContent(code: [hover.declaration], language: .odin))]
             if let documentation = hover.documentation {
