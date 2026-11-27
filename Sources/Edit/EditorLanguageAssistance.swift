@@ -18,9 +18,44 @@ final class EditorLanguageAssistance {
         let context: Context
         let caret: Int
         let range: NSRange
-        let items: [LSPCompletionItem]
+        let items: [Candidate]
         let isIncomplete: Bool
         var selected: Int
+    }
+
+    private enum Candidate {
+        case server(LSPCompletionItem)
+        case word(DocumentWord)
+
+        var label: String {
+            switch self {
+            case .server(let item): item.label
+            case .word(let word): word.name
+            }
+        }
+
+        var filterText: String {
+            if case .server(let item) = self, let filterText = item.filterText { return filterText }
+            return label
+        }
+
+        var sortText: String? {
+            if case .server(let item) = self { return item.sortText }
+            return nil
+        }
+
+        var row: EditorCompletionChoices.Item {
+            let detail = switch self {
+            case .server(let item): item.detail
+            case .word: "In this file"
+            }
+            return .init(label: label, detail: detail)
+        }
+    }
+
+    private struct DocumentWord: Sendable {
+        let name: String
+        let line: String
     }
 
     private struct Signature {
@@ -37,14 +72,15 @@ final class EditorLanguageAssistance {
     private var signatureTask: Task<Void, Never>?
     private var completionExpiry: Task<Void, Never>?
     private var signatureExpiry: Task<Void, Never>?
-    private var acceptanceTask: Task<Void, Never>?
+    private var documentationTask: Task<Void, Never>?
     private var formatTask: Task<Void, Never>?
     private var trackedCaret: Int?
     private var lastBufferEdit: ContinuousClock.Instant?
     private lazy var choices = EditorCompletionChoices { [weak self] row in self?.accept(row) }
-    private lazy var completionPopup = EditorAssistancePopup(prefersAbove: false)
     private lazy var signaturePopup = EditorAssistancePopup(prefersAbove: true)
     private static let staleInterval: Duration = .milliseconds(300)
+    private static let identifiers = CharacterSet.alphanumerics.union(.nonBaseCharacters)
+        .union(CharacterSet(charactersIn: "_$"))
 
     init(editor: EditorTextView, context: @escaping () -> Context?) {
         self.editor = editor
@@ -60,16 +96,15 @@ final class EditorLanguageAssistance {
     var canFormat: Bool { editor?.focusRanges == nil && context()?.session.supportsFormatting == true }
 
     private var caret: Int? {
-        guard let editor, editor.window?.firstResponder === editor,
-              !editor.hasSecondarySelections, editor.selectedRange().length == 0 else { return nil }
-        return editor.selectedRange().location
+        guard let editor, editor.window?.firstResponder === editor, !editor.hasSecondarySelections else { return nil }
+        let selection = editor.selectedRange()
+        return selection.length == 0 && selection.location != NSNotFound ? selection.location : nil
     }
 
     func complete() { requestCompletion(trigger: nil, delay: false) }
     func showSignature() { requestSignature(trigger: nil) }
 
     func typed(_ character: String?) {
-        acceptanceTask?.cancel()
         guard let state = context(), let editor, let caret else {
             dismiss()
             return
@@ -78,7 +113,7 @@ final class EditorLanguageAssistance {
         let signatureTrigger = character.flatMap {
             state.session.signatureTriggers.contains($0) || (signature != nil && state.session.signatureRetriggers.contains($0)) ? $0 : nil
         }
-        let continuesWord = character.map(Self.isIdentifier) ?? (completion != nil || completionTask != nil)
+        let continuesWord = character.map(Self.isIdentifier) ?? true
         let prefixLength = Self.prefix(in: editor.string as NSString, endingAt: caret).length
         if memberTrigger != nil || (continuesWord && (completion != nil || completionTask != nil || prefixLength >= 2)) {
             requestCompletion(trigger: memberTrigger, delay: memberTrigger == nil)
@@ -107,11 +142,9 @@ final class EditorLanguageAssistance {
 
     @discardableResult
     func dismiss() -> Bool {
-        let hadAssistance = isPresenting || completionTask != nil || signatureTask != nil || acceptanceTask != nil
+        let hadAssistance = isTrackingInput
         closeSignature()
         closeCompletion()
-        acceptanceTask?.cancel()
-        acceptanceTask = nil
         trackedCaret = nil
         return hadAssistance
     }
@@ -125,6 +158,7 @@ final class EditorLanguageAssistance {
             completion.selected = min(max(0, completion.selected + direction), completion.items.count - 1)
             self.completion = completion
             choices.select(completion.selected)
+            updateCompletionDocumentation()
         case 36, 48, 76:
             accept(completion.selected)
         default:
@@ -137,54 +171,85 @@ final class EditorLanguageAssistance {
         guard isPresenting, let editor, let caret,
               let owner = editor.window, let anchor = Self.anchor(for: caret, in: editor) else {
             if isPresenting {
-                completionPopup.close()
+                choices.close()
                 signaturePopup.close()
             }
             return
         }
-        if let completion {
-            let start = Self.anchor(for: completion.range.location, in: editor) ?? anchor
-            completionPopup.show(choices.view, anchoredAt: start, in: owner, appearance: editor.effectiveAppearance)
+        if completion != nil {
+            choices.show(anchor, in: owner, appearance: editor.effectiveAppearance)
         }
         if signature != nil, let signatureView {
             signaturePopup.show(signatureView, anchoredAt: anchor, in: owner, appearance: editor.effectiveAppearance,
-                                avoiding: completion == nil ? nil : completionPopup.frame)
+                                avoiding: completion == nil ? nil : choices.frame)
         }
     }
 
     private func requestCompletion(trigger: String?, delay: Bool) {
         guard let state = context(), state.session.supportsCompletion, let editor, let caret else { return }
         trackedCaret = caret
-        let incomplete = trigger == nil && completion?.isIncomplete == true
-        let range = Self.prefix(in: editor.string as NSString, endingAt: caret)
-        let prefix = (editor.string as NSString).substring(with: range)
+        let source = editor.string
+        let text = source as NSString
+        let range = Self.prefix(in: text, endingAt: caret)
+        let prefix = text.substring(with: range)
+        let offersDocumentWords = prefix.utf16.count >= 2 && Self.isBarePrefix(at: range.location, in: text)
+        let previous = completion.flatMap { previous in
+            previous.range.location == range.location && previous.context.session === state.session
+                && previous.context.opening == state.opening && previous.context.generation == state.generation ? previous : nil
+        }
+        let incomplete = trigger == nil && previous?.isIncomplete == true
         completionTask?.cancel()
-        if completion != nil, completionExpiry == nil {
-            choices.setPending(true)
-            completionExpiry = Task { [weak self] in
-                do { try await Task.sleep(for: Self.staleInterval) } catch { return }
-                self?.clearCompletion()
+        documentationTask?.cancel()
+        let previousRow = previous.map { $0.items[$0.selected].row }
+        if let previous, previous.context != state {
+            let matches = Self.orderedItems(previous.items, prefix: prefix)
+            if matches.isEmpty {
+                clearCompletion()
+            } else {
+                let selected = matches.firstIndex { $0.row == previousRow } ?? 0
+                completion = Completion(context: previous.context, caret: previous.caret, range: previous.range, items: matches,
+                                        isIncomplete: previous.isIncomplete, selected: selected)
+                if matches[selected].row != previousRow { updateCompletionDocumentation(resolve: false) }
+                choices.update(matches.map(\.row), selected: selected, pending: true)
+                if completionExpiry == nil {
+                    completionExpiry = Task { [weak self] in
+                        do { try await Task.sleep(for: Self.staleInterval) } catch { return }
+                        self?.clearCompletion()
+                    }
+                }
             }
+        } else if previous == nil {
+            clearCompletion()
         }
         completionTask = Task { [weak self, weak editor] in
+            guard let self else { return }
+            defer { if !Task.isCancelled { completionTask = nil } }
             if delay {
                 do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
             }
             let result = try? await state.session.completion(at: caret, trigger: trigger, retriggering: incomplete)
-            guard let self, !Task.isCancelled else { return }
-            completionTask = nil
-            guard isCurrent(state, caret: caret), let result, !result.items.isEmpty else {
+            guard !Task.isCancelled, isCurrent(state, caret: caret) else { return }
+            var items = result?.items.map(Candidate.server) ?? []
+            if offersDocumentWords, !items.contains(where: { Self.matchRank(for: $0.filterText, prefix: prefix) < 2 }) {
+                // Solar can lose the current source's semantic index on an incomplete statement.
+                // Recover with fresh text replacements from the buffer, independent of diagnostics or stale edits.
+                let words = await Self.documentWords(matching: prefix, excluding: range, in: source)
+                guard isCurrent(state, caret: caret), !Task.isCancelled else { return }
+                let labels = Set(items.map(\.filterText))
+                items += words.filter { !labels.contains($0.name) }.map(Candidate.word)
+            }
+            items = Self.orderedItems(items, prefix: prefix)
+            guard !items.isEmpty else {
                 clearCompletion()
                 return
             }
-            let items = Self.orderedItems(result.items, prefix: prefix)
-            let previous = completion.map { $0.items[$0.selected].label }
-            let selected = items.firstIndex { $0.label == previous } ?? 0
+            let selected = items.firstIndex { $0.row == previousRow } ?? 0
             completionExpiry?.cancel()
             completionExpiry = nil
             completion = Completion(context: state, caret: caret, range: range, items: items,
-                                    isIncomplete: result.isIncomplete, selected: selected)
-            choices.update(items, selected: selected)
+                                    isIncomplete: result?.isIncomplete == true, selected: selected)
+            choices.update(items.map(\.row), selected: selected, pending: false)
+            updateCompletionDocumentation()
             editor?.invalidateLanguageInteraction()
             viewportChanged()
         }
@@ -194,7 +259,8 @@ final class EditorLanguageAssistance {
         guard let state = context(), state.session.supportsSignatureHelp, let caret else { return }
         trackedCaret = caret
         let active = signature != nil
-        let analyzingEdit = lastBufferEdit.map { $0.duration(to: .now) < .seconds(1) } == true || trigger != nil
+        let analyzingEdit = state.session.server == .solidity &&
+            (lastBufferEdit.map { $0.duration(to: .now) < .seconds(1) } == true || trigger != nil)
         signatureTask?.cancel()
         if signature != nil, signatureExpiry == nil {
             signatureExpiry = Task { [weak self] in
@@ -244,22 +310,56 @@ final class EditorLanguageAssistance {
 
     private var signatureView: NSView?
 
-    private func accept(_ row: Int) {
-        guard let completion, completion.items.indices.contains(row),
-              isCurrent(completion.context, caret: completion.caret) else { return }
-        let item = completion.items[row]
-        closeCompletion()
-        acceptanceTask?.cancel()
-        acceptanceTask = Task { [weak self] in
-            let resolved = (try? await completion.context.session.resolveCompletion(item)) ?? item
-            guard let self, !Task.isCancelled else { return }
-            acceptanceTask = nil
-            guard let editor, isCurrent(completion.context, caret: completion.caret) else { return }
-            do {
-                try insert(resolved, from: completion, in: editor)
-            } catch {
-                editor.showLanguageFeedback(error.localizedDescription, at: completion.range)
+    private func updateCompletionDocumentation(resolve: Bool = true) {
+        documentationTask?.cancel()
+        documentationTask = nil
+        guard let completion else { return }
+        switch completion.items[completion.selected] {
+        case .word(let word):
+            let language = editor?.syntaxLanguage ?? .plainText
+            choices.showDocumentation(EditorHoverContent(code: [word.line], language: language))
+        case .server(let item):
+            showDocumentation(for: item)
+            guard resolve, item.documentation == nil, completion.context.session.supportsCompletionResolve else { return }
+            documentationTask = Task { [weak self] in
+                do {
+                    try await Task.sleep(for: .milliseconds(70))
+                    let item = try await completion.context.session.resolveCompletion(item)
+                    guard let self, !Task.isCancelled, isCurrent(completion.context, caret: completion.caret),
+                          self.completion?.selected == completion.selected else { return }
+                    showDocumentation(for: item)
+                } catch {
+                    // The item's original detail remains useful while resolve is unavailable.
+                }
             }
+        }
+    }
+
+    private func showDocumentation(for item: LSPCompletionItem) {
+        if let doc = item.documentation, !doc.value.isEmpty {
+            choices.showDocumentation(EditorHoverContent(text: doc.value, isMarkdown: doc.isMarkdown, preservesSoftBreaks: true))
+        } else if let detail = item.detail, !detail.isEmpty, detail != item.label {
+            choices.showDocumentation(EditorHoverContent(text: detail, isMarkdown: false))
+        } else {
+            choices.showDocumentation(nil)
+        }
+    }
+
+    private func accept(_ row: Int) {
+        guard let editor, let completion, completion.items.indices.contains(row),
+              isCurrent(completion.context, caret: completion.caret) else { return }
+        closeCompletion()
+        do {
+            switch completion.items[row] {
+            case .server(let item):
+                try insert(item, from: completion, in: editor)
+            case .word(let word):
+                let replacement = EditorTextEdit(range: completion.range, text: word.name)
+                let caret = replacement.result(at: 0).upperBound
+                Self.apply([replacement], selections: [NSRange(location: caret, length: 0)], named: "Complete", in: editor)
+            }
+        } catch {
+            editor.showLanguageFeedback(error.localizedDescription, at: completion.range)
         }
     }
 
@@ -272,9 +372,10 @@ final class EditorLanguageAssistance {
                   range.location <= completion.caret, completion.caret <= range.upperBound else {
                 throw LSPFailure.invalidMessage
             }
-            edit = EditorTextEdit(range: range, text: serverEdit.newText)
+            edit = EditorTextEdit(range: range, text: Self.insertion(serverEdit.newText, for: item, language: editor.syntaxLanguage))
         } else {
-            edit = EditorTextEdit(range: completion.range, text: item.insertText ?? item.label)
+            edit = EditorTextEdit(range: completion.range,
+                                  text: Self.insertion(item.insertText ?? item.label, for: item, language: editor.syntaxLanguage))
         }
         // Without the snippet capability, a snippet would appear as source code.
         guard item.insertTextFormat != 2 else { throw LSPFailure.invalidMessage }
@@ -283,6 +384,18 @@ final class EditorLanguageAssistance {
         let preceding = additional.lazy.filter { $0.range.location < edit.range.location }.reduce(0) { $0 + $1.lengthChange }
         let end = edit.range.location + preceding + edit.text.utf16.count
         Self.apply(edits, selections: [NSRange(location: end, length: 0)], named: "Complete", in: editor)
+    }
+
+    private static func insertion(_ text: String, for item: LSPCompletionItem, language: SyntaxLanguage) -> String {
+        // SourceKit strips snippet placeholders in plain-text mode. Leave the arguments to signature help.
+        guard language == .swift, item.filterText?.contains(":") == true, text.last == ")",
+              let start = text.firstIndex(of: "("), start > text.startIndex else { return text }
+        let arguments = text[text.index(after: start)..<text.index(before: text.endIndex)]
+        let emptyArguments = arguments.split(separator: ",", omittingEmptySubsequences: false).allSatisfy { argument in
+            let argument = argument.trimmingCharacters(in: .whitespaces)
+            return argument.isEmpty || (argument.last == ":" && argument.dropLast().allSatisfy { isIdentifier(String($0)) })
+        }
+        return emptyArguments ? String(text[..<start]) : text
     }
 
     func format() {
@@ -322,7 +435,10 @@ final class EditorLanguageAssistance {
         completionExpiry?.cancel()
         completionExpiry = nil
         completion = nil
-        completionPopup.close()
+        documentationTask?.cancel()
+        documentationTask = nil
+        choices.showDocumentation(nil)
+        choices.close()
         viewportChanged()
     }
 
@@ -347,36 +463,64 @@ final class EditorLanguageAssistance {
     }
 
     private static func isIdentifier(_ character: String) -> Bool {
-        character.utf16.count == 1 && isIdentifier(character.utf16.first ?? 0)
-    }
-
-    private static func isIdentifier(_ character: UInt16) -> Bool {
-        (65...90).contains(character) || (97...122).contains(character) || (48...57).contains(character) ||
-            character == 95 || character == 36
+        !character.isEmpty && character.unicodeScalars.allSatisfy(identifiers.contains)
     }
 
     private static func prefix(in text: NSString, endingAt caret: Int) -> NSRange {
-        var start = min(caret, text.length)
-        while start > 0, isIdentifier(text.character(at: start - 1)) { start -= 1 }
+        let caret = min(caret, text.length)
+        let line = text.lineRange(for: NSRange(location: caret, length: 0))
+        let separator = text.rangeOfCharacter(from: identifiers.inverted, options: .backwards,
+                                              range: NSRange(location: line.location, length: caret - line.location))
+        let start = separator.location == NSNotFound ? line.location : separator.upperBound
         return NSRange(location: start, length: caret - start)
     }
 
-    private static func orderedItems(_ items: [LSPCompletionItem], prefix: String) -> [LSPCompletionItem] {
+    private static func isBarePrefix(at start: Int, in text: NSString) -> Bool {
+        guard start > 0 else { return true }
+        let previous = text.character(at: start - 1)
+        if previous == 58 { return start < 2 || text.character(at: start - 2) != 58 }
+        if previous == 62 { return start < 2 || text.character(at: start - 2) != 45 }
+        return ![46, 47, 34, 39].contains(previous)
+    }
+
+    private static func orderedItems(_ items: [Candidate], prefix: String) -> [Candidate] {
+        let ranked = items.enumerated().compactMap { index, item -> (Int, String, Int, Candidate)? in
+            let rank = matchRank(for: item.filterText, prefix: prefix)
+            guard rank < 3 else { return nil }
+            return (rank, item.sortText ?? "", index, item)
+        }
+        return ranked.sorted { ($0.0, $0.1, $0.2) < ($1.0, $1.1, $1.2) }.map(\.3)
+    }
+
+    private static func matchRank(for value: String, prefix: String) -> Int {
+        if value.hasPrefix(prefix) { return 0 }
+        let value = value.lowercased()
         let prefix = prefix.lowercased()
-        let usesSortKeys = items.contains { $0.sortText != nil }
-        return items.enumerated().sorted { first, second in
-            let left = first.element
-            let right = second.element
-            let leftMatches = (left.filterText ?? left.label).lowercased().hasPrefix(prefix)
-            let rightMatches = (right.filterText ?? right.label).lowercased().hasPrefix(prefix)
-            if leftMatches != rightMatches { return leftMatches }
-            if usesSortKeys {
-                let left = left.sortText ?? left.label
-                let right = right.sortText ?? right.label
-                if left != right { return left < right }
-            }
-            return first.offset < second.offset
-        }.map(\.element)
+        if value.hasPrefix(prefix) { return 1 }
+        var index = value.startIndex
+        for character in prefix {
+            guard let match = value[index...].firstIndex(of: character) else { return 3 }
+            index = value.index(after: match)
+        }
+        return 2
+    }
+
+    @concurrent private static func documentWords(matching prefix: String, excluding range: NSRange,
+                                                  in source: String) async -> [DocumentWord] {
+        let text = source as NSString
+        guard let words = try? NSRegularExpression(pattern: #"[\p{L}_$][\p{L}\p{M}\p{Nd}_$]*"#) else { return [] }
+        let prefix = prefix.lowercased()
+        var seen = Set<String>()
+        var matches: [DocumentWord] = []
+        words.enumerateMatches(in: source, range: NSRange(location: 0, length: text.length)) { result, _, stop in
+            guard !Task.isCancelled, matches.count < 80 else { stop.pointee = true; return }
+            guard let result, NSIntersectionRange(result.range, range).length == 0 else { return }
+            let name = text.substring(with: result.range)
+            guard name.lowercased() != prefix, name.lowercased().hasPrefix(prefix), seen.insert(name).inserted else { return }
+            let line = text.substring(with: text.lineRange(for: result.range)).trimmingCharacters(in: .whitespacesAndNewlines)
+            matches.append(DocumentWord(name: name, line: line))
+        }
+        return matches
     }
 
     private static func parameterRange(_ signature: LSPSignatureHelp.Signature, active: Int) -> NSRange? {
@@ -510,7 +654,14 @@ final class EditorLanguageAssistance {
     var completionLabelsForCheck: [String] { completion?.items.map(\.label) ?? [] }
     var signatureLabelForCheck: String? { signature?.label }
     var signatureParameterForCheck: NSRange? { signature?.parameter }
-    var completionFrameForCheck: NSRect? { completionPopup.frame }
+    var completionFrameForCheck: NSRect? { choices.frame }
+    var completionCaretFrameForCheck: NSRect? {
+        guard let editor, let caret else { return nil }
+        return Self.anchor(for: caret, in: editor)
+    }
+    var completionDocumentationForCheck: String? { choices.documentationForCheck }
+    var completionDocumentationFrameForCheck: NSRect? { choices.documentationFrameForCheck }
+    var completionListFrameForCheck: NSRect? { choices.listFrameForCheck }
     var signatureFrameForCheck: NSRect? { signaturePopup.frame }
 #endif
 }

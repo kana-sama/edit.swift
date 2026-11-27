@@ -13,6 +13,8 @@ Edit uses full [semantic token results](features/lsp-highlighting/spec.md) for s
 Edit [underlines published errors and shows their messages after the affected lines](features/lsp-diagnostics/spec.md).
 The [Worktree marks files and collapsed folders with published errors](features/lsp-worktree-diagnostics/spec.md).
 
+[Completion, signature help, and formatting](features/lsp-editing/spec.md) use shared commands for ZLS, OLS, Solar, and SourceKit-LSP, including clangd-backed C-family files.
+
 | Method                                                                       | ZLS   | SourceKit-LSP | OLS   |
 | ---------------------------------------------------------------------------- | :---: | :-----------: | :---: |
 | [`textDocument/definition`][lsp-definition]                                  | ✓     | ✓             | ✓     |
@@ -24,6 +26,10 @@ The [Worktree marks files and collapsed folders with published errors](features/
 | [`textDocument/documentSymbol`][lsp-documentsymbol]                          | ✓     | ✓             | ✓     |
 | [`workspace/symbol`][lsp-ws-symbol]                                          | ✓     | ✓             | ✓     |
 | [`textDocument/hover`][lsp-hover]                                            | ✓     | ✓             | ✓     |
+| [`textDocument/completion`][lsp-completion]                                  | ✓     | ✓             | ✓     |
+| [`completionItem/resolve`][lsp-completionitem-resolve]                       | ✗     | ✓             | ✗     |
+| [`textDocument/signatureHelp`][lsp-signaturehelp]                            | ✓     | ✓             | ✓     |
+| [`textDocument/formatting`][lsp-formatting]                                  | ✓     | ✓             | ✓     |
 | [`textDocument/prepareRename`][lsp-preparerename]                            | ✓     | ✓             | ✓     |
 | [`textDocument/rename`][lsp-rename]                                          | ✓     | ✓             | ✓     |
 | [`textDocument/publishDiagnostics`][lsp-publishdiagnostics]                  | ✓     | ✓             | ✓     |
@@ -40,9 +46,6 @@ The [Worktree marks files and collapsed folders with published errors](features/
 | [`textDocument/prepareTypeHierarchy`][lsp-preparetypehierarchy]              | ✗     |               | ✗     |
 | [`typeHierarchy/supertypes`][lsp-typehierarchy-supertypes]                   | ✗     |               | ✗     |
 | [`typeHierarchy/subtypes`][lsp-typehierarchy-subtypes]                       | ✗     |               | ✗     |
-| [`textDocument/completion`][lsp-completion]                                  |       |               |       |
-| [`completionItem/resolve`][lsp-completionitem-resolve]                       | ✗     |               | ✗     |
-| [`textDocument/signatureHelp`][lsp-signaturehelp]                            |       |               |       |
 | [`textDocument/inlayHint`][lsp-inlayhint]                                    |       |               |       |
 | [`inlayHint/resolve`][lsp-inlayhint-resolve]                                 | ✗     |               | ✗     |
 | [`workspace/inlayHint/refresh`][lsp-ws-inlayhint-refresh]                    |       | ✗             | ✗     |
@@ -56,7 +59,6 @@ The [Worktree marks files and collapsed folders with published errors](features/
 | [`workspace/diagnostic/refresh`][lsp-diagnostic-refresh]                     | ✗     |               | ✗     |
 | [`textDocument/codeAction`][lsp-codeaction]                                  |       |               |       |
 | [`codeAction/resolve`][lsp-codeaction-resolve]                               | ✗     |               | ✗     |
-| [`textDocument/formatting`][lsp-formatting]                                  |       |               |       |
 | [`textDocument/rangeFormatting`][lsp-rangeformatting]                        | ✗     |               | ✗     |
 | [`textDocument/onTypeFormatting`][lsp-ontypeformatting]                      | ✗     |               | ✗     |
 | [`textDocument/willSave`][lsp-willsave]                                      | ✗     |               | ✗     |

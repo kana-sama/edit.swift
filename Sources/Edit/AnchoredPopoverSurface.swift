@@ -62,7 +62,10 @@ class AnchoredPopoverSurface: NSVisualEffectView {
     required init?(coder: NSCoder) { fatalError("Anchored popover surfaces are created in code.") }
 
     func applyOutline(_ shape: AnchoredPopoverShape) {
-        let path = shape.outline()
+        applyOutline(shape.outline())
+    }
+
+    func applyOutline(_ path: CGPath) {
         maskImage = NSImage(size: bounds.size, flipped: false) { _ in
             guard let context = NSGraphicsContext.current?.cgContext else { return false }
             context.setFillColor(CGColor(gray: 1, alpha: 1))

@@ -66,13 +66,13 @@ final class LanguageServerSession {
     var supportsDocumentSymbols: Bool { isReady && capabilities?.documentSymbols == true }
     var supportsWorkspaceSymbols: Bool { isServerReady && capabilities?.workspaceSymbols == true }
     var supportsRename: Bool { isReady && capabilities?.rename == true }
-    var supportsCompletion: Bool { server == .solidity && isReady && capabilities?.completion != nil }
+    var supportsCompletion: Bool { isReady && capabilities?.completion != nil }
     var supportsCompletionResolve: Bool { supportsCompletion && capabilities?.completion?.resolveProvider == true }
     var completionTriggers: Set<String> { Set(capabilities?.completion?.triggerCharacters ?? []) }
-    var supportsSignatureHelp: Bool { server == .solidity && isReady && capabilities?.signature != nil }
+    var supportsSignatureHelp: Bool { isReady && capabilities?.signature != nil }
     var signatureTriggers: Set<String> { Set(capabilities?.signature?.triggerCharacters ?? []) }
     var signatureRetriggers: Set<String> { Set(capabilities?.signature?.retriggerCharacters ?? []) }
-    var supportsFormatting: Bool { server == .solidity && isReady && capabilities?.formatting == true }
+    var supportsFormatting: Bool { isReady && capabilities?.formatting == true }
     var workspaceRoot: URL? { root }
 
     private var canControl: Bool { isEligible && rootLookup?.blocksServer != true }

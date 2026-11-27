@@ -560,10 +560,8 @@ final class LanguageServerConnection: @unchecked Sendable {
                     "tokenModifiers": LSPSemanticTokens.tokenModifiers,
                     "formats": ["relative"], "augmentsSyntaxTokens": true
                 ],
-                "rename": ["prepareSupport": true]
-            ]
-            if server == .solidity {
-                textDocument["completion"] = [
+                "rename": ["prepareSupport": true],
+                "completion": [
                     "contextSupport": true,
                     "completionItem": [
                         "snippetSupport": false,
@@ -571,8 +569,8 @@ final class LanguageServerConnection: @unchecked Sendable {
                         "documentationFormat": ["markdown", "plaintext"],
                         "resolveSupport": ["properties": ["documentation", "detail"]]
                     ]
-                ]
-                textDocument["signatureHelp"] = [
+                ],
+                "signatureHelp": [
                     "contextSupport": true,
                     "signatureInformation": [
                         "documentationFormat": ["markdown", "plaintext"],
@@ -580,6 +578,8 @@ final class LanguageServerConnection: @unchecked Sendable {
                         "activeParameterSupport": true
                     ]
                 ]
+            ]
+            if server == .solidity {
                 textDocument["synchronization"] = ["didSave": true]
             }
             var params: [String: Any] = [

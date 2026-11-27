@@ -821,7 +821,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     override func deleteBackward(_ sender: Any?) {
         if renameDraft != nil { super.deleteBackward(sender); return }
         if replaceProjectedSelection(with: "") { return }
-        trackLanguageTyping(nil, enabled: languageAssistance?.isTrackingInput == true) {
+        trackLanguageTyping(nil, enabled: true) {
             if !deleteAtCarets(backward: true, word: false) { super.deleteBackward(sender) }
         }
     }
@@ -1589,6 +1589,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var signatureLabelForCheck: String? { languageAssistance?.signatureLabelForCheck }
     var signatureParameterForCheck: NSRange? { languageAssistance?.signatureParameterForCheck }
     var completionFrameForCheck: NSRect? { languageAssistance?.completionFrameForCheck }
+    var completionCaretFrameForCheck: NSRect? { languageAssistance?.completionCaretFrameForCheck }
+    var completionDocumentationForCheck: String? { languageAssistance?.completionDocumentationForCheck }
+    var completionDocumentationFrameForCheck: NSRect? { languageAssistance?.completionDocumentationFrameForCheck }
+    var completionListFrameForCheck: NSRect? { languageAssistance?.completionListFrameForCheck }
     var signatureFrameForCheck: NSRect? { languageAssistance?.signatureFrameForCheck }
 #endif
 

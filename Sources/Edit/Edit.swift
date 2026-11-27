@@ -1643,6 +1643,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
                 }
                 try self.captureCheckView(view, screenshot: target)
             }
+        case "lsp-editing":
+            try await LanguageServerEditingCheck.run(in: self, document: document)
         case "lsp-solidity":
             try await SolidityLSPCheck.run(in: self, document: document)
         case "lsp-c-family":

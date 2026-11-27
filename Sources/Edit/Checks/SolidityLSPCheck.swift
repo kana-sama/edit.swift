@@ -52,6 +52,7 @@ enum SolidityLSPCheck {
             pragma solidity ^0.8.29;
             import {Math} from "@math/Math.sol";
             import {localValue} from "./Helper.sol";
+            enum Operation { Leverage, Deleverage }
             contract Counter {
                 function count() external pure returns (uint256) {
                     /* 🌿 */ return Math.add(2,3) + localValue();
@@ -65,6 +66,7 @@ enum SolidityLSPCheck {
             library Math {
                 /// @notice Adds two numbers.
                 function add(uint256 left, uint256 right) internal pure returns (uint256) { return left + right; }
+                /// @notice Multiplies two numbers.
                 function multiply(uint256 left, uint256 right) internal pure returns (uint256) { return left * right; }
             }
 
@@ -129,6 +131,7 @@ enum SolidityLSPCheck {
         let editor = document.editor
         document.window.makeFirstResponder(editor)
         try await checkTyping(in: document, original: mainText)
+        try await checkIncompleteStatement(in: document, before: "        /* 🌿 */ return Math.add")
         try await checkDiagnostics(in: document, file: main, original: mainText)
         try await checkFormatting(in: document, file: main, original: mainText, caretWord: "count(") {
             $0.contains("\n  function count()") && $0.contains("Math.add(2, 3)")
@@ -182,6 +185,7 @@ enum SolidityLSPCheck {
         try await wait("receive member completion after typing a dot") { editor.completionLabelsForCheck.contains("add") }
         try require(editor.completionFrameForCheck != nil && document.window.childWindows?.isEmpty != false,
                     "lay out the completion panel without ordering it above the hidden editor")
+        try await checkCompletionLayout(in: editor, documentation: "Adds two numbers.")
         try key(53, "\u{1B}", in: document)
         try require(editor.completionLabelsForCheck.isEmpty && editor.string.contains("Math.(2,3)"),
                     "dismiss completion with Escape without inserting a member")
@@ -193,6 +197,9 @@ enum SolidityLSPCheck {
             throw Failure(detail: "show a second selectable completion")
         }
         try key(125, "\u{F701}", in: document)
+        try await wait("show the NatSpec of the completion selected with the Down arrow") {
+            editor.completionDocumentationForCheck?.contains("Multiplies two numbers.") == true
+        }
         try key(36, "\r", in: document)
         try await wait("accept the completion selected with the Down arrow") {
             editor.string.contains("Math.\(second)(2,3)")
@@ -223,6 +230,58 @@ enum SolidityLSPCheck {
         try key(53, "\u{1B}", in: document)
         try require(editor.signatureLabelForCheck == nil && editor.string == original,
                     "dismiss the signature on Escape without moving or editing the call")
+    }
+
+    private static func checkCompletionLayout(in editor: EditorTextView, documentation: String) async throws {
+        try await wait("show selected completion documentation") {
+            editor.completionDocumentationForCheck?.contains(documentation) == true
+        }
+        guard let caret = editor.completionCaretFrameForCheck, let list = editor.completionListFrameForCheck,
+              let guide = editor.completionDocumentationFrameForCheck else {
+            throw Failure(detail: "lay out completion, caret, and documentation beside one another")
+        }
+        try require(list.minX >= caret.maxX - 1, "start completion to the right of the caret instead of at the token's start")
+        try require(guide.minX >= list.maxX - 1 && guide.minY < list.maxY && guide.maxY > list.minY,
+                    "show the selected item's documentation in an adjacent column")
+    }
+
+    private static func checkIncompleteStatement(in document: DocumentWindow, before nextStatement: String) async throws {
+        let editor = document.editor
+        let original = editor.string
+        let insertion = try range(nextStatement, in: original).location
+        let indent = "        "
+        let addedLines = indent + "\n\n"
+        editor.insertText(addedLines, replacementRange: NSRange(location: insertion, length: 0))
+        let caret = insertion + indent.utf16.count
+        select(caret, in: editor)
+        try key(31, "O", in: document, modifiers: .shift)
+        try key(35, "p", in: document)
+        try key(14, "e", in: document)
+        let incomplete = indent + "Ope\n\n"
+        let expectedBroken = (original as NSString).replacingCharacters(in: NSRange(location: insertion, length: 0), with: incomplete)
+        try require(editor.string == expectedBroken && editor.selectedRange().location == caret + 3,
+                    "type the screenshot's incomplete identifier on its own line")
+        let next = try range(nextStatement, in: expectedBroken)
+        let keyword = try range("return", in: nextStatement)
+        let diagnosed = NSRange(location: next.location + keyword.location, length: keyword.length)
+        try await wait("show the parse error on the following return and retain Operation completion") {
+            editor.diagnosticRanges.contains { NSIntersectionRange($0, diagnosed).length > 0 }
+                && editor.completionLabelsForCheck.first == "Operation"
+        }
+        try key(53, "\u{1B}", in: document)
+        try require(editor.completionLabelsForCheck.isEmpty, "dismiss the automatic completion")
+        editor.complete(nil)
+        try await wait("manually complete Operation once Solar has diagnosed the incomplete statement") {
+            editor.completionLabelsForCheck.first == "Operation"
+        }
+        try key(36, "\r", in: document)
+        let accepted = indent + "Operation\n\n"
+        let expectedAccepted = (original as NSString).replacingCharacters(in: NSRange(location: insertion, length: 0), with: accepted)
+        try await wait("replace only the incomplete symbol while preserving the return statement") {
+            editor.string == expectedAccepted
+        }
+        editor.insertText("", replacementRange: NSRange(location: insertion, length: accepted.utf16.count))
+        try require(editor.string == original, "restore the disposable source after the incomplete statement check")
     }
 
     private static func checkDiagnostics(in document: DocumentWindow, file: URL, original: String) async throws {
@@ -388,6 +447,14 @@ enum SolidityLSPCheck {
         }
         try replace("uint256 marketPrice  =", with: "uint256 marketPrice =", in: editor)
         try require(editor.string == original, "restore the exact BarterLend source in the disposable buffer")
+
+        let router = root.appending(path: "src/periphery/LeverageRouter.sol")
+        try require(FileManager.default.fileExists(atPath: router.path), "include LeverageRouter.sol in the BarterLend fixture copy")
+        try require(try await app.openFile(router, in: document) === document && document.fileURL?.path == router.path,
+                    "open the BarterLend source shown in the screenshot")
+        try await wait("synchronize LeverageRouter.sol", session: session) { session.supportsCompletion }
+        document.window.makeFirstResponder(editor)
+        try await checkIncompleteStatement(in: document, before: "        return FlashLoanContext({")
     }
 
     private static func checkParameter(_ text: String, in document: DocumentWindow) async throws {

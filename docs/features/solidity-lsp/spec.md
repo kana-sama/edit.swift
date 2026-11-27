@@ -4,13 +4,7 @@ Edit uses Solar from Foundry for named, editable Solidity files. Find `forge` on
 
 Use the existing per-window sessions, workspace-scoped Start, Stop and Restart, definition links, references, occurrence highlighting, document and workspace symbols, and Rename Symbol. Display Markdown hover with syntax-colored Solidity fences. Send the unsaved buffer with UTF-16 positions and notify Solar of saved files and relevant file changes. Show published errors in the source editor and Worktree. Solar in Forge 1.10.0 does not advertise semantic tokens. Syntax colors use the bundled Solidity Tree-sitter grammar.
 
-## Editing
-
-- **Complete** (Control-Space) opens a list at the caret. Also request completions after the server's advertised triggers and as an identifier is typed. Up and Down select a candidate, Return or Tab applies it, and Escape dismisses the list. Clicking a row applies it. Keep the editor focused. Honor the server's replacement range, plain insertion text, and additional edits. One Undo reverts the accepted candidate and its additional edits. While refreshing the same list, keep the previous rows briefly available for reading and disable acceptance until the current results arrive.
-- **Show Signature Help** (Control-Shift-Space) opens an anchored card above the caret if space permits. Also request it at advertised characters, including `(` and `,`. Update it as the user edits the call. Render the signature and emphasize the active parameter using the UTF-16 label range or the ordered parameter labels. Dismiss on Escape, leaving the call, or switching focus to another view. When both editing surfaces are present, give the completion list room to be used and show the signature card where they can fit together.
-- **Format Document** (Option-Shift-F) sends `textDocument/formatting` with the current buffer. Apply the validated reply to the editor with one Undo operation. Use the project's Foundry format configuration and retain caret positions across whitespace changes. A changed buffer, restarted session, or pending file switch discards the old response. Leave disk writes to the ordinary save flow. Formatting is available outside a focused selection, where it can edit the whole document.
-
-The three actions appear in Edit and Control when the open source and server capabilities support them. Completion and signature help operate at a single caret. The cards share the editor's anchored popover appearance and use the available screen space without changing the document layout.
+Solar provides the shared [completion, signature help, and formatting commands](../lsp-editing/spec.md). Formatting uses the Foundry project's format configuration.
 
 ## Acceptance
 

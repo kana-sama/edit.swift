@@ -113,9 +113,11 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
             await self?.documentHighlights(at: offset) ?? []
         }
         document.editor.languageAssistance = EditorLanguageAssistance(editor: document.editor) { [weak self] in
-            guard let self, sourceServer == .solidity, let query = query(), document.editor.isEditable,
+            guard let self, editableSourceURL != nil, document.editor.isEditable,
                   document.editor.jjInlineDiff?.projectedEditRange == nil else { return nil }
-            return .init(session: session, revision: query.revision, generation: query.generation, opening: query.openGeneration)
+            let session = session
+            return .init(session: session, revision: session.revision, generation: session.generation,
+                         opening: document.openRequestGeneration)
         }
     }
 
@@ -155,7 +157,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         let revision = session.revision
         session.updateText(document.textWithConflictPrefixes)
         if session.revision != revision {
-            if sourceServer == .solidity { document.editor.languageBufferChanged() }
+            document.editor.languageBufferChanged()
             updateDiagnostics()
             symbolRename.cancel()
             cancelLookup()
@@ -346,10 +348,15 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         _ = symbolRename.start(at: target.hit)
     }
 
-    private func query() -> Query? {
+    private var editableSourceURL: URL? {
         guard let url = sourceURL, !isClosed, !app.isQuitting, document.window.attachedSheet == nil,
               document.hasEditableTextDocument, document.editor.conflictEdits.isEmpty,
               !document.editor.hasMarkedText(), document.editor.renameRange == nil else { return nil }
+        return url
+    }
+
+    private func query() -> Query? {
+        guard let url = editableSourceURL else { return nil }
         return Query(url: url, text: document.editor.string, server: session.server,
                      generation: session.generation, revision: session.revision,
                      openGeneration: document.openRequestGeneration)
