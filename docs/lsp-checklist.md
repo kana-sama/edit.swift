@@ -157,7 +157,7 @@ Update this checklist in the same change as an Edit LSP feature or server integr
 
 - [x] Discover Foundry projects and launch `forge lsp --stdio`. Respect project profiles and remappings when opening source and dependency files. [Edit specification](features/solidity-lsp/spec.md)
 - [x] Run `textDocument/definition`, `textDocument/references`, `textDocument/hover`, `textDocument/documentHighlight`, `textDocument/documentSymbol`, `workspace/symbol`, `textDocument/prepareRename`, and `textDocument/rename`.
-- [x] Render NatSpec descriptions above a table of parameters and returns in the [Solidity hover](features/solidity-lsp/spec.md#natspec-hover).
+- [x] Render NatSpec descriptions above labeled parameter and return sections in the [Solidity hover](features/solidity-lsp/spec.md#natspec-hover).
 - [x] Display `textDocument/publishDiagnostics` errors and send `textDocument/didSave` and `workspace/didChangeWatchedFiles`.
 - [x] Display `textDocument/completion` results and accept edits, using `completionItem/resolve` when supported.
 - [x] Recover values from a visible local enum when an unfinished member access prevents Solar from returning completion results. [Shared completion behavior](features/lsp-editing/spec.md#completion)

@@ -8,7 +8,7 @@ Solar provides the shared [completion, signature help, and formatting commands](
 
 ## NatSpec hover
 
-Keep the syntax-colored signature above the description and developer notes. Put a divider below the description and show documented parameters and return values in a two-column table. Place names on the left and descriptions on the right, with a row for each parameter or return value. Use inline code for names and label return rows **Returns**. Show the divider when there are rows to display. Preserve Markdown links, emphasis, and code examples. Display inherited documentation when Solar includes it in the response. [Solidity NatSpec format](https://docs.soliditylang.org/en/stable/natspec-format.html)
+Use the [Zig hover section layout](../lsp/spec.md#hover). Put the syntax-colored signature in a rounded code block, then show the description and developer notes. Below the shared divider, use left-hand **Parameters** and **Returns** labels beside their documentation. Show each documented value on a separate line, with its name in inline code when given. Show only the labels that have content. Preserve Markdown links, emphasis, and code examples. Display inherited documentation when Solar includes it in the response. [Solidity NatSpec format](https://docs.soliditylang.org/en/stable/natspec-format.html)
 
 ## Acceptance
 

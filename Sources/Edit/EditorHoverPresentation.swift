@@ -7,10 +7,11 @@ enum EditorHoverPresentation: Sendable {
             case type = "Type"
             case documentation = "Description"
             case references = "Links"
-            case natSpec = "NatSpec"
+            case parameters = "Parameters"
+            case returns = "Returns"
 
             var isCode: Bool { self == .declaration || self == .type }
-            var showsLabel: Bool { self == .type || self == .references }
+            var showsLabel: Bool { self == .type || self == .references || self == .parameters || self == .returns }
         }
 
         let kind: Kind
@@ -24,21 +25,17 @@ enum EditorHoverPresentation: Sendable {
     var maximumWidth: CGFloat {
         switch self {
         case .markdown: 460
-        case .structured(let sections): sections.contains { $0.kind == .natSpec } ? 460 : 560
+        case .structured: 560
         case .diagnostics: 520
         }
     }
 
     init(text: String, isMarkdown: Bool, server: LanguageServer? = nil) {
-        if server == .solidity {
-            let content = EditorHoverContent(text: text, isMarkdown: isMarkdown)
-            let (description, details) = content.natSpecSections()
-            self = if let description, let details {
-                .structured([Section(kind: .documentation, content: description),
-                             Section(kind: .natSpec, content: details)])
-            } else {
-                .markdown(description ?? details ?? content)
-            }
+        if isMarkdown, server == .solidity {
+            let content = EditorHoverContent(text: text, isMarkdown: true)
+            let sections = content.natSpecSections()
+            self = sections.count == 1 && sections.first?.kind == .documentation
+                ? .markdown(sections[0].content) : .structured(sections)
             return
         }
         if isMarkdown, server == .odin, let hover = OLSHover(markdown: text) {
@@ -217,7 +214,7 @@ private final class HoverSectionsView: NSView {
 
         var top = inset
         for (index, row) in rows.enumerated() {
-            if index > 0, sections[index].kind == .natSpec || (!row.label.isHidden && rows[index - 1].label.isHidden) {
+            if index > 0, !row.label.isHidden, rows[index - 1].label.isHidden {
                 let separator = NSBox(frame: NSRect(x: inset, y: top, width: width - 2 * inset, height: 1))
                 separator.identifier = .init("EditorLanguageHover.separator")
                 separator.boxType = .separator

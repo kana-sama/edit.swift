@@ -38,7 +38,7 @@ enum HoverLink {
 
 struct EditorHoverContent: Sendable {
     private struct Run: Sendable {
-        var text: String
+        let text: String
         var emphasis = false
         var strong = false
         var code = false
@@ -53,9 +53,6 @@ struct EditorHoverContent: Sendable {
             let row: Int
             let column: Int
             let alignment: NSTextAlignment
-            var isNatSpec = false
-
-            var isHeader: Bool { row == 0 && !isNatSpec }
         }
 
         var identity: Int?
@@ -171,11 +168,13 @@ struct EditorHoverContent: Sendable {
         case result = "@return"
     }
 
-    func natSpecSections() -> (description: Self?, details: Self?) {
+    func natSpecSections() -> [EditorHoverPresentation.Section] {
+        let declaration = blocks.first.flatMap { $0.codeLanguage == .solidity ? $0 : nil }
         var description: [Block] = []
-        var details: [Block] = []
+        var parameters: [Block] = []
+        var returns: [Block] = []
         var field: NatSpecField?
-        for index in blocks.indices {
+        for index in blocks.indices.dropFirst(declaration == nil ? 0 : 1) {
             var block = blocks[index]
             if let tag = Self.natSpecField(in: block) {
                 if tag == .notes {
@@ -187,25 +186,24 @@ struct EditorHoverContent: Sendable {
                 }
             }
             if let tag = field, Self.isNatSpecItem(block) {
-                var label = [Run(text: tag == .result ? "Returns" : "Parameter", strong: true)]
-                if let name = block.runs.first, name.code, block.runs.dropFirst().first?.text.hasPrefix(": ") == true {
-                    block.runs.removeFirst()
-                    block.runs[0].text = String(block.runs[0].text.dropFirst(2))
-                    label = tag == .result ? [Run(text: "Returns ", strong: true), name] : [name]
-                }
-                let row = details.count / 2
-                details.append(Block(cell: .init(table: 0, columnCount: 2, row: row, column: 0,
-                                                 alignment: .left, isNatSpec: true), runs: label))
-                block.cell = .init(table: 0, columnCount: 2, row: row, column: 1, alignment: .left, isNatSpec: true)
                 block.indentation = 0
                 block.listMarker = nil
-                details.append(block)
+                if tag == .parameter { parameters.append(block) }
+                else { returns.append(block) }
             } else {
                 field = nil
                 description.append(block)
             }
         }
-        return (description.isEmpty ? nil : Self(blocks: description), details.isEmpty ? nil : Self(blocks: details))
+        let sections: [(EditorHoverPresentation.Section.Kind, [Block])] = [
+            (.declaration, declaration.map { [$0] } ?? []),
+            (.documentation, description),
+            (.parameters, parameters),
+            (.returns, returns)
+        ]
+        return sections.compactMap { kind, content in
+            content.isEmpty ? nil : EditorHoverPresentation.Section(kind: kind, content: Self(blocks: content))
+        }
     }
 
     private static func natSpecField(in block: Block) -> NatSpecField? {
@@ -242,20 +240,14 @@ struct EditorHoverContent: Sendable {
                     table = NSTextTable()
                     table.numberOfColumns = cell.columnCount
                     table.collapsesBorders = true
-                    if cell.isNatSpec { table.layoutAlgorithm = .fixed }
                     tables[cell.table] = table
                 }
                 let box = NSTextTableBlock(table: table, startingRow: cell.row, rowSpan: 1,
                                           startingColumn: cell.column, columnSpan: 1)
                 box.setWidth(5, type: .absolute, for: .padding)
-                if cell.isNatSpec {
-                    box.setContentWidth(cell.column == 0 ? 30 : 70, type: .percentage)
-                    box.setWidth(1, type: .absolute, for: .border, rectEdge: .maxYEdge)
-                } else {
-                    box.setWidth(1, type: .absolute, for: .border)
-                }
+                box.setWidth(1, type: .absolute, for: .border)
                 box.setBorderColor(.separatorColor)
-                if cell.isHeader { box.backgroundColor = codeBackground }
+                if cell.row == 0 { box.backgroundColor = codeBackground }
                 paragraph.textBlocks = [box]
                 paragraph.alignment = cell.alignment
             }
@@ -273,7 +265,7 @@ struct EditorHoverContent: Sendable {
                 if run.code && !block.isCode {
                     attributes[.font] = EditorTextView.defaultFont
                     attributes[.backgroundColor] = codeBackground
-                } else if !block.isCode && (run.strong || block.heading != nil || block.cell?.isHeader == true) {
+                } else if !block.isCode && (run.strong || block.heading != nil || block.cell?.row == 0) {
                     attributes[.font] = NSFont.systemFont(ofSize: size, weight: .semibold)
                 }
                 if run.emphasis, let font = attributes[.font] as? NSFont {
