@@ -68,7 +68,14 @@ struct EditorHoverContent: Sendable {
         var cell: Cell?
         var isTopLevelParagraph = false
         var alignedFields: [OLSHover.Field]?
+        var continuesNatSpecField = false
         var runs: [Run] = []
+
+        var natSpecName: String? {
+            guard let first = runs.first, first.code,
+                  runs.dropFirst().first?.text.hasPrefix(": ") == true else { return nil }
+            return first.text
+        }
     }
 
     private let blocks: [Block]
@@ -201,18 +208,14 @@ struct EditorHoverContent: Sendable {
             description = source.notice.map { Self(text: $0, isMarkdown: true).blocks } ?? []
             developer = source.developer.map { Self(text: $0, isMarkdown: true).blocks } ?? []
             parameters = source.parameters.flatMap { parameter in
-                Self(text: "`\(parameter.name)`: \(parameter.text)", isMarkdown: true).blocks
+                Self.natSpecEntry("`\(parameter.name)`: \(parameter.text)")
             }
-            let returnNames = Set(returns.compactMap { block -> String? in
-                guard let first = block.runs.first, first.code,
-                      block.runs.dropFirst().first?.text.hasPrefix(": ") == true else { return nil }
-                return first.text
-            })
+            let returnNames = Set(returns.compactMap(\.natSpecName))
             returns = source.returns.flatMap { body in
                 let name = body.prefix(while: { !$0.isWhitespace })
                 let text = returnNames.contains(String(name))
                     ? "`\(name)`: \(body[name.endIndex...].drop(while: \.isWhitespace))" : body
-                return Self(text: text, isMarkdown: true).blocks
+                return Self.natSpecEntry(text)
             }
         }
         if description.isEmpty {
@@ -243,8 +246,27 @@ struct EditorHoverContent: Sendable {
         block.listMarker == "• " && block.indentation == 1 && !block.isCode && !block.isQuote && block.cell == nil
     }
 
+    private static func natSpecEntry(_ text: String) -> [Block] {
+        var blocks = Self(text: text, isMarkdown: true).blocks
+        if blocks.first?.natSpecName != nil {
+            for index in blocks.indices.dropFirst() { blocks[index].continuesNatSpecField = true }
+        }
+        return blocks
+    }
+
     @MainActor
-    func attributedText(maximumWidth: CGFloat = .greatestFiniteMagnitude) -> NSAttributedString {
+    var natSpecNameWidth: CGFloat {
+        let names = blocks.compactMap(\.natSpecName)
+        guard !names.isEmpty else { return 0 }
+        let nameWidth = names.map {
+            ($0 as NSString).size(withAttributes: [.font: EditorTextView.defaultFont]).width
+        }.max() ?? 0
+        return nameWidth + (":" as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13)]).width
+    }
+
+    @MainActor
+    func attributedText(maximumWidth: CGFloat = .greatestFiniteMagnitude,
+                        natSpecDescriptionColumn: CGFloat? = nil) -> NSAttributedString {
         let result = NSMutableAttributedString()
         let codeBackground = NSColor.labelColor.withAlphaComponent(0.075)
         var tables: [Int: NSTextTable] = [:]
@@ -259,6 +281,16 @@ struct EditorHoverContent: Sendable {
             if block.isQuote {
                 paragraph.firstLineHeadIndent += 12
                 paragraph.headIndent += 12
+            }
+            let fieldName = natSpecDescriptionColumn == nil ? nil : block.natSpecName
+            if let column = natSpecDescriptionColumn {
+                if fieldName != nil {
+                    paragraph.tabStops = [NSTextTab(textAlignment: .left, location: column)]
+                    paragraph.headIndent = column
+                } else if block.continuesNatSpecField {
+                    paragraph.firstLineHeadIndent += column
+                    paragraph.headIndent += column
+                }
             }
             if let cell = block.cell {
                 let table: NSTextTable
@@ -305,6 +337,10 @@ struct EditorHoverContent: Sendable {
             for span in block.codeSpans where start + span.end <= result.length {
                 result.addAttribute(.foregroundColor, value: span.color.nativeColor,
                                     range: NSRange(location: start + span.start, length: span.end - span.start))
+            }
+            if let fieldName {
+                let space = NSRange(location: start + fieldName.utf16.count + 1, length: 1)
+                result.replaceCharacters(in: space, with: "\t")
             }
             if let fields = block.alignedFields {
                 alignFields(fields, in: result, startingAt: start, paragraph: paragraph, maximumWidth: maximumWidth)

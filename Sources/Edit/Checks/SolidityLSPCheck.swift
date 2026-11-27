@@ -144,15 +144,13 @@ enum SolidityLSPCheck {
             try require(description.frame.maxY < note.frame.minY && note.frame.maxY < divider.frame.minY
                         && rail.frame.maxX < note.frame.minX && rail.frame.height == note.frame.height,
                         "place the note beneath the description and above the metadata divider")
-            guard let parameters = hoverSubview("Parameters.body", in: view) as? NSTextView,
-                  let label = hoverSubview("Parameters.label", in: view) as? NSTextField
-            else { throw Failure(detail: "show the Parameters row") }
-            try require(!label.isHidden && label.stringValue == "Parameters"
-                        && parameters.string == "left: First number, in input units.\nright: Second number."
+            guard let parameters = hoverSubview("Parameters.body", in: view) as? NSTextView
+            else { throw Failure(detail: "show the Parameters section") }
+            try require(parameters.string == "left:\tFirst number, in input units.\nright:\tSecond number."
                         && returns?.string == "The sum in input units.",
-                        "show the documented parameters and return value under their respective labels")
+                        "show the documented parameters and return value under their headings")
             try require(returns.map { parameters.frame.maxY < $0.frame.minY && parameters.frame.minX == $0.frame.minX } == true,
-                        "align the description bodies in the labeled list")
+                        "start both sections at the same left edge")
             let link = try range("arithmetic", in: note.string)
             let parameter = try range("left", in: parameters.string)
             try require(note.textStorage?.attribute(.link, at: link.location, effectiveRange: nil) as? URL
@@ -579,14 +577,20 @@ enum SolidityLSPCheck {
         let preview = try range("previewProvideExactIn(", in: editor.string)
         try await checkHover(at: NSRange(location: preview.location, length: preview.length - 1), in: document) { description, returns, view in
             guard let note = hoverSubview("Note.body", in: view) as? NSTextView,
-                  let parameters = hoverSubview("Parameters.body", in: view) as? NSTextView
+                  let parameters = hoverSubview("Parameters.body", in: view) as? NSTextView, let returns
             else { throw Failure(detail: "show notes and parameters for the BarterLend preview") }
             try require(description.string == "Previews providing an exact asset amount by matching against existing borrow or reloan orders."
                         && note.string == "Note\nRequires an active market. May return a partial result when liquidity or the crossing limit is insufficient. Does not check the account's pool balance or authorization."
                         && parameters.string.contains("before share rounding, in loan token base units. Ignored by this preview.")
                         && parameters.string.contains("including skipped and invalidated orders.")
-                        && returns?.string.contains("collectedLoan: Loan claim produced, net of protocol fees and before share rounding, in loan token base units.") == true,
+                        && returns.string.contains("collectedLoan:\tLoan claim produced, net of protocol fees and before share rounding, in loan token base units."),
                         "restore each wrapped NatSpec fragment to the notice, developer note, parameter or return it documents")
+            let columns = try [descriptionColumn(after: "market", in: parameters),
+                               descriptionColumn(after: "minLoanAmount", in: parameters),
+                               descriptionColumn(after: "collectedLoan", in: returns),
+                               descriptionColumn(after: "crossedOrders", in: returns)]
+            try require(columns.allSatisfy { abs($0 - columns[0]) < 0.5 },
+                        "share the description column across named parameters and returns, including wrapped lines")
             try captureHover(view)
         }
     }
@@ -617,16 +621,40 @@ enum SolidityLSPCheck {
                     "keep the hover content selectable in the hidden native check")
         try require(codeBlock.frame.maxY < description.frame.minY, "show the description below the code block")
         if let returns {
-            guard let divider = hoverSubview("separator", in: view) as? NSBox,
-                  let label = hoverSubview("Returns.label", in: view) as? NSTextField
-            else { throw Failure(detail: "find the divider and Returns label") }
-            let firstRow = hoverSubview("Parameters.body", in: view) ?? returns
-            try require(description.frame.maxY < divider.frame.minY && divider.frame.maxY < firstRow.frame.minY
-                        && !label.isHidden && label.stringValue == "Returns" && divider.boxType == .separator
+            guard let divider = hoverSubview("separator", in: view) as? NSBox
+            else { throw Failure(detail: "find the NatSpec divider") }
+            let returnsHeading = try checkHeading("Returns", above: returns, in: view)
+            let firstHeading: NSRect
+            if let parameters = hoverSubview("Parameters.body", in: view) {
+                firstHeading = try checkHeading("Parameters", above: parameters, in: view)
+                try require(parameters.frame.maxY < returnsHeading.minY, "place the Returns heading after the parameters")
+            } else {
+                firstHeading = returnsHeading
+            }
+            try require(description.frame.maxY < divider.frame.minY && divider.frame.maxY < firstHeading.minY
+                        && description.frame.minX == firstHeading.minX && divider.boxType == .separator
                         && divider.frame.minX == codeBlock.frame.minX && divider.frame.width == codeBlock.frame.width,
-                        "use the shared divider above the labeled NatSpec rows")
+                        "use the shared divider above full-width NatSpec sections")
         }
         try verify(description, returns, view)
+    }
+
+    private static func checkHeading(_ title: String, above body: NSView, in view: NSView) throws -> NSRect {
+        guard let heading = hoverSubview("\(title).label", in: view) as? NSTextField
+        else { throw Failure(detail: "find the \(title) heading") }
+        let frame = heading.alignmentRect(forFrame: heading.frame)
+        try require(!heading.isHidden && heading.stringValue == title && heading.alignment == .left
+                    && frame.maxY < body.frame.minY && abs(frame.minX - body.frame.minX) < 0.5,
+                    "place the \(title) heading above the body at the same left edge")
+        return frame
+    }
+
+    private static func descriptionColumn(after name: String, in view: NSTextView) throws -> CGFloat {
+        let label = try range("\(name):\t", in: view.string)
+        let style = view.textStorage?.attribute(.paragraphStyle, at: label.upperBound, effectiveRange: nil) as? NSParagraphStyle
+        guard let style, let tab = style.tabStops.first, tab.location > 0, tab.location == style.headIndent
+        else { throw Failure(detail: "align the description and wrapped lines for \(name)") }
+        return view.frame.minX + tab.location
     }
 
     private static func hoverSubview(_ id: String, in view: NSView) -> NSView? {
@@ -663,7 +691,7 @@ enum SolidityLSPCheck {
         else { throw Failure(detail: "lay out the named returns after the description") }
         try require(description.string.contains("• First item.\n• Second item.")
                     && description.string.hasSuffix("A literal example:\n     * Keep this asterisk.\n     *\n**@return**")
-                    && returns.string == "lower: Lower bound.\nupper: Upper bound.",
+                    && returns.string == "lower:\tLower bound.\nupper:\tUpper bound.",
                     "preserve Markdown lists, asterisks inside a fenced example and both named returns")
     }
 

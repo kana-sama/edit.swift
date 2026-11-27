@@ -12,7 +12,9 @@ enum EditorHoverPresentation: Sendable {
             case returns = "Returns"
 
             var isCode: Bool { self == .declaration || self == .type }
-            var showsLabel: Bool { self == .type || self == .references || self == .parameters || self == .returns }
+            var showsLabel: Bool { self == .type || self == .references }
+            var showsHeading: Bool { self == .parameters || self == .returns }
+            var followsDivider: Bool { showsLabel || showsHeading }
         }
 
         let kind: Kind
@@ -178,31 +180,38 @@ private final class HoverSectionsView: NSView {
         let columnSpacing: CGFloat = 14
         let quoteInset: CGFloat = 12
         let codePadding = NSSize(width: 6, height: 4)
+        let textWidth = maximumWidth - 2 * inset - codePadding.width
+        let fieldWidth = sections.lazy.filter { $0.kind.showsHeading }.map { $0.content.natSpecNameWidth }.max() ?? 0
+        let fieldColumn = ceil(fieldWidth) + 12
+        let descriptionColumn = fieldWidth > 0 && fieldColumn <= textWidth * 0.6 ? fieldColumn : nil
         let rows: [(label: NSTextField, body: HoverTextView, isCode: Bool)] = sections.map { section in
-            let name = section.kind.rawValue
+            let kind = section.kind
+            let name = kind.rawValue
             let label = NSTextField(labelWithString: name)
             label.identifier = .init("EditorLanguageHover.\(name).label")
-            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
-            label.textColor = .secondaryLabelColor
-            label.alignment = .right
+            label.font = kind.showsHeading ? .systemFont(ofSize: 13, weight: .semibold)
+                : .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
+            label.textColor = kind.showsHeading ? .labelColor : .secondaryLabelColor
+            label.alignment = kind.showsHeading ? .left : .right
             label.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
-            label.isHidden = !section.kind.showsLabel
+            label.isHidden = !kind.followsDivider
 
-            let textWidth = maximumWidth - 2 * inset - codePadding.width
-            let body = HoverTextView(width: maximumWidth, text: section.content.attributedText(maximumWidth: textWidth),
-                                     inset: .zero)
+            let text = section.content.attributedText(maximumWidth: textWidth,
+                                                       natSpecDescriptionColumn: kind.showsHeading ? descriptionColumn : nil)
+            let body = HoverTextView(width: maximumWidth, text: text, inset: .zero)
             body.identifier = .init("EditorLanguageHover.\(name).body")
             if label.isHidden { body.setAccessibilityLabel(name) }
-            return (label: label, body: body, isCode: section.kind.isCode)
+            return (label: label, body: body, isCode: kind.isCode)
         }
-        let labelWidth = rows.lazy.filter { !$0.label.isHidden }.map { row in
+        let labelWidth = sections.indices.filter { sections[$0].kind.showsLabel }.map { index in
+            let row = rows[index]
             let insets = row.label.alignmentRectInsets
             return ceil(row.label.fittingSize.width - insets.left - insets.right)
         }.max() ?? 0
         let labeledLeading = inset + labelWidth + columnSpacing
         let leadingEdges = zip(rows, sections).map { row, section in
             if section.kind == .note { return inset + quoteInset }
-            return row.label.isHidden ? inset + (row.isCode ? codePadding.width : 0) : labeledLeading
+            return section.kind.showsLabel ? labeledLeading : inset + (row.isCode ? codePadding.width : 0)
         }
         let trailingInset = inset + codePadding.width
         var preferredWidth: CGFloat = 0
@@ -217,7 +226,8 @@ private final class HoverSectionsView: NSView {
 
         var top = inset
         for (index, row) in rows.enumerated() {
-            if index > 0, !row.label.isHidden, rows[index - 1].label.isHidden {
+            let kind = sections[index].kind
+            if index > 0, kind.followsDivider, !sections[index - 1].kind.followsDivider {
                 let separator = NSBox(frame: NSRect(x: inset, y: top, width: width - 2 * inset, height: 1))
                 separator.identifier = .init("EditorLanguageHover.separator")
                 separator.boxType = .separator
@@ -229,13 +239,21 @@ private final class HoverSectionsView: NSView {
             guard let size = row.body.measure(at: bodyWidth), let bodyBaseline = row.body.firstTextBaseline else { return nil }
             let padding = row.isCode ? codePadding : .zero
             let labelHeight = ceil(row.label.fittingSize.height)
-            let labelBaseline = row.label.firstBaselineOffsetFromTop
-            let baseline = top + max(labelBaseline, padding.height + bodyBaseline)
-            let labelFrame = NSRect(x: inset, y: baseline - labelBaseline, width: labelWidth, height: labelHeight)
+            let labelFrame: NSRect
+            let bodyTop: CGFloat
+            if kind.showsHeading {
+                labelFrame = NSRect(x: bodyLeading, y: top, width: bodyWidth, height: labelHeight)
+                bodyTop = labelFrame.maxY + 4
+            } else {
+                let labelBaseline = row.label.firstBaselineOffsetFromTop
+                let baseline = top + max(labelBaseline, padding.height + bodyBaseline)
+                labelFrame = NSRect(x: inset, y: baseline - labelBaseline, width: labelWidth, height: labelHeight)
+                bodyTop = baseline - bodyBaseline
+            }
             row.label.frame = row.label.frame(forAlignmentRect: labelFrame)
             addSubview(row.label)
 
-            let bodyFrame = NSRect(x: bodyLeading, y: baseline - bodyBaseline, width: bodyWidth, height: size.height)
+            let bodyFrame = NSRect(x: bodyLeading, y: bodyTop, width: bodyWidth, height: size.height)
             let paddedBody = bodyFrame.insetBy(dx: -padding.width, dy: -padding.height)
             if row.isCode {
                 let background = NSBox(frame: paddedBody)
@@ -247,7 +265,7 @@ private final class HoverSectionsView: NSView {
                 background.setAccessibilityElement(false)
                 addSubview(background)
             }
-            if sections[index].kind == .note {
+            if kind == .note {
                 let rail = NSBox(frame: NSRect(x: inset, y: bodyFrame.minY, width: 2, height: bodyFrame.height))
                 rail.identifier = .init("EditorLanguageHover.Note.rail")
                 rail.boxType = .custom
