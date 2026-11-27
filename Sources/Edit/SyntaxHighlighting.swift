@@ -3,6 +3,11 @@ import AppKit
 @MainActor
 final class SyntaxHighlighting {
     private static let odinQuotes = CharacterSet(charactersIn: "\"'`")
+    private static let solidityQuotes = CharacterSet(charactersIn: "\"'")
+    private static let solidityCompoundOperators: Set<String> = [
+        "++", "--", "**", "&&", "||", "<<", ">>", ":=", "==", "!=", "<=", ">=",
+        "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=",
+    ]
     private static let bareWordSeparators = Set(" \t\n\r\u{0B}\u{0C}!%&()*+,-./:;<=>?[]^{|}~".utf16)
     // The native tree currently takes a contiguous UTF-16 snapshot. Defer that copy for large buffers.
     private static let foregroundSyntaxSnapshotLimit = 256 * 1_024
@@ -521,6 +526,12 @@ final class SyntaxHighlighting {
               let editor, editor.syntaxLanguage == language, text.length > 0 else { return nil }
         let document = NSRange(location: 0, length: text.length)
         let affectedViewport = NSUnionRange(NSIntersectionRange(visible, document), edit)
+        if language == .solidity {
+            // A projected tree can leave the inserted prefix outside the token's capture.
+            // Keep its paint on the entire surviving token until the fresh lexer can classify it.
+            treeSpans = carryPreviousColors(previous, after: edits, solidityText: text)
+            return affectedViewport
+        }
         let deadline: ContinuousClock.Instant
 #if EDIT_AGENT_CHECKS
         deadline = expireProjectedQueryForCheck ? .now : .now + .milliseconds(6)
@@ -542,14 +553,18 @@ final class SyntaxHighlighting {
         return affectedViewport
     }
 
-    private func carryPreviousColors(_ previous: [SyntaxSpan], after edits: [EditorTextChange]) -> [SyntaxSpan] {
+    private func carryPreviousColors(_ previous: [SyntaxSpan], after edits: [EditorTextChange],
+                                     solidityText: NSString? = nil) -> [SyntaxSpan] {
         // Work in the old coordinates. At an insertion between two spans, the preceding span owns the new text.
         var scan = 0
         var shift = 0
         var result: [SyntaxSpan] = []
         for span in previous {
+            var leadingLength = 0
             while scan < edits.count, edits[scan].range.upperBound <= span.start {
-                shift += edits[scan].delta
+                let edit = edits[scan]
+                leadingLength = edit.range.upperBound == span.start ? edit.replacementLength : 0
+                shift += edit.delta
                 scan += 1
             }
             var start = span.start + shift
@@ -560,10 +575,18 @@ final class SyntaxHighlighting {
                 let editStart = edit.range.location + localShift
                 let replacementEnd = editStart + edit.replacementLength
                 if edit.range.location == span.end {
-                    if edit.range.length == 0 { end = replacementEnd }
+                    if edit.range.length == 0 {
+                        end = solidityText.map {
+                            Self.solidityContinuationEnd(color: span.color, start: start, at: editStart,
+                                                           limit: replacementEnd, in: $0)
+                        } ?? replacementEnd
+                    }
                     break
                 }
-                if edit.range.location <= span.start { start = replacementEnd }
+                if edit.range.location <= span.start {
+                    start = replacementEnd
+                    leadingLength = edit.replacementLength
+                }
                 if edit.range.upperBound <= span.end {
                     end += edit.delta
                 } else {
@@ -573,10 +596,110 @@ final class SyntaxHighlighting {
                 localShift += edit.delta
             }
             if start < end {
+                if let solidityText, leadingLength > 0, start - leadingLength >= (result.last?.end ?? 0),
+                   Self.isSolidityTokenPrefix(from: start - leadingLength, to: start, color: span.color, in: solidityText) {
+                    start -= leadingLength
+                }
                 result.append(SyntaxSpan(start: start, end: end, color: span.color, provisional: true))
             }
         }
         return result
+    }
+
+    private static func isSolidityTokenPrefix(from start: Int, to end: Int, color: SyntaxColor, in text: NSString) -> Bool {
+        let next = text.character(at: end)
+        switch color {
+        case .number, .string:
+            guard (48...57).contains(next) else { return false }
+            return (start..<end).allSatisfy { (48...57).contains(text.character(at: $0)) }
+                || (end == start + 1 && text.character(at: start) == 46)
+        case .keyword, .control, .type, .function, .property:
+            if color == .keyword, end == start + 1, !isSolidityIdentifierUnit(next) {
+                return solidityCompoundOperators.contains(text.substring(with: NSRange(location: start, length: 2)))
+            }
+            return isSolidityIdentifierUnit(next) && (start..<end).allSatisfy { isSolidityIdentifierUnit(text.character(at: $0)) }
+        default:
+            return false
+        }
+    }
+
+    private static func isSolidityIdentifierUnit(_ unit: UInt16) -> Bool { isWord(unit) || unit == 36 }
+
+    private static func solidityContinuationEnd(color: SyntaxColor, start: Int, at boundary: Int, limit: Int,
+                                                 in text: NSString) -> Int {
+        guard start < boundary, boundary < limit else { return boundary }
+        let inserted = NSRange(location: boundary, length: limit - boundary)
+        switch color {
+        case .comment:
+            if boundary - start >= 2, text.character(at: start + 1) == 42 {
+                if boundary - start >= 4, text.character(at: boundary - 2) == 42,
+                   text.character(at: boundary - 1) == 47 { return boundary }
+                let searchStart = max(start + 2, boundary - 1)
+                let close = text.range(of: "*/", options: .literal, range: NSRange(location: searchStart, length: limit - searchStart))
+                return close.location == NSNotFound ? limit : close.upperBound
+            }
+            let lineBreak = text.rangeOfCharacter(from: .newlines, range: inserted)
+            return lineBreak.location == NSNotFound ? limit : lineBreak.location
+        case .string where !(48...57).contains(text.character(at: start)):
+            return solidityStringContinuationEnd(start: start, appended: inserted, in: text)
+        default:
+            break
+        }
+
+        let previous = text.character(at: boundary - 1)
+        var end = boundary
+        while end < limit {
+            let next = text.character(at: end)
+            let continues: Bool
+            if color == .number || color == .string {
+                continues = isSolidityIdentifierUnit(next) || next == 46
+            } else if isSolidityIdentifierUnit(previous) {
+                continues = isSolidityIdentifierUnit(next)
+            } else {
+                // Repeated operators and a compound assignment keep the operator color.
+                continues = next == previous || next == 61
+            }
+            if !continues { break }
+            end += 1
+        }
+        return end
+    }
+
+    private static func solidityStringContinuationEnd(start: Int, appended: NSRange, in text: NSString) -> Int {
+        let boundary = appended.location
+        // The opening quote is at the start of an ordinary string or just after a literal prefix.
+        let opening = text.rangeOfCharacter(from: solidityQuotes, range: NSRange(location: start, length: min(16, boundary - start)))
+        var end = boundary
+        let quote: UInt16
+        if opening.location != NSNotFound {
+            quote = text.character(at: opening.location)
+        } else {
+            quote = text.character(at: boundary)
+            guard quote == 34 || quote == 39 else { return boundary }
+            end += 1
+        }
+        // A trailing backslash can escape a closing quote or the first appended character.
+        var escapes = 0
+        let lastWasQuote = text.character(at: boundary - 1) == quote
+        var offset = boundary - (lastWasQuote ? 2 : 1)
+        while offset >= start, text.character(at: offset) == 92 {
+            escapes += 1
+            offset -= 1
+        }
+        if lastWasQuote, opening.location < boundary - 1, escapes.isMultiple(of: 2) { return boundary }
+        var escaped = !lastWasQuote && !escapes.isMultiple(of: 2)
+        while end < appended.upperBound {
+            let unit = text.character(at: end)
+            if !escaped {
+                if unit == quote { return end + 1 }
+                if let scalar = Unicode.Scalar(unit), CharacterSet.newlines.contains(scalar) { return end }
+            } else if unit == 13, end + 1 < appended.upperBound, text.character(at: end + 1) == 10 {
+                end += 1
+            }
+            escaped = !escaped && unit == 92
+            end += 1
+        }
+        return end
     }
 
     private func refreshZigEdit(_ edit: NSRange, in text: NSString) -> NSRange? {

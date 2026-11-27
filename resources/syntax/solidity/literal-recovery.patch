@@ -1,0 +1,145 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -3,7 +3,6 @@
+ // [N] corresponds to precedence table at https://docs.soliditylang.org/en/v0.8.24/cheatsheet.html#order-of-precedence-of-operators
+ const PREC = {
+     COMMENT: 1,
+-    STRING: 2,
+ 
+     COMMA: -1, // [15] Comma operator
+     OBJECT: -1,
+@@ -414,12 +413,7 @@
+         yul_string_literal: $ => $.string,
+         yul_hex_number: $ => /0x[0-9A-Fa-f]*/,
+         yul_boolean: $ => choice('true', 'false'),
+-        yul_hex_string_literal: $ => seq(
+-            'hex',
+-            choice(
+-                seq('"', optional(optionalDashSeparation($._hex_digit)), '"'),
+-                seq("'", optional(optionalDashSeparation($._hex_digit)), "'"),
+-            )),
++        yul_hex_string_literal: $ => seq('hex', $.string),
+ 
+         // -- Yul Statements --
+         yul_block: $ => seq('{', repeat($._yul_statement), '}'),
+@@ -1074,9 +1068,7 @@
+             /(\d|_)+(\.(\d|_)+)?([eE](-)?(\d|_)+)?/,
+             /\.(\d|_)+([eE](-)?(\d|_)+)?/,
+         ),
+-        _hex_number: $ => prec(10, /0[xX]([a-fA-F0-9][a-fA-F0-9]?_?)+/),
+-        // _hex_number: $ => seq(/0[xX]/, optional(optionalDashSeparation($._hex_digit))),
+-        _hex_digit: $ => /([a-fA-F0-9][a-fA-F0-9])/,
++        _hex_number: $ => prec(10, /0[xX]([a-fA-F0-9][a-fA-F0-9]?_?)*/),
+         number_unit: $ => choice(
+             'wei','szabo', 'finney', 'gwei', 'ether', 'seconds', 'minutes', 'hours', 'days', 'weeks', 'years'
+         ),
+@@ -1084,70 +1076,18 @@
+         false: $ => "false",
+         boolean_literal: $ => choice($.true, $.false),
+ 
+-        hex_string_literal: $ => prec.left(repeat1(seq(
+-            'hex',
+-            choice(
+-                seq('"', optional(optionalDashSeparation($._hex_digit)), '"'),
+-                seq("'", optional(optionalDashSeparation($._hex_digit)), "'"),
+-            )))),
+-
+-        _escape_sequence: $ => token.immediate(seq(
+-            '\\',
+-            choice(
+-              /[^xu0-7]/,
+-              /[0-7]{1,3}/,
+-              /x[0-9a-fA-F]{2}/,
+-              /u[0-9a-fA-F]{4}/,
+-              /u\{[0-9a-fA-F]+\}/
+-            )
+-        )),
+-        _single_quoted_unicode_char: $ =>
+-            token.immediate(prec(PREC.STRING, /[^'\\\n]+|\\\r?\n/)),
+-        _double_quoted_unicode_char: $ =>
+-            token.immediate(prec(PREC.STRING, /[^"\\\n]+|\\\r?\n/)),
+-        unicode_string_literal: $ => prec.left(repeat1(seq(
+-            'unicode',
+-            choice(
+-                seq('"', repeat($._double_quoted_unicode_char), '"'),
+-                seq("'", repeat($._single_quoted_unicode_char), "'"),
+-        )))),
++        hex_string_literal: $ => prec.left(repeat1(seq('hex', $.string))),
++        unicode_string_literal: $ => prec.left(repeat1(seq('unicode', $.string))),
+ 
+-        string: $ => choice(
+-            seq(
+-            '"',
+-            repeat(choice(
+-                $._string_immediate_elt_inside_double_quote,
+-                $._escape_sequence
+-            )),
+-            '"'
+-            ),
+-            seq(
+-            "'",
+-            repeat(choice(
+-                $._string_immediate_elt_inside_quote,
+-                $._escape_sequence
+-            )),
+-            "'"
+-            )
+-        ),
+-	    // We need to name those elts for ocaml-tree-sitter-semgrep.
+-        _string_immediate_elt_inside_double_quote: $ =>
+-            token.immediate(prec(PREC.STRING, /[^"\\\n]+|\\\r?\n/)),
+-        _string_immediate_elt_inside_quote: $ =>
+-            token.immediate(prec(PREC.STRING, /[^'\\\n]+|\\\r?\n/)),
++        // Keep a string in one token while its closing quote or escape is being typed.
++        string: $ => token(choice(quotedString('"'), quotedString("'"))),
+ 
+-
+-
+         // Based on: https://github.com/tree-sitter/tree-sitter-c/blob/master/grammar.js#L965
+         comment: $ => token(
+             prec(PREC.COMMENT,
+                 choice(
+                     seq('//', /([^\r\n])*/),
+-                    seq(
+-                        '/*',
+-                        /[^*]*\*+([^/*][^*]*\*+)*/,
+-                        '/'
+-                    )
++                    seq('/*', /[^*]*(\*+[^/*][^*]*)*/, optional(seq(/\*+/, optional('/'))))
+                 )
+             )
+         ),
+@@ -1155,6 +1095,18 @@
+   }
+ );
+ 
++function quotedString(quote) {
++    const lineBreaks = '\r\n\v\f\u0085\u2028\u2029';
++    return seq(
++        quote,
++        repeat(choice(
++            new RegExp(`[^${quote}\\\\${lineBreaks}]+`),
++            /\\(?:\r?\n|[^\r\n\v\f\u0085\u2028\u2029])/,
++        )),
++        optional(choice(quote, '\\')),
++    );
++}
++
+ function dotSep1(rule) {
+     return seq(
+         rule,
+@@ -1188,14 +1140,3 @@
+     return optional(commaSep1(rule));
+ }
+ 
+-function optionalDashSeparation(rule) {
+-    return seq(
+-        rule,
+-        repeat(
+-            seq(
+-                optional('_'),
+-                rule
+-            )
+-        ),
+-    );
+-}

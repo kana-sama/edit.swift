@@ -23,7 +23,7 @@ The source archive contains Tree-sitter 0.25.10 and the generated parser and sca
 | Ruby | 0.23.1 |
 | Rust | 0.24.0 |
 | Shell Script | Bash 0.25.0 |
-| Solidity | 1.2.13 |
+| Solidity | 1.2.13 with Edit's incomplete literal and comment recovery |
 | Swift | 0.7.4 |
 | TOML | tree-sitter-toml-ng 0.7.0 |
 | TypeScript and TSX | `e2c53597d6a5d9cf7bbe8dccde576fe1e46c5899` |
@@ -35,5 +35,7 @@ JavaScript and JSX use the TSX grammar. Queries start from the grammar distribut
 The build applies [local grammar patches](patches/) after extracting the archive. The Ruby scanner retains an unterminated ordinary or percent string's body at EOF so the parser can report a missing delimiter and keep the literal as a syntax node.
 
 The Odin parser and scanner in the archive already include [the quote recovery source patch](odin/quote-recovery.patch). To regenerate them, apply that patch at the root of the pinned upstream checkout and run `tree-sitter generate --abi 15` with Tree-sitter CLI 0.25.10. Copy `src/parser.c`, `src/scanner.c`, and `src/tree_sitter/parser.h` into the corresponding archive paths.
+
+The Solidity parser in the archive includes [the literal recovery source patch](solidity/literal-recovery.patch). To regenerate it, apply the patch to the `tree-sitter-solidity` 1.2.13 source, run `tree-sitter generate --abi 15` with Tree-sitter CLI 0.25.10, and replace `solidity/src/parser.c` in the archive.
 
 Tree-sitter is distributed under the [MIT License](https://github.com/tree-sitter/tree-sitter/blob/v0.25.10/LICENSE). Each parser retains its respective license.

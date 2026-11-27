@@ -34,7 +34,10 @@
   (yul_hex_number)
 ] @number
 
-(yul_boolean) @boolean
+[
+  (boolean_literal)
+  (yul_boolean)
+] @boolean
 
 ; Variables
 [

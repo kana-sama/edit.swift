@@ -71,6 +71,10 @@ enum SyntaxCheck {
             let color: SyntaxColor
             let comment: (marker: String, beforeToken: Int)?
             var colorsOpeningDelimiter = false
+            var backspaceColor: SyntaxColor? = nil
+            var typingOffset: Int? = nil
+            var nearbyToken: (spelling: String, color: SyntaxColor)? = nil
+            var appendCode: String? = nil
         }
         var fixtures = [
             Fixture(filename: "Brewfile", language: .ruby, prefix: "brew \"café\"\n\n", initial: "b",
@@ -103,7 +107,7 @@ enum SyntaxCheck {
             Fixture(filename: "LineComment.sol", language: .solidity,
                     prefix: "contract Counter {\n    function read() public {\n        // - доля\n        // - ",
                     initial: "debtToRepay", suffix: "\n        // - collateralToWithdraw\n    }\n}\n",
-                    typed: ["a", "s", "d"], color: .comment, comment: nil),
+                    typed: ["a", "s", "d"], color: .comment, comment: nil, appendCode: "\n        nextValue;"),
             Fixture(filename: "NatSpec.sol", language: .solidity, prefix: "contract Counter {\n    /// @notice ",
                     initial: "café", suffix: "\n    function read() public {}\n}\n", typed: ["s", "!"],
                     color: .comment, comment: nil),
@@ -116,6 +120,48 @@ enum SyntaxCheck {
             Fixture(filename: "Function.sol", language: .solidity, prefix: "contract Counter {\n    function ",
                     initial: "read", suffix: "() public {}\n}\n", typed: ["V", "2"],
                     color: .function, comment: ("// ", "function ".utf16.count)),
+            Fixture(filename: "String.sol", language: .solidity, prefix: "contract Counter {\n    string text = ",
+                    initial: "", suffix: " \n    uint next = 42;\n}\n", typed: ["\"", "a", "\\", "\"", "b", "\""],
+                    color: .string, comment: nil, nearbyToken: ("uint", .type)),
+            Fixture(filename: "ContinuedString.sol", language: .solidity,
+                    prefix: "contract Counter {\n    string text = \"first\\\n        ",
+                    initial: "second", suffix: "\";\n}\n", typed: ["s", "!"], color: .string, comment: nil),
+            Fixture(filename: "ClosedString.sol", language: .solidity,
+                    prefix: "contract Counter {\n    function read() public {\n        string memory text = ",
+                    initial: "\"hello\"", suffix: ";\n    }\n}\n", typed: ["s"], color: .string, comment: nil,
+                    typingOffset: 6, appendCode: ";\n        nextValue"),
+            Fixture(filename: "Unicode.sol", language: .solidity, prefix: "contract Counter {\n    string text = unicode",
+                    initial: "", suffix: ";\n}\n", typed: ["'", "é", "s", "'"], color: .string, comment: nil,
+                    colorsOpeningDelimiter: true),
+            Fixture(filename: "HexString.sol", language: .solidity, prefix: "contract Counter {\n    bytes data = hex",
+                    initial: "", suffix: "\n}\n", typed: ["\"", "a", "b", "\""], color: .string, comment: nil),
+            Fixture(filename: "YulString.sol", language: .solidity,
+                    prefix: "contract Counter {\n    function read() public {\n        assembly {\n            let data := ",
+                    initial: "", suffix: "\n        }\n    }\n}\n", typed: ["'", "a", "b", "'"],
+                    color: .string, comment: nil),
+            Fixture(filename: "Number.sol", language: .solidity,
+                    prefix: "contract Counter {\n    uint value = ", initial: "0", suffix: ";\n}\n",
+                    typed: ["x", "a", "b"], color: .number, comment: nil),
+            Fixture(filename: "Separator.sol", language: .solidity,
+                    prefix: "contract Counter {\n    function read() public {\n        uint value = ", initial: "42",
+                    suffix: ";\n    }\n}\n", typed: ["3"], color: .number, comment: nil,
+                    appendCode: ";\n        nextValue"),
+            Fixture(filename: "NumberPrefix.sol", language: .solidity,
+                    prefix: "contract Counter {\n    uint value = ", initial: "42", suffix: " * 3;\n}\n",
+                    typed: ["1", "2"], color: .number, comment: nil, typingOffset: 0, nearbyToken: ("*", .keyword)),
+            Fixture(filename: "Type.sol", language: .solidity, prefix: "contract Counter {\n    struct ",
+                    initial: "Reserve", suffix: " { uint value; }\n}\n", typed: ["V", "2"], color: .type, comment: nil),
+            Fixture(filename: "Operator.sol", language: .solidity,
+                    prefix: "contract Counter {\n    function inc(uint value) public {\n        value", initial: "+",
+                    suffix: ";\n    }\n}\n", typed: ["+"], color: .keyword, comment: nil, typingOffset: 0),
+            Fixture(filename: "Return.sol", language: .solidity,
+                    prefix: "contract Counter {\n    function read() public returns (uint) {\n        ", initial: "return",
+                    suffix: " 42;\n    }\n}\n", typed: [], color: .keyword, comment: nil, backspaceColor: .plain),
+            Fixture(filename: "Boolean.sol", language: .solidity, prefix: "contract Counter {\n    bool ready = ",
+                    initial: "true", suffix: ";\n}\n", typed: [], color: .keyword, comment: nil, backspaceColor: .plain),
+            Fixture(filename: "OpenBlockComment.sol", language: .solidity,
+                    prefix: "contract Counter {\n    ", initial: "/*body", suffix: "\n    uint value = 42;\n}\n",
+                    typed: ["s", "!"], color: .comment, comment: nil, nearbyToken: ("uint", .comment)),
             Fixture(filename: "String.zig", language: .zig, prefix: "const value = ", initial: "",
                     suffix: ";\nconst next = 1;\n", typed: ["\"", "h", "e", "l", "l", "o", "\""],
                     color: .string, comment: nil),
@@ -135,6 +181,9 @@ enum SyntaxCheck {
             fixtures.append(Fixture(filename: "Large.zig", language: .zig, prefix: "const value = ", initial: "123",
                                     suffix: ";\n" + String(repeating: "// padding\n", count: 25_000), typed: ["4", "5"],
                                     color: .number, comment: nil))
+            fixtures.append(Fixture(filename: "Large.sol", language: .solidity, prefix: "contract Counter {\n    uint value = ",
+                                    initial: "42", suffix: ";\n}\n" + String(repeating: "// padding\n", count: 25_000),
+                                    typed: ["1", "2"], color: .number, comment: nil, typingOffset: 0))
         }
 
         for fixture in fixtures {
@@ -168,10 +217,17 @@ enum SyntaxCheck {
 
             let start = fixture.prefix.utf16.count
             var token = NSRange(location: start, length: fixture.initial.utf16.count)
+            var caret = start + (fixture.typingOffset ?? token.length)
+            var plainToken: NSRange?
             func expect(_ color: SyntaxColor, _ phase: String) throws {
                 editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
                 do {
                     try requireGlyphColors(in: token, document: document, expected: color)
+                    if let nearby = fixture.nearbyToken {
+                        let range = (editor.string as NSString).range(of: nearby.spelling, options: .backwards)
+                        try requireGlyphColors(in: range, document: document, expected: nearby.color)
+                    }
+                    if let plainToken { try requireGlyphColors(in: plainToken, document: document, expected: .plain) }
                 } catch {
                     throw Failure("\(fixture.filename) \(phase), expired parse \(expiresForegroundParse), expired query \(expiresProjectedQuery), token \(token): \(error.localizedDescription)")
                 }
@@ -189,8 +245,9 @@ enum SyntaxCheck {
 
             if token.length > 0 { try expect(fixture.color, "opening frame") }
             func type(_ character: String) {
-                editor.setSelectedRange(NSRange(location: token.upperBound, length: 0))
+                editor.setSelectedRange(NSRange(location: caret, length: 0))
                 editor.insertText(character, replacementRange: NSRange(location: NSNotFound, length: 0))
+                caret += character.utf16.count
                 token.length += character.utf16.count
             }
             if expiresForegroundParse, token.length > 0, fixture.typed.count > 1 {
@@ -208,8 +265,8 @@ enum SyntaxCheck {
                     try await checkEdit(fixture.color, pending: pending) { type(character) }
                 }
             }
-            try await checkEdit(fixture.color) {
-                editor.setSelectedRange(NSRange(location: token.upperBound, length: 0))
+            try await checkEdit(fixture.backspaceColor ?? fixture.color, pending: expiresForegroundParse ? fixture.color : nil) {
+                editor.setSelectedRange(NSRange(location: caret, length: 0))
                 editor.deleteBackward(nil)
                 token.length -= 1
             }
@@ -218,6 +275,13 @@ enum SyntaxCheck {
                     editor.setSelectedRange(NSRange(location: token.location - comment.beforeToken, length: 0))
                     editor.insertText(comment.marker, replacementRange: NSRange(location: NSNotFound, length: 0))
                     token.location += comment.marker.utf16.count
+                }
+            }
+            if let code = fixture.appendCode {
+                try await checkEdit(fixture.color) {
+                    editor.setSelectedRange(NSRange(location: token.upperBound, length: 0))
+                    editor.insertText(code, replacementRange: NSRange(location: NSNotFound, length: 0))
+                    plainToken = (editor.string as NSString).range(of: "nextValue")
                 }
             }
             guard !highlighting.usesLSPForCheck else { throw Failure("Typing fixture used LSP colors.") }
@@ -728,6 +792,11 @@ enum SyntaxCheck {
             (.rust, "fn main() { let café = \"🦜\"; }", "\"🦜\"", .string),
             (.shell, "greet() { echo hello; }", "greet", .function),
             (.solidity, "contract Counter { function get() public pure returns (uint) { return 1; } }", "get", .function),
+            (.solidity, "contract Counter { string s = unicode\"café 🦜\nuint value = 42; }", "\"café 🦜", .string),
+            (.solidity, "contract Counter { string s = unicode\"café 🦜\nuint value = 42; }", "uint", .type),
+            (.solidity, "contract Counter { /* unclosed\nuint value = 42; }", "uint value = 42; }", .comment),
+            (.solidity, #"contract Counter { string s = "/* literal */ // text"; uint n = 42; }"#, "42", .number),
+            (.markdown, "```solidity\ncontract Counter { bytes s = hex\"b\nuint n = 42; }\n```\n", "hex\"b", .string),
             (.swift, "func greet() -> String { return \"hello\" }", "greet", .function),
             (.toml, "title = \"Edit\"", "title", .property),
             (.typescript, "type Shape = { radius: number };", "Shape", .type),
