@@ -72,6 +72,7 @@ struct EditorHoverContent: Sendable {
         var isCode = false
         var codeLanguage: SyntaxLanguage?
         var codeSpans: [SyntaxSpan] = []
+        var soliditySignature: SolidityHoverSignature?
         var cell: Cell?
         var isTopLevelParagraph = false
         var alignedFields: [OLSHover.Field]?
@@ -185,7 +186,10 @@ struct EditorHoverContent: Sendable {
     }
 
     func natSpecSections(source: SolarHover.Documentation?) -> [EditorHoverPresentation.Section] {
-        let declaration = blocks.first.flatMap { $0.codeLanguage == .solidity ? $0 : nil }
+        var declaration = blocks.first.flatMap { $0.codeLanguage == .solidity ? $0 : nil }
+        if let code = declaration?.runs.map(\.text).joined() {
+            declaration?.soliditySignature = SolidityHoverSignature(code)
+        }
         var description: [Block] = []
         var developer: [Block] = []
         var parameters: [Block] = []
@@ -270,7 +274,16 @@ struct EditorHoverContent: Sendable {
         let result = NSMutableAttributedString()
         let codeBackground = NSColor.labelColor.withAlphaComponent(0.075)
         var tables: [Int: NSTextTable] = [:]
-        for (index, block) in blocks.enumerated() {
+        for (index, original) in blocks.enumerated() {
+            var block = original
+            if let signature = block.soliditySignature {
+                let attributes: [NSAttributedString.Key: Any] = [.font: EditorTextView.defaultFont]
+                let code = signature.formatted { ($0 as NSString).size(withAttributes: attributes).width <= maximumWidth }
+                if code != block.runs.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines) {
+                    block.runs = [Run(text: code)]
+                    block.codeSpans = SyntaxEngine.analysis(in: code, language: .solidity, includesBrackets: false)?.spans ?? []
+                }
+            }
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineSpacing = block.isCode ? 0 : 2
             paragraph.lineBreakMode = .byWordWrapping

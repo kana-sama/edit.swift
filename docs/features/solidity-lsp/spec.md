@@ -12,6 +12,8 @@ Use the shared code block and divider from the [Zig hover section layout](../lsp
 
 Read local NatSpec from the declaration to keep wrapped comment lines with their tags. In the active file, read the unsaved buffer. Use the server documentation for inherited comments and when the declaration cannot be read. Remove block-comment margins left in Solar Markdown and restore blank lines between paragraphs.
 
+Fit callable signatures to the width inside the hover code block. Keep a short signature on one line. When it overflows, keep the parameter list together if it fits by itself and start the modifiers on a new indented line. When the parameter list needs multiple lines, show one parameter per line and use the space after the closing parenthesis for modifiers. Wrap modifiers and `returns (…)` as units. If a return list needs multiple lines, keep `returns (` together and indent one result per line. Preserve nested parameter types and modifier arguments.
+
 ## Acceptance
 
 Run `./script/check --only lsp-solidity` with a compatible Forge on PATH. Check the discovered root, remapped library navigation and held source/destination frames, hover and symbols, cross-file rename, errors during unsaved edits, keyboard completion, active parameter highlighting, format and Undo, and Stop and Restart. Use `EDIT_SOLIDITY_CHECK_PROJECT` to exercise the same integration on a disposable copy of BarterLend.

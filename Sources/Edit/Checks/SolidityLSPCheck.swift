@@ -164,6 +164,7 @@ enum SolidityLSPCheck {
                         "right-align the rendered field names in the label column")
             try captureHover(view)
         }
+        try checkSignatureWrapping()
         try checkMultipleReturnHover()
         let references = try await session.references(at: position, includeDeclaration: true)
         try require(Set(references.map { $0.url.path }) == [main.path, other.path, math.path],
@@ -668,6 +669,44 @@ enum SolidityLSPCheck {
     private static func hoverSubview(_ id: String, in view: NSView) -> NSView? {
         if view.identifier?.rawValue == "EditorLanguageHover.\(id)" { return view }
         return view.subviews.lazy.compactMap { hoverSubview(id, in: $0) }.first
+    }
+
+    private static func checkSignatureWrapping() throws {
+        let cases: [(signature: String, columns: Int, lines: [String])] = [
+            ("function f(uint256 x) view", 27, ["function f(uint256 x) view"]),
+            ("function f(uint256 x) external view", 27, ["function f(uint256 x)", "  external view"]),
+            ("function f(uint256 x) external view returns (uint256)", 27,
+             ["function f(uint256 x)", "  external view", "  returns (uint256)"]),
+            ("function f(uint256 x, uint256 y) external view returns (uint256)", 27,
+             ["function f(", "  uint256 x,", "  uint256 y", ") external view", "  returns (uint256)"]),
+            ("function f(uint256 x, uint256 y) external view returns (uint256 z, uint256 t)", 27,
+             ["function f(", "  uint256 x,", "  uint256 y", ") external view", "  returns (", "    uint256 z,", "    uint256 t", "  )"]),
+            (#"function configure(function(uint256, uint256) external returns (uint256) cb, uint256[2] memory values) payable onlyAllowed("x,y", 2) override(BaseA, BaseB) returns (uint256);"#,
+             63, ["function configure(", "  function(uint256, uint256) external returns (uint256) cb,", "  uint256[2] memory values",
+                  #") payable onlyAllowed("x,y", 2) override(BaseA, BaseB)"#, "  returns (uint256);"])
+        ]
+        let font: [NSAttributedString.Key: Any] = [.font: EditorTextView.defaultFont]
+        for item in cases {
+            let markdown = "```solidity\n\(item.signature)\n```"
+            let presentation = EditorHoverPresentation(text: markdown, isMarkdown: true, server: .solidity)
+            let contentWidth = ceil((String(repeating: "M", count: item.columns) as NSString).size(withAttributes: font).width)
+            // The card uses a 12-point inset and 6-point code padding on both sides.
+            guard let layout = EditorHoverLayout(presentation, maximumWidth: contentWidth + 36),
+                  let declaration = hoverSubview("Declaration.body", in: layout.view) as? NSTextView,
+                  let textLayout = declaration.textLayoutManager
+            else { throw Failure(detail: "lay out the formatted Solidity signature") }
+            try require(declaration.string == item.lines.joined(separator: "\n"),
+                        "wrap the signature by clauses at \(item.columns) columns: \(declaration.string.debugDescription)")
+            var renderedLines = 0
+            textLayout.enumerateTextLayoutFragments(from: textLayout.documentRange.location, options: [.ensuresLayout]) { fragment in
+                renderedLines += fragment.textLineFragments.count
+                return true
+            }
+            try require(renderedLines == item.lines.count, "keep signature clauses on their intended visual lines")
+            let type = try range("uint256", in: declaration.string)
+            let color = declaration.textStorage?.attribute(.foregroundColor, at: type.location, effectiveRange: nil) as? NSColor
+            try require(color == SyntaxColor.type.nativeColor, "preserve Solidity syntax colors after wrapping")
+        }
     }
 
     private static func checkMultipleReturnHover() throws {

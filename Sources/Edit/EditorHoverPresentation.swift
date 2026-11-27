@@ -199,7 +199,8 @@ private final class HoverSectionsView: NSView {
             label.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
             label.isHidden = !kind.followsDivider
 
-            let text = section.content.attributedText(maximumWidth: textWidth,
+            let bodyWidth = textWidth - (kind.isCode ? codePadding.width : 0)
+            let text = section.content.attributedText(maximumWidth: bodyWidth,
                                                        natSpecLayout: kind.showsHeading ? natSpecLayout : nil)
             let body = HoverTextView(width: maximumWidth, text: text, inset: .zero)
             body.identifier = .init("EditorLanguageHover.\(name).body")
