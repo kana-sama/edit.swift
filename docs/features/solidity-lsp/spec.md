@@ -10,8 +10,10 @@ Solar provides the shared [completion, signature help, and formatting commands](
 
 Use the [Zig hover section layout](../lsp/spec.md#hover). Put the syntax-colored signature in a rounded code block, then show the description and developer notes. Below the shared divider, use left-hand **Parameters** and **Returns** labels beside their documentation. Show each documented value on a separate line, with its name in inline code when given. Show only the labels that have content. Preserve Markdown links, emphasis, and code examples. Display inherited documentation when Solar includes it in the response. [Solidity NatSpec format](https://docs.soliditylang.org/en/stable/natspec-format.html)
 
+Remove the block-comment margins that Solar can include in Markdown and restore blank lines between paragraphs. Retain the meaning of Markdown lists, emphasis, and asterisks in code examples.
+
 ## Acceptance
 
 Run `./script/check --only lsp-solidity` with a compatible Forge on PATH. Check the discovered root, remapped library navigation and held source/destination frames, hover and symbols, cross-file rename, errors during unsaved edits, keyboard completion, active parameter highlighting, format and Undo, and Stop and Restart. Use `EDIT_SOLIDITY_CHECK_PROJECT` to exercise the same integration on a disposable copy of BarterLend.
 
-Hover a documented call and check the summary, notes, and Markdown links above the divider and the parameter and return rows below it. With the BarterLend fixture, hover `getStalePriceWindow` in `LeverageRouter.sol` and check the single **Returns** row.
+Hover a documented call and check the summary, notes, and Markdown links above the divider and the parameter and return rows below it. With the BarterLend fixture, hover `getStalePriceWindow` in `LeverageRouter.sol` and check the single **Returns** row. Hover `forceApprove` and check that the ERC-7674 note begins a separate paragraph.

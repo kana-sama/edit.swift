@@ -68,11 +68,24 @@ enum SolidityLSPCheck {
             // SPDX-License-Identifier: MIT
             pragma solidity ^0.8.29;
             library Math {
-                /// @notice Adds two numbers.
-                /// @dev Uses checked [arithmetic](https://docs.soliditylang.org/).
-                /// @param left First number.
-                /// @param right Second number.
-                /// @return The sum in input units.
+                /**
+                 * @notice Adds two numbers.
+                 * The inputs use the same scale.
+                 *
+                 * NOTE: The sum must fit the type.
+                 * @dev Uses checked [arithmetic](https://docs.soliditylang.org/).
+                 *
+                 * * A positive input.
+                 * * A zero input.
+                 *
+                 * ```text
+                 * * A literal asterisk.
+                 * ```
+                 * @param left First number,
+                 * in input units.
+                 * @param right Second number.
+                 * @return The sum in input units.
+                 */
                 function add(uint256 left, uint256 right) internal pure returns (uint256) { return left + right; }
                 /// @notice Multiplies two numbers.
                 function multiply(uint256 left, uint256 right) internal pure returns (uint256) { return left * right; }
@@ -120,16 +133,18 @@ enum SolidityLSPCheck {
         try require(hover?.range == use && hover?.isMarkdown == true && hover?.text.contains("Adds two numbers.") == true,
                     "return a ranged Markdown hover with the dependency's NatSpec")
         try await checkHover(at: use, in: document) { description, returns, view in
-            try require(description.string.contains("Adds two numbers.\nNotes\nUses checked arithmetic."),
-                        "render the NatSpec description before the divider")
+            try require(description.string.contains("Adds two numbers. The inputs use the same scale.\nNOTE: The sum must fit the type.\nNotes\nUses checked arithmetic.")
+                        && description.string.contains("• A positive input.\n• A zero input.")
+                        && description.string.contains("\n* A literal asterisk."),
+                        "preserve NatSpec paragraphs, Markdown list items and literal code without the comment margin")
             guard let parameters = hoverSubview("Parameters.body", in: view) as? NSTextView,
                   let label = hoverSubview("Parameters.label", in: view) as? NSTextField
             else { throw Failure(detail: "show the Parameters row") }
             try require(!label.isHidden && label.stringValue == "Parameters"
-                        && parameters.string == "left: First number.\nright: Second number."
-                        && returns.string == "The sum in input units.",
+                        && parameters.string == "left: First number, in input units.\nright: Second number."
+                        && returns?.string == "The sum in input units.",
                         "show the documented parameters and return value under their respective labels")
-            try require(parameters.frame.maxY < returns.frame.minY && parameters.frame.minX == returns.frame.minX,
+            try require(returns.map { parameters.frame.maxY < $0.frame.minY && parameters.frame.minX == $0.frame.minX } == true,
                         "align the description bodies in the labeled list")
             let link = try range("arithmetic", in: description.string)
             let parameter = try range("left", in: parameters.string)
@@ -538,9 +553,15 @@ enum SolidityLSPCheck {
         try await checkHover(at: getter, in: document) { description, returns, view in
             try require(description.string.contains("Returns the maximum staleness of an oracle price."),
                         "show the BarterLend getter description above the divider")
-            try require(returns.string == "Maximum price staleness, in seconds."
+            try require(returns?.string == "Maximum price staleness, in seconds."
                         && hoverSubview("Parameters.label", in: view) == nil,
                         "show only the Returns row for the BarterLend getter")
+        }
+        let approval = try range("forceApprove", in: editor.string)
+        try await checkHover(at: approval, in: document) { description, _, view in
+            try require(description.string.contains("such as USDT.\nNOTE: If the token implements ERC-7674")
+                        && !description.string.contains(" *"),
+                        "show the OpenZeppelin forceApprove note as a separate paragraph without comment delimiters")
             try captureHover(view)
         }
         try await checkIncompleteStatement(in: document, before: "        return FlashLoanContext({")
@@ -549,7 +570,7 @@ enum SolidityLSPCheck {
     }
 
     private static func checkHover(at word: NSRange, in document: DocumentWindow,
-                                   verify: (NSTextView, NSTextView, NSView) throws -> Void) async throws {
+                                   verify: (NSTextView, NSTextView?, NSView) throws -> Void) async throws {
         let editor = document.editor
         select(word.location, in: editor)
         guard let rect = editor.highlightRects(for: [word]).first,
@@ -564,22 +585,25 @@ enum SolidityLSPCheck {
         guard let panel = editor.languageHoverWindowForCheck, let view = panel.contentView,
               let declaration = hoverSubview("Declaration.body", in: view) as? NSTextView,
               let description = hoverSubview("Description.body", in: view) as? NSTextView,
-              let returns = hoverSubview("Returns.body", in: view) as? NSTextView,
-              let label = hoverSubview("Returns.label", in: view) as? NSTextField,
-              let divider = hoverSubview("separator", in: view) as? NSBox,
               let codeBlock = declaration.superview?.subviews.compactMap({ $0 as? NSBox }).first(where: {
                   $0.boxType == .custom && $0.frame.contains(declaration.frame)
               })
-        else { throw Failure(detail: "find the Solidity signature code block, description, divider and Returns row") }
+        else { throw Failure(detail: "find the Solidity signature code block and description") }
+        let returns = hoverSubview("Returns.body", in: view) as? NSTextView
         try require(!panel.isVisible && panel.alphaValue == 0 && declaration.isSelectable
-                    && description.isSelectable && returns.isSelectable,
+                    && description.isSelectable && returns?.isSelectable != false,
                     "keep the hover content selectable in the hidden native check")
-        let firstRow = hoverSubview("Parameters.body", in: view) ?? returns
-        try require(codeBlock.frame.maxY < description.frame.minY && description.frame.maxY < divider.frame.minY
-                    && divider.frame.maxY < firstRow.frame.minY && !label.isHidden && label.stringValue == "Returns"
-                    && divider.boxType == .separator && divider.frame.minX == codeBlock.frame.minX
-                    && divider.frame.width == codeBlock.frame.width,
-                    "use the shared code block and divider above the labeled NatSpec rows")
+        try require(codeBlock.frame.maxY < description.frame.minY, "show the description below the code block")
+        if let returns {
+            guard let divider = hoverSubview("separator", in: view) as? NSBox,
+                  let label = hoverSubview("Returns.label", in: view) as? NSTextField
+            else { throw Failure(detail: "find the divider and Returns label") }
+            let firstRow = hoverSubview("Parameters.body", in: view) ?? returns
+            try require(description.frame.maxY < divider.frame.minY && divider.frame.maxY < firstRow.frame.minY
+                        && !label.isHidden && label.stringValue == "Returns" && divider.boxType == .separator
+                        && divider.frame.minX == codeBlock.frame.minX && divider.frame.width == codeBlock.frame.width,
+                        "use the shared divider above the labeled NatSpec rows")
+        }
         try verify(description, returns, view)
     }
 
@@ -594,12 +618,19 @@ enum SolidityLSPCheck {
             function limits() returns (uint64 lower, uint64 upper)
             ```
 
+            A Markdown list:
+            * First item.
+            * Second item.
+
             **@return**
 
             - `lower`: Lower bound.
             - `upper`: Upper bound.
 
             ```
+            A literal example:
+                 * Keep this asterisk.
+                 *
             **@return**
             ```
             """
@@ -608,8 +639,10 @@ enum SolidityLSPCheck {
               let description = hoverSubview("Description.body", in: layout.view) as? NSTextView,
               let returns = hoverSubview("Returns.body", in: layout.view) as? NSTextView
         else { throw Failure(detail: "lay out the named returns after the description") }
-        try require(description.string == "**@return**" && returns.string == "lower: Lower bound.\nupper: Upper bound.",
-                    "preserve the literal fenced example and the documented names and meanings of both returns")
+        try require(description.string.contains("• First item.\n• Second item.")
+                    && description.string.hasSuffix("A literal example:\n     * Keep this asterisk.\n     *\n**@return**")
+                    && returns.string == "lower: Lower bound.\nupper: Upper bound.",
+                    "preserve Markdown lists, asterisks inside a fenced example and both named returns")
     }
 
     private static func checkParameter(_ text: String, in document: DocumentWindow) async throws {

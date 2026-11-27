@@ -32,7 +32,7 @@ enum EditorHoverPresentation: Sendable {
 
     init(text: String, isMarkdown: Bool, server: LanguageServer? = nil) {
         if isMarkdown, server == .solidity {
-            let content = EditorHoverContent(text: text, isMarkdown: true)
+            let content = EditorHoverContent(text: SolarHover.markdownWithoutCommentMargins(text), isMarkdown: true)
             let sections = content.natSpecSections()
             self = sections.count == 1 && sections.first?.kind == .documentation
                 ? .markdown(sections[0].content) : .structured(sections)
