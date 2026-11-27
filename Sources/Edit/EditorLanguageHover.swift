@@ -66,7 +66,6 @@ struct EditorHoverContent: Sendable {
 
         var identity: Int?
         var heading: Int?
-        var isNoteTitle = false
         var listMarker: String?
         var indentation = 0
         var isQuote = false
@@ -229,8 +228,6 @@ struct EditorHoverContent: Sendable {
         if description.isEmpty {
             description = developer
             developer = []
-        } else if !developer.isEmpty {
-            developer.insert(Block(isNoteTitle: true, runs: [Run(text: "Note", strong: true)]), at: 0)
         }
         let sections: [(EditorHoverPresentation.Section.Kind, [Block])] = [
             (.declaration, declaration.map { [$0] } ?? []),
@@ -315,7 +312,7 @@ struct EditorHoverContent: Sendable {
                 paragraph.alignment = cell.alignment
             }
             let size: CGFloat = block.heading == 1 ? 15 : block.heading != nil ? 14 : 13
-            let foreground: NSColor = block.isNoteTitle ? .controlAccentColor : (block.isQuote ? .secondaryLabelColor : .labelColor)
+            let foreground: NSColor = block.isQuote ? .secondaryLabelColor : .labelColor
             let baseFont = block.isCode ? EditorTextView.defaultFont : NSFont.systemFont(ofSize: size)
             let base = [NSAttributedString.Key.font: baseFont,
                         .foregroundColor: foreground, .paragraphStyle: paragraph] as [NSAttributedString.Key: Any]

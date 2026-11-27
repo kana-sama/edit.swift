@@ -137,7 +137,7 @@ enum SolidityLSPCheck {
             guard let note = hoverSubview("Note.body", in: view) as? NSTextView,
                   let rail = hoverSubview("Note.rail", in: view), let divider = hoverSubview("separator", in: view)
             else { throw Failure(detail: "show the developer note with a quote rail") }
-            try require(note.string.hasPrefix("Note\nUses checked arithmetic. This applies to both inputs.")
+            try require(note.string.hasPrefix("Uses checked arithmetic. This applies to both inputs.")
                         && note.string.contains("• A positive input.\n• A zero input.")
                         && note.string.contains("\n* A literal asterisk."),
                         "keep the developer text, its list and code example together")
@@ -585,7 +585,7 @@ enum SolidityLSPCheck {
                   let parameters = hoverSubview("Parameters.body", in: view) as? NSTextView, let returns
             else { throw Failure(detail: "show notes and parameters for the BarterLend preview") }
             try require(description.string == "Previews providing an exact asset amount by matching against existing borrow or reloan orders."
-                        && note.string == "Note\nRequires an active market. May return a partial result when liquidity or the crossing limit is insufficient. Does not check the account's pool balance or authorization."
+                        && note.string == "Requires an active market. May return a partial result when liquidity or the crossing limit is insufficient. Does not check the account's pool balance or authorization."
                         && parameters.string.contains("before share rounding, in loan token base units. Ignored by this preview.")
                         && parameters.string.contains("including skipped and invalidated orders.")
                         && returns.string.contains("\tcollectedLoan\tLoan claim produced, net of protocol fees and before share rounding, in loan token base units."),
@@ -632,7 +632,8 @@ enum SolidityLSPCheck {
             let firstHeading: NSRect
             if let parameters = hoverSubview("Parameters.body", in: view) {
                 firstHeading = try checkHeading("Parameters", above: parameters, in: view)
-                try require(parameters.frame.maxY < returnsHeading.minY, "place the Returns heading after the parameters")
+                try require(returnsHeading.minY - parameters.frame.maxY >= 14,
+                            "leave a wider section gap before the Returns heading")
             } else {
                 firstHeading = returnsHeading
             }

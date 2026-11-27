@@ -177,6 +177,7 @@ private final class HoverSectionsView: NSView {
     init?(_ sections: [EditorHoverPresentation.Section], maximumWidth: CGFloat) {
         let inset: CGFloat = 12
         let rowSpacing: CGFloat = 8
+        let fieldGroupSpacing: CGFloat = 16
         let columnSpacing: CGFloat = 14
         let quoteInset: CGFloat = 12
         let codePadding = NSSize(width: 6, height: 4)
@@ -280,7 +281,9 @@ private final class HoverSectionsView: NSView {
             row.body.frame = bodyFrame
             addSubview(row.body)
             top = max(labelFrame.maxY, paddedBody.maxY)
-            if index < rows.count - 1 { top += rowSpacing }
+            if index < rows.count - 1 {
+                top += kind == .parameters && sections[index + 1].kind == .returns ? fieldGroupSpacing : rowSpacing
+            }
         }
         setFrameSize(NSSize(width: width, height: top + inset))
     }
