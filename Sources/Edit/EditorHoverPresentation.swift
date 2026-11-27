@@ -181,23 +181,25 @@ private final class HoverSectionsView: NSView {
         let quoteInset: CGFloat = 12
         let codePadding = NSSize(width: 6, height: 4)
         let textWidth = maximumWidth - 2 * inset - codePadding.width
-        let fieldWidth = sections.lazy.filter { $0.kind.showsHeading }.map { $0.content.natSpecNameWidth }.max() ?? 0
-        let fieldColumn = ceil(fieldWidth) + 12
-        let descriptionColumn = fieldWidth > 0 && fieldColumn <= textWidth * 0.6 ? fieldColumn : nil
+        let sideLabelFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
+        let fieldWidth = ceil(sections.lazy.filter { $0.kind.showsHeading }
+            .map { $0.content.natSpecNameWidth(using: sideLabelFont) }.max() ?? 0)
+        let natSpecLayout = EditorHoverContent.NatSpecLayout(
+            labelFont: sideLabelFont, labelWidth: fieldWidth + columnSpacing <= textWidth * 0.6 ? fieldWidth : 0,
+            columnSpacing: columnSpacing)
         let rows: [(label: NSTextField, body: HoverTextView, isCode: Bool)] = sections.map { section in
             let kind = section.kind
             let name = kind.rawValue
             let label = NSTextField(labelWithString: name)
             label.identifier = .init("EditorLanguageHover.\(name).label")
-            label.font = kind.showsHeading ? .systemFont(ofSize: 13, weight: .semibold)
-                : .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
+            label.font = kind.showsHeading ? .systemFont(ofSize: 13, weight: .semibold) : sideLabelFont
             label.textColor = kind.showsHeading ? .labelColor : .secondaryLabelColor
             label.alignment = kind.showsHeading ? .left : .right
             label.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
             label.isHidden = !kind.followsDivider
 
             let text = section.content.attributedText(maximumWidth: textWidth,
-                                                       natSpecDescriptionColumn: kind.showsHeading ? descriptionColumn : nil)
+                                                       natSpecLayout: kind.showsHeading ? natSpecLayout : nil)
             let body = HoverTextView(width: maximumWidth, text: text, inset: .zero)
             body.identifier = .init("EditorLanguageHover.\(name).body")
             if label.isHidden { body.setAccessibilityLabel(name) }

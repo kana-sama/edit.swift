@@ -38,6 +38,14 @@ enum HoverLink {
 }
 
 struct EditorHoverContent: Sendable {
+    struct NatSpecLayout {
+        let labelFont: NSFont
+        let labelWidth: CGFloat
+        let columnSpacing: CGFloat
+
+        var descriptionColumn: CGFloat? { labelWidth > 0 ? labelWidth + columnSpacing : nil }
+    }
+
     private struct Run: Sendable {
         let text: String
         var emphasis = false
@@ -255,18 +263,13 @@ struct EditorHoverContent: Sendable {
     }
 
     @MainActor
-    var natSpecNameWidth: CGFloat {
-        let names = blocks.compactMap(\.natSpecName)
-        guard !names.isEmpty else { return 0 }
-        let nameWidth = names.map {
-            ($0 as NSString).size(withAttributes: [.font: EditorTextView.defaultFont]).width
-        }.max() ?? 0
-        return nameWidth + (":" as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13)]).width
+    func natSpecNameWidth(using font: NSFont) -> CGFloat {
+        blocks.lazy.compactMap(\.natSpecName).map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
     }
 
     @MainActor
     func attributedText(maximumWidth: CGFloat = .greatestFiniteMagnitude,
-                        natSpecDescriptionColumn: CGFloat? = nil) -> NSAttributedString {
+                        natSpecLayout: NatSpecLayout? = nil) -> NSAttributedString {
         let result = NSMutableAttributedString()
         let codeBackground = NSColor.labelColor.withAlphaComponent(0.075)
         var tables: [Int: NSTextTable] = [:]
@@ -282,10 +285,11 @@ struct EditorHoverContent: Sendable {
                 paragraph.firstLineHeadIndent += 12
                 paragraph.headIndent += 12
             }
-            let fieldName = natSpecDescriptionColumn == nil ? nil : block.natSpecName
-            if let column = natSpecDescriptionColumn {
+            let fieldName = natSpecLayout == nil ? nil : block.natSpecName
+            if let natSpecLayout, let column = natSpecLayout.descriptionColumn {
                 if fieldName != nil {
-                    paragraph.tabStops = [NSTextTab(textAlignment: .left, location: column)]
+                    paragraph.tabStops = [NSTextTab(textAlignment: .right, location: natSpecLayout.labelWidth),
+                                          NSTextTab(textAlignment: .left, location: column)]
                     paragraph.headIndent = column
                 } else if block.continuesNatSpecField {
                     paragraph.firstLineHeadIndent += column
@@ -338,9 +342,14 @@ struct EditorHoverContent: Sendable {
                 result.addAttribute(.foregroundColor, value: span.color.nativeColor,
                                     range: NSRange(location: start + span.start, length: span.end - span.start))
             }
-            if let fieldName {
-                let space = NSRange(location: start + fieldName.utf16.count + 1, length: 1)
-                result.replaceCharacters(in: space, with: "\t")
+            if let fieldName, let natSpecLayout {
+                let prefix = NSRange(location: start, length: fieldName.utf16.count + 2)
+                let label = natSpecLayout.descriptionColumn == nil ? "\(fieldName)\n" : "\t\(fieldName)\t"
+                var attributes = base
+                attributes[.font] = natSpecLayout.labelFont
+                // The selectable text view draws labels without the vibrancy of an NSTextField.
+                attributes[.foregroundColor] = NSColor.labelColor.withAlphaComponent(0.75)
+                result.replaceCharacters(in: prefix, with: NSAttributedString(string: label, attributes: attributes))
             }
             if let fields = block.alignedFields {
                 alignFields(fields, in: result, startingAt: start, paragraph: paragraph, maximumWidth: maximumWidth)
