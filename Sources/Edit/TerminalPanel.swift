@@ -40,7 +40,8 @@ final class TerminalPanel: NSObject {
     private let picker = NSPopUpButton(frame: .zero, pullsDown: false)
     private lazy var dockedPickerWidth = picker.widthAnchor.constraint(lessThanOrEqualToConstant: 0)
     private let dockPopover = TerminalDockPopover()
-    private var spaceActionButtons: [NSButton] = []
+    private weak var deleteSpaceButton: NSButton?
+    private var splitButtons: [NSButton] = []
     private let directory: () -> URL
     private let onDockChange: (TerminalDock) -> Void
     private let onLastShellExit: (TerminalPanel, Bool) -> Void
@@ -127,6 +128,25 @@ final class TerminalPanel: NSObject {
         selectedSpace?.last.focus()
     }
 
+    func revealRunningTest() -> Bool {
+        guard let space = spaces.first(where: { $0.last.isRunningTest }) else { return false }
+        select(space)
+        return true
+    }
+
+    func runTest(_ invocation: ZigTestInvocation) {
+        guard !closed else { return }
+        let space: TerminalSpace
+        if let existing = spaces.first(where: { $0.last.isTestOutput }) {
+            space = existing
+        } else {
+            space = TerminalSpace(pane: makePane(in: invocation.directory, isTestOutput: true))
+            spaces.append(space)
+        }
+        select(space)
+        space.last.runTest(invocation)
+    }
+
     func containsTerminalResponder(_ responder: NSResponder?) -> Bool {
         guard let responder = responder as? NSView, let selectedSpace else { return false }
         return selectedSpace.panes.contains {
@@ -140,7 +160,7 @@ final class TerminalPanel: NSObject {
     }
 
     private func split(_ direction: TerminalSplitDirection, pane existing: TerminalPane) {
-        guard !closed, let space = selectedSpace, space.panes.contains(where: { $0 === existing }),
+        guard !closed, !existing.isTestOutput, let space = selectedSpace, space.panes.contains(where: { $0 === existing }),
               let slot = existing.superview as? TerminalSlot else { return }
         let added = makePane(in: existing.workingDirectory)
         let split = TerminalSplitView(frame: slot.bounds, direction: direction)
@@ -220,7 +240,8 @@ final class TerminalPanel: NSObject {
         let splitDown = headerButton(symbol: "rectangle.split.1x2", label: "Split Terminal Down",
                                      action: #selector(Self.splitDown(_:)))
         splitDown.identifier = .init("Edit.Terminal.SplitDown")
-        spaceActionButtons = [delete, splitRight, splitDown]
+        deleteSpaceButton = delete
+        splitButtons = [splitRight, splitDown]
         let options = headerButton(symbol: "ellipsis", label: "Terminal Dock Position", action: #selector(showOptions(_:)))
         options.identifier = .init("Edit.Terminal.Options")
         header.identifier = .init("Edit.Terminal.Header")
@@ -311,8 +332,8 @@ final class TerminalPanel: NSObject {
         return button
     }
 
-    private func makePane(in directory: URL, restoredState: TerminalPaneState? = nil) -> TerminalPane {
-        let pane = TerminalPane(directory: directory, shell: shell, restoredState: restoredState)
+    private func makePane(in directory: URL, restoredState: TerminalPaneState? = nil, isTestOutput: Bool = false) -> TerminalPane {
+        let pane = TerminalPane(directory: directory, shell: shell, restoredState: restoredState, isTestOutput: isTestOutput)
         pane.onClose = { [weak self] pane in self?.removePane(pane) }
         pane.onSplit = { [weak self] pane, direction in self?.split(direction, pane: pane) }
         pane.onTitleChange = { [weak self] in self?.updatePickerNames() }
@@ -366,7 +387,8 @@ final class TerminalPanel: NSObject {
     private func updatePicker() {
         picker.removeAllItems()
         picker.isEnabled = !spaces.isEmpty
-        for button in spaceActionButtons { button.isEnabled = selectedSpace != nil }
+        deleteSpaceButton?.isEnabled = selectedSpace != nil
+        for button in splitButtons { button.isEnabled = selectedSpace?.last.isTestOutput == false }
         if spaces.isEmpty {
             picker.addItem(withTitle: "Spaces")
         } else {
@@ -775,11 +797,15 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
         didSet { if foregroundCommand != oldValue { onTitleChange?() } }
     }
     var title: String {
+        if isTestOutput { return "Tests" }
         if let foregroundCommand { return foregroundCommand }
         let folder = workingDirectory.lastPathComponent
         return folder.isEmpty ? workingDirectory.path : folder
     }
     var wrapsLines: Bool { fixedColumns == nil }
+    let isTestOutput: Bool
+    private var testInvocation: ZigTestInvocation?
+    var isRunningTest: Bool { testInvocation != nil }
 
     private let shell: String?
     private let scrollView = TerminalScrollView()
@@ -795,11 +821,12 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
     private var startupPrompt: TerminalPrompt.Line?
     private var learningStartupPrompt = false
 
-    init(directory: URL, shell: String?, restoredState: TerminalPaneState?) {
+    init(directory: URL, shell: String?, restoredState: TerminalPaneState?, isTestOutput: Bool = false) {
         id = restoredState?.id ?? UUID()
         workingDirectory = directory
         foregroundCommand = restoredState?.foregroundCommand
         self.shell = shell
+        self.isTestOutput = restoredState?.isTestOutput ?? isTestOutput
         if let restoredState, !restoredState.wrapsLines {
             fixedColumns = min(Self.maximumFixedColumns, max(1, restoredState.fixedColumns ?? Self.defaultFixedColumns))
             pendingHorizontalOffset = restoredState.horizontalOffset
@@ -978,7 +1005,7 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
                                  fixedColumns: fixedColumns,
                                  horizontalOffset: fixedColumns.map { _ in
                                      pendingHorizontalOffset ?? scrollView.contentView.bounds.minX
-                                 })
+                                 }, isTestOutput: isTestOutput ? true : nil)
     }
 
     private func currentHistory() -> (transcript: TerminalTranscript, scrollbackOffset: Int) {
@@ -1048,9 +1075,11 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
         paste.isEnabled = terminal.process.running && NSPasteboard.general.availableType(from: [.string]) != nil
         let splitRight = NSMenuItem(title: "Split Terminal Right", action: #selector(splitFromMenu(_:)), keyEquivalent: "")
         splitRight.target = self
+        splitRight.isEnabled = !isTestOutput
         splitRight.representedObject = TerminalSplitDirection.right
         let splitDown = NSMenuItem(title: "Split Terminal Down", action: #selector(splitFromMenu(_:)), keyEquivalent: "")
         splitDown.target = self
+        splitDown.isEnabled = !isTestOutput
         splitDown.representedObject = TerminalSplitDirection.down
         let wrap = NSMenuItem(title: "Wrap Lines", action: #selector(toggleWrapFromMenu(_:)), keyEquivalent: "")
         wrap.target = self
@@ -1121,6 +1150,7 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
         promptObservation?.cancel()
         terminal.processDelegate = nil
         terminal.terminate()
+        testInvocation = nil
         terminal.updateUiClosed()
     }
 
@@ -1130,7 +1160,7 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
     }
 
     func startShellIfNeeded() {
-        guard let shell, !startedShell, !closed else { return }
+        guard !isTestOutput, let shell, !startedShell, !closed else { return }
         startedShell = true
         // Replay history before the new PTY can emit output, including in detached spaces.
         if pendingTranscript != nil && terminal.bounds.isEmpty {
@@ -1159,6 +1189,20 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
         terminal.startProcess(executable: shell, environment: environment.map { "\($0.key)=\($0.value)" },
                               execName: shellName.map { "-" + $0 },
                               currentDirectory: workingDirectory.path)
+    }
+
+    func runTest(_ invocation: ZigTestInvocation) {
+        guard isTestOutput, !closed, testInvocation == nil else { return }
+        testInvocation = invocation
+        if pendingTranscript != nil && terminal.bounds.isEmpty {
+            scrollView.layoutViewport(terminal.getOptimalFrameSize(), minimumColumns: fixedColumns)
+        }
+        restoreTranscript()
+        workingDirectory = invocation.directory
+        let environment = invocation.environment.merging(["TERM": "xterm-256color", "PWD": workingDirectory.path]) { _, value in value }
+        terminal.feed(text: "\r\nRunning Zig test…\r\n")
+        terminal.startProcess(executable: invocation.executable.path, args: invocation.arguments,
+                              environment: environment.map { "\($0.key)=\($0.value)" }, currentDirectory: workingDirectory.path)
     }
 
     private func learnStartupPrompt() {
@@ -1199,11 +1243,22 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
 
     func processTerminated(source: TerminalView, exitCode: Int32?) {
         guard !closed else { return }
+        if isTestOutput {
+            testInvocation = nil
+            let status = exitCode.map { "Zig exited with status \($0)." } ?? "Zig test stopped."
+            terminal.feed(text: "\r\n\(status)\r\n")
+            return
+        }
         onClose?(self)
     }
 
     func processFailedToStart(source: TerminalView, error: LocalProcessError) {
         guard !closed else { return }
+        if isTestOutput {
+            testInvocation = nil
+            terminal.feed(text: "\r\nCould not start Zig: \(error)\r\n")
+            return
+        }
         NSLog("Could not start terminal shell: %@", String(describing: error))
         onClose?(self)
     }

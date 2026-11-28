@@ -1570,6 +1570,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case "terminal":
             try await TerminalCheck.checkFolderSessions(in: self)
             try await TerminalCheck.run(in: self)
+        case "zig-test":
+            try await ZigTestCodeLensCheck.run(in: self, document: document) { window in
+                try checkWindow(window, screenshot: screenshot)
+            }
         case "markdown":
             try await MarkdownCheck.run(in: self, screenshot: screenshot)
         case "results":

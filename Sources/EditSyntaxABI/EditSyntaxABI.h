@@ -37,6 +37,13 @@ typedef EditSyntaxTreeQueryFunction *EditSyntaxTreeQuery;
 typedef void EditSyntaxTreeReleaseFunction(void * _Nonnull tree);
 typedef EditSyntaxTreeReleaseFunction *EditSyntaxTreeRelease;
 
+typedef void (*EditZigTestCapture)(void * _Null_unspecified context, uint32_t start, uint32_t headerEnd,
+                                   uint32_t nameStart, uint32_t nameEnd, bool isIdentifier);
+typedef bool EditZigTestsFunction(const void * _Nonnull tree, EditZigTestCapture _Nonnull test,
+                                  EditSyntaxCancelled _Nonnull cancelled, void * _Null_unspecified context);
+typedef EditZigTestsFunction *EditZigTests;
+extern EditZigTestsFunction edit_zig_tests_v1;
+
 typedef bool EditMarkdownTableFunction(const uint16_t * _Nonnull units, uint32_t count, uint32_t caret,
                                        EditSyntaxCapture _Nonnull row, void * _Null_unspecified context);
 

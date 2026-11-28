@@ -31,4 +31,5 @@ struct TerminalPaneState: Codable, Sendable, Equatable {
     let scrollbackOffset: Int
     let fixedColumns: Int?
     let horizontalOffset: CGFloat?
+    let isTestOutput: Bool?
 }

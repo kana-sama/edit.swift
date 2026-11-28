@@ -126,6 +126,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var terminalSidebarWidth = TerminalDockSizes().rightWidth
     private(set) var isTerminalVisible = false
     private var pendingTerminalFocus: Bool?
+    private var zigTestStart: Task<Void, Never>?
     private(set) lazy var titleBar = DocumentTitleBar(document: self, app: app)
     private(set) lazy var languageFeatures = DocumentLanguageFeatures(document: self, app: app)
     private(set) lazy var resultDecorations: FindDecorations = {
@@ -541,6 +542,55 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     func showTerminal() {
         guard !app.isQuitting, window.attachedSheet == nil else { return }
         attachTerminal(focusing: true)
+    }
+
+    private var zigTestFile: URL? {
+        guard hasEditableTextDocument, scratchFile == nil, resolvedSyntaxLanguage == .zig,
+              let fileURL, fileURL.pathExtension.lowercased() == "zig" else { return nil }
+        return fileURL
+    }
+
+    private func refreshTestCodeLens() {
+        guard let file = zigTestFile else {
+            editor.testCodeLens?.reset()
+            editor.testCodeLens = nil
+            return
+        }
+        if editor.testCodeLens == nil {
+            let lens = EditorTestCodeLens(editor: editor)
+            lens.run = { [weak self] test in self?.runZigTest(test) }
+            editor.testCodeLens = lens
+        }
+        editor.testCodeLens?.update(file: file)
+    }
+
+    private func runZigTest(_ test: ZigTestDeclaration) {
+        guard zigTestStart == nil, canReplaceBuffer, editor.isEditable, !editor.hasMarkedText(), !app.isQuitting,
+              editor.conflictEdits.isEmpty, let file = zigTestFile, let lens = editor.testCodeLens else { return }
+        if terminalPanel?.revealRunningTest() == true {
+            attachTerminal(focusing: false)
+            return
+        }
+        let opening = openRequestGeneration
+        let folder = folderURL
+        let source = editor.sourceString
+        zigTestStart = Task { [weak self] in
+            guard let self else { return }
+            defer { zigTestStart = nil }
+            @MainActor func isCurrent() -> Bool {
+                !Task.isCancelled && !app.isQuitting && zigTestFile == file && folderURL == folder &&
+                    openRequestGeneration == opening && editor.sourceString == source && editor.conflictEdits.isEmpty
+            }
+            guard await lens.isCurrent(test, file: file), isCurrent(), await save(), isCurrent() else { return }
+            do {
+                let invocation = try await ZigTestInvocation.prepare(test: test, file: file, folder: folder)
+                guard isCurrent() else { return }
+                prepareTerminal().runTest(invocation)
+                attachTerminal(focusing: false)
+            } catch {
+                if isCurrent() { await showError("Could Not Run Zig Test", detail: error.localizedDescription) }
+            }
+        }
     }
 
     func restoreTerminal(_ state: DocumentTerminalState?) {
@@ -1886,6 +1936,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func refreshSyntax(immediate: Bool, preparedSyntax: SyntaxSnapshot? = nil, allowsLSP: Bool = true) {
+        defer { refreshTestCodeLens() }
         let language = resolvedSyntaxLanguage
         refreshMarkdown(immediate: immediate)
         editor.syntaxLanguage = language
@@ -2308,6 +2359,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         if !app.isQuitting { discardDraftCheckpoint() }
         fileRefresh.stop()
         languageFeatures.close()
+        zigTestStart?.cancel()
+        editor.testCodeLens?.reset()
         closeTerminalSessions()
         jjDocumentChanges?.stop()
         clearSourceControlFile()
@@ -2376,6 +2429,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.preferredLineEnding = format.lineEnding
         editor.resetMultiCarets()
         syntaxHighlighting?.prepareForBufferReplacement()
+        editor.testCodeLens?.reset()
         editor.bracketNavigation.reset()
         editor.occurrenceHighlighting.reset()
         editor.string = projection.text
@@ -2414,6 +2468,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
         titleBar.update()
         languageFeatures.updateDocument()
+        refreshTestCodeLens()
         sidebar.documentTitleChanged(reveal: revealInWorktree)
         updateJJContext()
     }

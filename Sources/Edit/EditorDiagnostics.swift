@@ -113,7 +113,7 @@ extension EditorTextView {
 
     private func messageFrame(for row: DiagnosticRow) -> NSRect {
         let gap = diagnosticGap
-        let x = row.bounds.maxX + gap
+        let x = max(row.bounds.maxX, testCodeLens?.trailingEdge(on: row.bounds) ?? 0) + gap
         let naturalWidth = messageWidth(row.message)
         // In wrap mode the text view already tracks the unobscured editor width.
         let width = wrapsWords ? min(naturalWidth, bounds.maxX - Self.diagnosticTrailingSpace - x) : naturalWidth

@@ -74,6 +74,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     var onFindViewportChange: (() -> Void)?
     var onDrawFindHighlights: ((NSRect) -> Void)?
     var onBufferEdit: ((NSTextStorage, [EditorTextEdit]?) -> Void)?
+    var testCodeLens: EditorTestCodeLens?
     private var applyingTextEdits: [EditorTextEdit]?
     lazy var layoutSpacing = EditorLayoutSpacing(editor: self)
     fileprivate var jjDecorations: JJEditorDecorations?
@@ -223,7 +224,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
 
     override func setFrameSize(_ size: NSSize) {
         // An unwrapped annotation is part of the scroll extent, outside TextKit's layout.
-        super.setFrameSize(NSSize(width: max(size.width, diagnosticMinimumWidth), height: size.height))
+        let lensWidth = wrapsWords ? 0 : testCodeLens?.minimumWidth ?? 0
+        super.setFrameSize(NSSize(width: max(size.width, diagnosticMinimumWidth, lensWidth), height: size.height))
     }
 
     override var undoManager: UndoManager? { renameDraft?.undoManager ?? editorUndoManager }
@@ -482,6 +484,14 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
            let items = languageContextItems?(hit), !items.isEmpty {
             menu.addItem(.separator())
             items.forEach(menu.addItem)
+        }
+        if let testCodeLens {
+            let offset = characterIndexForInsertion(at: convert(event.locationInWindow, from: nil))
+            let items = testCodeLens.menuItems(at: offset)
+            if !items.isEmpty {
+                menu.addItem(.separator())
+                items.forEach(menu.addItem)
+            }
         }
         return menu
     }
@@ -1391,6 +1401,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         // Both preedit and its rollback are presentation. Subscribers still hold
         // the baseline onto which the real replacements will be applied.
         guard !updatingComposition else { return }
+        testCodeLens?.sourceDidEdit(changes)
         onNavigationTextEdit?(storage.editedRange)
         if !replacingConflictStructure, !conflictEdits.isEmpty {
             let range = storage.editedRange
@@ -1502,6 +1513,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             self.occurrenceHighlighting.layout()
             self.jjInlineDiff?.layout()
             self.jjConflictDecorations?.layout()
+            self.testCodeLens?.layout()
+            if self.testCodeLens != nil, !self.diagnostics.isEmpty { self.refreshDiagnosticForeground(redraw: true) }
             if let scroll = self.enclosingScrollView { self.jjDecorations?.layout(in: scroll) }
             self.renameShade?.update()
             self.updateMarkdownToolTips()

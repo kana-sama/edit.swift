@@ -518,9 +518,7 @@ final class LanguageServerSession {
     }
 
     @concurrent private nonisolated static func resolveExecutable(for server: LanguageServer, in root: URL) async -> Launch? {
-        var environment = ProcessInfo.processInfo.environment
-        // Launch Services starts the app through launchd. Direct executable launches retain their caller's PATH.
-        if getppid() == 1, let loginPath = await loginShellPATH() { environment["PATH"] = loginPath }
+        let environment = await launchEnvironment()
         guard !Task.isCancelled else { return nil }
         if let path = environment["PATH"], let executable = executable(in: path, named: server.executable),
            server != .sourceKit || executable.path != "/usr/bin/sourcekit-lsp" {
@@ -537,6 +535,13 @@ final class LanguageServerSession {
             }
         }
         return nil
+    }
+
+    @concurrent nonisolated static func launchEnvironment() async -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        // Launch Services starts the app through launchd. Direct executable launches retain their caller's PATH.
+        if getppid() == 1, let loginPath = await loginShellPATH() { environment["PATH"] = loginPath }
+        return environment
     }
 
     nonisolated static func executable(in path: String, named name: String = "zls") -> URL? {

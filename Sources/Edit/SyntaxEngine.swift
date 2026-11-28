@@ -163,6 +163,11 @@ enum SyntaxEngine {
                 unsafeBitCast(query, to: EditSyntaxTreeQuery.self), unsafeBitCast(release, to: EditSyntaxTreeRelease.self))
     }()
 
+    private static let readZigTests: EditZigTests? = {
+        guard let library, let entry = dlsym(library, "edit_zig_tests_v1") else { return nil }
+        return unsafeBitCast(entry, to: EditZigTests.self)
+    }()
+
     static func supportsIncremental(_ language: SyntaxLanguage) -> Bool {
         switch language {
         case .odin, .ruby, .shell, .solidity, .swift, .zig: treeAPI != nil && queries != nil
@@ -250,6 +255,19 @@ enum SyntaxEngine {
         }
 
         deinit { treeAPI?.release(tree) }
+
+        func zigTests() -> [ZigTestDeclaration]? {
+            guard language == .zig, let readZigTests else { return nil }
+            var captures: [ZigTestDeclaration.Capture] = []
+            let found = withUnsafeMutablePointer(to: &captures) { output in
+                readZigTests(UnsafeRawPointer(tree), { context, start, headerEnd, nameStart, nameEnd, isIdentifier in
+                    context?.assumingMemoryBound(to: [ZigTestDeclaration.Capture].self).pointee.append(.init(
+                        header: Int(start)..<Int(headerEnd), name: Int(nameStart)..<Int(nameEnd), isIdentifier: isIdentifier
+                    ))
+                }, { _ in Task.isCancelled }, output)
+            }
+            return found ? ZigTestDeclaration.read(captures, from: units) : nil
+        }
 
         func highlights(in range: NSRange, deadline: ContinuousClock.Instant? = nil) -> [SyntaxSpan]? {
             if range.length == 0 { return [] }

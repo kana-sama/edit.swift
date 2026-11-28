@@ -763,6 +763,55 @@ void edit_syntax_tree_release_v1(void *tree) {
     dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), tree, releaseSyntaxTree);
 }
 
+EDIT_VISIBLE EditZigTestsFunction edit_zig_tests_v1;
+bool edit_zig_tests_v1(const void *tree, EditZigTestCapture test, EditSyntaxCancelled check, void *context) {
+    if (ts_tree_language(tree) != languageForName("zig")) return false;
+    TSTree *snapshot = ts_tree_copy(tree);
+    if (!snapshot) return false;
+    TSTreeCursor cursor = ts_tree_cursor_new(ts_tree_root_node(snapshot));
+    if (ts_tree_cursor_goto_first_child(&cursor)) {
+        do {
+            if (check(context)) break;
+            TSNode declaration = ts_tree_cursor_current_node(&cursor);
+            const char *type = ts_node_type(declaration);
+            const bool recovering = strcmp(type, "ERROR") == 0;
+            if (!recovering && strcmp(type, "test_declaration") != 0) continue;
+            TSNode keyword = ts_node_child(declaration, 0);
+            if (ts_node_is_null(keyword) || strcmp(ts_node_type(keyword), "test") != 0 || ts_node_is_missing(keyword)) continue;
+            TSNode name = {0};
+            TSNode brace = {0};
+            bool isIdentifier = false;
+            for (uint32_t i = 1, count = ts_node_child_count(declaration); i < count; ++i) {
+                TSNode child = ts_node_child(declaration, i);
+                const char *type = ts_node_type(child);
+                if (strcmp(type, "block") == 0) {
+                    brace = ts_node_child(child, 0);
+                    break;
+                }
+                if (recovering && strcmp(type, "{") == 0) {
+                    brace = child;
+                    break;
+                }
+                if (ts_node_is_extra(child) && !ts_node_is_error(child)) continue;
+                if (ts_node_is_null(name) && (strcmp(type, "identifier") == 0 || strcmp(type, "string") == 0)) {
+                    name = child;
+                    isIdentifier = strcmp(type, "identifier") == 0;
+                } else {
+                    break;
+                }
+            }
+            if (ts_node_is_null(brace) || ts_node_is_missing(brace) || strcmp(ts_node_type(brace), "{") != 0 ||
+                (!ts_node_is_null(name) && (ts_node_is_missing(name) || ts_node_has_error(name)))) continue;
+            test(context, ts_node_start_byte(keyword) / 2, ts_node_end_byte(brace) / 2,
+                 ts_node_is_null(name) ? 0 : ts_node_start_byte(name) / 2,
+                 ts_node_is_null(name) ? 0 : ts_node_end_byte(name) / 2, isIdentifier);
+        } while (ts_tree_cursor_goto_next_sibling(&cursor));
+    }
+    ts_tree_cursor_delete(&cursor);
+    ts_tree_delete(snapshot);
+    return !check(context);
+}
+
 static bool solidityNameMatches(Input *input, TSNode name, uint32_t start, uint32_t end) {
     if (ts_node_is_null(name)) return false;
     uint32_t nameStart = ts_node_start_byte(name);

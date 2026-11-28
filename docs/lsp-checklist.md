@@ -100,6 +100,8 @@ SourceKit-LSP advertises `textDocument/declaration` for C-family languages. Its 
 
 ## ZLS
 
+Edit discovers and runs [Zig tests from CodeLens](features/test-codelens/spec.md) using its local Zig parser and toolchain. The action is available independently of ZLS.
+
 - [x] Discover Zig projects and launch the ZLS executable from PATH. [Edit specification](features/lsp/spec.md#server-discovery-and-session)
 - [x] Render ZLS hover declarations, inferred types and clickable links to local type definitions. [Edit specification](features/lsp/spec.md#hover)
 - [x] Rename Zig identifiers that require quoting or escapes. [Edit specification](features/lsp-rename/spec.md)
