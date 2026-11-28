@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 struct ZigTestDeclaration: Equatable, Sendable {
@@ -46,39 +47,85 @@ final class ZigTestInvocation: Sendable {
     private let runnerDirectory: URL
 
     @concurrent static func prepare(test: ZigTestDeclaration, file: URL, folder: URL?) async throws -> ZigTestInvocation {
-        let environment = await LanguageServerSession.launchEnvironment()
+        let environment = await launchEnvironment()
         try Task.checkCancellation()
         guard let executable = LanguageServerSession.executable(in: environment["PATH"] ?? "", named: "zig") else {
             throw RunError.zigUnavailable
         }
         let parent = file.deletingLastPathComponent()
-        let root = LanguageServer.zig.projectRoot(in: folder ?? parent, activeFile: file, previousRoot: nil,
-                                                   searchesParents: folder == nil) ?? parent
-        return try ZigTestInvocation(test: test, file: file, directory: root, executable: executable, environment: environment)
+        let discoveredRoot = LanguageServer.zig.projectRoot(in: folder ?? parent, activeFile: file, previousRoot: nil,
+                                                             searchesParents: folder == nil) ?? parent
+        let root = FileBuffer.canonicalURL(discoveredRoot)
+        let project = await ZigProjectTest.find(executable: executable, environment: environment, directory: root, file: file)
+        try Task.checkCancellation()
+        return try ZigTestInvocation(test: test, file: file, directory: root, executable: executable,
+                                     environment: environment, project: project)
     }
 
     private init(test: ZigTestDeclaration, file: URL, directory: URL, executable: URL,
-                 environment: [String: String]) throws {
+                 environment: [String: String], project: ZigProjectTest?) throws {
         let prefix = ZigTestDeclaration.quoted(file.deletingPathExtension().lastPathComponent + test.namePrefix)
         let runnerDirectory = FileManager.default.temporaryDirectory.appending(path: "Edit-Zig-Test-\(UUID())",
                                                                                   directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: runnerDirectory, withIntermediateDirectories: false,
                                                 attributes: [.posixPermissions: 0o700])
         let runner = runnerDirectory.appending(path: "runner.zig")
+        let arguments: [String]
         do {
             try Self.runner(selected: "\(prefix) ++ \(test.nameLiteral)").write(to: runner, atomically: true, encoding: .utf8)
+            if let project {
+                arguments = try project.arguments(executable: executable, file: file, runner: runner, staging: runnerDirectory)
+            } else {
+                arguments = ["test", file.path, "--test-runner", runner.path]
+            }
         } catch {
             try? FileManager.default.removeItem(at: runnerDirectory)
             throw error
         }
         self.runnerDirectory = runnerDirectory
         self.executable = executable
-        self.arguments = ["test", file.path, "--test-runner", runner.path]
+        self.arguments = arguments
         self.environment = environment
         self.directory = directory
     }
 
     deinit { try? FileManager.default.removeItem(at: runnerDirectory) }
+
+    var displayCommand: String {
+        let command = ([executable.path] + arguments).map(Self.shellArgument).joined(separator: " ")
+        return "$ cd \(Self.shellArgument(directory.path))\r\n$ \(command)"
+    }
+
+    private static func shellArgument(_ argument: String) -> String {
+        let unquoted = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./-=+:")
+        if !argument.isEmpty, argument.unicodeScalars.allSatisfy(unquoted.contains) { return argument }
+        if argument.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) {
+            return "$'" + argument.utf8.map { String(format: "\\x%02x", $0) }.joined() + "'"
+        }
+        return "'" + argument.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private static func launchEnvironment() async -> [String: String] {
+        let inherited = ProcessInfo.processInfo.environment
+        guard getppid() == 1 else { return inherited }
+        // Tools launched from the Dock need the same exported project settings as an interactive terminal.
+        if let shell = getpwuid(getuid())?.pointee.pw_shell.map({ String(cString: $0) }),
+           FileManager.default.isExecutableFile(atPath: shell),
+           let result = try? await JJCommand.run(URL(filePath: shell),
+                arguments: ["-i", "-l", "-c", "/usr/bin/printf '\\000'; /usr/bin/env -0"],
+                in: FileManager.default.homeDirectoryForCurrentUser, limit: 512 * 1024, timeout: 5),
+           result.status == 0, let start = result.stdout.firstIndex(of: 0) {
+            let exports = result.stdout.suffix(from: result.stdout.index(after: start)).split(separator: 0)
+            var environment = inherited
+            for field in exports {
+                guard let assignment = String(data: Data(field), encoding: .utf8),
+                      let equals = assignment.firstIndex(of: "="), equals != assignment.startIndex else { continue }
+                environment[String(assignment[..<equals])] = String(assignment[assignment.index(after: equals)...])
+            }
+            return environment
+        }
+        return await LanguageServerSession.launchEnvironment()
+    }
 
     private enum RunError: LocalizedError {
         case zigUnavailable

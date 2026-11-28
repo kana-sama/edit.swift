@@ -70,7 +70,8 @@ enum ZigTestCodeLensCheck {
         document.focusContent()
         run.performClick(nil)
         try await waitForOutput("save the file and run only the selected declaration", in: document.window) { text in
-            return text.contains("Selected tests.test.exact") && text.contains("Passed") && text.contains("status 0")
+            text.contains("Selected tests.test.exact") && text.contains("Passed") && text.contains("status 0") &&
+                text.contains("$ cd ") && text.contains("zig test ")
         }
         try expect(try String(contentsOf: zig, encoding: .utf8) == editor.string, "write the live buffer before testing")
         try expect(!output(in: document.window).contains("NeighborRan") && !output(in: document.window).contains("UnnamedRan"),
@@ -117,6 +118,59 @@ enum ZigTestCodeLensCheck {
         try expect(try await opening.value === document, "open the plain-text file")
         try expect(document.window.title.hasSuffix("Plain.txt") && buttons(in: editor).isEmpty,
                    "clear the action on the first presentation of the new file")
+
+        try await checkProject(in: app, document: document, under: root)
+    }
+
+    private static func checkProject(in app: Edit, document: DocumentWindow, under root: URL) async throws {
+        let project = root.appending(path: "Project with modules", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        try """
+        const std = @import("std");
+        pub fn build(b: *std.Build) void {
+            const library = b.createModule(.{ .root_source_file = b.path("value.zig"), .target = b.graph.host });
+            const tests = b.addTest(.{ .root_module = b.createModule(.{
+                .root_source_file = b.path("project.t.zig"),
+                .target = b.graph.host,
+                .imports = &.{.{ .name = "value", .module = library }},
+            }) });
+            b.step("test", "Run tests").dependOn(&b.addRunArtifact(tests).step);
+        }
+        """.write(to: project.appending(path: "build.zig"), atomically: true, encoding: .utf8)
+        try "pub const answer = 42;\n".write(to: project.appending(path: "value.zig"), atomically: true, encoding: .utf8)
+        let file = project.appending(path: "project.t.zig")
+        try """
+        const std = @import("std");
+        const value = @import("value");
+        test "project import" {
+            try std.testing.expectEqual(42, value.answer);
+        }
+        test "project import neighbor" { return error.WholeSuiteRan; }
+        """.write(to: file, atomically: true, encoding: .utf8)
+        try await runProjectCase(project: project, file: file, name: "project import", in: app, document: document)
+        try expect(!output(in: document.window).contains("WholeSuiteRan"), "leave the project test's neighbor unexecuted")
+
+        let environment = ProcessInfo.processInfo.environment
+        if let fixture = environment["EDIT_ZIG_TEST_PROJECT_FILE"], let name = environment["EDIT_ZIG_TEST_PROJECT_CASE"] {
+            let file = FileBuffer.canonicalURL(URL(filePath: fixture))
+            let parent = file.deletingLastPathComponent()
+            let root = LanguageServer.zig.projectRoot(in: parent, activeFile: file, previousRoot: nil, searchesParents: true) ?? parent
+            try await runProjectCase(project: root, file: file, name: name, in: app, document: document)
+        }
+    }
+
+    private static func runProjectCase(project: URL, file: URL, name: String, in app: Edit, document: DocumentWindow) async throws {
+        document.setFolder(project)
+        try expect(try await app.openFile(file, in: document) === document, "open the module-dependent test file")
+        document.languageFeatures.perform(.stop)
+        try await wait("discover the project test") { button(name, in: document.editor) != nil }
+        try require(button(name, in: document.editor), "find the project test button").performClick(nil)
+        try await waitForOutput("finish the project test", in: document.window, seconds: 120) { text in
+            text.contains("Zig exited with status ")
+        }
+        let text = output(in: document.window)
+        try expect(text.contains("zig build ") && text.contains(".test.\(name)") && text.contains("Passed") && text.contains("status 0"),
+                   "run the selected test with the Zig build configuration\nTerminal output:\n\(text)")
     }
 
     private static func buttons(in editor: EditorTextView) -> [NSButton] {
@@ -152,8 +206,9 @@ enum ZigTestCodeLensCheck {
         }
     }
 
-    private static func waitForOutput(_ detail: String, in window: NSWindow, until ready: (String) -> Bool) async throws {
-        do { try await wait(detail, seconds: 35) { ready(output(in: window)) } }
+    private static func waitForOutput(_ detail: String, in window: NSWindow, seconds: Int = 35,
+                                      until ready: (String) -> Bool) async throws {
+        do { try await wait(detail, seconds: seconds) { ready(output(in: window)) } }
         catch { throw Failure(detail: "\(detail)\nTerminal output:\n\(output(in: window))") }
     }
 

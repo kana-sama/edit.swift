@@ -1234,13 +1234,18 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func laidOutLineBounds(at offset: Int) -> NSRect? {
+        laidOutLineMetrics(at: offset)?.bounds
+    }
+
+    func laidOutLineMetrics(at offset: Int) -> (bounds: NSRect, baseline: CGFloat)? {
         guard let layout = textLayoutManager,
               let location = layout.location(layout.documentRange.location, offsetBy: offset),
               let fragment = layout.textLayoutFragment(for: location), fragment.state == .layoutAvailable,
               let line = fragment.textLineFragment(for: location, isUpstreamAffinity: false) else { return nil }
         let frame = fragment.layoutFragmentFrame
-        return line.typographicBounds.offsetBy(dx: frame.minX + textContainerOrigin.x,
-                                               dy: frame.minY + textContainerOrigin.y)
+        let bounds = line.typographicBounds.offsetBy(dx: frame.minX + textContainerOrigin.x,
+                                                    dy: frame.minY + textContainerOrigin.y)
+        return (bounds, bounds.minY + line.glyphOrigin.y)
     }
 
     func lineBounds(at offset: Int) -> NSRect? {

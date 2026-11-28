@@ -1,6 +1,6 @@
 # Run Zig tests from CodeLens
 
-In an editable Zig file, show **Run test** to the right of the code on the visual row containing the declaration's `test` keyword. For a multiline header, anchor the button to the keyword even when the name and opening brace are below it. Keep the button outside text layout so it leaves line heights, wrapping, and the gutter geometry intact. The action moves with its row during scrolling and zooming. When a wrapped row fills the available width, use **Run test** in that row's context menu. The button's tooltip and VoiceOver label include the test name.
+In an editable Zig file, show **Run test** to the right of the code on the visual row containing the declaration's `test` keyword. Use a gray label and center its visible text vertically within the row. For a multiline header, anchor the button to the keyword even when the name and opening brace are below it. Keep the button outside text layout so it leaves line heights, wrapping, and the gutter geometry intact. The action moves with its row during scrolling and zooming. When a wrapped row fills the available width, use **Run test** in that row's context menu. The button's tooltip and VoiceOver label include the test name.
 
 ## Discovery
 
@@ -10,15 +10,17 @@ The Zig extension for VS Code 0.6.17 identifies tests by regular expression in a
 
 ## Running a test
 
-Save the current file using the normal save flow. Start Zig only after the save succeeds and the same document and source are still active. Resolve `zig` using the editor's toolchain PATH. Use `zig test` with the current file as the root module and the containing project as the working directory, or the file's directory when opened on its own. Projects that require explicit module arguments or a custom `build.zig` test step need their project test command.
+Save the current file using the normal save flow. Start Zig only after the save succeeds and the same document and source are still active. Resolve `zig` on PATH and use the containing project as the working directory, or the file's directory for a loose file. Use the interactive login shell's exports when Edit was launched from the Dock or Finder.
+
+With Zig 0.17, use the project's `zig build` configuration when its `test` step runs a host test artifact rooted at the current file. Reuse the artifact's modules and generated dependencies, and run the selected test through an isolated build step. The project's build script stays on disk as written. A loose file, or a file outside the project test artifact, uses `zig test` with the file as the root module. Custom test runners and multiple matching host test artifacts require the project's own invocation.
 
 Select the test by its full compiler name in the test runner. Zig's `--test-filter` matches substrings and unnamed blocks are included even when that filter is present. Keep other tests outside the run. [Zig test declarations][zig-tests]
 
-Reveal live output and the exit status in the current window's **Tests** terminal space, while keeping keyboard focus in the editor. Clicking Run test while a test in that window is running reveals the current output. Control-C in the test terminal interrupts the process. Keep the transcript after the run and inherit the [terminal's folder and window lifecycle](../terminal/spec.md).
+Print the working directory and the actual Zig executable and arguments before launching. Reveal live output and the exit status in the current window's **Tests** terminal space, while keeping keyboard focus in the editor. Clicking Run test while a test in that window is running reveals the current output. Control-C in the test terminal interrupts the process. Keep the transcript after the run and inherit the [terminal's folder and window lifecycle](../terminal/spec.md).
 
 ## Acceptance
 
-Run `./script/check --only zig-test [screenshot-path]` with Zig on PATH. Verify that the multiline test's button follows its first display row after a UTF-16 edit and with word wrap. Click it with pending changes and check the saved file, precise selection, live output, and editor focus. Run the similarly named neighbor to verify failure output and reuse of the terminal. Hold a file switch and check the outgoing action until the new text appears. The optional screenshot shows the inline controls on the original fixture.
+Run `./script/check --only zig-test [screenshot-path]` with Zig on PATH. Verify that the multiline test's button follows its first display row after a UTF-16 edit and with word wrap. Click it with pending changes and check the saved file, precise selection, live output, and editor focus. Run the similarly named neighbor to verify failure output and reuse of the terminal. Verify the printed command for loose-file and project runs. In a project test with an injected module, check that the module resolves and the test's neighbor stays outside the run. Hold a file switch and check the outgoing action until the new text appears. The optional screenshot shows the inline controls on the original fixture.
 
 [vscode-zig-tests]: https://github.com/ziglang/vscode-zig/blob/master/src/zigTestRunnerProvider.ts#L65-L88
 [zig-tests]: https://ziglang.org/documentation/0.17.1/#Zig-Test

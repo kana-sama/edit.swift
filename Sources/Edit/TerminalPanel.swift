@@ -1200,7 +1200,7 @@ private final class TerminalPane: NSView, LocalProcessTerminalViewDelegate {
         restoreTranscript()
         workingDirectory = invocation.directory
         let environment = invocation.environment.merging(["TERM": "xterm-256color", "PWD": workingDirectory.path]) { _, value in value }
-        terminal.feed(text: "\r\nRunning Zig test…\r\n")
+        terminal.feed(text: "\r\n\(invocation.displayCommand)\r\n")
         terminal.startProcess(executable: invocation.executable.path, args: invocation.arguments,
                               environment: environment.map { "\($0.key)=\($0.value)" }, currentDirectory: workingDirectory.path)
     }

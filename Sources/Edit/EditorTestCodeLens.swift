@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 
 @MainActor
 final class EditorTestCodeLens: NSObject {
@@ -96,14 +97,18 @@ final class EditorTestCodeLens: NSObject {
             return
         }
         let visible = editor.charRange(viewport, in: manager)
-        let font = NSFont.systemFont(ofSize: max(10, (editor.font ?? EditorTextView.defaultFont).pointSize - 1))
+        let codeFont = editor.font ?? EditorTextView.defaultFont
+        let font = NSFont.systemFont(ofSize: max(10, codeFont.pointSize - 1))
+        let keyword = CTLineCreateWithAttributedString(NSAttributedString(string: "test", attributes: [.font: codeFont]))
+        let keywordInkCenter = CTLineGetBoundsWithOptions(keyword, .useGlyphPathBounds).midY
         let width = ceil(("Run test" as NSString).size(withAttributes: [.font: font]).width) + 8
         var rowEnd: [CGFloat: CGFloat] = [:]
         var count = 0
         var requiredWidth = editor.wrapsWords ? 0 : minimumWidth
         for test in tests where NSLocationInRange(test.header.location, visible) {
-            guard let row = editor.laidOutLineBounds(at: test.header.location),
-                  row.maxY > editor.visibleRect.minY, row.minY < editor.visibleRect.maxY else { continue }
+            guard let metrics = editor.laidOutLineMetrics(at: test.header.location),
+                  metrics.bounds.maxY > editor.visibleRect.minY, metrics.bounds.minY < editor.visibleRect.maxY else { continue }
+            let row = metrics.bounds
             let x = max(row.maxX, rowEnd[row.minY] ?? 0) + Self.gap
             let frame = NSRect(x: x, y: row.minY, width: width, height: row.height)
             let edge = frame.maxX + Self.trailingInset
@@ -111,7 +116,7 @@ final class EditorTestCodeLens: NSObject {
             rowEnd[row.minY] = frame.maxX
             requiredWidth = editor.wrapsWords ? 0 : max(requiredWidth, edge)
             let button = count < buttons.count ? buttons[count] : addButton()
-            button.configure(test: test, font: font)
+            button.configure(test: test, font: font, textCenter: metrics.baseline - row.minY - keywordInkCenter)
             if button.frame != frame { button.frame = frame }
             count += 1
         }
@@ -180,16 +185,41 @@ final class EditorTestCodeLens: NSObject {
 
     private final class Button: NSButton {
         private(set) var test: ZigTestDeclaration?
+        private var textLine: CTLine?
+        private var textCenter: CGFloat = 0
 
-        func configure(test: ZigTestDeclaration, font: NSFont) {
+        override var isFlipped: Bool { true }
+
+        override func draw(_ dirtyRect: NSRect) {
+            guard let textLine, let context = NSGraphicsContext.current?.cgContext else { return }
+            let ink = CTLineGetBoundsWithOptions(textLine, .useGlyphPathBounds)
+            let color: NSColor = isHighlighted ? .labelColor : .secondaryLabelColor
+            context.saveGState()
+            context.translateBy(x: bounds.midX - ink.midX, y: textCenter + ink.midY)
+            context.scaleBy(x: 1, y: -1)
+            context.textMatrix = .identity
+            context.textPosition = .zero
+            context.setFillColor(color.cgColor)
+            CTLineDraw(textLine, context)
+            context.restoreGState()
+        }
+
+        func configure(test: ZigTestDeclaration, font: NSFont, textCenter: CGFloat) {
             if self.test != test {
                 self.test = test
                 toolTip = "Run test “\(test.name)”"
                 setAccessibilityLabel(toolTip)
             }
-            if self.font != font {
+            if self.font != font || textLine == nil {
                 self.font = font
-                attributedTitle = NSAttributedString(string: title, attributes: [.font: font, .foregroundColor: NSColor.linkColor])
+                textLine = CTLineCreateWithAttributedString(NSAttributedString(string: title, attributes: [
+                    .font: font, NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true
+                ]))
+                needsDisplay = true
+            }
+            if self.textCenter != textCenter {
+                self.textCenter = textCenter
+                needsDisplay = true
             }
         }
     }
