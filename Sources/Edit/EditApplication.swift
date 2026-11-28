@@ -178,6 +178,8 @@ final class EditApplication: NSApplication {
                 return button.isEnabled ? .pointingHand : .arrow
             case let selector as ModeSelector:
                 return selector.isEnabled ? .pointingHand : .arrow
+            case let label as TitleBarLabel where label.press != nil:
+                return .pointingHand
             case let split as NSSplitView where hit === foregroundHit:
                 return split.dividerResizeCursor ?? background
             case let divider as SourceControlDivider:

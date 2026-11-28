@@ -39,11 +39,20 @@ extension EditorTextView {
         guard !hasMarkedText(), let layout = textLayoutManager else {
             return groups != nil && !hasMarkedText()
         }
-        let direction: NSTextSelectionNavigation.Direction = backward ? .backward : .forward
-        guard word || hasSecondarySelections || groups != nil else { return false }
-        guard !word || isEditable else { return true }
         let source = textStorage?.mutableString
+        var indentation: [NSRange: NSRange] = [:]
+        if backward, !word, isEditable, let source {
+            let carets = groups?.flatMap { $0 } ?? caretSelections
+            if deleteAutomaticPairs(at: carets) { return true }
+            for caret in carets where caret.length == 0 && (0...source.length).contains(caret.location) {
+                indentation[caret] = LineEditing.deleteIndentation(in: source, before: caret.location, settings: indentationSettings)
+            }
+        }
+        guard word || hasSecondarySelections || groups != nil || !indentation.isEmpty else { return false }
+        guard !word || isEditable else { return true }
+        let direction: NSTextSelectionNavigation.Direction = backward ? .backward : .forward
         func deletions(at caret: NSRange) -> [NSRange] {
+            if let indent = indentation[caret] { return [indent] }
             if word, let source {
                 guard 0...source.length ~= caret.location else { return [] }
                 return [EditorWordBoundary.deletion(from: caret.location, backward: backward, in: source)]
@@ -72,6 +81,21 @@ extension EditorTextView {
         return true
     }
 
+    private func deleteAutomaticPairs(at carets: [NSRange]) -> Bool {
+        guard !automaticPairs.isEmpty, !carets.isEmpty else { return false }
+        let ranges = carets.compactMap { caret -> NSRange? in
+            guard caret.length == 0, automaticPairs.contains(where: {
+                $0.closing == caret.location && $0.opening + 1 == $0.closing
+            }) else { return nil }
+            return NSRange(location: caret.location - 1, length: 2)
+        }
+        guard ranges.count == carets.count, focusAllowsEdits(ranges) else { return false }
+        let edits = MultiCaretEditing.ordered(ranges).map { Replacement(range: $0, text: "") }
+        let changes = edits.map { EditorTextChange(range: $0.range, delta: $0.lengthChange) }
+        return applyMultiEdits(edits, selections: MultiCaretEditing.mapped(carets, after: edits),
+                               automaticPairsAfter: automaticPairs.compactMap { $0.remapped(after: changes) })
+    }
+
     private func deleteRanges(_ ranges: [NSRange], selections: [NSRange]? = nil) {
         let edits = MultiCaretEditing.ordered(MultiCaretEditing.merged(ranges.filter { $0.length > 0 }))
             .map { Replacement(range: $0, text: "") }
@@ -98,16 +122,23 @@ extension EditorTextView {
 
         switch command {
         case .tab:
-            let indent = MultiCaretEditing.indentation(in: text, for: selections.filter { $0.length > 0 }, outdent: false)
+            let indent = MultiCaretEditing.indentation(in: text, for: selections.filter { $0.length > 0 },
+                                                        outdent: false, settings: indentationSettings)
             let existing = Set(indent.map(\.range.location))
-            changes = (indent + selections.filter { $0.length == 0 && !existing.contains($0.location) }
-                .map { Replacement(range: $0, text: LineEditing.spacesToNextTabStop(in: text, at: $0.location)) })
-                .sorted { $0.range.location < $1.range.location }
+            var visited: Set<NSRange> = []
+            let tabs = selections.filter { $0.length == 0 && !existing.contains($0.location) }.compactMap { caret in
+                let line = LineEditing.line(at: caret.location, in: text)
+                let edit = LineEditing.tab(in: text, at: caret.location, settings: indentationSettings,
+                                           language: syntaxLanguage, contextual: !existing.contains(line.start))
+                return visited.insert(edit.range).inserted ? edit : nil
+            }
+            changes = (indent + tabs).sorted { $0.range.location < $1.range.location }
         case .indent(let outdent):
-            changes = MultiCaretEditing.indentation(in: text, for: selections, outdent: outdent)
+            changes = MultiCaretEditing.indentation(in: text, for: selections, outdent: outdent, settings: indentationSettings)
         case .newline:
             return MultiCaretEditing.typingPlan(selections.map {
-                LineEditing.newline(text, selection: $0, separator: preferredLineEnding)
+                LineEditing.newline(text, selection: $0, separator: preferredLineEnding,
+                                    settings: indentationSettings, language: syntaxLanguage)
             })
         case .move(let up):
             var moved = selections
@@ -273,7 +304,8 @@ extension EditorTextView {
     ) {
         if case .newline = command {
             let localEdits = groups.compactMap(\.first).map {
-                LineEditing.newline(text, selection: $0, separator: preferredLineEnding)
+                LineEditing.newline(text, selection: $0, separator: preferredLineEnding,
+                                    settings: indentationSettings, language: syntaxLanguage)
             }
             let plan = MultiCaretEditing.typingPlan(localEdits, deleting: groups.flatMap { $0.dropFirst() })
             applyMultiEdits(plan.edits, selections: plan.selections)

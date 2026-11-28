@@ -175,6 +175,36 @@ final class BracketNavigation {
         }
     }
 
+    func hasUnmatchedCloser(for opening: UInt16, at positions: [Int], in text: NSString) -> Bool {
+        guard let editor else { return false }
+        if let model, scope == editor.focusRanges {
+            return positions.contains { model.hasUnmatchedCloser(for: opening, at: $0) }
+        }
+        // A small freshly loaded or edited buffer can answer before the background index arrives.
+        guard text.length <= 4_096, let start = positions.min(), start < text.length,
+              let closing = TypingDelimiters.brackets[opening],
+              text.range(of: String(decoding: [closing], as: UTF16.self), options: .literal,
+                         range: NSRange(start..<text.length)).location != NSNotFound else { return false }
+        let source = editor.string
+        let context: BracketSyntax.Context
+        if language == .plainText {
+            context = .empty
+        } else if SyntaxEngine.supportsIncremental(language) {
+            let deadline = ContinuousClock.now + .milliseconds(2)
+            guard let tree = editor.syntaxAnalysis.treeForEdit(in: source, language: language,
+                                                               length: text.length, deadline: deadline),
+                  let brackets = tree.bracketContext() else { return false }
+            context = brackets
+        } else {
+            guard let analysis = SyntaxEngine.analysis(in: source, language: language) else { return false }
+            context = analysis.brackets
+        }
+        let current = BracketMatching(text: source, language: language, ignoredRanges: context.ignoredRanges,
+                                      scope: editor.focusRanges,
+                                      embeddedLanguages: context.embeddedLanguages.map { ($0.range, $0.language) })
+        return positions.contains { current.hasUnmatchedCloser(for: opening, at: $0) }
+    }
+
     private func updateScope(_ ranges: [NSRange]?) {
         if scope != ranges {
             scope = ranges

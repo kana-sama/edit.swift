@@ -127,6 +127,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     private var markdownToolTipTags: [NSView.ToolTipTag] = []
     var languageDefinitionLinkRange: NSRange? { languageInteractionEnabled ? languageInteraction.linkRange : nil }
     var preferredLineEnding = "\n"
+    private(set) var indentationSettings = Indentation.standard
     var syntaxLanguage: SyntaxLanguage = .plainText
 
     var hasBufferFocus: Bool { window?.isKeyWindow == true && window?.firstResponder === self }
@@ -395,9 +396,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         }
         let selection = selectedRange()
         if selection.length == 0 {
-            replace(selection, with: LineEditing.spacesToNextTabStop(in: text, at: selection.location), coalesce: true)
+            let edit = LineEditing.tab(in: text, at: selection.location, settings: indentationSettings, language: syntaxLanguage)
+            replace(edit.range, with: edit.text, coalesce: true)
         } else {
-            apply(LineEditing.indent(text, selection: selection, outdent: false))
+            apply(LineEditing.indent(text, selection: selection, outdent: false, settings: indentationSettings))
         }
     }
 
@@ -422,7 +424,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             super.insertNewline(sender)
             return
         }
-        let edit = LineEditing.newline(text, selection: selectedRange(), separator: preferredLineEnding)
+        let edit = LineEditing.newline(text, selection: selectedRange(), separator: preferredLineEnding,
+                                       settings: indentationSettings, language: syntaxLanguage)
         if edit.selection.location == edit.range.location + edit.replacement.utf16.count {
             replace(edit.range, with: edit.replacement, coalesce: true)
         } else {
@@ -435,7 +438,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         guard prepareProjectedLineCommand() else { return }
         if editMultipleLines(.indent(outdent: false)) { return }
         guard let text = textStorage?.mutableString else { return }
-        apply(LineEditing.indent(text, selection: selectedRange(), outdent: false))
+        apply(LineEditing.indent(text, selection: selectedRange(), outdent: false, settings: indentationSettings))
     }
 
     @objc func toggleLineComments(_ sender: Any?) {
@@ -451,7 +454,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         guard prepareProjectedLineCommand() else { return }
         if editMultipleLines(.indent(outdent: true)) { return }
         guard let text = textStorage?.mutableString else { return }
-        apply(LineEditing.indent(text, selection: selectedRange(), outdent: true))
+        apply(LineEditing.indent(text, selection: selectedRange(), outdent: true, settings: indentationSettings))
     }
 
     @objc func moveLinesUp(_ sender: Any?) {
@@ -697,9 +700,14 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         let closers = Set(automaticPairs.map(\.closing))
         let smart = ranges.map { range in
             let canSkip = closers.contains(range.location) && focusAllowsEdits([NSRange(location: range.location, length: 1)])
-            return TypingDelimiters.edit(for: key, in: text, selection: range, canSkip: canSkip)
+            return TypingDelimiters.edit(for: key, in: text, selection: range, canSkip: canSkip, language: syntaxLanguage)
         }
+        if ranges.contains(where: { $0.length > 0 }),
+           !zip(ranges, smart).allSatisfy({ $0.0.length > 0 && $0.1 != nil }) { return false }
         guard smart.contains(where: { $0 != nil }) else { return false }
+        if let opening = key.utf16.first, TypingDelimiters.brackets[opening] != nil,
+           smart.contains(where: { $0?.tracksPair == true }),
+           bracketNavigation.hasUnmatchedCloser(for: opening, at: ranges.map(\.location), in: text) { return false }
         let localEdits = zip(ranges, smart).map { range, result in
             result?.edit ?? LineEditing.Edit(range: range, replacement: key,
                                              selection: NSRange(location: range.location + 1, length: 0))
@@ -1202,9 +1210,15 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         let horizontalOrigin: CGFloat
     }
 
-    private func setFontSize(_ size: CGFloat) {
+    func setIndentation(_ settings: Indentation, preservingViewport: Bool = true) {
+        let changedWidth = settings.width != indentationSettings.width
+        indentationSettings = settings
+        if changedWidth { setFontSize(fontSize, tabWidthChanged: true, preservingViewport: preservingViewport) }
+    }
+
+    private func setFontSize(_ size: CGFloat, tabWidthChanged: Bool = false, preservingViewport: Bool = true) {
         let newSize = min(max(size, 6), 72)
-        let anchor = newSize == fontSize ? nil : zoomAnchor()
+        let anchor = preservingViewport && (newSize != fontSize || tabWidthChanged) ? zoomAnchor() : nil
         fontSize = newSize
         let font = fontSize == Self.defaultFontSize ? Self.defaultFont : Self.codeFont(ofSize: fontSize)
         self.font = font
@@ -1214,7 +1228,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         paragraph.minimumLineHeight = lineHeight
         paragraph.maximumLineHeight = lineHeight
         paragraph.tabStops = []
-        paragraph.defaultTabInterval = (LineEditing.indentUnit as NSString).size(withAttributes: [.font: font]).width
+        paragraph.defaultTabInterval = (String(repeating: " ", count: indentationSettings.width) as NSString)
+            .size(withAttributes: [.font: font]).width
         defaultParagraphStyle = paragraph
         rebuildDiagnosticMessages()
         let range = NSRange(location: 0, length: textStorage?.length ?? 0)

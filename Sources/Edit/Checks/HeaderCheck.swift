@@ -85,9 +85,8 @@ enum HeaderCheck {
                    "place the relative path before the filename and the caret after it (\(path.stringValue), \(pathFrame), \(nameFrame), \(caretFrame), tooltip \(path.toolTip ?? "none"))")
         try expect(caret.stringValue == "2:13" && !caret.isHidden,
                    "show the one-based caret position in the source (\(caret.stringValue))")
-        try expect(folderTitle.action == nil && fileTitle.action == nil && icon.action == nil
-                   && folderTitle.mouseDownCanMoveWindow && fileTitle.mouseDownCanMoveWindow && icon.mouseDownCanMoveWindow,
-                   "the title parts leave primary mouse events available for moving the window")
+        try expect(folderTitle.mouseDownCanMoveWindow && icon.mouseDownCanMoveWindow,
+                   "the folder and icon leave primary mouse events available for moving the window")
         guard let frameView = document.window.contentView?.superview else { throw Failure("the title is in a window frame") }
         for view in [folderTitle, icon, fileTitle] as [NSView] {
             let center = NSPoint(x: view.bounds.midX, y: view.bounds.midY)
@@ -184,6 +183,57 @@ enum HeaderCheck {
         try FileManager.default.createDirectory(at: widthFolder, withIntermediateDirectories: true)
         try await checkFileTitleWidth(in: app, folder: widthFolder)
         try await checkMetadataTransition(in: app, folder: folder, source: source, text: sourceText, root: root)
+        try await checkIndentationSettings(in: app, root: root)
+    }
+
+    private static func checkIndentationSettings(in app: Edit, root: URL) async throws {
+        let spaces = root.appending(path: "Spaces.txt")
+        let tabs = root.appending(path: "Tabs.txt")
+        let sample = "root\n  child\n    grandchild\n"
+        try sample.write(to: spaces, atomically: true, encoding: .utf8)
+        try "root\n\tchild\n\t\tgrandchild\n".write(to: tabs, atomically: true, encoding: .utf8)
+        let document = app.makeDocument()
+        defer { document.window.close() }
+        _ = try await app.openFile(spaces, in: document)
+        let window = document.window
+        let editor = document.editor
+        try expect(editor.indentationSettings == Indentation(style: .spaces, width: 2), "detect two-space indentation on open")
+        window.layoutIfNeeded()
+        guard let filename = fileLabel(in: window) else { throw Failure("file settings have a filename anchor") }
+        let point = filename.convert(NSPoint(x: filename.bounds.midX, y: filename.bounds.midY), to: nil)
+        try expect(EditApplication.clickCursor(in: window, at: point) === NSCursor.pointingHand,
+                   "the actionable filename displays the pointing hand")
+        guard let click = NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [],
+                                             timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                             eventNumber: 1, clickCount: 1, pressure: 1) else {
+            throw Failure("create a primary click on the filename")
+        }
+        NSApp.sendEvent(click)
+        func find(_ identifier: String, in view: NSView) -> NSPopUpButton? {
+            if view.identifier?.rawValue == identifier { return view as? NSPopUpButton }
+            return view.subviews.lazy.compactMap { find(identifier, in: $0) }.first
+        }
+        guard let content = document.titleBar.indentationPopoverForCheck,
+              let style = find("Edit.FileSettings.IndentStyle", in: content),
+              let width = find("Edit.FileSettings.TabWidth", in: content) else {
+            throw Failure("clicking the filename opens indentation settings")
+        }
+        try expect(!window.isVisible && style.indexOfSelectedItem == 0 && width.selectedTag() == 2, "show the detected settings without activating the test window")
+        width.selectItem(withTag: 3)
+        _ = width.sendAction(width.action, to: width.target)
+        style.selectItem(at: 2)
+        _ = style.sendAction(style.action, to: style.target)
+        try expect(editor.indentationSettings == Indentation(style: .tabs, width: 3) &&
+                   editor.string == sample && !window.isDocumentEdited,
+                   "setting file indentation changes the editor without rewriting the file")
+        _ = try await app.openFile(tabs, in: document)
+        try expect(editor.indentationSettings == Indentation(style: .tabs, width: 4), "detect tabs independently in a different file")
+        _ = try await app.openFile(spaces, in: document)
+        try expect(editor.indentationSettings == Indentation(style: .tabs, width: 3), "restore the file override when reopened")
+        style.selectItem(at: 0)
+        _ = style.sendAction(style.action, to: style.target)
+        try expect(document.indentationOverride == nil && editor.indentationSettings == Indentation(style: .spaces, width: 2),
+                   "reset a manual override to automatic indentation")
     }
 
     private static func checkMetadataTransition(in app: Edit, folder: URL, source: URL, text: String, root: URL) async throws {
@@ -196,6 +246,7 @@ enum HeaderCheck {
         _ = try await app.openFile(folder, in: document)
         _ = try await app.openFile(outside, in: document)
         let editor = document.editor
+        document.chooseIndentation(Indentation(style: .tabs, width: 8))
         let left = NSRange(location: 1, length: 0)
         let right = NSRange(location: ("First\r\n👍🏽e\u{301}\t" as NSString).length, length: 1)
         editor.setCaretSelections([left, right], primaryAffinity: .upstream)
@@ -220,13 +271,15 @@ enum HeaderCheck {
         try await waitFor("hold an incoming file before presentation") { staged }
         window.layoutIfNeeded()
         try expect(editor.string == text && fileLabel(in: window)?.stringValue == "Main.swift" &&
-                   fileField("Path", in: window)?.stringValue == "Sources/" && fileField("Caret", in: window)?.stringValue == "4:1",
+                   fileField("Path", in: window)?.stringValue == "Sources/" && fileField("Caret", in: window)?.stringValue == "4:1" &&
+                   editor.indentationSettings == Indentation(style: .spaces, width: 4),
                    "the pending switch keeps the previous text, path, filename, and caret together")
         release.finish()
         _ = try await opening.value
         window.layoutIfNeeded()
         try expect(editor.string == outsideText && fileLabel(in: window)?.stringValue == "Outside.txt" &&
-                   fileField("Path", in: window)?.stringValue == prefix && fileField("Caret", in: window)?.stringValue == "2:5",
+                   fileField("Path", in: window)?.stringValue == prefix && fileField("Caret", in: window)?.stringValue == "2:5" &&
+                   editor.indentationSettings == Indentation(style: .tabs, width: 8),
                    "the destination shows its own path and restored position (\(fileField("Caret", in: window)?.stringValue ?? "none"))")
         editor.insertNewline(nil)
         let afterEdit = fileField("Caret", in: window)?.stringValue

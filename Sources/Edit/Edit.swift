@@ -69,6 +69,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     lazy var draftRecovery = DraftRecoveryStore(directory: storageFolder.appending(path: "DraftRecovery", directoryHint: .isDirectory))
     lazy var syntaxOverrides = SyntaxLanguageOverrides(defaults: isAgentCheck ? nil : .standard)
     lazy var fileWordWrap = FileWordWrap(defaults: isAgentCheck ? nil : .standard)
+    lazy var fileIndentation = FileIndentationOverrides(defaults: isAgentCheck ? nil : .standard)
     lazy var workspaceLanguageServers = WorkspaceLanguageServers(defaults: isAgentCheck ? nil : .standard)
     lazy var workspaceHighlighting = WorkspaceHighlighting(defaults: isAgentCheck ? nil : .standard)
     lazy var workspaceFindPreferences = WorkspaceFindPreferences(defaults: isAgentCheck ? nil : .standard)
@@ -308,12 +309,17 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
 
     private func routeTitleClick(_ event: NSEvent) -> NSEvent? {
         let modifiers = event.modifierFlags.intersection([.control, .command, .option, .shift])
-        guard !isQuitting, let window = event.window,
-              event.type == .rightMouseDown || (event.type == .leftMouseDown && modifiers == .control) else { return event }
+        guard !isQuitting, let window = event.window else { return event }
+        let secondary = event.type == .rightMouseDown || (event.type == .leftMouseDown && modifiers == .control)
+        let primary = event.type == .leftMouseDown && modifiers.isEmpty && event.clickCount == 1
+        guard primary || secondary else { return event }
 
         // AppKit can host the fullscreen toolbar in a different window from the document.
         for document in documents {
-            if document.titleBar.handleSecondaryClick(at: event.locationInWindow, in: window) { return nil }
+            let handled = primary
+                ? document.titleBar.handlePrimaryClick(at: event.locationInWindow, in: window)
+                : document.titleBar.handleSecondaryClick(at: event.locationInWindow, in: window)
+            if handled { return nil }
         }
         return event
     }

@@ -529,7 +529,8 @@ enum SyntaxCheck {
             defer { NotificationCenter.default.removeObserver(movement) }
             editor.doCommand(by: #selector(NSTextView.insertNewline(_:)))
             try await Task.sleep(for: .milliseconds(100))
-            for _ in 0..<5 {
+            // The first Backspace removes the generated indentation as one step.
+            for _ in 0..<2 {
                 editor.doCommand(by: #selector(NSTextView.deleteBackward(_:)))
                 try await Task.sleep(for: .milliseconds(30))
             }

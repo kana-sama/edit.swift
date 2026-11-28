@@ -57,12 +57,12 @@ struct BracketMatching: Sendable {
         var enclosingOpening: Int?
     }
 
-    private struct OpeningKind: Hashable {
+    private struct OpeningKind: Hashable, Sendable {
         let kind: Kind
         let region: Int
     }
 
-    private struct LanguageRun {
+    private struct LanguageRun: Sendable {
         let end: Int
         let region: Int
         let delimiters: [UInt16: [Delimiter]]
@@ -71,6 +71,7 @@ struct BracketMatching: Sendable {
     private struct Block: Sendable {
         let range: NSRange
         let tokens: [Token]
+        let lastUnmatchedCloser: [OpeningKind: Int]
 
         func firstTokenStarting(after position: Int) -> Int {
             var lower = 0
@@ -111,6 +112,7 @@ struct BracketMatching: Sendable {
     }
 
     private let blocks: [Block]
+    private let languageRuns: [LanguageRun]
 
     init(
         text: String, language: SyntaxLanguage, ignoredRanges: [NSRange], scope: [NSRange]? = nil,
@@ -120,16 +122,23 @@ struct BracketMatching: Sendable {
         let masks = Self.mergeMasks(ignoredRanges, length: units.count)
         let ranges = scope ?? [NSRange(location: 0, length: units.count)]
         let runs = Self.languageRuns(in: units.count, host: language, embedded: embeddedLanguages)
+        languageRuns = runs
         var blocks: [Block] = []
         var maskIndex = 0
         var languageIndex = 0
         for range in ranges where Self.isValid(range, length: units.count) {
             if Task.isCancelled { break }
-            let tokens = Self.scan(units, in: range, masks: masks, maskIndex: &maskIndex,
-                                   runs: runs, languageIndex: &languageIndex)
-            blocks.append(Block(range: range, tokens: tokens))
+            blocks.append(Self.scan(units, in: range, masks: masks, maskIndex: &maskIndex,
+                                    runs: runs, languageIndex: &languageIndex))
         }
         self.blocks = blocks
+    }
+
+    func hasUnmatchedCloser(for opening: UInt16, at position: Int) -> Bool {
+        guard let block = block(at: position), let run = languageRuns.first(where: { $0.end > position }),
+              let delimiter = run.delimiters[opening]?.first(where: { $0.opens && $0.units.count == 1 }),
+              let last = block.lastUnmatchedCloser[OpeningKind(kind: delimiter.kind, region: run.region)] else { return false }
+        return last >= position
     }
 
     func pair(at position: Int) -> Pair? {
@@ -176,14 +185,15 @@ struct BracketMatching: Sendable {
     private static func scan(
         _ units: [UInt16], in range: NSRange, masks: [NSRange], maskIndex: inout Int,
         runs: [LanguageRun], languageIndex: inout Int
-    ) -> [Token] {
+    ) -> Block {
         var tokens: [Token] = []
+        var lastUnmatchedCloser: [OpeningKind: Int] = [:]
         var openings: [(index: Int, kind: OpeningKind)] = []
         var openingCounts: [OpeningKind: Int] = [:]
         var position = range.location
         var iterations = 0
         while position < range.upperBound {
-            if iterations.isMultiple(of: 4_096), Task.isCancelled { return [] }
+            if iterations.isMultiple(of: 4_096), Task.isCancelled { break }
             iterations += 1
             while maskIndex < masks.count, masks[maskIndex].upperBound <= position { maskIndex += 1 }
             let nextMask = maskIndex < masks.count ? masks[maskIndex] : nil
@@ -217,19 +227,21 @@ struct BracketMatching: Sendable {
                 // Closing an ancestor leaves any unfinished inner openings available to Go to Bracket.
                 for item in openings[matching...] { openingCounts[item.kind, default: 0] -= 1 }
                 openings.removeLast(openings.count - matching)
+            } else {
+                lastUnmatchedCloser[kind] = marker.location
             }
         }
 
         var completeOpenings: [Int] = []
         for index in tokens.indices {
-            if index.isMultiple(of: 4_096), Task.isCancelled { return [] }
+            if index.isMultiple(of: 4_096), Task.isCancelled { break }
             if let partner = tokens[index].partner {
                 if partner > index { completeOpenings.append(index) }
                 else { completeOpenings.removeLast() }
             }
             tokens[index].enclosingOpening = completeOpenings.last
         }
-        return tokens
+        return Block(range: range, tokens: tokens, lastUnmatchedCloser: lastUnmatchedCloser)
     }
 
     private static func languageRuns(

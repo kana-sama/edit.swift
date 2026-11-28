@@ -6,6 +6,8 @@ Show the active end of the primary selection as `line:column` in secondary text 
 
 Keep the filename readable as the window or its sidebars resize. Cap the path width, truncate its beginning to preserve the directories closest to the file, and hide it when too little of it fits. Keep the coordinate pair whole while space allows. The path and coordinates yield before the filename and existing header controls. Keep outgoing metadata with its content during a document switch, and show the incoming metadata with the new presentation and its restored selection.
 
+Click the filename in the source editor to open [file indentation settings](../smart-typing/spec.md#file-indentation). Secondary click opens the sibling-file menu when the document has a file path.
+
 ## Acceptance
 
 - Open a nested file in a folder window, a file at its root, and a file outside it. Check their directory prefixes and the full path on hover. Resize the editor pane in both directions while a long path is visible.

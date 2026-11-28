@@ -66,19 +66,20 @@ enum MultiCaretEditing {
         return result
     }
 
-    static func indentation(in text: NSString, for ranges: [NSRange], outdent: Bool) -> [Replacement] {
+    static func indentation(in text: NSString, for ranges: [NSRange], outdent: Bool, settings: Indentation) -> [Replacement] {
         var edits: [Replacement] = []
         var seen: Set<Int> = []
+        let unit = outdent ? "" : settings.whitespace(to: settings.width)
         for range in ordered(ranges) {
             guard let lines = LineEditing.affectedLines(in: text, selection: range) else { continue }
             var start = lines.start
             repeat {
                 let line = LineEditing.line(at: start, in: text)
                 if seen.insert(start).inserted {
-                    let removed = outdent ? LineEditing.outdentLength(in: line, text: text) : 0
+                    let removed = outdent ? LineEditing.outdentLength(in: line, text: text, width: settings.width) : 0
                     if !outdent || removed > 0 {
                         edits.append(Replacement(
-                            range: NSRange(location: start, length: removed), text: outdent ? "" : LineEditing.indentUnit
+                            range: NSRange(location: start, length: removed), text: unit
                         ))
                     }
                 }

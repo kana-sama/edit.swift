@@ -37,6 +37,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     private var languageServerVisible = false
     private let dividerContinuation = TitleBarDividers(frame: .zero)
     private var siblingRequest: Task<Void, Never>?
+    private var indentationPopover: FileIndentationPopover?
     private(set) var agentContextMenu: NSMenu?
     private(set) lazy var toolbar = makeToolbar()
 
@@ -415,6 +416,16 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         }
         fileItem?.isHidden = document.showsEmptyFolder
         fileLabel?.stringValue = document.displayName
+        if document.canChooseIndentation {
+            fileLabel?.press = { [weak self] in self?.showIndentationPopover() ?? false }
+            fileLabel?.setAccessibilityRole(.button)
+            fileLabel?.setAccessibilityHelp("File indentation settings")
+        } else {
+            fileLabel?.press = nil
+            fileLabel?.setAccessibilityRole(.staticText)
+            fileLabel?.setAccessibilityHelp(nil)
+            closeIndentationPopover()
+        }
         let url = document.scratchFile == nil ? document.fileIconURL : nil
         fileLabel?.toolTip = url?.path ?? document.displayName
         pathLabel?.toolTip = url?.path
@@ -538,27 +549,56 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
 
     func handleSecondaryClick(at location: NSPoint, in window: NSWindow) -> Bool {
         guard document.window.attachedSheet == nil else { return false }
-
-        func hits(_ view: NSView) -> Bool {
-            guard view.window === window, !view.isHiddenOrHasHiddenAncestor else { return false }
-            let point = view.convert(location, from: nil)
-            return view.bounds.contains(point) && view.visibleRect.contains(point)
-        }
-
         let show: () -> Void
-        if let folderLabel, document.folderURL != nil, hits(folderLabel) {
+        if let folderLabel, document.folderURL != nil, hits(folderLabel, at: location, in: window) {
             show = { self.showFolderMenu(from: folderLabel) }
-        } else if let languageIcon, document.hasTextDocument, hits(languageIcon) {
+        } else if let languageIcon, document.hasTextDocument, hits(languageIcon, at: location, in: window) {
             show = { self.showLanguagePicker() }
-        } else if let fileLabel, document.displayedFileURL != nil, hits(fileLabel) {
+        } else if let fileLabel, document.displayedFileURL != nil, hits(fileLabel, at: location, in: window) {
             show = { self.showSiblingMenu(from: fileLabel) }
         } else {
             return false
         }
+        closeIndentationPopover()
         app.dismissControlForTitleClick()
         show()
         return true
     }
+
+    func handlePrimaryClick(at location: NSPoint, in window: NSWindow) -> Bool {
+        guard let fileLabel, hits(fileLabel, at: location, in: window) else { return false }
+        return showIndentationPopover()
+    }
+
+    private func hits(_ view: NSView, at location: NSPoint, in window: NSWindow) -> Bool {
+        guard view.window === window, !view.isHiddenOrHasHiddenAncestor else { return false }
+        let point = view.convert(location, from: nil)
+        return view.bounds.contains(point) && view.visibleRect.contains(point)
+    }
+
+    private func showIndentationPopover() -> Bool {
+        guard document.canChooseIndentation, let fileLabel, fileLabel.window != nil,
+              !fileLabel.isHiddenOrHasHiddenAncestor else { return false }
+        siblingRequest?.cancel()
+        app.dismissControlForTitleClick()
+        if indentationPopover == nil {
+            indentationPopover = FileIndentationPopover { [weak self] in self?.document.chooseIndentation($0) }
+        }
+        updateIndentationPopover()
+        indentationPopover?.toggle(at: fileLabel, testing: app.isAgentCheck)
+        return true
+    }
+
+    func updateIndentationPopover() {
+        indentationPopover?.update(effective: document.editor.indentationSettings, detected: document.detectedIndentation,
+                                    override: document.indentationOverride)
+    }
+
+    func closeIndentationPopover() { indentationPopover?.close() }
+
+#if EDIT_AGENT_CHECKS
+    var indentationPopoverForCheck: NSView? { indentationPopover?.contentForCheck }
+#endif
 
     private func showFolderMenu(from label: TitleBarLabel) {
         siblingRequest?.cancel()
@@ -645,8 +685,11 @@ final class TitleBarDividers: NSView {
 }
 
 @MainActor
-private final class TitleBarLabel: NSTextField {
-    override var mouseDownCanMoveWindow: Bool { true }
+final class TitleBarLabel: NSTextField {
+    var press: (() -> Bool)?
+    override var mouseDownCanMoveWindow: Bool { press == nil }
+
+    override func accessibilityPerformPress() -> Bool { press?() ?? super.accessibilityPerformPress() }
 }
 
 @MainActor

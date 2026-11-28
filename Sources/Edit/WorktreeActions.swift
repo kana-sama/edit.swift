@@ -354,6 +354,7 @@ final class WorktreeActions {
     private func retarget(_ move: WorktreeFileOperations.Transfer, revealInWorktree: Bool = true) {
         app.retargetNavigation(from: move.source, to: move.destination)
         app.fileWordWrap.move(from: move.source, to: move.destination)
+        app.fileIndentation.move(from: move.source, to: move.destination)
         for document in app.documents {
             document.retargetMovedFile(from: move.source, to: move.destination, revealInWorktree: revealInWorktree)
         }

@@ -139,6 +139,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     private var navigationBufferID = UUID()
     private var navigationSelectionAnchor: LineEditing.LineAnchor?
     private var restoringNavigationSelection = false
+    private(set) var detectedIndentation = Indentation.standard
+    private var untitledIndentation: Indentation?
 
     private unowned let app: Edit
     private(set) var fileURL: URL? {
@@ -388,6 +390,33 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
 
     private var wordWrapFileURL: URL? {
         hasTextDocument ? fileURL ?? sourceControlRevision?.url : nil
+    }
+
+    var canChooseIndentation: Bool { hasEditableTextDocument && !isShowingMarkdownPreview && window.attachedSheet == nil }
+
+    var indentationOverride: Indentation? {
+        if let fileURL { return app.fileIndentation[fileURL] }
+        return untitledIndentation
+    }
+
+    func chooseIndentation(_ settings: Indentation?) {
+        guard canChooseIndentation else { return }
+        if let fileURL {
+            app.fileIndentation[fileURL] = settings
+            for document in app.documents where document.fileURL == fileURL {
+                if settings == nil { document.detectedIndentation = Indentation.detect(in: document.editor.string as NSString) }
+                document.updateIndentation()
+            }
+        } else {
+            untitledIndentation = settings
+            if settings == nil { detectedIndentation = Indentation.detect(in: editor.string as NSString) }
+            updateIndentation()
+        }
+    }
+
+    private func updateIndentation(preservingViewport: Bool = true) {
+        editor.setIndentation(indentationOverride ?? detectedIndentation, preservingViewport: preservingViewport)
+        titleBar.updateIndentationPopover()
     }
 
     func toggleWordWrap() {
@@ -1625,6 +1654,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         let wasUntitled = fileURL == nil
         let changedPath = fileURL != file.url
         if changedPath {
+            titleBar.closeIndentationPopover()
             clearSourceControlFile()
             discardDraftCheckpoint()
             rememberFilePosition()
@@ -1639,6 +1669,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             app.syntaxOverrides.set(manualSyntaxLanguage, for: fileURL)
             if wasUntitled && editor.wrapsWords { app.fileWordWrap.set(true, for: file.url) }
             editor.setWordWrap(app.fileWordWrap.isEnabled(for: file.url), preservingViewport: true)
+            if wasUntitled, let untitledIndentation { app.fileIndentation[file.url] = untitledIndentation }
+            untitledIndentation = nil
+            detectedIndentation = Indentation.detect(in: editor.string as NSString)
+            updateIndentation()
         }
         if resolvedSyntaxLanguage != previousLanguage {
             refreshSyntax(immediate: true)
@@ -2422,6 +2456,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         confirmedConflicts: [JJConflict] = [], restoredConflicts: [JJConflictEdit] = [], revealInWorktree: Bool = true,
         preservingConflictPresentation: Bool = false
     ) {
+        titleBar.closeIndentationPopover()
+        untitledIndentation = nil
         if editor.renameRange != nil { _ = editor.onCancelSymbolRename?() }
         navigationSelectionAnchor = nil
         titleBar.invalidateCaretLine(from: 0)
@@ -2442,6 +2478,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.bracketNavigation.reset()
         editor.occurrenceHighlighting.reset()
         editor.string = projection.text
+        detectedIndentation = Indentation.detect(in: text as NSString)
+        updateIndentation(preservingViewport: false)
         editor.conflictEdits = projection.edits
         refreshSyntax(immediate: true, preparedSyntax: projection.text.utf8.elementsEqual(text.utf8) ? preparedSyntax : nil,
                       allowsLSP: false)
