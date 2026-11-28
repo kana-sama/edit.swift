@@ -232,10 +232,10 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
     func performFind(_ command: FindCommand) {
         switch command {
         case .find:
-            if searchPanel().selectScope(.buffer) {
-                rememberFocus()
-                searchPanel().openField(replace: false, reveal: revealSearch)
-            } else { toggleFocus(of: .search) }
+            rememberFocus()
+            let search = searchPanel()
+            search.selectScope(.buffer, startsSearch: false)
+            search.openField(replace: false, reveal: revealSearch)
         case .findWorkspace:
             findInWorkspace()
         case .replace:
@@ -299,7 +299,7 @@ final class DocumentSidebar: NSObject, NSMenuDelegate {
         }
         rememberFocus()
         switch mode {
-        case .search: searchPanel().focusSearch(reveal: revealSearch)
+        case .search: searchPanel().openField(replace: false, reveal: revealSearch)
         case .worktree: showWorktree()
         case .scratches: showScratches()
         case .sourceControl: showSourceControl()

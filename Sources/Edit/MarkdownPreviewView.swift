@@ -12,6 +12,8 @@ final class MarkdownPreviewView: NSView, WKNavigationDelegate, NSSearchFieldDele
 
     private let webView: WKWebView
     private let searchField = NSSearchField()
+    private let searchEditor = InputFieldEditor.make()
+    private var searchOpening = 0
     private let bridge = Bridge()
     private var isReady = false
     private var pending: (() -> Void)?
@@ -45,6 +47,7 @@ final class MarkdownPreviewView: NSView, WKNavigationDelegate, NSSearchFieldDele
 
         searchField.translatesAutoresizingMaskIntoConstraints = false
         searchField.placeholderString = "Find in Preview"
+        searchField.cell?.allowsUndo = true
         searchField.sendsSearchStringImmediately = true
         searchField.delegate = self
         searchField.isHidden = true
@@ -79,6 +82,7 @@ final class MarkdownPreviewView: NSView, WKNavigationDelegate, NSSearchFieldDele
 
     func dismissFind() -> Bool {
         guard !searchField.isHidden else { return false }
+        searchOpening += 1
         searchField.isHidden = true
         window?.makeFirstResponder(webView)
         return true
@@ -86,9 +90,27 @@ final class MarkdownPreviewView: NSView, WKNavigationDelegate, NSSearchFieldDele
 
     var isFinding: Bool { !searchField.isHidden && searchField.currentEditor() != nil }
 
+    func fieldEditor(for client: Any?) -> NSTextView? {
+        (client as? NSSearchField) === searchField ? searchEditor : nil
+    }
+
     func showFind() {
+        let seedsQuery = containsResponder(window?.firstResponder) && !isFinding
+        searchOpening += 1
+        let opening = searchOpening
+        if seedsQuery {
+            let revision = revision
+            webView.evaluateJavaScript("window.getSelection()?.toString() ?? ''") { [weak self] value, error in
+                guard let self, error == nil, opening == searchOpening, revision == self.revision, isFinding,
+                      let selected = value as? String, !selected.isEmpty else { return }
+                let query = selected.components(separatedBy: .newlines).joined(separator: " ")
+                searchEditor.replaceAllTextUndoably(with: query)
+                searchEditor.selectAll(nil)
+            }
+        }
         searchField.isHidden = false
         window?.makeFirstResponder(searchField)
+        searchEditor.breakUndoCoalescing()
         searchField.selectText(nil)
     }
 
@@ -100,7 +122,10 @@ final class MarkdownPreviewView: NSView, WKNavigationDelegate, NSSearchFieldDele
         webView.find(searchField.stringValue, configuration: configuration) { _ in }
     }
 
-    func controlTextDidChange(_ notification: Notification) { find() }
+    func controlTextDidChange(_ notification: Notification) {
+        searchOpening += 1
+        find()
+    }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         switch commandSelector {

@@ -13,14 +13,15 @@ final class FindInput: NSView, NSTextViewDelegate {
     var onReturn: (() -> Void)?
     var onEscape: (() -> Void)?
 
-    var value: String {
-        get { input.string }
-        set {
-            guard input.string != newValue else { return }
-            input.string = newValue
-            fieldUndo.removeAllActions()
-            updateContents()
-        }
+    var value: String { input.string }
+
+    // Use this for an initial value or a different editing context, not for commands.
+    func load(_ value: String) {
+        input.breakUndoCoalescing()
+        fieldUndo.removeAllActions()
+        guard input.string != value else { return }
+        input.string = value
+        updateContents()
     }
 
     init(name: String, options: [NSButton] = [], singleLine: Bool = false) {
@@ -178,6 +179,7 @@ final class FindInput: NSView, NSTextViewDelegate {
         if inputHeight.constant != newHeight { inputHeight.constant = newHeight }
     }
 }
+
 final class FindFieldTextView: NSTextView {
     var placeholder = ""
     var singleLine = false

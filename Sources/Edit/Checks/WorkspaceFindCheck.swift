@@ -91,11 +91,21 @@ enum WorkspaceFindCheck {
         ignore.performClick(nil)
         try await waitFor("restore the ignore rules") { rows(in: table).count == 4 }
 
-        set("[", in: include)
+        // The synthetic edits and the menu command need their own user-event groups.
+        let includeUndo = try require(include.undoManager, "Include has its own Undo history")
+        include.breakUndoCoalescing()
+        includeUndo.removeAllActions()
+        includeUndo.groupsByEvent = false
+        func editInclude(_ value: String) {
+            includeUndo.beginUndoGrouping()
+            include.replaceAllTextUndoably(with: value)
+            includeUndo.endUndoGrouping()
+        }
+        editInclude("[")
         try await waitFor("report malformed globs and remove stale results") {
             rows(in: table).isEmpty && fieldValue("Invalid Include pattern", in: window)
         }
-        set("*.swift, ./visible.tmp", in: include)
+        editInclude("*.swift, ./visible.tmp")
         try await waitFor("include multiple glob patterns") { rows(in: table).count == 3 }
         set("*.log", in: exclude)
 
@@ -113,11 +123,22 @@ enum WorkspaceFindCheck {
         let menu = try require(document.sidebar.worktree?.menu(at: sourcesRow), "open the folder context menu")
         let findHere = menu.indexOfItem(withTitle: "Find Here")
         try expect(findHere >= 0, "Find Here appears for a Worktree folder")
+        includeUndo.beginUndoGrouping()
         menu.performActionForItem(at: findHere)
+        includeUndo.endUndoGrouping()
+        includeUndo.groupsByEvent = true
         try await waitFor("Find Here searches only Sources and preserves Exclude") {
             rows(in: table).count == 2 && include.string == "./Sources/**" && exclude.string == "*.log"
         }
         try expect(document.findSettings.query == "value" && window.firstResponder === finder, "Find Here preserves the query and focuses Find")
+        window.makeFirstResponder(include)
+        let didUndo = include.tryToPerform(Selector(("undo:")), with: nil)
+        try expect(didUndo && include.string == "*.swift, ./visible.tmp" && exclude.string == "*.log" && finder.string == "value",
+                   "Undo in Include restores the filter overwritten by Find Here; got \(include.string.debugDescription), handled: \(didUndo)")
+        try await waitFor("the restored Include reruns Workspace search") { rows(in: table).count == 3 }
+        try expect(include.tryToPerform(Selector(("redo:")), with: nil) && include.string == "./Sources/**",
+                   "Redo restores the Find Here filter")
+        try await waitFor("the Find Here results return on Redo") { rows(in: table).count == 2 }
         let split = document.documentSplitView
         let sidebar = try require(window.contentViewController as? NSSplitViewController, "a native split sidebar")
         split.setPosition(sidebar.splitViewItems[0].minimumThickness, ofDividerAt: 0)
@@ -213,8 +234,9 @@ enum WorkspaceFindCheck {
 
         document.performFind(.find)
         try expect(document.findScope == .buffer && scope.selectedSegment == 0 &&
-                   include.isHiddenOrHasHiddenAncestor && exclude.isHiddenOrHasHiddenAncestor,
-                   "Command-F chooses Current Buffer and hides the filters")
+                   include.isHiddenOrHasHiddenAncestor && exclude.isHiddenOrHasHiddenAncestor &&
+                   window.firstResponder === finder && finder.selectedRange() == NSRange(location: 0, length: finder.string.utf16.count),
+                   "Command-F chooses Current Buffer, hides the filters, and selects the query")
         try expect(scope.hasLocalSlideForCheck(from: 1, to: 0), "slide from Workspace to Current Buffer")
         try await waitFor("let the Current Buffer highlight settle") { !scope.selectionIsAnimatingForCheck }
         finder.insertText("live", replacementRange: NSRange(location: 0, length: finder.string.utf16.count))

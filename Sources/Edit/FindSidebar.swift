@@ -233,8 +233,8 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         regex.state = settings.options.regularExpression ? .on : .off
         updateSearchOptionsAppearance()
 
-        findInput.value = settings.query
-        replaceInput.value = settings.replacement
+        findInput.load(settings.query)
+        replaceInput.load(settings.replacement)
         findInput.onChange = { [weak self] in self?.queryChanged() }
         replaceInput.onChange = { [weak self] in
             guard let self else { return }
@@ -439,56 +439,32 @@ final class FindSidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         results.onEscape = { [weak self] in self?.clearResultFocus() }
     }
 
-    func focusSearch(reveal: (NSView, Bool) -> Void) {
-        if searchesWorkspace { openField(replace: false, reveal: reveal); return }
-        guard selectedMatchLocation != nil else {
-            openField(replace: false, reveal: reveal)
-            return
-        }
-        document.requestAutosave()
-        previewRequested = settings.showsReplacement
-        reveal(results, false)
-        searchWhenShown()
-        if validResults, let selected {
-            selectRow(selected, reveal: true, preview: true)
-        }
-    }
-
     func openField(replace: Bool, seedSelection: Bool = true, reveal: (NSView, Bool) -> Void) {
         document.requestAutosave()
-        var changedQuery = false
-        if seedSelection, let editor = document.window.firstResponder as? EditorTextView, editor === document.editor {
-            let selection = editor.selectedRange()
-            let text = editor.string as NSString
-            if selection.length > 0 && NSMaxRange(selection) <= text.length {
-                let selectedText: String
-                if let ranges = editor.focusRanges {
-                    selectedText = ranges
-                        .map { NSIntersectionRange($0, selection) }
-                        .filter { $0.length > 0 }
-                        .map { text.substring(with: $0) }
-                        .joined(separator: editor.preferredLineEnding)
-                } else {
-                    selectedText = text.substring(with: selection)
-                }
-                let query = settings.options.regularExpression ? NSRegularExpression.escapedPattern(for: selectedText) : selectedText
-                if !query.isEmpty && query != settings.query {
-                    changedQuery = true
-                    settings.query = query
-                    findInput.value = query
-                    resetBufferMatches()
-                }
-            }
+        let seed = seedSelection ? selectedEditorText() : nil
+        let field = replace ? replaceInput.input : findInput.input
+        reveal(field, replace)
+        if let seed {
+            let query = settings.options.regularExpression ? NSRegularExpression.escapedPattern(for: seed) : seed
+            findInput.input.replaceAllTextUndoably(with: query)
         }
-        reveal(replace ? replaceInput.input : findInput.input, replace)
-        if searchesWorkspace {
-            if changedQuery { workspace.invalidate(resetDismissals: true) }
-            workspace.searchWhenShown()
-            return
-        }
-        previewRequested = false
-        if changedQuery || (!validResults && !pending) { requestSearch() }
-        refreshDecorations()
+        field.breakUndoCoalescing()
+        field.selectAll(nil)
+        if !searchesWorkspace { previewRequested = false }
+        searchWhenShown()
+        if !searchesWorkspace { refreshDecorations() }
+    }
+
+    private func selectedEditorText() -> String? {
+        let editor = document.editor
+        guard document.window.firstResponder === editor else { return nil }
+        let selection = editor.selectedRange()
+        let text = editor.string as NSString
+        guard selection.length > 0, NSMaxRange(selection) <= text.length else { return nil }
+        guard let ranges = editor.focusRanges else { return text.substring(with: selection) }
+        let visible = ranges.map { NSIntersectionRange($0, selection) }.filter { $0.length > 0 }
+        guard !visible.isEmpty else { return nil }
+        return visible.map { text.substring(with: $0) }.joined(separator: editor.preferredLineEnding)
     }
 
     func setReplacementVisible(_ visible: Bool) {

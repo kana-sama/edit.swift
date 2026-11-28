@@ -48,7 +48,15 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         }
     }
 
+    @MainActor private final class QuerySession {
+        let editor = InputFieldEditor.make()
+        var value = ""
+    }
+
     private let input = NSTextField()
+    private let querySessions = NSMapTable<DocumentWindow, QuerySession>.weakToStrongObjects()
+    private var querySession: QuerySession?
+    private var isUpdatingQuery = false
     private let leadingIcon = NSImageView()
     private let clearButton = NSButton()
     private let headerHeight: CGFloat = 44
@@ -149,7 +157,11 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
 
         configure(mode)
         let query = retry?.query ?? ""
-        input.stringValue = query
+        let session = querySessions.object(forKey: document) ?? QuerySession()
+        querySessions.setObject(session, forKey: document)
+        querySession = session
+        input.stringValue = session.value
+        updateQuery(query)
         clearButton.isHidden = query.isEmpty
         let searchesFolder = mode == .files && document.folderURL != nil
         let deferred = searchesFolder || mode.isSymbolMode
@@ -168,7 +180,6 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             document.window.addChildWindow(panel, ordered: .above)
             panel.makeKeyAndOrderFront(nil)
             focusQuery()
-            (input.currentEditor() as? NSTextView)?.undoManager?.removeAllActions()
             monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
                 guard let self else { return event }
                 return intercept(event)
@@ -207,12 +218,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         let resetsRows = self.mode != mode && (self.mode.isSymbolMode || mode.isSymbolMode)
         configure(mode)
         if resetsRows { apply([], selected: nil, emptyMessage: nil) }
-        input.stringValue = query
-        focusQuery()
-        if let field = input.currentEditor() as? NSTextView {
-            field.undoManager?.removeAllActions()
-            field.setSelectedRange(NSRange(location: query.utf16.count, length: 0))
-        }
+        updateQuery(query)
         search(preserving: initialID)
         if let document { refreshFiles(for: document) }
     }
@@ -237,6 +243,9 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     func dismiss(restoreFocus: Bool) {
         guard let document else { return }
         self.document = nil
+        querySession?.value = input.stringValue
+        panel.makeFirstResponder(nil)
+        querySession = nil
         opening &+= 1
         generation &+= 1
         request?.cancel()
@@ -376,6 +385,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
         input.font = .systemFont(ofSize: 14)
         input.cell?.usesSingleLineMode = true
         input.cell?.isScrollable = true
+        input.cell?.allowsUndo = true
         input.setAccessibilitySubrole(.searchField)
         input.delegate = self
         leadingIcon.contentTintColor = .secondaryLabelColor
@@ -832,19 +842,33 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
     }
 
     @objc private func clearQuery() {
-        input.stringValue = ""
-        focusQuery()
+        updateQuery("")
         search(preserving: initialID)
     }
 
+    private func updateQuery(_ query: String) {
+        isUpdatingQuery = true
+        defer { isUpdatingQuery = false }
+        focusQuery()
+        if let field = input.currentEditor() as? NSTextView {
+            field.replaceAllTextUndoably(with: query)
+            field.setSelectedRange(NSRange(location: field.string.utf16.count, length: 0))
+        }
+    }
+
+    func windowWillReturnFieldEditor(_ sender: NSWindow, to client: Any?) -> Any? {
+        (client as? NSTextField) === input ? querySession?.editor : nil
+    }
+
     private func focusQuery() {
-        panel.makeFirstResponder(input)
-        (input.currentEditor() as? NSTextView)?.allowsUndo = true
+        if input.currentEditor() == nil { panel.makeFirstResponder(input) }
     }
 
     func controlTextDidChange(_ obj: Notification) {
+        guard !isUpdatingQuery else { return }
+        let editor = input.currentEditor() as? NSTextView
         if mode == .files, let next = Mode(prefix: input.stringValue.first),
-           (input.currentEditor() as? NSTextView)?.hasMarkedText() != true {
+           editor?.hasMarkedText() != true, editor?.undoManager?.isUndoing != true, editor?.undoManager?.isRedoing != true {
             switchMode(to: next, query: String(input.stringValue.dropFirst()))
         } else {
             search()
@@ -905,12 +929,12 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
             dismiss(restoreFocus: true)
             document.toggleSidebarFocus(.sourceControl)
             return nil
-        case ("f", .command), ("e", [.command, .shift]), ("w", [.command, .shift]):
-            let mode: SidebarMode = switch key {
-            case "f": .search
-            case "e": .worktree
-            default: .scratches
-            }
+        case ("f", .command), ("f", [.command, .shift]):
+            dismiss(restoreFocus: true)
+            document.performFind(modifiers.contains(.shift) ? .findWorkspace : .find)
+            return nil
+        case ("e", [.command, .shift]), ("w", [.command, .shift]):
+            let mode: SidebarMode = key == "e" ? .worktree : .scratches
             guard mode != .worktree || document.folderURL != nil else { return nil }
             dismiss(restoreFocus: true)
             document.toggleSidebarFocus(mode)
@@ -1710,6 +1734,7 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
 
     private func checkKeyboardRouting() throws {
         let probe = app.makeDocument()
+        defer { probe.window.close() }
         let text = "one one\ntwo\nthree"
         let selection = NSRange(location: 0, length: 3)
         probe.editor.string = text
@@ -1778,6 +1803,28 @@ final class ControlPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTab
               document === probe, mode == .commands, input.placeholderString == "Search commands",
               input.currentEditor() === query, query.string == "x",
               intercept(key("w", 13, .command)) == nil, document == nil else {
+            throw CheckFailure.shortcutEscaped
+        }
+
+        undo.groupsByEvent = false
+        undo.beginUndoGrouping()
+        show(in: probe, mode: .commands)
+        undo.endUndoGrouping()
+        guard input.currentEditor() === query, query.string.isEmpty,
+              intercept(key("z", 6, .command)) == nil, query.string == "x" else {
+            throw CheckFailure.invalidSearchField
+        }
+        undo.beginUndoGrouping()
+        clearQuery()
+        undo.endUndoGrouping()
+        guard query.string.isEmpty, intercept(key("z", 6, .command)) == nil, query.string == "x" else {
+            throw CheckFailure.invalidSearchField
+        }
+        undo.groupsByEvent = true
+        probe.window.makeFirstResponder(probe.editor)
+        guard intercept(key("f", 3, .command)) == nil, document == nil,
+              let find = probe.window.firstResponder as? FindFieldTextView, find.string == "one",
+              find.selectedRange() == NSRange(location: 0, length: 3) else {
             throw CheckFailure.shortcutEscaped
         }
 

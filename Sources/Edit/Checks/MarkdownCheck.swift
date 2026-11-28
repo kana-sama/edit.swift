@@ -101,8 +101,36 @@ enum MarkdownCheck {
             throw Failure("The preview is missing footnotes, the image control, or code colors.")
         }
         document.performFind(.find)
+        guard let find = document.window.firstResponder as? NSTextView, let undo = find.undoManager,
+              undo !== text.undoManager else {
+            throw Failure("Preview Find has no input focus or Undo history.")
+        }
+        undo.groupsByEvent = false
+        undo.beginUndoGrouping()
+        find.insertText("initial", replacementRange: find.selectedRange())
+        find.breakUndoCoalescing()
+        undo.endUndoGrouping()
+        undo.groupsByEvent = true
+        document.performFind(.find)
+        guard document.window.firstResponder === find, find.selectedRange() == NSRange(location: 0, length: 7) else {
+            throw Failure("Repeating Command-F did not select the whole preview query.")
+        }
         guard preview.isFinding, document.handleMarkdownEscape(), document.isShowingMarkdownPreview else {
             throw Failure("Escape did not dismiss preview Find before leaving preview.")
+        }
+        _ = try await preview.evaluateForCheck("getSelection().selectAllChildren(document.querySelector('h1'))")
+        let heading = try await preview.evaluateForCheck("getSelection().toString()") as? String
+        document.performFind(.find)
+        try await wait("preview Find seeds the rendered selection") {
+            heading?.isEmpty == false && find.string == heading &&
+                find.selectedRange() == NSRange(location: 0, length: find.string.utf16.count)
+        }
+        let didUndo = find.tryToPerform(Selector(("undo:")), with: nil)
+        guard didUndo, find.string == "initial" else {
+            throw Failure("Undo in preview Find should restore the previous query; got \(find.string.debugDescription), handled: \(didUndo), redo: \(undo.canRedo).")
+        }
+        guard document.handleMarkdownEscape(), document.isShowingMarkdownPreview else {
+            throw Failure("Escape did not return to the preview after Undo.")
         }
         _ = try await preview.evaluateForCheck("document.querySelector('[data-task]').click(); document.querySelector('details').open = true;")
         try await wait("source task edit") { text.string.contains("- [x] A task") }

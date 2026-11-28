@@ -73,6 +73,7 @@ enum FindCheck {
         try expect(window.firstResponder === editor, "hiding Find restores editor focus")
         document.performFind(.next)
         try expect(editor.string == "cat cat\ncat", "finding with the sidebar hidden preserves text")
+        try await checkQueryFocusAndUndo(in: app.makeDocument())
         try await checkDismissalDuringDisjointEdits(in: app.makeDocument())
         try await checkReturnNavigation(in: app.makeDocument())
         try await checkResumingResult(in: app)
@@ -83,6 +84,94 @@ enum FindCheck {
         try await checkWindowSession(in: app)
         try expect(NSApplication.shared.activationPolicy() == .prohibited &&
                    !NSApplication.shared.isActive && !window.isVisible, "Find stays in the isolated hidden window")
+    }
+
+    private static func checkQueryFocusAndUndo(in document: DocumentWindow) async throws {
+        let window = document.window
+        let editor = document.editor
+        defer { window.close() }
+        editor.string = "cat cat dog. dog?"
+        window.makeFirstResponder(editor)
+        editor.setSelectedRange(NSRange(location: 0, length: 0))
+        let menu = try require(NSApplication.shared.mainMenu?.items.compactMap(\.submenu).first {
+            $0.item(withTitle: "Find…") != nil
+        }, "Edit menu with Find")
+        let commandF = try require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+            timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "f",
+            charactersIgnoringModifiers: "f", isARepeat: false, keyCode: 3), "Command-F key event")
+        func pressFind() throws {
+            try expect(menu.performKeyEquivalent(with: commandF), "the Find menu handles Command-F")
+        }
+
+        try pressFind()
+        let find = try require(window.firstResponder as? FindFieldTextView, "Command-F focuses the query field")
+        let table = try require(descendant(of: window.contentView, type: SidebarActionResultTable.self), "query results")
+        let undo = try require(find.undoManager, "the query has its own Undo history")
+        try expect(undo !== editor.undoManager, "query Undo is independent of document Undo")
+        // Synthetic key and menu dispatch do not always create separate AppKit event groups.
+        undo.groupsByEvent = false
+        func editQuery(_ action: () throws -> Void) rethrows {
+            undo.beginUndoGrouping()
+            defer {
+                find.breakUndoCoalescing()
+                undo.endUndoGrouping()
+            }
+            try action()
+        }
+        editQuery { find.insertText("cat", replacementRange: find.selectedRange()) }
+        try await waitUntil("the typed query finds both cats") { table.numberOfRows == 2 }
+        window.makeFirstResponder(table)
+        table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        try pressFind()
+        try expect(window.firstResponder === find && find.selectedRange() == NSRange(location: 0, length: 3),
+                   "Command-F focuses and selects the whole existing query from the results")
+        find.setSelectedRange(NSRange(location: 2, length: 0))
+        try pressFind()
+        try expect(window.firstResponder === find && find.selectedRange() == NSRange(location: 0, length: 3),
+                   "repeating Command-F stays in Find and selects all again")
+
+        document.performFind(.toggleRegex)
+        window.makeFirstResponder(editor)
+        let selection = (editor.string as NSString).range(of: "dog.")
+        editor.setSelectedRange(selection)
+        try editQuery { try pressFind() }
+        try expect(window.firstResponder === find && find.string == #"dog\."# &&
+                   find.selectedRange() == NSRange(location: 0, length: 5) && editor.selectedRange() == selection,
+                   "Command-F seeds and selects the literal editor selection in regex mode")
+        try await waitUntil("the literal selection finds only dog with a period") { table.numberOfRows == 1 }
+        document.performFind(.toggleSidebar)
+        editor.setSelectedRange(NSRange(location: 0, length: 0))
+        try pressFind()
+        try expect(window.firstResponder === find && find.string == #"dog\."#, "Find retains its query after hiding")
+        try expect(find.tryToPerform(Selector(("undo:")), with: nil) && find.string == "cat" &&
+                   document.findSettings.query == "cat" && editor.string == "cat cat dog. dog?",
+                   "Undo after reopening restores the previous search without editing the document")
+        try await waitUntil("Undo refreshes the results for the restored query") { table.numberOfRows == 2 }
+        try expect(find.tryToPerform(Selector(("redo:")), with: nil) && find.string == #"dog\."#,
+                   "Redo restores the query seeded from the selection")
+        try pressFind()
+        editQuery { find.insertText("missing", replacementRange: find.selectedRange()) }
+        try await waitUntil("typing replaces the selected query") { table.numberOfRows == 0 }
+        try expect(find.tryToPerform(Selector(("undo:")), with: nil) && find.string == #"dog\."#,
+                   "Undo restores a query overwritten by typing")
+
+        document.performFind(.replace)
+        let replace = try require(window.firstResponder as? FindFieldTextView, "Replace has a separate field")
+        let replaceUndo = try require(replace.undoManager, "Replace has its own Undo history")
+        replaceUndo.groupsByEvent = false
+        func typeReplacement(_ value: String) {
+            replaceUndo.beginUndoGrouping()
+            replace.insertText(value, replacementRange: replace.selectedRange())
+            replace.breakUndoCoalescing()
+            replaceUndo.endUndoGrouping()
+        }
+        typeReplacement("first")
+        try pressFind()
+        try expect(window.firstResponder === find, "Command-F moves focus from Replace to Find")
+        document.performFind(.replace)
+        typeReplacement("second")
+        try expect(replace.tryToPerform(Selector(("undo:")), with: nil) && replace.string == "first" && find.string == #"dog\."#,
+                   "Replace keeps its own edits and Undo after losing focus")
     }
 
     private static func checkDismissalDuringDisjointEdits(in document: DocumentWindow) async throws {
@@ -251,8 +340,8 @@ enum FindCheck {
         find.insertText("cat", replacementRange: NSRange(location: 0, length: find.string.utf16.count))
         find.keyDown(with: pressReturn)
         document.performFind(.find)
-        try await waitUntil("toggling Find focus cancels deferred focus of results") {
-            table.numberOfRows == 2 && window.firstResponder === editor && document.isSidebarVisible
+        try await waitUntil("Command-F keeps Find focused instead of yielding to a pending result") {
+            table.numberOfRows == 2 && window.firstResponder === find && document.isSidebarVisible
         }
     }
 
@@ -295,26 +384,29 @@ enum FindCheck {
         try expect(window.firstResponder === editor && editor.selectedRange() == caretAfter("cat two"),
                    "Space opens the selected match after its text")
         document.performFind(.find)
-        try expect(window.firstResponder === table && table.selectedRow == 1 && field.string == "cat",
-                   "Command-F returns to the same result and query after Space")
+        try expect(window.firstResponder === field && table.selectedRow == 1 && field.string == "cat",
+                   "Command-F focuses the query without clearing the active match after Space")
 
+        window.makeFirstResponder(table)
         table.keyDown(with: enter)
         try expect(window.firstResponder === editor && editor.selectedRange() == caretAfter("cat two"),
                    "Return opens the same selected match")
         editor.insertText("cat zero\n", replacementRange: NSRange(location: 0, length: 0))
         document.performFind(.find)
-        try await waitUntil("Command-F follows the same match through an earlier insertion") {
-            table.numberOfRows == 5 && window.firstResponder === table && table.selectedRow == 2
+        try await waitUntil("the active result follows an earlier insertion without stealing Find focus") {
+            table.numberOfRows == 5 && window.firstResponder === field && table.selectedRow == 2
         }
+        window.makeFirstResponder(table)
         table.keyDown(with: enter)
         try expect(editor.selectedRange() == caretAfter("cat two"), "the resumed row still points to the original match")
 
         let removedMatch = (editor.string as NSString).range(of: "cat two")
         editor.insertText("gone two", replacementRange: removedMatch)
         document.performFind(.find)
-        try await waitUntil("Command-F focuses the next surviving match when the active match disappears") {
-            table.numberOfRows == 4 && window.firstResponder === table && table.selectedRow == 2
+        try await waitUntil("the next surviving match becomes active without stealing Find focus") {
+            table.numberOfRows == 4 && window.firstResponder === field && table.selectedRow == 2
         }
+        window.makeFirstResponder(table)
         table.keyDown(with: enter)
         try expect(editor.selectedRange() == caretAfter("cat three"), "the next row opens the following match")
 
@@ -334,8 +426,9 @@ enum FindCheck {
         editor.insertText("gone last", replacementRange: lastMatch)
         document.performFind(.find)
         try await waitUntil("removing the last match wraps to the first remaining result") {
-            table.numberOfRows == 1 && window.firstResponder === table && table.selectedRow == 0
+            table.numberOfRows == 1 && window.firstResponder === field && table.selectedRow == 0
         }
+        window.makeFirstResponder(table)
         table.keyDown(with: space)
         editor.insertText("no matches", replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
         document.performFind(.find)
@@ -846,8 +939,8 @@ enum FindCheck {
         try expect(document.isSidebarVisible && document.sidebarMode == .search,
                    "Command-F reveals a hidden sidebar in Search mode")
         app.openFind(nil)
-        try expect(document.isSidebarVisible && window.firstResponder === document.editor,
-                   "repeating Command-F returns to the editor with Search still visible")
+        try expect(document.isSidebarVisible && window.firstResponder === findField,
+                   "repeating Command-F keeps focus in Find")
         app.openFind(nil)
         let viewMenu = try require(NSApplication.shared.mainMenu?.item(withTitle: "View")?.submenu,
                                    "the View menu handles sidebar shortcuts")
@@ -876,8 +969,8 @@ enum FindCheck {
         try expect(document.sidebarMode == .search && window.firstResponder === findField,
                    "Command-F switches from focused Worktree to Find")
         app.openFind(nil)
-        try expect(document.isSidebarVisible && document.sidebarMode == .search && window.firstResponder === document.editor,
-                   "repeating Command-F keeps Search visible and returns to the editor")
+        try expect(document.isSidebarVisible && document.sidebarMode == .search && window.firstResponder === findField,
+                   "repeating Command-F still focuses Find after switching from Worktree")
         app.openFind(nil)
         window.layoutIfNeeded()
         let ellipsis = try sidebarMenu(in: window)

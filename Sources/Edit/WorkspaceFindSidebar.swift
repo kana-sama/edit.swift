@@ -191,6 +191,9 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
         operationError = nil
         scroll.isHidden = false
         rebuildRows()
+        filters = folder.map { app.workspaceFindPreferences[$0] } ?? WorkspaceFindFilters()
+        include.load(filters.include)
+        exclude.load(filters.exclude)
         guard let folder else { return }
         syncFilters()
         repositoryLookup = Task { [weak self] in
@@ -211,8 +214,8 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
             dismissed.removeAll()
         }
         filters = latest
-        include.value = filters.include
-        exclude.value = filters.exclude
+        include.input.replaceAllTextUndoably(with: latest.include)
+        exclude.input.replaceAllTextUndoably(with: latest.exclude)
         ignore.state = filters.respectsIgnoreFiles ? .on : .off
         ignore.contentTintColor = filters.respectsIgnoreFiles ? .controlAccentColor : nil
     }
@@ -224,19 +227,16 @@ final class WorkspaceFindSidebar: NSObject, NSTableViewDataSource, NSTableViewDe
         guard let relative = DocumentWindow.worktreePathSuffix(from: root, to: directory),
               path == rootPath || !relative.isEmpty else { return }
         syncFilters()
-        var updated = filters
-        updated.include = relative.isEmpty ? "" : WorkspaceFindGlob.folder(relative)
-        guard updated != filters else { return }
-        app.workspaceFindPreferences[root] = updated
-        syncFilters()
-        invalidate(resetDismissals: true)
+        include.input.replaceAllTextUndoably(with: relative.isEmpty ? "" : WorkspaceFindGlob.folder(relative))
     }
 
     private func filterEdited(include updatingInclude: Bool) {
         guard let root else { return }
+        let key = updatingInclude ? \WorkspaceFindFilters.include : \WorkspaceFindFilters.exclude
+        let value = updatingInclude ? include.value : exclude.value
         var latest = app.workspaceFindPreferences[root]
-        if updatingInclude { latest.include = include.value }
-        else { latest.exclude = exclude.value }
+        guard latest[keyPath: key] != value else { return }
+        latest[keyPath: key] = value
         filters = latest
         app.workspaceFindPreferences[root] = filters
         invalidate(resetDismissals: true, after: .milliseconds(65))

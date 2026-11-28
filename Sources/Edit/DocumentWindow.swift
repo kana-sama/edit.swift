@@ -2260,6 +2260,10 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         editor.undoManager
     }
 
+    func windowWillReturnFieldEditor(_ sender: NSWindow, to client: Any?) -> Any? {
+        markdownPreview?.fieldEditor(for: client)
+    }
+
     var canFocusSelection: Bool { markdownPreview == nil && canReplaceBuffer && hasEditableTextDocument && editor.canFocusSelection }
     var canExitFocus: Bool { markdownPreview == nil && canReplaceBuffer && editor.focusRanges != nil }
 
