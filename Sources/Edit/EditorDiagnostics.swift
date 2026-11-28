@@ -127,7 +127,7 @@ extension EditorTextView {
     }
 
     func diagnosticHover(at point: NSPoint) -> EditorDiagnosticHover? {
-        guard visibleRect.contains(point), let visible = diagnosticViewport else { return nil }
+        guard !diagnosticsArePending, visibleRect.contains(point), let visible = diagnosticViewport else { return nil }
         for row in diagnosticRows(in: visible) where row.bounds.minY <= point.y && point.y < row.bounds.maxY {
             let lens = messageFrame(for: row).intersection(visibleRect)
             if lens.contains(point) {

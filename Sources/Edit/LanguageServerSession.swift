@@ -30,9 +30,11 @@ final class LanguageServerSession {
     var onSemanticTokensRefresh: (() -> Void)?
     var onDiagnosticsChange: (() -> Void)?
     private(set) var pathsWithErrors: Set<String> = []
-    var diagnostics: [LSPError] {
-        guard isReady, documentErrors?.revision == revision else { return [] }
-        return documentErrors?.errors ?? []
+    /// A ready session returns nil until it receives a report for this revision.
+    var diagnostics: [LSPError]? {
+        guard isReady else { return [] }
+        guard let documentErrors, documentErrors.revision == revision else { return nil }
+        return documentErrors.errors
     }
     private(set) var semanticTokensRefresh = 0
     private(set) var progress: [LSPWorkDoneActivity] = []
@@ -110,6 +112,7 @@ final class LanguageServerSession {
     private var semanticTokenResult: LSPSemanticTokens?
 #if EDIT_AGENT_CHECKS
     var beforeApplyProjectRootForCheck: (() async -> Void)?
+    var beforeApplyDiagnosticsForCheck: (() async -> Void)?
 #endif
 
     init(server: LanguageServer, workspacePreferences: WorkspaceLanguageServers) {
@@ -456,6 +459,9 @@ final class LanguageServerSession {
         }
         diagnosticsTask = Task { [weak self, updates = connection.diagnostics] in
             for await update in updates {
+#if EDIT_AGENT_CHECKS
+                await self?.beforeApplyDiagnosticsForCheck?()
+#endif
                 guard !Task.isCancelled, let self, self.generation == generation else { return }
                 let isActive = self.document.url.map(WorktreeFileOperations.path) == update.path
                 var changed = false

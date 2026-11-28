@@ -149,6 +149,7 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
                                 language: session.server == sourceServer ? sourceLanguage : nil,
                                 folder: folder, searchesParentProjects: inferRoot, text: text)
         }
+        document.editor.setDiagnostics([])
         stateChanged()
     }
 
@@ -156,7 +157,9 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
         guard sourceURL != nil, !isClosed else { return }
         let revision = session.revision
         session.updateText(document.textWithConflictPrefixes)
-        if session.revision != revision {
+        let changed = session.revision != revision
+        document.editor.finishDiagnosticEdit(revisionChanged: changed)
+        if changed {
             document.editor.languageBufferChanged()
             updateDiagnostics()
             symbolRename.cancel()
@@ -232,7 +235,9 @@ final class DocumentLanguageFeatures: NSObject, NSUserInterfaceValidations {
     private func updateDiagnostics() {
         let isCurrent = sourceURL != nil && sourceURL == document.fileURL
             && sourceLanguage == document.resolvedSyntaxLanguage && document.editor.conflictEdits.isEmpty
-        document.editor.setDiagnostics(isCurrent ? session.diagnostics : [])
+        if let errors = isCurrent ? session.diagnostics : [] {
+            document.editor.setDiagnostics(errors)
+        }
         document.editor.languageInteractionEnabled = sourceURL != nil && (session.supportsDefinition || session.supportsHover
             || session.supportsReferences || session.supportsRename || !document.editor.diagnostics.isEmpty)
         updateWorktreeDiagnostics()

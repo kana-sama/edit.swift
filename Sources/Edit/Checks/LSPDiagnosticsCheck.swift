@@ -45,6 +45,7 @@ enum LSPDiagnosticsCheck {
         try #"{"enable_parser_errors":true}"#.write(to: root.appending(path: "ols.json"), atomically: true, encoding: .utf8)
 
         document.setFolder(root)
+        try await checkTypingDiagnostics(in: app, document: document, root: root)
         let editor = document.editor
         try require(try await app.openFile(zig, in: document) === document, "open Zig fixture")
         let zigError = (zigText as NSString).range(of: ")")
@@ -92,7 +93,7 @@ enum LSPDiagnosticsCheck {
         try checkHorizontalScroll(in: document, lineEnd: end)
 
         editor.insertText("1", replacementRange: zigError)
-        try require(editor.diagnosticRanges.isEmpty, "clear the old revision immediately after the edit")
+        try require(editor.diagnosticRanges.isEmpty, "clear the diagnostic when its entire token is replaced")
         try require(editor.languageHoverWindowForCheck == nil, "dismiss the obsolete diagnostic card")
         try require(try !hasRedPixels(in: underlines + [messageArea], document: document),
                     "remove the underline and inline message from the native editor")
@@ -172,6 +173,100 @@ enum LSPDiagnosticsCheck {
         }
         document.window.close()
         try await wait("stop the fixture servers") { features.serversStoppedForCheck }
+    }
+
+    private static func checkTypingDiagnostics(in app: Edit, document: DocumentWindow, root: URL) async throws {
+        let file = root.appending(path: "Typing.zig")
+        let source = "test \"hello\" {\n    const std = @import(\"std\");\n    const name = 0;\n}\n"
+        try source.write(to: file, atomically: true, encoding: .utf8)
+        try require(try await app.openFile(file, in: document) === document, "open the typing fixture")
+        let editor = document.editor
+        let session = document.languageFeatures.session
+        let title = document.window.title
+        let unused = "unused local constant"
+        let missingSemicolon = "expected ';' after statement"
+        func hasMessage(_ message: String) -> Bool { editor.diagnostics.contains { $0.message == message } }
+        func checkLens(_ message: String, on token: String, pending: Bool) throws {
+            let text = editor.string as NSString
+            let range = text.range(of: token)
+            guard range.location != NSNotFound else { throw Failure(detail: "find \(token) in \(editor.string.debugDescription)") }
+            let line = LineEditing.line(at: range.location, in: text)
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            guard let row = editor.laidOutLineBounds(at: line.contentEnd),
+                  let tokenRect = editor.highlightRects(for: [range]).first,
+                  editor.diagnostics.contains(where: { $0.message == message && $0.lineEnd == line.contentEnd
+                      && $0.displayRange == range }) else {
+                throw Failure(detail: "keep '\(message)' on the line containing \(token) (pending \(pending))")
+            }
+            let gap = ("0000" as NSString).size(withAttributes: [.font: editor.font ?? EditorTextView.defaultFont]).width
+            let area = NSRect(x: row.maxX + gap, y: row.minY, width: 84, height: row.height)
+            let underline = NSRect(x: tokenRect.minX, y: tokenRect.maxY - 3, width: tokenRect.width, height: 3)
+            let tint = NSRect(x: row.maxX + 2, y: row.minY + 2, width: 4, height: 1)
+            let hover = editor.diagnosticHover(at: NSPoint(x: area.minX + 4, y: area.midY))
+            try require(try hasRedPixels(in: [area], document: document) && hasRedPixels(in: [underline], document: document)
+                        && hasPixels(in: [tint], document: document, matching: isLineTint) && document.window.title == title,
+                        "paint '\(message)' with its document title on the first frame (pending \(pending))")
+            try require(pending ? hover == nil : hover?.messages.contains(message) == true,
+                        "offer a hover only for a confirmed '\(message)'")
+        }
+
+        try await wait("receive both unused Zig constants") {
+            editor.diagnostics.filter { $0.message == unused }.count == 2
+        }
+        try checkLens(unused, on: "std", pending: false)
+        try checkLens(unused, on: "name", pending: false)
+        let wasWrapped = editor.wrapsWords
+        defer { editor.setWordWrap(wasWrapped) }
+        editor.setWordWrap(false)
+        let previousWidth = editor.diagnosticMinimumWidth
+        let indent = NSRange(location: (source as NSString).range(of: "    const std").location, length: 1)
+        editor.insertText("\t", replacementRange: indent)
+        try require(editor.diagnosticMinimumWidth > previousWidth, "resize a pending lens after a space becomes a tab")
+        editor.insertText(" ", replacementRange: indent)
+        let name = (source as NSString).range(of: "name")
+        editor.insertText("x", replacementRange: NSRange(location: name.upperBound, length: 0))
+        try checkLens(unused, on: "std", pending: true)
+        try checkLens(unused, on: "namex", pending: true)
+        editor.insertText("asda", replacementRange: (editor.string as NSString).range(of: "const namex = 0;"))
+        try checkLens(unused, on: "std", pending: true)
+        try await wait("receive the missing-semicolon error on the next line") { hasMessage(missingSemicolon) }
+        try checkLens(missingSemicolon, on: "asda", pending: false)
+
+        let (held, release) = AsyncStream<Void>.makeStream()
+        var reportPending = false
+        session.beforeApplyDiagnosticsForCheck = {
+            reportPending = true
+            for await _ in held { break }
+        }
+        defer {
+            session.beforeApplyDiagnosticsForCheck = nil
+            release.finish()
+        }
+        let started = ContinuousClock.now
+        let selection = NSRange(location: NSNotFound, length: 0)
+        editor.setSelectedRange(NSRange(location: (editor.string as NSString).range(of: "asda").upperBound, length: 0))
+        editor.insertText("x", replacementRange: selection)
+        try checkLens(missingSemicolon, on: "asdax", pending: true)
+        editor.deleteBackward(nil)
+        try checkLens(missingSemicolon, on: "asda", pending: true)
+        editor.deleteBackward(nil)
+        try checkLens(missingSemicolon, on: "asd", pending: true)
+        editor.insertText("\n", replacementRange: NSRange(location: 0, length: 0))
+        try checkLens(missingSemicolon, on: "asd", pending: true)
+        try await wait("hold a real ZLS report while typing") { reportPending }
+
+        try await Task.sleep(until: started + .milliseconds(450), clock: .continuous)
+        editor.insertText(" ", replacementRange: NSRange(location: 0, length: 0))
+        try checkLens(missingSemicolon, on: "asd", pending: true)
+        try await Task.sleep(until: started + .milliseconds(950), clock: .continuous)
+        try require(editor.diagnostics.isEmpty, "expire pending lenses from the first edit during continued typing")
+        release.finish()
+        try await wait("install the current report after the held stale reports") { hasMessage(missingSemicolon) }
+        try checkLens(missingSemicolon, on: "asd", pending: false)
+        editor.insertText("_ = std;", replacementRange: (editor.string as NSString).range(of: "asd"))
+        try await wait("apply an empty ZLS publication for the repaired fixture") {
+            editor.diagnostics.isEmpty && !session.pathsWithErrors.contains(file.path)
+        }
     }
 
     private static func checkWorktreeDiagnostics(
@@ -351,6 +446,22 @@ enum LSPDiagnosticsCheck {
                     && index.diagnosticDisplayRange(explicit, on: 0) == explicit
                     && index.diagnosticDisplayRange(lineEnd, on: 0) == lineEnd,
                     "expand a point inside a word without changing explicit ranges or line-end points")
+
+        let word = (text as NSString).range(of: "bad")
+        let firstLetter = NSRange(location: word.location, length: 1)
+        let marker = LSPError(range: NSRange(location: word.location, length: 0), lineEnd: word.upperBound,
+                              message: "Error", displayRange: word)
+        let edits = [EditorTextChange(range: NSRange(location: 0, length: 0), delta: 2),
+                     EditorTextChange(range: firstLetter, delta: -1)]
+        let result = "🧩🧩 ad\r\nother" as NSString
+        let remaining = result.range(of: "ad")
+        let pending = marker.remapped(after: edits, in: result)
+        try require(pending?.range == NSRange(location: remaining.location, length: 0)
+                    && pending?.displayRange == remaining && pending?.lineEnd == remaining.upperBound,
+                    "keep a point diagnostic on its surviving word across two UTF-16 edits")
+        let endMarker = LSPError(range: lineEnd, lineEnd: lineEnd.location, message: "Error")
+        try require(endMarker.remapped(after: [.init(range: lineEnd, delta: 2)], in: "🧩 bad\r\n\r\nother") == endMarker,
+                    "keep a line-end point on its original row after inserting a line break")
     }
 
     private static func hoverContains(_ message: String, in view: NSView) -> Bool {

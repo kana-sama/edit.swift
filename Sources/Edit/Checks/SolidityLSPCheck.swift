@@ -361,7 +361,7 @@ enum SolidityLSPCheck {
             try await wait("clear diagnostics after correcting the argument") { editor.diagnosticRanges.isEmpty }
         } catch {
             let session = document.languageFeatures.session
-            let reports = session.diagnostics.map { "\($0.displayRange): \($0.message)" }
+            let reports = (session.diagnostics ?? []).map { "\($0.displayRange): \($0.message)" }
             throw Failure(detail: "clear diagnostics after correcting the argument. "
                 + "Buffer \(editor.string.debugDescription), editor ranges \(editor.diagnosticRanges), "
                 + "session revision \(session.revision), session reports \(reports)")

@@ -10,7 +10,7 @@ Edit ranks comparable [workspace symbol matches](features/lsp-symbol-navigation/
 
 Edit uses full [semantic token results](features/lsp-highlighting/spec.md) for scrolling and a concurrent visible-range preview for large ZLS files. It also supports range-only providers and deltas.
 
-Edit [underlines published errors and shows their messages after the affected lines](features/lsp-diagnostics/spec.md).
+Edit [underlines published errors and shows their messages after the affected lines](features/lsp-diagnostics/spec.md). While the server checks an edit, these marks briefly follow the surviving text.
 The [Worktree marks files and collapsed folders with published errors](features/lsp-worktree-diagnostics/spec.md).
 
 [Completion, signature help, and formatting](features/lsp-editing/spec.md) use shared commands for ZLS, OLS, Solar, and SourceKit-LSP, including clangd-backed C-family files.

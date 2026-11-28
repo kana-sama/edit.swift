@@ -309,7 +309,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         if let replacementString, !allowsConflictEdit(in: affectedCharRange, replacement: replacementString) { return false }
         let allowed = super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
         if allowed, let replacementString {
-            if !automaticPairs.isEmpty {
+            if !automaticPairs.isEmpty || !diagnostics.isEmpty {
                 nativeKeyInput?.edit = EditorTextChange(range: affectedCharRange,
                                                         delta: replacementString.utf16.count - affectedCharRange.length)
             }
@@ -336,7 +336,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         }
         let allowed = super.shouldChangeText(inRanges: affectedRanges, replacementStrings: replacementStrings)
         if allowed, let replacementStrings {
-            if !automaticPairs.isEmpty, affectedRanges.count == 1 {
+            if !automaticPairs.isEmpty || !diagnostics.isEmpty, affectedRanges.count == 1 {
                 let range = affectedRanges[0].rangeValue
                 nativeKeyInput?.edit = EditorTextChange(range: range, delta: replacementStrings[0].utf16.count - range.length)
             }
@@ -1453,9 +1453,9 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         let changes = applyingTextEdits?.map { EditorTextChange(range: $0.range, delta: $0.lengthChange) }
             ?? (edited.location != NSNotFound && edited.length >= delta
                 ? [EditorTextChange(range: NSRange(location: edited.location, length: edited.length - delta), delta: delta)] : [])
+        // The storage notification can also cover adjacent characters whose attributes changed.
+        let keyChanges = nativeKeyInput?.edit.flatMap { applyingTextEdits == nil && $0.delta == delta ? [$0] : nil } ?? changes
         if !automaticPairs.isEmpty {
-            // The storage notification can also cover adjacent characters whose attributes changed.
-            let keyChanges = nativeKeyInput?.edit.flatMap { applyingTextEdits == nil && $0.delta == delta ? [$0] : nil } ?? changes
             automaticPairs = keyChanges.isEmpty ? [] : automaticPairs.compactMap { $0.remapped(after: keyChanges) }
         }
         nativeKeyInput?.edit = nil
@@ -1483,6 +1483,14 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         // the baseline onto which the real replacements will be applied.
         guard !updatingComposition else { return }
         testCodeLens?.sourceDidEdit(changes)
+        if !diagnostics.isEmpty {
+            // A single textDidChange can commit several storage edits. Draw once with the new revision.
+            let firstEdit = min(editedDiagnostics?.firstEdit ?? NSNotFound, keyChanges.first?.range.location ?? 0)
+            let errors = (editedDiagnostics?.errors ?? diagnostics).compactMap {
+                $0.remapped(after: keyChanges, in: storage.mutableString)
+            }
+            editedDiagnostics = (errors, firstEdit)
+        }
         onNavigationTextEdit?(storage.editedRange)
         if !replacingConflictStructure, !conflictEdits.isEmpty {
             let range = storage.editedRange
@@ -1811,11 +1819,43 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     private(set) var diagnostics: [LSPError] = []
+    private var editedDiagnostics: (errors: [LSPError], firstEdit: Int)?
+    private var diagnosticExpiry: Task<Void, Never>?
+    var diagnosticsArePending: Bool { diagnosticExpiry != nil }
     var diagnosticMessagesByLineEnd: [Int: DiagnosticMessage] = [:]
     var diagnosticMinimumWidth: CGFloat = 0
     private var diagnosticForeground: EditorDiagnosticForeground?
 
     func setDiagnostics(_ errors: [LSPError]) {
+        diagnosticExpiry?.cancel()
+        diagnosticExpiry = nil
+        editedDiagnostics = nil
+        displayDiagnostics(errors)
+    }
+
+    func finishDiagnosticEdit(revisionChanged: Bool) {
+        defer { editedDiagnostics = nil }
+        guard revisionChanged, !diagnostics.isEmpty else { return }
+        guard let editedDiagnostics, !editedDiagnostics.errors.isEmpty else {
+            setDiagnostics([])
+            return
+        }
+        if diagnosticExpiry == nil {
+            let deadline = ContinuousClock.now + .milliseconds(750)
+            diagnosticExpiry = Task { [weak self] in
+                do { try await Task.sleep(until: deadline, clock: .continuous) } catch { return }
+                self?.setDiagnostics([])
+            }
+        }
+        if editedDiagnostics.errors != diagnostics {
+            displayDiagnostics(editedDiagnostics.errors)
+        } else if let last = diagnostics.last, editedDiagnostics.firstEdit <= last.lineEnd {
+            // Equal UTF-16 lengths can paint at different widths, for example a space replaced with a tab.
+            updateDiagnosticWidth()
+        }
+    }
+
+    private func displayDiagnostics(_ errors: [LSPError]) {
         guard errors != diagnostics else { return }
         diagnostics = errors
         rebuildDiagnosticMessages()

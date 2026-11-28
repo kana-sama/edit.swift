@@ -10,11 +10,15 @@ Use [`textDocument/publishDiagnostics`][publish] for named, editable files. Rend
 
 The [Worktree error indicators](../lsp-worktree-diagnostics/spec.md) also reflect publications for files outside the active editor.
 
-Apply versioned reports only when their URI and version match the active synchronized document. For servers that omit the version, associate the report with the synchronized revision at receipt. Discard queued updates if the buffer changes before display. Clear marks when text changes, when the replacement document is installed, or when the server stops, restarts, or fails. While another file is opening, keep the outgoing marks with its text and title.
+Apply versioned reports only when their URI and version match the active synchronized document. For servers that omit the version, associate the report with the synchronized revision at receipt. Discard queued updates if the buffer changes before display.
+
+While the server checks an edit, keep existing underlines, row tints, and messages attached to the surviving text. Move them with line edits and follow typing and backspacing within a diagnosed word. Remove an error as soon as its entire target is replaced or deleted. Dismiss diagnostic hover cards on edit and enable them again with the current report. Install the new report in one update, including an empty report. Pending marks expire 750 ms after the first unconfirmed edit, even if typing continues.
+
+While another file is opening, keep the outgoing marks with its text and title. Clear them when the new context is installed or when the server stops, restarts, or fails.
 
 ## Acceptance
 
-Run `./script/check --only lsp-diagnostics` with ZLS, SourceKit-LSP, and OLS available. The isolated native check verifies live diagnostics for Zig, Swift, C, and Odin. It checks UTF-16 offsets, the expanded second `let` in `let let = 1; let`, single-error hover over code, the list over the lens, and arrow alignment after horizontal scrolling and pointer movement during the hover delay. It also checks selection paint, both horizontal overscroll edges, Word Wrap, recovery after edits and server controls, and the outgoing and incoming presentations of a held file transition. Protocol fixtures cover empty, filtered, stale, unversioned, and unrelated reports.
+Run `./script/check --only lsp-diagnostics` with ZLS, SourceKit-LSP, and OLS available. The isolated native check verifies live diagnostics for Zig, Swift, C, and Odin. It checks UTF-16 offsets, the expanded second `let` in `let let = 1; let`, single-error hover over code, the list over the lens, and arrow alignment after horizontal scrolling and pointer movement during the hover delay. It checks the first edited frame on adjacent diagnosed Zig lines, including while a ZLS report is held, and the expiry of pending marks during continued typing. It also checks selection paint, both horizontal overscroll edges, Word Wrap, recovery after edits and server controls, and the outgoing and incoming presentations of a held file transition. Protocol fixtures cover empty, filtered, stale, unversioned, and unrelated reports.
 
 [publish]: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/#textDocument_publishDiagnostics
 [error-lens]: https://github.com/usernamehw/vscode-error-lens/blob/master/package.json

@@ -51,6 +51,60 @@ struct LSPError: Hashable, Sendable {
         self.lineEnd = lineEnd
         self.message = message
     }
+
+    /// Project only the part of a published diagnostic that still has an anchor in the edited text.
+    func remapped(after changes: [EditorTextChange], in text: NSString) -> LSPError? {
+        guard let first = changes.first else { return nil }
+        if first.range.location > max(lineEnd, displayRange.upperBound) { return self }
+        var start = displayRange.location
+        var end = displayRange.upperBound
+        var point = range.location
+        var appendedLength = 0
+        for change in changes.reversed() {
+            let edit = change.range
+            if range.length == 0, edit.location <= point {
+                point = max(point, edit.upperBound) + change.delta
+            }
+            // A newline typed at a line-end point leaves the error on its original row.
+            if start == end, start == lineEnd, edit.location == start, edit.length == 0 {
+                appendedLength = change.replacementLength
+                continue
+            }
+            if edit.upperBound <= start {
+                start += change.delta
+                end += change.delta
+            } else if edit.location <= start, end <= edit.upperBound {
+                return nil
+            } else if edit.location < end {
+                if edit.location <= start { start = edit.location + change.replacementLength }
+                end = end <= edit.upperBound ? edit.location : end + change.delta
+            } else if edit.location == end, edit.length == 0 {
+                appendedLength = change.replacementLength
+            }
+        }
+        guard start >= 0, start <= end, end <= text.length else { return nil }
+        if range.length == 0 {
+            let anchor: Int
+            if start == end {
+                let line = LineEditing.line(at: start, in: text)
+                anchor = min(start + appendedLength, line.contentEnd)
+            } else {
+                anchor = (start..<end).contains(point) ? point : start
+            }
+            let line = LineEditing.line(at: anchor, in: text)
+            let mapped = NSRange(location: anchor, length: 0)
+            let word = EditorWordBoundary.wordRange(containing: anchor, within: line.start..<line.contentEnd, in: text)
+            return LSPError(range: mapped, lineEnd: line.contentEnd, message: message, displayRange: word ?? mapped)
+        }
+        let line = LineEditing.line(at: start, in: text)
+        let bounds = line.start..<line.contentEnd
+        if appendedLength > 0, end > start,
+           let word = EditorWordBoundary.wordRange(containing: end - 1, within: bounds, in: text) {
+            end = min(word.upperBound, end + appendedLength)
+        }
+        let mapped = NSRange(location: start, length: end - start)
+        return LSPError(range: mapped, lineEnd: line.contentEnd, message: message)
+    }
 }
 
 struct LSPDocumentErrors: Sendable {
