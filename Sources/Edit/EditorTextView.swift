@@ -446,7 +446,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         guard isEditable, !hasMarkedText(), let prefix = syntaxLanguage.lineCommentPrefix,
               prepareProjectedLineCommand(), let text = textStorage?.mutableString else { return }
         let selections = caretSelections
-        let edits = MultiCaretEditing.toggleLineComments(in: text, for: selections, prefix: prefix)
+        let edits = MultiCaretEditing.toggleLineComments(in: text, for: selections, prefix: prefix,
+                                                        settings: indentationSettings)
         applyMultiEdits(edits, selections: MultiCaretEditing.mapped(selections, after: edits),
                         actionName: "Toggle Line Comments")
     }

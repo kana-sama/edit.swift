@@ -68,29 +68,62 @@ enum EditorCheck {
         // Keep the fixture unordered while AppKit dispatches the menu key equivalent.
         comment.target = window.firstResponder
         defer { comment.target = nil }
-        setBuffer("  café", at: 4)
-        try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == "  // café" &&
-                   editor.selectedRange() == NSRange(location: 7, length: 0),
+        setBuffer("    café", at: 6)
+        try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == "    // café" &&
+                   editor.selectedRange() == NSRange(location: 9, length: 0),
                    "Command-/ comments an indented Swift line and moves the caret with the text")
         undo.undo()
-        try expect(editor.string == "  café" && editor.selectedRange() == NSRange(location: 4, length: 0),
+        try expect(editor.string == "    café" && editor.selectedRange() == NSRange(location: 6, length: 0),
                    "undo line comment and restore the caret")
         undo.redo()
-        try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == "  café",
+        try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == "    café",
                    "redo and toggle the Swift comment off")
+        document.setSyntaxLanguage(.zig)
+        let zigLines = [
+            "const dt = playdate.system.getElapsedTime();",
+            "const radius = 100;",
+            "playdate.sprite.moveTo(",
+            "sprite,",
+            "@cos(dt) * radius + radius + 70,",
+            "@sin(dt) * radius + radius + 70,",
+            ");"
+        ]
+        for gap in ["", "\n    \t\n"] {
+            let commented = zigLines.map { "        // " + $0 }.joined(separator: "\n" + gap)
+            let uncommented = zigLines.map { "        " + $0 }.joined(separator: "\n" + gap)
+            let originalSelection = NSRange(location: 0, length: commented.utf16.count)
+            setBuffer(commented, length: originalSelection.length)
+            try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == uncommented &&
+                       editor.selectedRange() == NSRange(location: 0, length: uncommented.utf16.count),
+                       "Command-/ removes all Zig line comments through blank and whitespace-only lines")
+            undo.undo()
+            try expect(editor.string == commented && editor.selectedRange() == originalSelection,
+                       "undo the Zig uncomment in one step and restore the selection")
+        }
+        setBuffer("    ", at: 4)
+        try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == "    // " &&
+                   editor.selectedRange() == NSRange(location: 7, length: 0),
+                   "insert a comment on a line containing only indentation")
         document.setSyntaxLanguage(.python)
-        setBuffer("  one\r\n\t#two\r\nthree", length: 14)
-        try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == "  # one\r\n\t# #two\r\nthree",
-                   "toggle a mixed Python selection ending at the next line boundary")
-        try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == "  one\r\n\t#two\r\nthree",
+        let mixed = "      one\r\n\r\n\t\t#two\r\nthree"
+        let commentedMixed = "    #   one\r\n\r\n\t# \t#two\r\nthree"
+        setBuffer(mixed, length: (mixed as NSString).range(of: "three").location)
+        try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == commentedMixed,
+                   "align Python comments in a mixed selection and skip the blank and following lines")
+        try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == mixed,
                    "round-trip mixed lines with CRLF separators")
         undo.undo()
-        try expect(editor.string == "  # one\r\n\t# #two\r\nthree", "undo a multiline toggle in one step")
+        try expect(editor.string == commentedMixed, "undo a multiline toggle in one step")
         setBuffer("one\ntwo")
         editor.setCaretSelections([0, 2, 6].map { NSRange(location: $0, length: 0) })
         try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == "# one\n# two" &&
                    editor.caretSelections.map(\.location) == [2, 4, 10],
                    "comment each line once and preserve all carets")
+        setBuffer("# one\ntwo")
+        editor.setCaretSelections([2, 8].map { NSRange(location: $0, length: 0) })
+        try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == "one\n# two" &&
+                   editor.caretSelections.map(\.location) == [0, 8],
+                   "toggle comments independently at separate carets")
         editor.isEditable = false
         try expect(!editor.validateUserInterfaceItem(comment), "disable line comments in a read-only editor")
         editor.isEditable = true

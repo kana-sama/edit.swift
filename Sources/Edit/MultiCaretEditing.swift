@@ -89,36 +89,57 @@ enum MultiCaretEditing {
         return edits
     }
 
-    static func toggleLineComments(in text: NSString, for selections: [NSRange], prefix: String) -> [Replacement] {
+    static func toggleLineComments(in text: NSString, for selections: [NSRange], prefix: String,
+                                   settings: Indentation) -> [Replacement] {
         let prefixLength = prefix.utf16.count
-        var lines: [(indentationEnd: Int, commentLength: Int)] = []
-        for selection in ordered(selections) {
+        let insertion = prefix + " "
+        var edits: [Replacement] = []
+        var seen: Set<Int> = []
+        // The primary selection takes precedence on a line shared by multiple selections.
+        for selection in selections.reversed() {
             guard let block = LineEditing.affectedLines(in: text, selection: selection) else { continue }
-            var start = block.start
+            var lines: [(indentation: NSRange, isBlank: Bool, comment: NSRange?)] = []
+            var lineStart = block.start
             repeat {
-                let line = LineEditing.line(at: start, in: text)
-                let indentationEnd = LineEditing.indentationEnd(in: line, text: text)
-                if indentationEnd > (lines.last?.indentationEnd ?? -1) {
+                let line = LineEditing.line(at: lineStart, in: text)
+                if seen.insert(lineStart).inserted {
+                    let indentationEnd = LineEditing.indentationEnd(in: line, text: text)
                     let prefixEnd = indentationEnd + prefixLength
                     let prefixRange = NSRange(location: indentationEnd, length: prefixLength)
-                    var commentLength = 0
+                    var comment: NSRange?
                     if prefixEnd <= line.contentEnd, text.substring(with: prefixRange) == prefix {
-                        commentLength = prefixLength
-                        if prefixEnd < line.contentEnd, text.character(at: prefixEnd) == 0x20 {
-                            commentLength += 1
-                        }
+                        let hasSpace = prefixEnd < line.contentEnd && text.character(at: prefixEnd) == 0x20
+                        comment = NSRange(location: indentationEnd, length: prefixLength + (hasSpace ? 1 : 0))
                     }
-                    lines.append((indentationEnd, commentLength))
+                    lines.append((NSRange(lineStart..<indentationEnd), indentationEnd == line.contentEnd, comment))
                 }
-                start = line.end
-            } while start < block.end
-        }
+                lineStart = line.end
+            } while lineStart < block.end
 
-        let uncomment = lines.allSatisfy { $0.commentLength > 0 }
-        return lines.map { line in
-            Replacement(range: NSRange(location: line.indentationEnd, length: uncomment ? line.commentLength : 0),
-                        text: uncomment ? "" : prefix + " ")
+            let nonBlank = lines.filter { !$0.isBlank }
+            if !nonBlank.isEmpty { lines = nonBlank }
+            let comments = lines.compactMap(\.comment)
+            if comments.count == lines.count {
+                edits.append(contentsOf: comments.map { Replacement(range: $0, text: "") })
+                continue
+            }
+
+            let columns = lines.lazy.map { settings.column(after: text.substring(with: $0.indentation)) }
+            guard let minimum = columns.min() else { continue }
+            let insertionColumn = minimum - minimum % settings.width
+            for line in lines {
+                var column = 0
+                var offset = line.indentation.location
+                while offset < line.indentation.upperBound && column < insertionColumn {
+                    let nextColumn = text.character(at: offset) == 0x09 ? settings.nextStop(after: column) : column + 1
+                    guard nextColumn <= insertionColumn else { break }
+                    column = nextColumn
+                    offset += 1
+                }
+                edits.append(Replacement(range: NSRange(location: offset, length: 0), text: insertion))
+            }
         }
+        return edits.sorted { $0.range.location < $1.range.location }
     }
 
     static func mapped(_ selections: [NSRange], after replacements: [Replacement]) -> [NSRange] {
