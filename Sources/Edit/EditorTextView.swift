@@ -726,9 +726,16 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             ranges.contains { pair.opening < $0.location && $0.location <= pair.closing }
         }
         let closers = Set(automaticPairs.map(\.closing))
-        let smart = ranges.map { range in
+        let outdents = bracketOutdents(for: key, at: ranges, in: text)
+        let smart = ranges.map { range -> (edit: LineEditing.Edit, tracksPair: Bool)? in
             let canSkip = closers.contains(range.location) && focusAllowsEdits([NSRange(location: range.location, length: 1)])
-            return TypingDelimiters.edit(for: key, in: text, selection: range, canSkip: canSkip, language: syntaxLanguage)
+            let delimiter = TypingDelimiters.edit(for: key, in: text, selection: range, canSkip: canSkip, language: syntaxLanguage)
+            guard let outdent = outdents[range.location] else { return delimiter }
+            // Reuse a tracked closer when the ordinary delimiter edit advances over it.
+            let replacement = outdent.indent + (delimiter?.edit.replacement ?? key)
+            return (LineEditing.Edit(range: outdent.range, replacement: replacement,
+                                     selection: NSRange(location: outdent.range.location + outdent.indent.utf16.count + 1,
+                                                        length: 0)), false)
         }
         if ranges.contains(where: { $0.length > 0 }),
            !zip(ranges, smart).allSatisfy({ $0.0.length > 0 && $0.1 != nil }) { return false }
@@ -756,6 +763,35 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             applyMultiEdits(plan.edits, selections: plan.selections, actionName: "Type Delimiter", automaticPairsAfter: pairs)
         }
         return true
+    }
+
+    private func bracketOutdents(for key: String, at ranges: [NSRange], in text: NSString)
+        -> [Int: (range: NSRange, indent: String)] {
+        guard let closing = key.utf16.first, TypingDelimiters.closingBrackets.contains(closing),
+              ranges.allSatisfy({ $0.length == 0 }) else { return [:] }
+        var prefixes: [NSRange] = []
+        var previous = -1
+        for caret in MultiCaretEditing.ordered(ranges) {
+            let position = caret.location
+            let line = LineEditing.line(at: position, in: text)
+            defer { previous = position }
+            // Only the first caret on a line can replace its leading whitespace.
+            guard previous < line.start, position > line.start,
+                  position <= LineEditing.indentationEnd(in: line, text: text) else { continue }
+            prefixes.append(NSRange(line.start..<position))
+        }
+        let openings = bracketNavigation.openings(for: closing, at: prefixes.map(\.upperBound), in: text)
+        var edits: [Int: (range: NSRange, indent: String)] = [:]
+        for prefix in prefixes {
+            guard let opening = openings[prefix.upperBound], opening < prefix.location,
+                  focusAllowsEdits([prefix]) else { continue }
+            let line = LineEditing.line(at: opening, in: text)
+            let indent = text.substring(with: NSRange(line.start..<LineEditing.indentationEnd(in: line, text: text)))
+            guard indentationSettings.column(after: indent) <
+                    indentationSettings.column(after: text.substring(with: prefix)) else { continue }
+            edits[prefix.upperBound] = (prefix, indent)
+        }
+        return edits
     }
 
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {

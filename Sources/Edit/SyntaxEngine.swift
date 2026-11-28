@@ -138,6 +138,11 @@ enum SyntaxEngine {
         }
     }
 
+    private static let captureBracket: EditSyntaxCapture = { context, start, end, name in
+        guard let context else { return }
+        Unmanaged<Captures>.fromOpaque(context).takeUnretainedValue().appendBracket(start: start, end: end, name: name)
+    }
+
     // The signed library is loaded only when the first supported file needs highlighting.
     // The handle is intentionally kept for the process lifetime with the function pointer.
     nonisolated(unsafe) private static let library: UnsafeMutableRawPointer? = {
@@ -410,10 +415,6 @@ enum SyntaxEngine {
         let previewEnd = prioritizesViewport ? UInt32(min(NSMaxRange(viewport), units.count)) : 0
         let sink = Captures(length: units.count, onPreview: onPreview)
         let context = Unmanaged.passUnretained(sink).toOpaque()
-        let bracket: EditSyntaxCapture = { context, start, end, name in
-            guard let context else { return }
-            Unmanaged<Captures>.fromOpaque(context).takeUnretainedValue().appendBracket(start: start, end: end, name: name)
-        }
         let success = units.withUnsafeBufferPointer { buffer in
             analyze(language.rawValue, queries, buffer.baseAddress!, count, previewStart, previewEnd, { context in
                 guard let context else { return }
@@ -421,10 +422,26 @@ enum SyntaxEngine {
             }, { context, start, end, name in
                 guard let context, let name else { return }
                 Unmanaged<Captures>.fromOpaque(context).takeUnretainedValue().append(start: start, end: end, name: name)
-            }, includesBrackets ? bracket : nil, { _ in Task.isCancelled }, context)
+            }, includesBrackets ? captureBracket : nil, { _ in Task.isCancelled }, context)
         }
         guard success, !Task.isCancelled else { return nil }
         return SyntaxAnalysis(spans: resolveOverlaps(sink.values, length: units.count), brackets: sink.bracketContext())
+    }
+
+    static func bracketContext(in source: String, language: SyntaxLanguage,
+                               deadline: ContinuousClock.Instant) -> BracketSyntax.Context? {
+        if language == .plainText { return .empty }
+        guard let analyze, let queries, !source.isEmpty, ContinuousClock.now < deadline else { return nil }
+        let units = Array(source.utf16)
+        guard let count = UInt32(exactly: units.count) else { return nil }
+        let sink = Captures(length: units.count, deadline: deadline)
+        let success = units.withUnsafeBufferPointer { buffer in
+            analyze(language.rawValue, queries, buffer.baseAddress!, count, 0, 0, nil, nil, captureBracket, { context in
+                guard let context else { return true }
+                return Unmanaged<Captures>.fromOpaque(context).takeUnretainedValue().cancelled
+            }, Unmanaged.passUnretained(sink).toOpaque())
+        }
+        return success && !sink.cancelled ? sink.bracketContext() : nil
     }
 
     private static func resolveOverlaps(_ input: [SyntaxSpan], length: Int) -> [SyntaxSpan] {

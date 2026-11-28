@@ -10,6 +10,8 @@ enum BracketCheck {
     static func run(in app: Edit) async throws {
         let document = app.makeDocument()
         defer { document.window.close() }
+        try checkOutdent(in: document)
+        try await checkIndexedOutdent(in: document)
         guard let menu = NSApplication.shared.mainMenu else { throw Failure("Missing command menu.") }
         let commands = ControlCommand.fromMenu(menu)
         guard let go = commands.first(where: { $0.item.action == #selector(EditorTextView.goToBracket(_:)) }),
@@ -62,6 +64,141 @@ enum BracketCheck {
         }
         try await checkHighlights()
         try await checkDecorationsWhileTyping()
+    }
+
+    private static func checkOutdent(in document: DocumentWindow) throws {
+        let editor = document.editor
+        guard let undo = editor.undoManager, !document.window.isVisible, !NSApp.isActive else {
+            throw Failure("Missing a quiet editor for closing-bracket input.")
+        }
+        let previousGrouping = undo.groupsByEvent
+        undo.groupsByEvent = false
+        defer {
+            undo.groupsByEvent = previousGrouping
+            undo.removeAllActions()
+        }
+
+        func state(_ marked: String) -> (String, [NSRange]) {
+            let parts = marked.components(separatedBy: "|")
+            var offset = 0
+            let carets = parts.dropLast().map { part in
+                offset += part.utf16.count
+                return caret(offset)
+            }
+            return (parts.joined(), carets)
+        }
+        func set(_ marked: String) {
+            let (source, carets) = state(marked)
+            editor.string = source
+            editor.didChangeText()
+            editor.setCaretSelections(carets, record: false)
+            undo.removeAllActions()
+        }
+        func expect(_ marked: String, _ description: String) throws {
+            let (source, carets) = state(marked)
+            guard editor.string == source, editor.caretSelections == carets else {
+                throw Failure("\(description). Got \(String(reflecting: editor.string)) at \(editor.caretSelections).")
+            }
+        }
+        func key(_ characters: String, _ code: UInt16, shifted: Bool = true) throws {
+            undo.beginUndoGrouping()
+            defer { undo.endUndoGrouping() }
+            try type(characters, code: code, shifted: shifted, in: document)
+            editor.breakUndoCoalescing()
+        }
+
+        document.setSyntaxLanguage(.zig)
+        let zigPrefix = """
+            const playdate_docs = b.addInstallDirectory(.{
+                .source_dir = playdate_mod.getEmittedDocs(),
+                .install_dir = .prefix,
+                .install_subdir = "docs",
+            """ + "\n"
+        set(zigPrefix + "     |")
+        try key("}", 30)
+        try expect(zigPrefix + "}|", "Outdent the Zig initializer on the keypress without waiting for the index")
+        undo.undo()
+        try expect(zigPrefix + "     |", "One Undo restores the Zig indent and caret")
+        undo.redo()
+        try expect(zigPrefix + "}|", "Redo restores the Zig closer and caret")
+
+        set("    fn testFn() |")
+        try key("{", 33)
+        try expect("    fn testFn() {|}", "Track the auto-inserted brace")
+        undo.beginUndoGrouping()
+        editor.insertText("\n            ", replacementRange: editor.selectedRange())
+        editor.breakUndoCoalescing()
+        undo.endUndoGrouping()
+        try key("}", 30)
+        try expect("    fn testFn() {\n    }|", "Outdent and skip over an auto-inserted closer")
+        undo.undo()
+        try expect("    fn testFn() {\n            |}", "Undo restores the tracked closer and whitespace")
+        try key("}", 30)
+        try expect("    fn testFn() {\n    }|", "Type over the same tracked closer after Undo")
+
+        document.setSyntaxLanguage(.json)
+        set("{\r\n\t\"array\": [\r\n\t\t\t|")
+        try key("]", 30, shifted: false)
+        try expect("{\r\n\t\"array\": [\r\n\t]|", "Align tab-indented JSON square brackets inside braces")
+        document.setSyntaxLanguage(.python)
+        set("  call(\n       |")
+        try key(")", 29)
+        try expect("  call(\n  )|", "Align a closing parenthesis in Python")
+
+        document.setSyntaxLanguage(.swift)
+        set("func example() {\n    let value = [1]\n    |\n    /*\n    |\n    */")
+        try key("}", 30)
+        try expect("func example() {\n    let value = [1]\n}|\n    /*\n    }|\n    */",
+                   "Outdent after a closed inner pair and insert literally in a comment on the same keystroke")
+        set("func example() {\n    let value = \"\"\"\n        |")
+        try key("}", 30)
+        try expect("func example() {\n    let value = \"\"\"\n        }|",
+                   "Type literally on the last line of an unfinished multiline string")
+        set("    |")
+        try key("}", 30)
+        try expect("    }|", "Type literally with no opening bracket")
+
+        set("{\n    |\nprotected\n\t{\n\t\t|")
+        let protectedOpener = editor.caretSelections[0]
+        let editableOpener = editor.caretSelections[1]
+        editor.startFocus(with: [
+            NSRange(location: 2, length: 4),
+            NSRange(location: editableOpener.location - 5, length: 5),
+        ])
+        defer { editor.exitFocus() }
+        editor.setCaretSelections([protectedOpener, editableOpener], record: false)
+        try key("}", 30)
+        try expect("{\n    }|\nprotected\n\t{\n\t}|", "Match an opener only inside each editable Focus block")
+        undo.undo()
+        try expect("{\n    |\nprotected\n\t{\n\t\t|", "Undo both Focus edits together")
+    }
+
+    private static func checkIndexedOutdent(in document: DocumentWindow) async throws {
+        let editor = document.editor
+        let prefix = "fn sample() {\n" + String(repeating: "    // fixture line for the background bracket index\n", count: 400)
+        let suffix = "\n}"
+        let position = prefix.utf16.count
+        document.setSyntaxLanguage(.zig)
+        editor.string = prefix + "    " + suffix
+        editor.didChangeText()
+        editor.setCaretSelections([caret(position + 4)], record: false)
+        editor.goToBracket(nil)
+        try await waitFor("navigation to the large Zig fixture's indexed closer") {
+            editor.selectedRange() == caret(position + 5)
+        }
+        editor.setCaretSelections([caret(position + 4)], record: false)
+        try type("}", code: 30, in: document)
+        guard editor.string == prefix + "}" + suffix, editor.selectedRange() == caret(position + 1) else {
+            throw Failure("The large Zig fixture did not align the new closer before an existing manual closer.")
+        }
+    }
+
+    private static func type(_ characters: String, code: UInt16, shifted: Bool = true, in document: DocumentWindow) throws {
+        guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: shifted ? .shift : [],
+                                           timestamp: 0, windowNumber: document.window.windowNumber, context: nil,
+                                           characters: characters, charactersIgnoringModifiers: characters,
+                                           isARepeat: false, keyCode: code) else { throw Failure("Cannot make a key event.") }
+        document.editor.keyDown(with: event)
     }
 
     private static func checkHighlights() async throws {

@@ -205,6 +205,29 @@ final class BracketNavigation {
         return positions.contains { current.hasUnmatchedCloser(for: opening, at: $0) }
     }
 
+    func openings(for closing: UInt16, at positions: [Int], in text: NSString) -> [Int: Int] {
+        guard !positions.isEmpty, let editor else { return [:] }
+        let deadline = ContinuousClock.now + .milliseconds(5)
+        let current: BracketMatching
+        if let model, scope == editor.focusRanges {
+            current = model
+        } else {
+            // Ordinary typing invalidates the index. Analyze small buffers within the key's budget.
+            guard text.length <= 16 * 1_024,
+                  let context = SyntaxEngine.bracketContext(in: editor.string, language: language, deadline: deadline)
+            else { return [:] }
+            current = BracketMatching(text: editor.string, language: language, ignoredRanges: context.ignoredRanges,
+                                      scope: editor.focusRanges,
+                                      embeddedLanguages: context.embeddedLanguages.map { ($0.range, $0.language) })
+        }
+        var openings: [Int: Int] = [:]
+        for position in positions.sorted() {
+            if ContinuousClock.now >= deadline { break }
+            openings[position] = current.opening(for: closing, at: position, deadline: deadline)
+        }
+        return openings
+    }
+
     private func updateScope(_ ranges: [NSRange]?) {
         if scope != ranges {
             scope = ranges
@@ -219,18 +242,18 @@ final class BracketNavigation {
         indexing = Task { [weak self, weak editor] in
             if !immediate { try? await Task.sleep(for: .milliseconds(50)) }
             guard !Task.isCancelled, let analysis = editor?.syntaxAnalysis, let source = editor?.string else { return }
-            let context: BracketSyntax.Context
+            let context: BracketSyntax.Context?
             if language == .plainText {
                 context = .empty
             } else {
                 let job = analysis.request(in: source, language: language)
-                context = await job.task.value?.brackets ?? .empty
+                context = await job.task.value?.brackets
             }
             guard !Task.isCancelled else { return }
             let work = Task.detached(priority: .userInitiated) {
                 return BracketMatching(text: Task.isCancelled ? "" : source, language: language,
-                                       ignoredRanges: context.ignoredRanges, scope: scope,
-                                       embeddedLanguages: context.embeddedLanguages.map { ($0.range, $0.language) })
+                                       ignoredRanges: context?.ignoredRanges, scope: scope,
+                                       embeddedLanguages: context?.embeddedLanguages.map { ($0.range, $0.language) } ?? [])
             }
             let result = await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
 #if EDIT_AGENT_CHECKS

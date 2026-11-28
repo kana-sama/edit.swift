@@ -2,6 +2,7 @@ import Foundation
 
 enum TypingDelimiters {
     static let brackets: [unichar: unichar] = [0x28: 0x29, 0x5B: 0x5D, 0x7B: 0x7D]
+    static let closingBrackets = Set(brackets.values)
     private static let pairs = ["(": ")", "[": "]", "{": "}", "\"": "\"", "'": "'", "`": "`"]
     private static let pairBoundaries = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ")]},;:."))
     private static let wordCharacters = CharacterSet.alphanumerics.union(.nonBaseCharacters).union(CharacterSet(charactersIn: "_"))

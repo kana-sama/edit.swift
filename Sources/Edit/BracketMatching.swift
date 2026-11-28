@@ -53,6 +53,7 @@ struct BracketMatching: Sendable {
 
     private struct Token: Sendable {
         let range: NSRange
+        var opening: OpeningKind?
         var partner: Int?
         var enclosingOpening: Int?
     }
@@ -113,13 +114,15 @@ struct BracketMatching: Sendable {
 
     private let blocks: [Block]
     private let languageRuns: [LanguageRun]
+    private let masks: [NSRange]?
 
     init(
-        text: String, language: SyntaxLanguage, ignoredRanges: [NSRange], scope: [NSRange]? = nil,
+        text: String, language: SyntaxLanguage, ignoredRanges: [NSRange]?, scope: [NSRange]? = nil,
         embeddedLanguages: [(range: NSRange, language: SyntaxLanguage)] = []
     ) {
         let units = Array(text.utf16)
-        let masks = Self.mergeMasks(ignoredRanges, length: units.count)
+        let masks = ignoredRanges.map { Self.mergeMasks($0, length: units.count) }
+        self.masks = masks
         let ranges = scope ?? [NSRange(location: 0, length: units.count)]
         let runs = Self.languageRuns(in: units.count, host: language, embedded: embeddedLanguages)
         languageRuns = runs
@@ -128,7 +131,7 @@ struct BracketMatching: Sendable {
         var languageIndex = 0
         for range in ranges where Self.isValid(range, length: units.count) {
             if Task.isCancelled { break }
-            blocks.append(Self.scan(units, in: range, masks: masks, maskIndex: &maskIndex,
+            blocks.append(Self.scan(units, in: range, masks: masks ?? [], maskIndex: &maskIndex,
                                     runs: runs, languageIndex: &languageIndex))
         }
         self.blocks = blocks
@@ -139,6 +142,45 @@ struct BracketMatching: Sendable {
               let delimiter = run.delimiters[opening]?.first(where: { $0.opens && $0.units.count == 1 }),
               let last = block.lastUnmatchedCloser[OpeningKind(kind: delimiter.kind, region: run.region)] else { return false }
         return last >= position
+    }
+
+    // Locate the opener a newly typed delimiter would close, including an opener
+    // whose existing partner is later in the buffer.
+    func opening(for closing: UInt16, at position: Int, deadline: ContinuousClock.Instant) -> Int? {
+        guard let block = block(at: position), let masks, position > block.range.location,
+              let lastRun = languageRuns.last else { return nil }
+        // The caller has confirmed whitespace before the caret. Test that character
+        // as well at EOF, where the mask of an unfinished literal can end.
+        let preceding = position - 1
+        var lower = 0
+        var upper = masks.count
+        while lower < upper {
+            let middle = (lower + upper) / 2
+            if masks[middle].upperBound <= preceding { lower = middle + 1 }
+            else { upper = middle }
+        }
+        guard lower == masks.count || masks[lower].location > preceding else { return nil }
+
+        let probe = min(position, lastRun.end - 1)
+        lower = 0
+        upper = languageRuns.count
+        while lower < upper {
+            let middle = (lower + upper) / 2
+            if languageRuns[middle].end <= probe { lower = middle + 1 }
+            else { upper = middle }
+        }
+        let run = languageRuns[lower]
+        guard let delimiter = run.delimiters[closing]?.first(where: { !$0.opens && $0.units.count == 1 }) else { return nil }
+        let kind = OpeningKind(kind: delimiter.kind, region: run.region)
+        var index = block.firstTokenStarting(after: preceding) - 1
+        while index >= 0, ContinuousClock.now < deadline {
+            let token = block.tokens[index]
+            if token.opening == kind { return token.range.location }
+            // A completed pair also consumed any unfinished inner brackets.
+            if let partner = token.partner, partner < index { index = partner }
+            index -= 1
+        }
+        return nil
     }
 
     func pair(at position: Int) -> Pair? {
@@ -218,7 +260,7 @@ struct BracketMatching: Sendable {
             if delimiter.opens {
                 openings.append((tokens.count, kind))
                 openingCounts[kind, default: 0] += 1
-                tokens.append(Token(range: marker))
+                tokens.append(Token(range: marker, opening: kind))
             } else if openingCounts[kind, default: 0] > 0,
                       let matching = openings.lastIndex(where: { $0.kind == kind }) {
                 let opening = openings[matching].index
