@@ -1,6 +1,6 @@
 # Files
 
-Edit opens and saves plain-text files. New documents default to UTF-8. A window can show one document, identified by its file’s basename or “Untitled” in the title bar. A [folder window](../folders/spec.md) also shows the folder name and can stay open between documents. The title content has an 8-point leading inset for both file and folder windows, with the sidebar open or closed. A named file uses the same Seti icon here as in Control. macOS indicates unsaved changes in the window’s close button. Each document uses the text surface and editing commands in the [Editor specification](../editor/spec.md).
+Edit opens and saves plain-text files. New documents default to UTF-8. A window can show one document, identified by its file’s basename or “Untitled” in the [document header](../document-header/spec.md). A [folder window](../folders/spec.md) also shows the folder name and can stay open between documents. The title content has an 8-point leading inset for both file and folder windows, with the sidebar open or closed. A named file uses the same Seti icon here as in Control. macOS indicates unsaved changes in the window’s close button. Each document uses the text surface and editing commands in the [Editor specification](../editor/spec.md).
 
 ## Open and save
 

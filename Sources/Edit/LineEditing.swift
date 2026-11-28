@@ -34,6 +34,11 @@ enum LineEditing {
         }
     }
 
+    struct LineAnchor {
+        let offset: Int
+        let number: Int
+    }
+
     static func indent(_ text: NSString, selection: NSRange, outdent: Bool) -> Edit? {
         guard let block = affectedLines(in: text, selection: selection) else { return nil }
 
@@ -163,6 +168,27 @@ enum LineEditing {
         var contentEnd = 0
         text.getLineStart(&start, end: &end, contentsEnd: &contentEnd, for: NSRange(location: index, length: 0))
         return Line(start: start, contentEnd: contentEnd, end: end)
+    }
+
+    static func lineNumber(at lineStart: Int, from anchor: LineAnchor?, in text: NSString) -> Int {
+        let reference = anchor.flatMap {
+            $0.offset <= text.length && abs($0.offset - lineStart) <= lineStart ? $0 : nil
+        }
+        var cursor = reference?.offset ?? 0
+        var number = reference?.number ?? 0
+        while cursor < lineStart {
+            let next = line(at: cursor, in: text).end
+            guard next > cursor else { break }
+            cursor = next
+            number += 1
+        }
+        while cursor > lineStart {
+            let previous = line(at: cursor - 1, in: text).start
+            guard previous < cursor else { break }
+            cursor = previous
+            number -= 1
+        }
+        return number
     }
 
     static func indentationEnd(in line: Line, text: NSString) -> Int {

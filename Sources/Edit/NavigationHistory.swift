@@ -20,11 +20,6 @@ final class NavigationHistory {
     }
 
     struct Selection: Equatable {
-        struct Anchor {
-            let offset: Int
-            fileprivate let line: Int
-        }
-
         private struct Position: Equatable {
             let line: Int
             let column: Int
@@ -33,24 +28,24 @@ final class NavigationHistory {
         private let start: Position
         private let end: Position
         let isBackward: Bool
-        let anchor: Anchor
+        let anchor: LineEditing.LineAnchor
 
         fileprivate var line: Int { start.line }
 
-        init?(range: NSRange, in content: String, activeEnd: Int? = nil, previousAnchor: Anchor? = nil) {
+        init?(range: NSRange, in content: String, activeEnd: Int? = nil, previousAnchor: LineEditing.LineAnchor? = nil) {
             self.init(range: range, in: content as NSString, activeEnd: activeEnd, previousAnchor: previousAnchor)
         }
 
-        init?(range: NSRange, in text: NSString, activeEnd: Int? = nil, previousAnchor: Anchor? = nil) {
+        init?(range: NSRange, in text: NSString, activeEnd: Int? = nil, previousAnchor: LineEditing.LineAnchor? = nil) {
             guard range.location >= 0, range.location <= text.length,
                   range.length >= 0, range.length <= text.length - range.location else { return nil }
 
             let firstLine = LineEditing.line(at: range.location, in: text)
-            let firstLineNumber = Self.lineNumber(at: firstLine.start, from: previousAnchor, in: text)
+            let firstLineNumber = LineEditing.lineNumber(at: firstLine.start, from: previousAnchor, in: text)
             let lastLine = LineEditing.line(at: range.upperBound, in: text)
-            anchor = Anchor(offset: firstLine.start, line: firstLineNumber)
+            anchor = .init(offset: firstLine.start, number: firstLineNumber)
             start = Position(line: firstLineNumber, column: range.location - firstLine.start)
-            end = Position(line: Self.lineNumber(at: lastLine.start, from: anchor, in: text),
+            end = Position(line: LineEditing.lineNumber(at: lastLine.start, from: anchor, in: text),
                            column: range.upperBound - lastLine.start)
             isBackward = range.length > 0 && activeEnd == range.location
         }
@@ -64,27 +59,6 @@ final class NavigationHistory {
             let startOffset = Self.offset(of: start, in: text)
             let endOffset = Self.offset(of: end, in: text)
             return NSRange(location: startOffset, length: max(0, endOffset - startOffset))
-        }
-
-        private static func lineNumber(at lineStart: Int, from anchor: Anchor?, in text: NSString) -> Int {
-            let reference = anchor.flatMap {
-                $0.offset <= text.length && abs($0.offset - lineStart) <= lineStart ? $0 : nil
-            }
-            var cursor = reference?.offset ?? 0
-            var number = reference?.line ?? 0
-            while cursor < lineStart {
-                let next = LineEditing.line(at: cursor, in: text).end
-                guard next > cursor else { break }
-                cursor = next
-                number += 1
-            }
-            while cursor > lineStart {
-                let previous = LineEditing.line(at: cursor - 1, in: text).start
-                guard previous < cursor else { break }
-                cursor = previous
-                number -= 1
-            }
-            return number
         }
 
         private static func offset(of position: Position, in text: NSString) -> Int {

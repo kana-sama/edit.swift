@@ -19,10 +19,14 @@ enum HeaderCheck {
     }
 
     private static func fileLabel(in window: NSWindow) -> NSTextField? {
-        fileTitle(in: window)?.arrangedSubviews.compactMap { $0 as? NSTextField }.first
+        fileField("Filename", in: window)
     }
 
-    static func run(in app: Edit) async throws {
+    private static func fileField(_ name: String, in window: NSWindow) -> NSTextField? {
+        fileTitle(in: window)?.arrangedSubviews.first { $0.identifier?.rawValue == "Edit.DocumentHeader.\(name)" } as? NSTextField
+    }
+
+    static func run(in app: Edit, capture: (NSWindow) throws -> Void = { _ in }) async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "Header check \(UUID())")
         let folder = root.appending(path: "Project")
         let another = root.appending(path: "Another folder")
@@ -30,9 +34,11 @@ enum HeaderCheck {
         try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: another, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: sourceDirectory.appending(path: "Helpers"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
         let source = sourceDirectory.appending(path: "Main.swift")
         let sibling = sourceDirectory.appending(path: "Notes.txt")
-        try Data("func main() {}\n".utf8).write(to: source)
+        let sourceText = "func main() {\n    print(\"Hello\")\n}\n"
+        try Data(sourceText.utf8).write(to: source)
         try Data("Notes\n".utf8).write(to: sibling)
         try Data("Finder metadata".utf8).write(to: sourceDirectory.appending(path: ".DS_Store"))
         try Data("Different directory".utf8).write(to: folder.appending(path: "README.md"))
@@ -58,17 +64,27 @@ enum HeaderCheck {
 
         document.window.layoutIfNeeded()
         guard let folderTitle = folderLabel(in: document.window), let fileTitle = fileLabel(in: document.window),
-              let icon = fileIcon(in: document) else { throw Failure("title has two text labels and a file icon") }
+              let path = fileField("Path", in: document.window), let caret = fileField("Caret", in: document.window),
+              let icon = fileIcon(in: document) else { throw Failure("the header shows the folder, icon, path, and caret") }
         try expect(folderTitle.stringValue == "Project" && fileTitle.stringValue == "Main.swift",
                    "the folder appears before the file name")
         try expect(folderStack(in: document.window)?.edgeInsets.left == 8,
                    "the folder title starts with an 8-point inset")
         let folderFrame = folderTitle.convert(folderTitle.bounds, to: nil)
         let iconFrame = icon.convert(icon.bounds, to: nil)
+        let pathFrame = path.convert(path.bounds, to: nil)
         let nameFrame = fileTitle.convert(fileTitle.bounds, to: nil)
-        let iconGap = nameFrame.minX - iconFrame.maxX
+        let caretFrame = caret.convert(caret.bounds, to: nil)
+        let iconGap = pathFrame.minX - iconFrame.maxX
         try expect(iconFrame.minX - folderFrame.maxX >= 3 && (-1...4).contains(iconGap),
-                   "separate folder and file hit regions with a compact icon gap (\(folderFrame), \(iconFrame), \(nameFrame))")
+                   "separate the folder and file hit regions with a compact gap after the icon (\(folderFrame), \(iconFrame), \(pathFrame))")
+        document.editor.setSelectedRange(NSRange(location: 26, length: 0))
+        try capture(document.window)
+        try expect(!path.isHidden && path.stringValue == "Sources/" && path.toolTip == FileBuffer.canonicalURL(source).path &&
+                   pathFrame.maxX <= nameFrame.minX + 2.5 && caretFrame.minX > nameFrame.maxX,
+                   "place the relative path before the filename and the caret after it (\(path.stringValue), \(pathFrame), \(nameFrame), \(caretFrame), tooltip \(path.toolTip ?? "none"))")
+        try expect(caret.stringValue == "2:13" && !caret.isHidden,
+                   "show the one-based caret position in the source (\(caret.stringValue))")
         try expect(folderTitle.action == nil && fileTitle.action == nil && icon.action == nil
                    && folderTitle.mouseDownCanMoveWindow && fileTitle.mouseDownCanMoveWindow && icon.mouseDownCanMoveWindow,
                    "the title parts leave primary mouse events available for moving the window")
@@ -167,6 +183,64 @@ enum HeaderCheck {
         let widthFolder = root.appending(path: "Title width/Project")
         try FileManager.default.createDirectory(at: widthFolder, withIntermediateDirectories: true)
         try await checkFileTitleWidth(in: app, folder: widthFolder)
+        try await checkMetadataTransition(in: app, folder: folder, source: source, text: sourceText, root: root)
+    }
+
+    private static func checkMetadataTransition(in app: Edit, folder: URL, source: URL, text: String, root: URL) async throws {
+        let outside = root.appending(path: "Outside.txt")
+        let outsideText = "First\r\n👍🏽e\u{301}\tZ\n"
+        try Data(outsideText.utf8).write(to: outside)
+        let document = app.makeDocument()
+        let window = document.window
+        defer { window.close() }
+        _ = try await app.openFile(folder, in: document)
+        _ = try await app.openFile(outside, in: document)
+        let editor = document.editor
+        let left = NSRange(location: 1, length: 0)
+        let right = NSRange(location: ("First\r\n👍🏽e\u{301}\t" as NSString).length, length: 1)
+        editor.setCaretSelections([left, right], primaryAffinity: .upstream)
+        let prefix = FileBuffer.canonicalURL(root).path + "/"
+        try expect(fileField("Path", in: window)?.stringValue == prefix && fileField("Caret", in: window)?.stringValue == "2:4",
+                   "an external file uses its directory and the active end of the primary selection counts characters")
+        editor.setCaretSelections([NSRange(location: right.upperBound, length: 0)])
+        _ = try await app.openFile(source, in: document)
+        editor.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
+        let (pending, release) = AsyncStream<Void>.makeStream()
+        var staged = false
+        document.beforeInstallFileForCheck = { _ in
+            staged = true
+            for await _ in pending { break }
+        }
+        let opening = Task { try await app.openFile(outside, in: document) }
+        defer {
+            document.beforeInstallFileForCheck = nil
+            release.finish()
+            opening.cancel()
+        }
+        try await waitFor("hold an incoming file before presentation") { staged }
+        window.layoutIfNeeded()
+        try expect(editor.string == text && fileLabel(in: window)?.stringValue == "Main.swift" &&
+                   fileField("Path", in: window)?.stringValue == "Sources/" && fileField("Caret", in: window)?.stringValue == "4:1",
+                   "the pending switch keeps the previous text, path, filename, and caret together")
+        release.finish()
+        _ = try await opening.value
+        window.layoutIfNeeded()
+        try expect(editor.string == outsideText && fileLabel(in: window)?.stringValue == "Outside.txt" &&
+                   fileField("Path", in: window)?.stringValue == prefix && fileField("Caret", in: window)?.stringValue == "2:5",
+                   "the destination shows its own path and restored position (\(fileField("Caret", in: window)?.stringValue ?? "none"))")
+        editor.insertNewline(nil)
+        let afterEdit = fileField("Caret", in: window)?.stringValue
+        try expect(afterEdit == "3:1", "inserting a newline updates the caret position (\(afterEdit ?? "none"))")
+
+        document.beforeInstallFileForCheck = nil
+        _ = try await app.openFile(folder.appending(path: "README.md"), in: document)
+        try expect(fileField("Path", in: window)?.stringValue.isEmpty == true, "a file at the folder root has no path prefix")
+        editor.setSelectedRange(NSRange(location: 3, length: 0))
+        document.setMarkdownPreview(true, focus: false)
+        try expect(fileField("Caret", in: window)?.isHidden == true, "the rendered Markdown header hides the source caret")
+        document.setMarkdownPreview(false, focus: false)
+        try expect(fileField("Caret", in: window)?.stringValue == "1:4" && fileField("Caret", in: window)?.isHidden == false,
+                   "returning to Markdown source shows its caret position again")
     }
 
     private static func checkFileTitleWidth(in app: Edit, folder: URL) async throws {
@@ -230,6 +304,27 @@ enum HeaderCheck {
                    "widen the terminal enough to compress the editor title")
         split.setPosition(terminalDivider, ofDividerAt: divider)
         try expectTitle(longer, fits: true)
+
+        let nestedFolder = folder.appending(path: "Sources/Editor/Commands")
+        try FileManager.default.createDirectory(at: nestedFolder, withIntermediateDirectories: true)
+        let nestedFile = nestedFolder.appending(path: longer.lastPathComponent)
+        try Data("Sample\n".utf8).write(to: nestedFile)
+        split.setPosition(terminalDivider + 65, ofDividerAt: divider)
+        _ = try await app.openFile(nestedFile, in: document)
+        try expectTitle(nestedFile, fits: true)
+        guard let path = fileField("Path", in: window), let caret = fileField("Caret", in: window) else {
+            throw Failure("the nested file has path and caret labels")
+        }
+        try expect(!path.isHidden && path.bounds.width + 0.5 >= path.intrinsicContentSize.width,
+                   "the wide editor shows the complete relative path")
+        split.setPosition(leadingEdge + 320, ofDividerAt: divider)
+        try expectTitle(nestedFile, fits: true)
+        try expect(!path.isHidden && path.bounds.width + 0.5 < path.intrinsicContentSize.width && !caret.isHidden,
+                   "the narrow editor truncates the path while keeping the filename and caret visible (\(path.bounds.width) pt)")
+        split.setPosition(terminalDivider + 65, ofDividerAt: divider)
+        try expectTitle(nestedFile, fits: true)
+        try expect(!path.isHidden && path.bounds.width + 0.5 >= path.intrinsicContentSize.width,
+                   "the path expands again as the editor regains room")
     }
 
     private static func checkDetachedToolbar(in document: DocumentWindow, app: Edit) async throws {

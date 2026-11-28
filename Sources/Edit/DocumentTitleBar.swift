@@ -12,17 +12,22 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     private static let sidebarItemIdentifiers: [NSToolbarItem.Identifier] = [sidebarItemIdentifier, .sidebarTrackingSeparator]
     private static let itemIdentifiers = [folderItemIdentifier, fileItemIdentifier]
     private static let leadingInset: CGFloat = 8
+    private static let metadataSpacing: CGFloat = 7
 
     private unowned let document: DocumentWindow
     private unowned let app: Edit
     private weak var folderLabel: TitleBarLabel?
     private weak var fileLabel: TitleBarLabel?
+    private weak var pathLabel: TitleBarLabel?
+    private weak var caretLabel: TitleBarLabel?
     private weak var fileTitle: NSStackView?
     private weak var languageIcon: TitleBarIcon?
     private weak var folderItem: NSToolbarItem?
     private weak var fileItem: NSToolbarItem?
     private weak var folderWidth: NSLayoutConstraint?
     private weak var fileWidth: NSLayoutConstraint?
+    private weak var pathWidth: NSLayoutConstraint?
+    private var caretLineAnchor: LineEditing.LineAnchor?
     private weak var revisionStatus: SourceControlRevisionBanner?
     private weak var conflictControls: JJConflictPanel?
     private weak var sidebar: DocumentSidebar?
@@ -179,7 +184,22 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             item.label = "File"
             item.visibilityPriority = .high
             let label = makeLabel()
+            label.identifier = .init("Edit.DocumentHeader.Filename")
             fileWidth = constrainWidth(of: label)
+            let path = makeLabel()
+            path.identifier = .init("Edit.DocumentHeader.Path")
+            path.font = .systemFont(ofSize: 11)
+            path.textColor = .secondaryLabelColor
+            path.lineBreakMode = .byTruncatingHead
+            path.isHidden = true
+            pathWidth = constrainWidth(of: path)
+            pathLabel = path
+            let caret = makeLabel()
+            caret.identifier = .init("Edit.DocumentHeader.Caret")
+            caret.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            caret.textColor = .secondaryLabelColor
+            caret.isHidden = true
+            caretLabel = caret
             let icon = TitleBarIcon()
             icon.imageScaling = .scaleProportionallyDown
             icon.setAccessibilityLabel("Change Language Mode")
@@ -192,9 +212,13 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
 
             let title = FileTitleView()
             title.addArrangedSubview(icon)
+            title.addArrangedSubview(path)
             title.addArrangedSubview(label)
+            title.addArrangedSubview(caret)
             title.alignment = .centerY
             title.spacing = 2
+            title.setCustomSpacing(Self.metadataSpacing, after: label)
+            title.setCustomSpacing(Self.metadataSpacing, after: caret)
             title.setVisibilityPriority(.detachOnlyIfNecessary, for: label)
             title.onLayout = { [weak self] in self?.updateDividerContinuation() }
             fileTitle = title
@@ -310,6 +334,14 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         let truncatedFolder = min(folderIdeal, max(0, room - fileIdeal))
         let folder = truncatedFolder >= 13 ? truncatedFolder : 0
         let file = min(fileIdeal, room - folder)
+        let extra = room - folder - file
+        let caretIdeal = caretLabel.flatMap { $0.stringValue.isEmpty ? nil : ceil($0.intrinsicContentSize.width) } ?? 0
+        let showCaret = caretIdeal > 0 && extra >= caretIdeal + Self.metadataSpacing
+        // Reserve room for typical coordinates so a digit change does not move the filename in a tight pane.
+        let caretRoom = caretIdeal > 0 ? max(60, caretIdeal) + Self.metadataSpacing : 0
+        let pathIdeal = pathLabel.flatMap { $0.stringValue.isEmpty ? nil : ceil($0.intrinsicContentSize.width) } ?? 0
+        let pathRoom = min(200, extra - caretRoom - (fileTitle?.spacing ?? 0))
+        let path = pathRoom >= min(28, pathIdeal) ? min(pathIdeal, pathRoom) : 0
 
         revisionStatus?.presentation = revision
         conflictControls?.presentation = format
@@ -319,6 +351,9 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         if let fileTitle, fileTitle.edgeInsets.left != inset { fileTitle.edgeInsets.left = inset }
         if folderWidth?.constant != folder { folderWidth?.constant = folder }
         if fileWidth?.constant != file { fileWidth?.constant = file }
+        if pathWidth?.constant != path { pathWidth?.constant = path }
+        if let pathLabel, pathLabel.isHidden != (path == 0) { pathLabel.isHidden = path == 0 }
+        if let caretLabel, caretLabel.isHidden == showCaret { caretLabel.isHidden = !showCaret }
     }
 
     func setDocumentStatus(revision: SourceControlRevisionBanner?, conflict: JJConflictPanel?) {
@@ -346,12 +381,7 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
     }
 
     private func installRevisionStatus(in title: NSStackView) {
-        if let revisionStatus, let fileLabel {
-            title.setCustomSpacing(7, after: fileLabel)
-            title.addArrangedSubview(revisionStatus)
-        } else if let fileLabel {
-            title.setCustomSpacing(title.spacing, after: fileLabel)
-        }
+        if let revisionStatus { title.addArrangedSubview(revisionStatus) }
     }
 
     private func updateDocumentToolbarSpace() {
@@ -385,7 +415,11 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
         }
         fileItem?.isHidden = document.showsEmptyFolder
         fileLabel?.stringValue = document.displayName
-        fileLabel?.toolTip = document.displayedFileURL?.path ?? document.displayName
+        let url = document.scratchFile == nil ? document.fileIconURL : nil
+        fileLabel?.toolTip = url?.path ?? document.displayName
+        pathLabel?.toolTip = url?.path
+        pathLabel?.stringValue = url.map(directoryPrefix(for:)) ?? ""
+        updateCaretLabel()
         fitLabels()
         if document.fileIconURL == nil && document.manualSyntaxLanguage == nil {
             languageIcon?.image = NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
@@ -393,6 +427,49 @@ final class DocumentTitleBar: NSObject, NSToolbarDelegate {
             languageIcon?.image = FileIcons.image(for: document.fileIconURL, appearance: document.window.effectiveAppearance,
                                                   language: document.manualSyntaxLanguage?.iconIdentifier)
         }
+    }
+
+    private func directoryPrefix(for url: URL) -> String {
+        if let folder = document.folderURL, let relative = FolderFileSearch.relativeDirectory(of: url, in: folder) {
+            return relative.isEmpty ? "" : relative + "/"
+        }
+        let directory = (url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath
+        return directory.hasSuffix("/") ? directory : directory + "/"
+    }
+
+    func invalidateCaretLine(from offset: Int) {
+        if let anchor = caretLineAnchor, offset <= anchor.offset { caretLineAnchor = nil }
+    }
+
+    func updateCaretPosition() {
+        let width = caretLabel?.intrinsicContentSize.width
+        updateCaretLabel()
+        if caretLabel?.intrinsicContentSize.width != width { fitLabels() }
+    }
+
+    private func updateCaretLabel() {
+        guard let caretLabel else { return }
+        let editor = document.editor
+        guard document.hasTextDocument, !document.isShowingMarkdownPreview,
+              let text = editor.textStorage?.mutableString else {
+            caretLabel.stringValue = ""
+            caretLabel.toolTip = nil
+            caretLabel.setAccessibilityLabel(nil)
+            return
+        }
+        let offset = editor.activeEnd(of: editor.selectedRange())
+        guard (0...text.length).contains(offset) else { return }
+        let line = LineEditing.line(at: offset, in: text)
+        let number = LineEditing.lineNumber(at: line.start, from: caretLineAnchor, in: text)
+        caretLineAnchor = .init(offset: line.start, number: number)
+        let prefix = NSRange(location: line.start, length: min(offset, line.contentEnd) - line.start)
+        let column = text.substring(with: prefix).count + 1
+        let value = "\(number + 1):\(column)"
+        guard caretLabel.stringValue != value else { return }
+        caretLabel.stringValue = value
+        let description = "Line \(number + 1), Column \(column)"
+        caretLabel.toolTip = description
+        caretLabel.setAccessibilityLabel(description)
     }
 
     func recentFoldersMenu() -> NSMenu {

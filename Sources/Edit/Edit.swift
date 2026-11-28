@@ -1562,6 +1562,10 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case "files":
             _ = try await FilesCheck.run(in: self)
             try await FilesCheck.checkFilePreview(in: self)
+            try await HeaderCheck.run(in: self) { window in
+                let target = screenshot.map { URL(fileURLWithPath: $0).deletingPathExtension().path + "-header.png" }
+                try checkWindow(window, screenshot: target)
+            }
             try await FolderCheck.checkCloseWorkspace(in: self) { window, suffix in
                 let target = screenshot.map { URL(fileURLWithPath: $0).deletingPathExtension().path + "-\(suffix).png" }
                 try checkWindow(window, screenshot: target)

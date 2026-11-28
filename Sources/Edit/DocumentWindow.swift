@@ -137,7 +137,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     let navigationHistory = NavigationHistory()
     var isReplayingNavigation = false
     private var navigationBufferID = UUID()
-    private var navigationSelectionAnchor: NavigationHistory.Selection.Anchor?
+    private var navigationSelectionAnchor: LineEditing.LineAnchor?
     private var restoringNavigationSelection = false
 
     private unowned let app: Edit
@@ -452,9 +452,15 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         window.makeFirstResponder(editor)
         editor.onTextChange = { [weak self] in self?.textDidChange() }
         editor.markdownLink = { [weak self] offset, activate in self?.markdownLink(at: offset, activate: activate) ?? false }
-        editor.onNavigationSelectionChange = { [weak self] in self?.recordEditorSelection() }
+        editor.onNavigationSelectionChange = { [weak self] in
+            guard let self else { return }
+            titleBar.updateCaretPosition()
+            recordEditorSelection()
+        }
         editor.onNavigationTextEdit = { [weak self] range in
-            if let self, let anchor = navigationSelectionAnchor, range.location <= anchor.offset {
+            guard let self else { return }
+            titleBar.invalidateCaretLine(from: range.location)
+            if let anchor = navigationSelectionAnchor, range.location <= anchor.offset {
                 navigationSelectionAnchor = nil
             }
         }
@@ -1918,6 +1924,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     }
 
     private func textDidChange() {
+        titleBar.updateCaretPosition()
         if conflictPanel != nil || !editor.conflictEdits.isEmpty {
             conflictStyleTask?.cancel()
             conflictApplyTask?.cancel()
@@ -2417,6 +2424,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     ) {
         if editor.renameRange != nil { _ = editor.onCancelSymbolRename?() }
         navigationSelectionAnchor = nil
+        titleBar.invalidateCaretLine(from: 0)
         let projection = restoredConflicts.isEmpty
             ? JJConflictEdit.project(openingConflicts?.blocks ?? confirmedConflicts, in: text)
             : (text: text, edits: restoredConflicts)
@@ -2968,6 +2976,7 @@ extension DocumentWindow {
             scrollView.isHidden = isShowingFilePreview || showsEmptyFolder
             editor.setMarkdownToolTipLinks(markdownPage?.source == editor.string ? markdownPage?.document.links ?? [] : [])
         }
+        titleBar.updateCaretPosition()
         window.initialFirstResponder = contentResponder
         sidebar.markdownModeChanged()
         if focus { focusContent() }
@@ -3051,6 +3060,7 @@ extension DocumentWindow {
         markdownState = prepared.state
         markdownPage = (prepared.source, prepared.document)
         markdownPreview = prepared.view
+        titleBar.updateCaretPosition()
         connectMarkdownPreview(prepared.view)
         scrollView.isHidden = true
         previous?.removeFromSuperview()
