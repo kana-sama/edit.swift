@@ -58,6 +58,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     private(set) var wrapsWords = false
     private let currentLineHighlight = CurrentLineHighlight()
     private var lineRefreshPending = false
+    private var layingOutViewport = false
     let multiCaret = MultiCaretState()
     private weak var observedWindow: NSWindow?
     private var multiCaretComposition: MultiCaretComposition?
@@ -1606,7 +1607,13 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         super.textViewportLayoutController(controller, configureRenderingSurfaceFor: fragment)
     }
 
+    override func textViewportLayoutControllerWillLayout(_ controller: NSTextViewportLayoutController) {
+        layingOutViewport = true
+        super.textViewportLayoutControllerWillLayout(controller)
+    }
+
     override func textViewportLayoutControllerDidLayout(_ controller: NSTextViewportLayoutController) {
+        defer { layingOutViewport = false }
         super.textViewportLayoutControllerDidLayout(controller)
         if !diagnostics.isEmpty {
             refreshDiagnosticForeground(redraw: true)
@@ -1615,6 +1622,11 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         bracketNavigation.layoutHighlights()
         if let range = renameRange, range.length > 0 { renameShade?.update() }
         requestLineRefresh()
+    }
+
+    fileprivate func layoutViewportForUpwardScroll() {
+        guard !layingOutViewport else { return }
+        textLayoutManager?.textViewportLayoutController.layoutViewport()
     }
 
     func setJJLineMarks(_ marks: [JJLineMark], lineStarts: [Int] = [], hunks: [JJDiffHunk] = [], normalizeCRLF: Bool = false) {
@@ -2018,6 +2030,7 @@ private final class EditorOverscrollBackground: NSView {
 @MainActor
 private final class EditorScrollView: NSScrollView {
     private var preservingViewport = false
+    private var reflectedClipY: CGFloat?
     private let leftOverscroll = EditorOverscrollBackground()
     private let rightOverscroll = EditorOverscrollBackground()
 
@@ -2057,6 +2070,13 @@ private final class EditorScrollView: NSScrollView {
 
     override func reflectScrolledClipView(_ clipView: NSClipView) {
         super.reflectScrolledClipView(clipView)
+        let y = clipView.bounds.minY
+        let previousY = reflectedClipY
+        reflectedClipY = y
+        if let previousY, y < previousY, y >= -contentInsets.top, !preservingViewport {
+            // Lay out the exposed rows before TextKit can draw from stale estimates during upward scrolling.
+            (documentView as? EditorTextView)?.layoutViewportForUpwardScroll()
+        }
         refreshScrollDecorations()
     }
 

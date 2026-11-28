@@ -270,6 +270,90 @@ enum EditorCheck {
         }
     }
 
+    static func checkScrollReversal(in app: Edit) async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "Scroll Reversal \(UUID())", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        let document = app.makeDocument()
+        let window = document.window
+        defer {
+            window.close()
+            try? FileManager.default.removeItem(at: root)
+        }
+        window.setFrame(NSRect(x: -10_000, y: -10_000, width: 1470, height: 923), display: false)
+        window.orderBack(nil)
+        try expect(window.alphaValue == 0 && window.ignoresMouseEvents && !NSApp.isActive, "quiet live scrolling check")
+
+        // Alternate between sections with short declarations and sections with long signatures.
+        let rows = (0..<10_258).map { row in
+            let width = switch row {
+            case 0..<720: 24 + row * 17 % 34
+            case 720..<795: 24 + row * 43 % 97
+            case 795..<905: 24 + row * 19 % 24
+            case 905..<1050: 32 + row * 31 % 98
+            default: 24 + row * 47 % 93
+            }
+            return "\(row) " + String(repeating: "x", count: width)
+        }
+        let source = rows.joined(separator: "\n") + "\n"
+        let url = root.appending(path: "Declarations.txt")
+        try Data(source.utf8).write(to: url)
+        _ = try await app.openFile(root, in: document)
+        _ = try await app.openFile(url, in: document, focusEditor: false)
+        window.layoutIfNeeded()
+        window.displayIfNeeded()
+
+        let editor = document.editor
+        let scroll = document.scrollView
+        guard let manager = editor.textLayoutManager else { throw Failure("TextKit 2 scroll layout") }
+        let viewport = manager.textViewportLayoutController
+        let starts = [0] + source.utf16.enumerated().compactMap { $0.element == 10 ? $0.offset + 1 : nil }
+        let destination = NSRange(location: starts[949] + 12, length: 0)
+        document.navigate(to: destination, from: nil)
+        window.displayIfNeeded()
+
+        func firstViewportRow() throws -> Int {
+            guard let range = viewport.viewportRange,
+                  let row = starts.firstIndex(of: manager.offset(from: manager.documentRange.location, to: range.location)) else {
+                throw Failure("TextKit provides a laid-out first row")
+            }
+            return row
+        }
+
+        let down: [Int32] = [5, 28, 58, 35, 63, 104, 17, 52, 21, 8, 8, 15, 16, 44, 40, 67, 98, 32, 15, 25, 21, 10,
+                             8, 3, 29, 77, 80, 80, 19, 6, 43, 12, 11, 9, 9, 16, 6, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1, 1]
+        func scrollBy(_ points: Int32) throws {
+            guard let input = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                                      wheel1: -points, wheel2: 0, wheel3: 0),
+                  let event = NSEvent(cgEvent: input) else { throw Failure("create pixel scroll event") }
+            scroll.scrollWheel(with: event)
+            window.displayIfNeeded()
+        }
+
+        for delta in down {
+            try scrollBy(delta)
+            await Task.yield()
+        }
+        guard let lineHeight = editor.defaultParagraphStyle?.minimumLineHeight, lineHeight > 0 else {
+            throw Failure("fixed line height for unwrapped scrolling")
+        }
+        let initialHeight = editor.frame.height
+        let up: [Int32] = [-24, -49, -65, -76]
+        for delta in up {
+            let previousRow = try firstViewportRow()
+            let previousOrigin = scroll.contentView.bounds.minY
+            try scrollBy(delta)
+            let nextRow = try firstViewportRow()
+            let movement = scroll.contentView.bounds.minY - previousOrigin
+            try expect(abs(movement - CGFloat(delta)) < 1
+                       && abs(movement - CGFloat(nextRow - previousRow) * lineHeight) < 2 * lineHeight,
+                       "first frame of upward scroll follows the clip movement (\(previousRow + 1) → \(nextRow + 1), \(movement) pt)")
+            try expect(abs(editor.frame.height - initialHeight) < lineHeight,
+                       "scrollbar extent stays stable during upward scrolling")
+            await Task.yield()
+        }
+        try expect(editor.selectedRange() == destination && editor.string == source, "scrolling preserves selection and text")
+    }
+
     static func checkScrolledZoom(in document: DocumentWindow) async throws {
         let window = document.window
         let editor = document.editor

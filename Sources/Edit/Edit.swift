@@ -1689,6 +1689,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         try await EditorCheck.checkViewportResize(in: makeDocument())
         try await EditorCheck.checkCurrentLinePaint()
         try await EditorCheck.checkScrolledZoom(in: makeDocument())
+        try await EditorCheck.checkScrollReversal(in: self)
     }
 
     private func checkJJ(screenshot: String? = nil) async throws {
