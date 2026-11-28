@@ -123,7 +123,9 @@ final class JJInlineDiffInteraction {
 
         let granularity: NSSelectionGranularity = event.clickCount >= 3 ? .selectByParagraph
             : event.clickCount == 2 ? .selectByWord : .selectByCharacter
-        let initial = selectionRange(at: offset, granularity: granularity, editor: editor, projection: projection)
+        let wordText = granularity == .selectByWord ? layout.textLayout()?.text : nil
+        let initial = wordText.map { EditorWordBoundary.clickSelection(at: offset, in: $0) }
+            ?? selectionRange(at: offset, granularity: granularity, editor: editor)
         if modifiers == .shift {
             _ = select(from: previous.anchor, to: hit)
         } else if initial.length > 0, let start = projection.position(at: initial.location),
@@ -147,12 +149,18 @@ final class JJInlineDiffInteraction {
             } else if granularity == .selectByCharacter {
                 _ = self.select(from: pressed, to: hit)
             } else {
-                let range = self.selectionRange(at: end, granularity: granularity, editor: editor, projection: projection)
-                let backwards = end < initial.location
-                let anchor = backwards ? NSMaxRange(initial) : initial.location
-                let head = backwards ? range.location : NSMaxRange(range)
-                if let start = projection.position(at: anchor, preferPrevious: backwards),
-                   let end = projection.position(at: head, preferPrevious: !backwards) {
+                let anchor: Int
+                let head: Int
+                if let wordText {
+                    (anchor, head) = EditorWordBoundary.dragSelection(from: initial, to: end, in: wordText)
+                } else {
+                    let range = self.selectionRange(at: end, granularity: granularity, editor: editor)
+                    let backwards = end < initial.location
+                    anchor = backwards ? initial.upperBound : initial.location
+                    head = backwards ? range.location : range.upperBound
+                }
+                if let start = projection.position(at: anchor, preferPrevious: head < anchor),
+                   let end = projection.position(at: head, preferPrevious: head >= anchor) {
                     _ = self.select(from: start, to: end)
                 }
             }
@@ -221,15 +229,13 @@ final class JJInlineDiffInteraction {
         return .live(offset)
     }
 
-    private func selectionRange(at offset: Int, granularity: NSSelectionGranularity,
-                                editor: EditorTextView, projection: JJInlineDiffSelection) -> NSRange {
+    private func selectionRange(at offset: Int, granularity: NSSelectionGranularity, editor: EditorTextView) -> NSRange {
         let caret = NSRange(location: offset, length: 0)
-        guard granularity != .selectByCharacter else { return caret }
+        guard granularity == .selectByParagraph else { return caret }
         guard let layout = layout.textLayout()?.manager,
               let range = editor.textRange(caret, in: layout) else { return caret }
         let selection = NSTextSelection(range: range, affinity: .downstream, granularity: .character)
-        let result = layout.textSelectionNavigation.textSelection(for: granularity == .selectByWord ? .word : .paragraph,
-                                                                  enclosing: selection)
+        let result = layout.textSelectionNavigation.textSelection(for: .paragraph, enclosing: selection)
         guard let first = result.textRanges.first, let last = result.textRanges.last else { return caret }
         return NSUnionRange(editor.charRange(first, in: layout), editor.charRange(last, in: layout))
     }

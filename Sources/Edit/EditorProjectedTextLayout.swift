@@ -84,7 +84,7 @@ final class EditorProjectedTextLayout {
     private let content = NSTextContentStorage()
     let manager = NSTextLayoutManager()
     let style: Style
-    private let text: NSString
+    let text: NSString
     private var wrappedRows: [NSRange: EditorTextRows] = [:]
     private var lineHeight: CGFloat { style.lineHeight }
 

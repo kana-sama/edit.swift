@@ -48,9 +48,34 @@ enum EditorWordBoundary {
 
     static func wordRange(containing offset: Int, within bounds: Range<Int>, in text: NSString) -> NSRange? {
         guard bounds.contains(offset), kind(at: offset, in: text) == .word else { return nil }
-        let start = skip(.word, from: offset, toward: bounds.lowerBound, in: text)
-        let end = skip(.word, from: offset, toward: bounds.upperBound, in: text)
+        return run(.word, at: offset, within: bounds, in: text)
+    }
+
+    private static func run(_ kind: Kind, at offset: Int, within bounds: Range<Int>, in text: NSString) -> NSRange {
+        let start = skip(kind, from: offset, toward: bounds.lowerBound, in: text)
+        let end = skip(kind, from: offset, toward: bounds.upperBound, in: text)
         return NSRange(location: start, length: end - start)
+    }
+
+    static func clickSelection(at offset: Int, in text: NSString) -> NSRange {
+        let bounds = line(at: offset, in: text)
+        // A word owns the caret immediately after it. A separator only owns
+        // positions before or inside its run, so it yields to a following word or space.
+        if offset > bounds.lowerBound, kind(at: offset - 1, in: text) == .word {
+            return run(.word, at: offset, within: bounds, in: text)
+        }
+        let right = bounds.contains(offset) ? kind(at: offset, in: text) : .space
+        return run(right, at: offset, within: bounds, in: text)
+    }
+
+    static func dragSelection(from initial: NSRange, to offset: Int, in text: NSString) -> (anchor: Int, head: Int) {
+        if (initial.location...initial.upperBound).contains(offset) {
+            return (initial.location, initial.upperBound)
+        }
+        let word = wordRange(containing: offset, within: line(at: offset, in: text), in: text)
+        let interior = word.flatMap { $0.location < offset ? $0 : nil }
+        if offset < initial.location { return (initial.upperBound, interior?.location ?? offset) }
+        return (initial.location, interior?.upperBound ?? offset)
     }
 
     static func move(from offset: Int, backward: Bool, multipleCarets: Bool, in text: NSString) -> Int {

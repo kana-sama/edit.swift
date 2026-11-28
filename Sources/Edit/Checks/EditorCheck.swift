@@ -8,6 +8,7 @@ enum EditorCheck {
         try expect(!window.isVisible && !NSApplication.shared.isActive, "quiet test window")
         try expect(window.firstResponder === editor && editor.string.isEmpty, "focused, empty editor")
         try expect(editor.textLayoutManager != nil, "TextKit 2 editor")
+        try checkDoubleClick(in: window, editor: editor)
 
         guard let undo = editor.undoManager else { throw Failure("window undo manager") }
         undo.groupsByEvent = false
@@ -641,6 +642,52 @@ enum EditorCheck {
         undo.undo()
         try expect(editor.string == "keep\r\n\t[]\r\nprotected\r\n()" && editor.caretSelections == [range(8), range(23)],
                    "Undo restores both focused pairs and their carets")
+    }
+
+    private static func checkDoubleClick(in window: NSWindow, editor: EditorTextView) throws {
+        let sample = "  playdate_mod.getEmittedDocs(),  \nnext"
+        editor.string = sample
+        defer {
+            editor.string = ""
+            editor.undoManager?.removeAllActions()
+        }
+        window.layoutIfNeeded()
+        editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+
+        func event(_ type: NSEvent.EventType, at offset: Int, count: Int) throws -> NSEvent {
+            let hit = NSRange(location: offset, length: 0)
+            let rect = editor.firstRect(forCharacterRange: hit, actualRange: nil)
+            let point = window.convertPoint(fromScreen: NSPoint(x: rect.minX, y: rect.midY))
+            guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                                 timestamp: ProcessInfo.processInfo.systemUptime,
+                                                 windowNumber: window.windowNumber, context: nil, eventNumber: count,
+                                                 clickCount: count, pressure: type == .leftMouseUp ? 0 : 1) else {
+                throw Failure("create a text selection mouse event")
+            }
+            return event
+        }
+        func doubleClick(at offset: Int, draggingTo target: Int? = nil) throws {
+            NSApp.postEvent(try event(.leftMouseUp, at: offset, count: 1), atStart: true)
+            editor.mouseDown(with: try event(.leftMouseDown, at: offset, count: 1))
+            NSApp.postEvent(try event(.leftMouseUp, at: target ?? offset, count: 2), atStart: true)
+            if let target { NSApp.postEvent(try event(.leftMouseDragged, at: target, count: 2), atStart: true) }
+            editor.mouseDown(with: try event(.leftMouseDown, at: offset, count: 2))
+        }
+
+        let text = sample as NSString
+        for (offset, expected) in [(10, text.range(of: "playdate_mod")), (14, text.range(of: "playdate_mod")),
+                                   (15, text.range(of: "getEmittedDocs")), (31, text.range(of: "(),")),
+                                   (1, NSRange(location: 0, length: 2)), (33, NSRange(location: 32, length: 2))] {
+            try doubleClick(at: offset)
+            let selected = editor.selectedRange()
+            try expect(selected == expected, "double-click selection at \(offset), got \(selected), expected \(expected)")
+        }
+        for (target, start, end, affinity) in [(1, 1, 14, NSSelectionAffinity.upstream),
+                                               (15, 2, 15, .downstream), (22, 2, 29, .downstream)] {
+            try doubleClick(at: 10, draggingTo: target)
+            try expect(editor.selectedRange() == NSRange(start..<end) && editor.selectionAffinity == affinity,
+                       "extend a double-click selection to \(target), got \(editor.selectedRange())")
+        }
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ description: String) throws {

@@ -639,8 +639,36 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         multiCaret.pendingSkip = false
         if jjInlineDiff?.handleMouseDown(event) == true { return }
         jjInlineDiff?.clearProjectedSelection()
+        if event.clickCount == 2, event.modifierFlags.intersection([.command, .option, .shift, .control]).isEmpty,
+           trackWordSelection(with: event) { return }
         super.mouseDown(with: event)
         if focusSession == nil && hasSecondarySelections { keepPrimarySelection(nil) }
+    }
+
+    private func trackWordSelection(with event: NSEvent) -> Bool {
+        guard isSelectable, !hasMarkedText(), let window, let text = textStorage?.mutableString else { return false }
+        let offset = characterIndexForInsertion(at: convert(event.locationInWindow, from: nil))
+        guard offset <= text.length, window.makeFirstResponder(self) else { return false }
+        let initial = EditorWordBoundary.clickSelection(at: offset, in: text)
+        setSelectedRange(initial, affinity: .downstream, stillSelecting: false)
+
+        var drag: NSEvent?
+        window.trackEvents(matching: [.leftMouseUp, .leftMouseDragged], timeout: 0.05, mode: .eventTracking) { event, stop in
+            if event?.type == .leftMouseUp { stop.pointee = true }
+            guard self.window === window, window.firstResponder === self, initial.upperBound <= text.length else {
+                stop.pointee = true
+                return
+            }
+            if event?.type == .leftMouseDragged { drag = event }
+            guard drag != nil, let location = event ?? drag else { return }
+            _ = self.autoscroll(with: location)
+            let offset = self.characterIndexForInsertion(at: self.convert(location.locationInWindow, from: nil))
+            guard offset <= text.length else { return }
+            let (anchor, head) = EditorWordBoundary.dragSelection(from: initial, to: offset, in: text)
+            self.setSelectedRange(NSRange(location: min(anchor, head), length: abs(head - anchor)),
+                                  affinity: head < anchor ? .upstream : .downstream, stillSelecting: false)
+        }
+        return true
     }
 
     override func insertText(_ string: Any, replacementRange: NSRange) {

@@ -117,6 +117,16 @@ enum JJInlineDiffCheck {
         let wordAnchor = JJInlineDiffSelection.Position.removed(key: replacement.baseRange, offset: afterMode)
         let wordClipboard = NSPasteboard.withUniqueName()
         defer { wordClipboard.releaseGlobally() }
+        let platform = (replacement.removedText as NSString).range(of: "platform")
+        let wordRect = try require(controller.removedCaretRect(key: replacement.baseRange, offset: platform.location + 3),
+                                   "lay out a word in a removed row")
+        let wordPoint = editor.convert(NSPoint(x: wordRect.minX, y: wordRect.midY), to: nil)
+        NSApp.postEvent(try mouse(.leftMouseUp, at: wordPoint, in: window, clickCount: 2), atStart: true)
+        editor.mouseDown(with: try mouse(.leftMouseDown, at: wordPoint, in: window, clickCount: 2))
+        guard controller.copyProjectedSelection(to: wordClipboard, cutting: false),
+              wordClipboard.string(forType: .string) == "platform" else {
+            throw Failure("double-click selects only the word before a slash in a removed row")
+        }
         guard controller.select(from: wordAnchor, to: wordAnchor) else {
             throw Failure("place a word-selection anchor in the removed text")
         }
@@ -725,10 +735,11 @@ enum JJInlineDiffCheck {
         }
     }
 
-    private static func mouse(_ type: NSEvent.EventType, at point: NSPoint, in window: NSWindow) throws -> NSEvent {
+    private static func mouse(_ type: NSEvent.EventType, at point: NSPoint, in window: NSWindow,
+                              clickCount: Int = 1) throws -> NSEvent {
         try require(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
                                       timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                                      context: nil, eventNumber: 1, clickCount: type == .mouseMoved ? 0 : 1,
+                                      context: nil, eventNumber: 1, clickCount: type == .mouseMoved ? 0 : clickCount,
                                       pressure: type == .leftMouseUp ? 0 : 1), "synthesize a mouse event")
     }
 
