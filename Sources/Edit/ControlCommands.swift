@@ -35,7 +35,9 @@ struct ControlCommand {
         if action == #selector(Edit.closeDocument(_:)) { return document.canCloseDocument }
         if action == #selector(Edit.closeWorkspace(_:)) { return document.canCloseWorkspace }
         if action == #selector(Edit.toggleWordWrap(_:)) { return document.canToggleWordWrap }
-        if Self.highlightingLayer(for: action) != nil { return document.canToggleHighlighting }
+        if action == #selector(Edit.toggleFormatOnSave(_:)) || Self.highlightingLayer(for: action) != nil {
+            return document.canChangeWorkspaceSettings
+        }
         if action == #selector(Edit.performFindControlAction(_:)), let command = item.representedObject as? FindCommand {
             return document.canPerformFind(command)
         }
@@ -78,6 +80,7 @@ struct ControlCommand {
         case #selector(Edit.toggleLSPHighlight(_:)), #selector(Edit.toggleTreeSitterHighlight(_:)):
             return Self.highlightingLayer(for: item.action).map { document.isHighlightingEnabled($0) }
         case #selector(Edit.toggleWordWrap(_:)): return document.editor.wrapsWords
+        case #selector(Edit.toggleFormatOnSave(_:)): return document.isFormatOnSaveEnabled
         case #selector(Edit.toggleMarkdownPreview(_:)): return document.isShowingMarkdownPreview
         case #selector(Edit.toggleSidebar(_:)): return document.isSidebarVisible
         case #selector(Edit.toggleTerminal(_:)): return document.isTerminalVisible
@@ -125,6 +128,10 @@ struct ControlCommand {
         }
         if action == #selector(Edit.toggleWordWrap(_:)) {
             document.toggleWordWrap()
+            return
+        }
+        if action == #selector(Edit.toggleFormatOnSave(_:)) {
+            document.toggleFormatOnSave()
             return
         }
         if let layer = Self.highlightingLayer(for: action) {
@@ -262,10 +269,15 @@ struct ControlCommand {
                action != #selector(NSWindow.performMiniaturize(_:)),
                action != #selector(NSWindow.performZoom(_:)) { return [] }
             let assistance = isLanguageAssistanceCommand(action)
-            let title = action == #selector(Edit.goBack(_:)) || action == #selector(Edit.goForward(_:))
-                || action == #selector(Edit.toggleMarkdownPreview(_:))
-                || highlightingLayer(for: action) != nil || assistance
-                ? item.title : "\(prefix): \(item.title)"
+            let title: String
+            if action == #selector(Edit.toggleFormatOnSave(_:)) {
+                title = "Toggle \(item.title)"
+            } else if action == #selector(Edit.goBack(_:)) || action == #selector(Edit.goForward(_:))
+                        || action == #selector(Edit.toggleMarkdownPreview(_:)) || highlightingLayer(for: action) != nil || assistance {
+                title = item.title
+            } else {
+                title = "\(prefix): \(item.title)"
+            }
             return [ControlCommand(id: NSStringFromSelector(action), title: title, item: item,
                                    documentOnly: isBracketCommand(action) || isCaseCommand(action) || assistance)]
         }

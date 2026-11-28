@@ -27,7 +27,7 @@ enum LanguageServerEditingCheck {
             document.window.close()
             try? FileManager.default.removeItem(at: base)
         }
-
+        try checkFormatOnSavePreferences(in: base)
         for fixture in fixtures {
             try await check(fixture, in: base, app: app, document: document)
         }
@@ -122,8 +122,130 @@ enum LanguageServerEditingCheck {
                     "undo the \(label) formatter's edits and restore the selection in one action")
         if fixture.language == .zig {
             try await checkCompletionScrolling(in: document, session: session)
+            try await checkFormatOnSave(in: document, file: file, fixture: fixture)
         }
         print("LSP editing passed for \(label) with \(session.server.name).")
+    }
+
+    private static func checkFormatOnSavePreferences(in root: URL) throws {
+        let suite = "dev.edit-swift.format-on-save.check.\(UUID())"
+        guard let defaults = UserDefaults(suiteName: suite) else { throw Failure(detail: "create isolated preferences") }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let other = root.appending(path: "Other")
+        let saved = WorkspaceFormatOnSave(defaults: defaults)
+        saved.setEnabled(true, in: root)
+        saved.setEnabled(true, in: nil)
+        let reopened = WorkspaceFormatOnSave(defaults: defaults)
+        try require(reopened.isEnabled(in: root) && !reopened.isEnabled(in: other) && reopened.isEnabled(in: nil),
+                    "restore independent Format on Save settings for folders and standalone windows")
+        reopened.setEnabled(false, in: nil)
+        let updated = WorkspaceFormatOnSave(defaults: defaults)
+        try require(!updated.isEnabled(in: nil) && updated.isEnabled(in: root), "persist switching off a single scope")
+    }
+
+    private static func checkFormatOnSave(in document: DocumentWindow, file: URL, fixture: Fixture) async throws {
+        let editor = document.editor
+        guard let menu = NSApp.mainMenu,
+              let toggle = ControlCommand.fromMenu(menu).first(where: { $0.title == "Toggle Format on Save" }) else {
+            throw Failure(detail: "find Format on Save in Command Mode")
+        }
+        try require(toggle.isAvailable(in: document, focus: editor) && toggle.toggleState(in: document) == false,
+                    "offer Format on Save switched off in a new workspace")
+        func disk(_ url: URL? = nil) throws -> String { try String(contentsOf: url ?? file, encoding: .utf8) }
+
+        let start = NSRange(location: 0, length: 0)
+        let prefix = "// Save fixture\n"
+        editor.insertText(prefix, replacementRange: start)
+        let raw = prefix + fixture.text
+        let savedOff = await document.save()
+        try require(try savedOff && editor.string == raw && disk() == raw, "save the exact text with formatting off")
+
+        toggle.run(in: document)
+        try require(toggle.toggleState(in: document) == true && document.isFormatOnSaveEnabled,
+                    "enable formatting for the active workspace from Command Mode")
+        editor.insertText("const number=42;\n", replacementRange: start)
+        let unformatted = editor.string
+        let position = editor.selectedRange()
+        editor.breakUndoCoalescing()
+        editor.undoManager?.removeAllActions()
+        let savedOn = await document.save()
+        let formatted = editor.string
+        try require(try savedOn && formatted.contains(fixture.formattedInvocation) && formatted.contains("const number = 42;")
+                    && disk() == formatted && !document.window.isDocumentEdited,
+                    "write the ZLS-formatted text to disk and mark it saved")
+        editor.undoManager?.undo()
+        try require(editor.string == unformatted && editor.selectedRange() == position && document.window.isDocumentEdited,
+                    "undo every format-on-save edit and restore the caret in one action")
+
+        document.requestAutosave()
+        try await wait("autosave the exact text restored by Undo") {
+            !document.window.isDocumentEdited && (try? disk()) == unformatted
+        }
+        let savedClean = await document.save()
+        try require(try savedClean && editor.string == formatted && disk() == formatted,
+                    "an explicit Save formats an already autosaved buffer")
+
+        editor.undoManager?.undo()
+        try require(editor.string == unformatted, "restore the unformatted source for the pending save")
+        try await checkPendingSave(in: document, file: file, typeWhileSaving: true)
+        editor.insertText("// Slow formatter\n", replacementRange: start)
+        try await checkPendingSave(in: document, file: file, typeWhileSaving: false)
+
+        let copy = file.deletingLastPathComponent().appending(path: "SavedAs.zig")
+        let beforeCopy = editor.string
+        let savedCopy = await document.save(asNew: true, to: copy)
+        try require(try savedCopy && document.fileURL == copy && editor.string.contains(fixture.formattedInvocation)
+                    && disk(copy) == editor.string && disk() == beforeCopy,
+                    "format a named Zig buffer on Save As and preserve the source file")
+
+        let features = document.languageFeatures
+        try await wait("prepare ZLS for the saved copy") { features.session.supportsFormatting }
+        features.perform(.stop)
+        try await wait("stop ZLS before saving without a formatter") { features.session.state == .stopped }
+        editor.insertText("const offline=1;\n", replacementRange: start)
+        let offline = editor.string
+        let savedOffline = await document.save()
+        try require(try savedOffline && editor.string == offline && disk(copy) == offline,
+                    "save the exact text when the configured formatter is unavailable")
+    }
+
+    private static func checkPendingSave(in document: DocumentWindow, file: URL, typeWhileSaving: Bool) async throws {
+        let editor = document.editor
+        let title = document.window.title
+        var expected = editor.string
+        let diskBefore = try String(contentsOf: file, encoding: .utf8)
+        // Keep the response held even when the deadline cancels its task.
+        var gate: CheckedContinuation<Void, Never>?
+        var returned = false
+        editor.beforeApplyLanguageFormattingForCheck = {
+            await withCheckedContinuation { gate = $0 }
+            returned = true
+        }
+        defer {
+            gate?.resume()
+            editor.beforeApplyLanguageFormattingForCheck = nil
+        }
+        var saved: Bool?
+        let saving = Task { saved = await document.save() }
+        defer { saving.cancel() }
+        try await wait("hold the live formatting result before Save writes") { gate != nil }
+        try require(try editor.string == expected && document.window.title == title
+                    && String(contentsOf: file, encoding: .utf8) == diskBefore,
+                    "retain text, title, and file contents while format on save is pending")
+        if typeWhileSaving {
+            let prefix = "// Typed while saving\n"
+            editor.insertText(prefix, replacementRange: NSRange(location: 0, length: 0))
+            expected = prefix + expected
+            gate?.resume()
+            gate = nil
+        }
+        try await wait("save the current buffer when formatting is stale or times out") { saved != nil }
+        gate?.resume()
+        gate = nil
+        try await wait("let the obsolete formatting result finish") { returned }
+        try require(try saved == true && editor.string == expected && document.window.title == title
+                    && String(contentsOf: file, encoding: .utf8) == expected,
+                    "preserve the latest visible and saved text after obsolete formatting returns")
     }
 
     private static func checkCompletionScrolling(in document: DocumentWindow, session: LanguageServerSession) async throws {

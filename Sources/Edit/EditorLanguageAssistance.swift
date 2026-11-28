@@ -405,27 +405,56 @@ final class EditorLanguageAssistance {
     }
 
     func format() {
-        guard canFormat, let state = context(), let editor else { return }
+        _ = startFormatting(reportFailure: true)
+    }
+
+    func formatForSave() async {
+        guard !Task.isCancelled else { return }
+        let (finished, completion) = AsyncStream<Void>.makeStream()
+        guard let request = startFormatting(reportFailure: false, onFinish: { completion.finish() }) else { return }
+        let deadline = Task {
+            do { try await Task.sleep(for: .seconds(1)) } catch { return }
+            request.cancel()
+            completion.finish()
+        }
+        defer { deadline.cancel() }
+        // Save can proceed even if a cancelled formatter is still computing edits off the main actor.
+        await withTaskCancellationHandler {
+            var iterator = finished.makeAsyncIterator()
+            _ = await iterator.next()
+        } onCancel: {
+            request.cancel()
+            completion.finish()
+        }
+    }
+
+    private func startFormatting(reportFailure: Bool, onFinish: (() -> Void)? = nil) -> Task<Void, Never>? {
+        guard canFormat, let state = context(), let editor else { return nil }
         dismiss()
         let text = editor.string
         formatTask?.cancel()
-        formatTask = Task { [weak self] in
+        let request = Task { [weak self] in
+            defer { onFinish?() }
+            guard let self, !Task.isCancelled, context() == state else { return }
             do {
                 let raw = try await state.session.formatting(tabSize: 4, insertSpaces: true)
                 let edits = try await Self.formattingEdits(raw, in: text)
 #if EDIT_AGENT_CHECKS
                 if let beforeFormat = editor.beforeApplyLanguageFormattingForCheck { await beforeFormat() }
 #endif
-                guard let self, context() == state, !Task.isCancelled, canFormat else { return }
+                guard !Task.isCancelled, context() == state, canFormat,
+                      editor.string.utf8.elementsEqual(text.utf8) else { return }
                 let selections = MultiCaretEditing.mapped(editor.caretSelections, after: edits)
                 Self.apply(edits, selections: selections, named: "Format Document", in: editor)
             } catch is CancellationError {
                 return
             } catch {
-                guard let self, context() == state, !Task.isCancelled else { return }
+                guard reportFailure, context() == state, !Task.isCancelled else { return }
                 editor.showLanguageFeedback("Could not format the document: \(error.localizedDescription)", at: editor.selectedRange())
             }
         }
+        formatTask = request
+        return request
     }
 
     private static func apply(_ edits: [EditorTextEdit], selections: [NSRange], named name: String, in editor: EditorTextView) {

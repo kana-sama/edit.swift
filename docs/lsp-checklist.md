@@ -14,6 +14,7 @@ Edit [underlines published errors and shows their messages after the affected li
 The [Worktree marks files and collapsed folders with published errors](features/lsp-worktree-diagnostics/spec.md).
 
 [Completion, signature help, and formatting](features/lsp-editing/spec.md) use shared commands for ZLS, OLS, Solar, and SourceKit-LSP, including clangd-backed C-family files.
+The [Format on Save switch](features/format-on-save/spec.md) runs document formatting on an explicit Save.
 
 | Method                                                                       | ZLS   | SourceKit-LSP | OLS   |
 | ---------------------------------------------------------------------------- | :---: | :-----------: | :---: |

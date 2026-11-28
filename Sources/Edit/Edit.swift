@@ -72,6 +72,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     lazy var fileIndentation = FileIndentationOverrides(defaults: isAgentCheck ? nil : .standard)
     lazy var workspaceLanguageServers = WorkspaceLanguageServers(defaults: isAgentCheck ? nil : .standard)
     lazy var workspaceHighlighting = WorkspaceHighlighting(defaults: isAgentCheck ? nil : .standard)
+    lazy var workspaceFormatOnSave = WorkspaceFormatOnSave(defaults: isAgentCheck ? nil : .standard)
     lazy var workspaceFindPreferences = WorkspaceFindPreferences(defaults: isAgentCheck ? nil : .standard)
     private weak var recentMenu: NSMenu?
     private weak var focusJujutsuItem: NSMenuItem?
@@ -644,6 +645,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
     @objc func exitFocus(_ sender: Any?) { activeDocument?.exitFocus() }
     @objc func toggleMarkdownPreview(_ sender: Any?) { activeDocument?.toggleMarkdownPreview() }
     @objc func toggleWordWrap(_ sender: Any?) { activeDocument?.toggleWordWrap() }
+    @objc func toggleFormatOnSave(_ sender: Any?) { activeDocument?.toggleFormatOnSave() }
     @objc func toggleLSPHighlight(_ sender: Any?) { activeDocument?.toggleHighlighting(.lsp) }
     @objc func toggleTreeSitterHighlight(_ sender: Any?) { activeDocument?.toggleHighlighting(.treeSitter) }
 
@@ -776,10 +778,13 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case #selector(toggleWordWrap(_:)):
             (item as? NSMenuItem)?.state = activeDocument?.editor.wrapsWords == true ? .on : .off
             return activeDocument?.canToggleWordWrap ?? false
+        case #selector(toggleFormatOnSave(_:)):
+            (item as? NSMenuItem)?.state = activeDocument?.isFormatOnSaveEnabled == true ? .on : .off
+            return activeDocument?.canChangeWorkspaceSettings ?? false
         case #selector(toggleLSPHighlight(_:)), #selector(toggleTreeSitterHighlight(_:)):
             let layer: HighlightingLayer = item.action == #selector(toggleLSPHighlight(_:)) ? .lsp : .treeSitter
             (item as? NSMenuItem)?.state = activeDocument?.isHighlightingEnabled(layer) == true ? .on : .off
-            return activeDocument?.canToggleHighlighting ?? false
+            return activeDocument?.canChangeWorkspaceSettings ?? false
         case #selector(goBack(_:)), #selector(goForward(_:)):
             guard let document = currentNavigationDocument else { return false }
             return canNavigate(item.action == #selector(goBack(_:)) ? .back : .forward, in: document)
@@ -1451,6 +1456,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         edit.addCommand("Complete", #selector(EditorTextView.complete(_:)), " ", [.control])
         edit.addCommand("Show Signature Help", #selector(EditorTextView.showSignatureHelp(_:)), " ", [.control, .shift])
         edit.addCommand("Format Document", #selector(EditorTextView.formatDocument(_:)), "f", [.option, .shift])
+        edit.addCommand("Format on Save", #selector(toggleFormatOnSave(_:))).target = self
         edit.addItem(.separator())
 
         edit.addCommand("Find…", #selector(openFind(_:)), "f").target = self

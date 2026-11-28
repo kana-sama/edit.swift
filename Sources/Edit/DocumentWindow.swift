@@ -361,14 +361,21 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         hasTextDocument && window.attachedSheet == nil && !app.isQuitting
     }
 
-    var canToggleHighlighting: Bool { window.attachedSheet == nil && !app.isQuitting }
+    var canChangeWorkspaceSettings: Bool { window.attachedSheet == nil && !app.isQuitting }
+
+    var isFormatOnSaveEnabled: Bool { app.workspaceFormatOnSave.isEnabled(in: folderURL) }
+
+    func toggleFormatOnSave() {
+        guard canChangeWorkspaceSettings else { return }
+        app.workspaceFormatOnSave.setEnabled(!isFormatOnSaveEnabled, in: folderURL)
+    }
 
     func isHighlightingEnabled(_ layer: HighlightingLayer) -> Bool {
         app.workspaceHighlighting.isEnabled(layer, in: folderURL)
     }
 
     func toggleHighlighting(_ layer: HighlightingLayer) {
-        guard canToggleHighlighting else { return }
+        guard canChangeWorkspaceSettings else { return }
         let folder = folderURL?.standardizedFileURL
         app.workspaceHighlighting.setEnabled(!isHighlightingEnabled(layer), for: layer, in: folder)
         for document in app.documents where document.folderURL?.standardizedFileURL == folder {
@@ -616,7 +623,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
                 !Task.isCancelled && !app.isQuitting && zigTestFile == file && folderURL == folder &&
                     openRequestGeneration == opening && editor.sourceString == source && editor.conflictEdits.isEmpty
             }
-            guard await lens.isCurrent(test, file: file), isCurrent(), await save(), isCurrent() else { return }
+            guard await lens.isCurrent(test, file: file), isCurrent(), await save(formatIfEnabled: false), isCurrent() else { return }
             do {
                 let invocation = try await ZigTestInvocation.prepare(test: test, file: file, folder: folder,
                                                                       cacheRoot: ZigTestCache.location(isolated: app.isAgentCheck))
@@ -1521,7 +1528,7 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
     @discardableResult
     func save(
         asNew: Bool = false, to selectedURL: URL? = nil, encoding: FileTextEncoding? = nil,
-        duringWorkspaceMutation: Bool = false
+        duringWorkspaceMutation: Bool = false, formatIfEnabled: Bool = true
     ) async -> Bool {
         guard hasEditableTextDocument, activity.beginSave(duringWorkspaceMutation: duringWorkspaceMutation) else { return false }
         if editor.hasMarkedText() { editor.unmarkText() }
@@ -1531,9 +1538,11 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             autosaveDidFinish()
         }
         await autosave.waitForWrite()
-        if selectedURL == nil, !asNew, fileURL != nil, revision != .missing, !window.isDocumentEdited {
-            return true
+        var alreadySaved: Bool {
+            selectedURL == nil && !asNew && fileURL != nil && revision != .missing && !window.isDocumentEdited
         }
+        let shouldFormat = formatIfEnabled && isFormatOnSaveEnabled && editor.languageAssistance?.canFormat == true
+        if alreadySaved && !shouldFormat { return true }
 
         var destination = selectedURL ?? fileURL
         var saveFormat = format.using(encoding ?? format.encoding)
@@ -1563,6 +1572,14 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
         }
         defer { app.finishSave(to: target) }
 
+        if shouldFormat {
+            let source = fileURL
+            let opening = openRequestGeneration
+            await editor.languageAssistance?.formatForSave()
+            guard !Task.isCancelled, fileURL == source, openRequestGeneration == opening else { return false }
+            if editor.hasMarkedText() { editor.unmarkText() }
+            if alreadySaved { return true }
+        }
         let text = textForSaving
         let writtenGeneration = autosave.generation
         let expected = target == fileURL ? revision : nil
