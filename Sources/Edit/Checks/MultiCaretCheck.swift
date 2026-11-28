@@ -57,7 +57,7 @@ enum MultiCaretCheck {
         editor.addCaretsAtLineEnds(nil)
         try expect(editor.caretSelections == [range(2), range(4)], "carets at selected line ends")
         edit { editor.insertTab(nil) }
-        try expect(editor.string == "ab    \nc    d\nef", "Tab inserts spaces at empty carets")
+        try expect(editor.string == "ab  \nc   d\nef", "Tab reaches the next stop at each empty caret")
         undo.undo()
         try expect(editor.string == "ab\ncd\nef", "one Undo reverses all caret indent insertions")
 

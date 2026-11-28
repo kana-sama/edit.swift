@@ -78,7 +78,7 @@ enum MultiCaretEditing {
                     let removed = outdent ? LineEditing.outdentLength(in: line, text: text) : 0
                     if !outdent || removed > 0 {
                         edits.append(Replacement(
-                            range: NSRange(location: start, length: removed), text: outdent ? "" : "    "
+                            range: NSRange(location: start, length: removed), text: outdent ? "" : LineEditing.indentUnit
                         ))
                     }
                 }
@@ -136,6 +136,22 @@ enum MultiCaretEditing {
             let start = offset(for: range.location)
             return NSRange(location: start, length: offset(for: NSMaxRange(range)) - start)
         }
+    }
+
+    // Each local edit reports its selection in the document after only that edit.
+    static func typingPlan(_ localEdits: [LineEditing.Edit], deleting: [NSRange] = [])
+        -> (edits: [Replacement], selections: [NSRange]) {
+        var selections = localEdits.map(\.selection)
+        let inputs = localEdits.enumerated().map { (index: Optional($0.offset), range: $0.element.range, text: $0.element.replacement) }
+            + deleting.map { (index: nil, range: $0, text: "") }
+        var offset = 0
+        let edits = inputs.sorted { ($0.range.location, $0.range.length) < ($1.range.location, $1.range.length) }.map { input in
+            if let index = input.index { selections[index].location += offset }
+            let replacement = Replacement(range: input.range, text: input.text)
+            offset += replacement.lengthChange
+            return replacement
+        }
+        return (edits, selections)
     }
 
     static func selectionEnds(in selection: NSRange, text: NSString) -> [NSRange] {

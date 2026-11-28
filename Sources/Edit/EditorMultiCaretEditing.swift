@@ -101,16 +101,14 @@ extension EditorTextView {
             let indent = MultiCaretEditing.indentation(in: text, for: selections.filter { $0.length > 0 }, outdent: false)
             let existing = Set(indent.map(\.range.location))
             changes = (indent + selections.filter { $0.length == 0 && !existing.contains($0.location) }
-                .map { Replacement(range: $0, text: "    ") }).sorted { $0.range.location < $1.range.location }
+                .map { Replacement(range: $0, text: LineEditing.spacesToNextTabStop(in: text, at: $0.location)) })
+                .sorted { $0.range.location < $1.range.location }
         case .indent(let outdent):
             changes = MultiCaretEditing.indentation(in: text, for: selections, outdent: outdent)
         case .newline:
-            changes = MultiCaretEditing.ordered(selections).map { range in
-                let line = LineEditing.line(at: range.location, in: text)
-                let end = min(range.location, LineEditing.indentationEnd(in: line, text: text))
-                let indentation = text.substring(with: NSRange(location: line.start, length: end - line.start))
-                return Replacement(range: range, text: preferredLineEnding + indentation)
-            }
+            return MultiCaretEditing.typingPlan(selections.map {
+                LineEditing.newline(text, selection: $0, separator: preferredLineEnding)
+            })
         case .move(let up):
             var moved = selections
             changes = MultiCaretEditing.lineBlocks(in: text, for: selections).compactMap { block in
@@ -274,16 +272,11 @@ extension EditorTextView {
         _ command: LineCommand, in text: NSString, scopes: [NSRange], groups: [[NSRange]]
     ) {
         if case .newline = command {
-            let inserts = groups.map { group -> String in
-                guard let first = group.first, let scope = editScope(containing: first.location) else {
-                    return preferredLineEnding
-                }
-                let line = focusedLine(at: first.location, in: text, scope: scope)
-                let end = min(first.location, LineEditing.indentationEnd(in: line, text: text))
-                let indentation = text.substring(with: NSRange(location: line.start, length: end - line.start))
-                return preferredLineEnding + indentation
+            let localEdits = groups.compactMap(\.first).map {
+                LineEditing.newline(text, selection: $0, separator: preferredLineEnding)
             }
-            replaceFocusedGroups(groups, with: inserts)
+            let plan = MultiCaretEditing.typingPlan(localEdits, deleting: groups.flatMap { $0.dropFirst() })
+            applyMultiEdits(plan.edits, selections: plan.selections)
             return
         }
 
@@ -400,7 +393,7 @@ extension EditorTextView {
         _ replacements: [MultiCaretEditing.Replacement], selections: [NSRange], validate: Bool = true,
         restoreFocus: EditorFocusSession.Snapshot? = nil,
         restoreNavigation: [FocusNavigationSelection]? = nil, actionName: String? = nil,
-        conflictEditsAfter: [JJConflictEdit]? = nil
+        conflictEditsAfter: [JJConflictEdit]? = nil, automaticPairsAfter: [TypingDelimiters.Pair]? = nil
     ) -> Bool {
         let edits = replacements.filter { $0.range.length > 0 || !$0.text.isEmpty }
         guard !edits.isEmpty || conflictEditsAfter != nil, let storage = textStorage else { return false }
@@ -408,6 +401,7 @@ extension EditorTextView {
         let previousFocus = captureFocusSnapshot()
         let previousFocusNavigation = multiCaret.focusNavigation
         let previousConflictEdits = conflictEditsAfter.map { _ in conflictEdits }
+        let previousAutomaticPairs = automaticPairsAfter.map { _ in automaticPairs }
         let manager = undoManager
         if validate {
             let ranges = edits.map(\.range)
@@ -456,6 +450,7 @@ extension EditorTextView {
             storage.endEditing()
         }
         replacingConflictStructure = false
+        if let automaticPairsAfter { automaticPairs = automaticPairsAfter }
         setCaretSelections(selections, record: false,
                            focusNavigation: restoredLiveFocus ? restoreNavigation : nil)
         multiCaret.isApplying = true
@@ -470,7 +465,8 @@ extension EditorTextView {
         manager?.registerUndo(withTarget: self) { editor in
             MainActor.assumeIsolated {
                 editor.applyMultiEdits(inverse, selections: previous, validate: false, restoreFocus: previousFocus,
-                                       restoreNavigation: previousFocusNavigation, conflictEditsAfter: previousConflictEdits)
+                                       restoreNavigation: previousFocusNavigation, conflictEditsAfter: previousConflictEdits,
+                                       automaticPairsAfter: previousAutomaticPairs)
             }
         }
         if let actionName { manager?.setActionName(actionName) }

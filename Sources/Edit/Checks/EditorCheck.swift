@@ -141,6 +141,8 @@ enum EditorCheck {
         edit { editor.insertLineBelow(nil) }
         try expect(editor.string == "  first\n  \nsecond", "insert indented line below")
 
+        try checkTyping(in: window, editor: editor, undo: undo)
+
         setBuffer("a\nb\nc", length: 3)
         edit { editor.insertTab(nil) }
         try expect(editor.string == "    a\n    b\nc", "Tab indents selected lines")
@@ -487,6 +489,108 @@ enum EditorCheck {
             blankHeight = hasText ? 0 : blankHeight + 2
             try expect(blankHeight < 50, "zoom keeps the viewport painted after \(action)")
         }
+    }
+
+    private static func checkTyping(in window: NSWindow, editor: EditorTextView, undo: UndoManager) throws {
+        func range(_ offset: Int, _ length: Int = 0) -> NSRange { NSRange(location: offset, length: length) }
+        func set(_ source: String, _ ranges: NSRange...) {
+            editor.string = source
+            editor.setCaretSelections(ranges, record: false)
+            undo.removeAllActions()
+        }
+        func key(_ characters: String, code: UInt16, shifted: Bool = false) throws {
+            guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: shifted ? .shift : [],
+                                               timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                               characters: characters, charactersIgnoringModifiers: characters,
+                                               isARepeat: false, keyCode: code) else { throw Failure("create a typing event") }
+            undo.beginUndoGrouping()
+            editor.keyDown(with: event)
+            editor.breakUndoCoalescing()
+            undo.endUndoGrouping()
+        }
+
+        set("fn () ", range(6))
+        try key("{", code: 33, shifted: true)
+        try expect(editor.string == "fn () {}" && editor.selectedRange() == range(7), "type both braces around the caret")
+        try key("\r", code: 36)
+        try expect(editor.string == "fn () {\n    \n}" && editor.selectedRange() == range(12), "Return splits the brace pair and indents its interior")
+        undo.undo()
+        try expect(editor.string == "fn () {}" && editor.selectedRange() == range(7), "Undo restores the one-line pair and caret")
+        undo.undo()
+        try expect(editor.string == "fn () " && editor.selectedRange() == range(6), "Undo removes both inserted braces")
+        undo.redo()
+        undo.redo()
+        try expect(editor.string == "fn () {\n    \n}" && editor.selectedRange() == range(12), "Redo restores the split pair and caret")
+        editor.setSelectedRange(range(13))
+        try key("}", code: 30, shifted: true)
+        try expect(editor.string == "fn () {\n    \n}" && editor.selectedRange() == range(14), "type over the auto-inserted closing brace after Redo")
+
+        set("  call(  ", range(9))
+        try key("\r", code: 36)
+        try expect(editor.string == "  call(  \n      " && editor.selectedRange() == range(16), "Return indents after an unmatched opener and trailing spaces")
+
+        set("🙂 café\nnext", range(3, 9))
+        try key("'", code: 39)
+        try expect(editor.string == "🙂 'café\nnext'" && editor.selectedRange() == range(4, 9), "wrap a multiline Unicode selection in quotes")
+        undo.undo()
+        try expect(editor.string == "🙂 café\nnext" && editor.selectedRange() == range(3, 9), "Undo restores the original selected text")
+        try key("]", code: 30)
+        try expect(editor.string == "🙂 [café\nnext]" && editor.selectedRange() == range(4, 9), "a closing bracket also wraps selected text")
+
+        set("can", range(3))
+        try key("'", code: 39)
+        try expect(editor.string == "can'", "type an apostrophe after a word")
+        set("", range(0))
+        try key("\"", code: 39, shifted: true)
+        try expect(editor.string == "\"\"" && editor.selectedRange() == range(1), "type a pair of double quotes")
+        try key("x", code: 7)
+        try key("y", code: 16)
+        try key("\u{7f}", code: 51)
+        try key("\"", code: 39, shifted: true)
+        try expect(editor.string == "\"x\"" && editor.selectedRange() == range(3),
+                   "type through an auto-inserted quote after typing and Backspace (\(editor.string), \(editor.selectedRange()))")
+        set("\\", range(1))
+        try key("\"", code: 39, shifted: true)
+        try expect(editor.string == "\\\"", "type an escaped quote")
+        set("hello", range(2))
+        try key("[", code: 33)
+        try expect(editor.string == "he[llo", "type a single opener in the middle of a word")
+        set(")", range(0))
+        try key(")", code: 29, shifted: true)
+        try expect(editor.string == "))", "insert a closer before a manually entered closer")
+        set("", range(0))
+        undo.beginUndoGrouping()
+        editor.insertText("[", replacementRange: range(NSNotFound))
+        editor.breakUndoCoalescing()
+        undo.endUndoGrouping()
+        try expect(editor.string == "[", "explicit text input inserts its literal text")
+
+        set("  abc\n\t x\né", range(2), range(8), range(11))
+        try key("\t", code: 48)
+        try expect(editor.string == "    abc\n\t    x\né   " && editor.caretSelections == [range(4), range(13), range(19)],
+                   "Tab aligns several carets using logical columns and existing tabs")
+
+        set("left\n  ", range(0, 4), range(7))
+        try key("[", code: 33)
+        try expect(editor.string == "[left]\n  []" && editor.caretSelections == [range(1, 4), range(10)],
+                   "wrap one selection and pair at another caret in the same keystroke")
+        undo.undo()
+        try expect(editor.string == "left\n  " && editor.caretSelections == [range(0, 4), range(7)], "Undo restores both caret ranges")
+
+        set("keep\r\n\t[]\r\nprotected\r\n()", range(8), range(23))
+        let previousSeparator = editor.preferredLineEnding
+        editor.preferredLineEnding = "\r\n"
+        defer {
+            editor.exitFocus()
+            editor.preferredLineEnding = previousSeparator
+        }
+        editor.beginFocus()
+        try key("\r", code: 36)
+        try expect(editor.string == "keep\r\n\t[\r\n\t    \r\n\t]\r\nprotected\r\n(\r\n    \r\n)" &&
+                   editor.caretSelections == [range(15), range(39)], "Return splits CRLF pairs in multiple Focus blocks")
+        undo.undo()
+        try expect(editor.string == "keep\r\n\t[]\r\nprotected\r\n()" && editor.caretSelections == [range(8), range(23)],
+                   "Undo restores both focused pairs and their carets")
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ description: String) throws {

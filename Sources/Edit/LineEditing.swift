@@ -1,6 +1,9 @@
 import Foundation
 
 enum LineEditing {
+    static let tabWidth = 4
+    static let indentUnit = String(repeating: " ", count: tabWidth)
+
     struct Edit {
         let range: NSRange
         let replacement: String
@@ -42,10 +45,10 @@ enum LineEditing {
         repeat {
             let line = line(at: lineStart, in: text)
             let removed = outdent ? outdentLength(in: line, text: text) : 0
-            let added = outdent ? 0 : 4
+            let added = outdent ? 0 : tabWidth
 
             if added > 0 {
-                replacement += "    "
+                replacement += indentUnit
             }
             replacement += text.substring(with: NSRange(location: line.start + removed, length: line.range.length - removed))
 
@@ -172,12 +175,40 @@ enum LineEditing {
         return index
     }
 
+    static func spacesToNextTabStop(in text: NSString, at location: Int) -> String {
+        let start = line(at: location, in: text).start
+        let prefix = text.substring(with: NSRange(location: start, length: location - start))
+        let remainder = prefix.reduce(0) { $1 == "\t" ? 0 : ($0 + 1) % tabWidth }
+        return String(repeating: " ", count: tabWidth - remainder)
+    }
+
+    static func newline(_ text: NSString, selection: NSRange, separator: String) -> Edit {
+        let current = line(at: selection.location, in: text)
+        let indentEnd = min(selection.location, indentationEnd(in: current, text: text))
+        let indent = text.substring(with: NSRange(location: current.start, length: indentEnd - current.start))
+        var previous = selection.location
+        while previous > indentEnd, [0x20, 0x09].contains(text.character(at: previous - 1)) {
+            previous -= 1
+        }
+        var insertion = separator + indent
+        var suffix = ""
+        if previous > indentEnd, let closer = TypingDelimiters.brackets[text.character(at: previous - 1)] {
+            insertion += indentUnit
+            if selection.length == 0, selection.location < current.contentEnd,
+               text.character(at: selection.location) == closer {
+                suffix = separator + indent
+            }
+        }
+        return Edit(range: selection, replacement: insertion + suffix,
+                    selection: NSRange(location: selection.location + insertion.utf16.count, length: 0))
+    }
+
     static func outdentLength(in line: Line, text: NSString) -> Int {
         guard line.start < line.contentEnd else { return 0 }
         if text.character(at: line.start) == 0x09 { return 1 }
 
         var removed = 0
-        while removed < 4, line.start + removed < line.contentEnd, text.character(at: line.start + removed) == 0x20 {
+        while removed < tabWidth, line.start + removed < line.contentEnd, text.character(at: line.start + removed) == 0x20 {
             removed += 1
         }
         return removed

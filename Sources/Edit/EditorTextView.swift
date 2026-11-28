@@ -45,6 +45,11 @@ private struct EditorRenameDraft {
     }
 }
 
+private struct NativeKeyInput {
+    let delimiter: String?
+    var edit: EditorTextChange?
+}
+
 final class EditorTextView: NSTextView, NSTextViewDelegate {
     static let linePasteType = NSPasteboard.PasteboardType("dev.edit-swift.whole-line")
     private static let defaultFontSize: CGFloat = 12
@@ -57,6 +62,8 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
     private weak var observedWindow: NSWindow?
     private var multiCaretComposition: MultiCaretComposition?
     private var updatingComposition = false
+    private var nativeKeyInput: NativeKeyInput?
+    var automaticPairs: [TypingDelimiters.Pair] = []
     var editorUndoManager = EditorUndoManager()
     var focusSession: EditorFocusSession?
     var focusDecoration: FocusDecoration?
@@ -301,6 +308,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         if let replacementString, !allowsConflictEdit(in: affectedCharRange, replacement: replacementString) { return false }
         let allowed = super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
         if allowed, let replacementString {
+            if !automaticPairs.isEmpty {
+                nativeKeyInput?.edit = EditorTextChange(range: affectedCharRange,
+                                                        delta: replacementString.utf16.count - affectedCharRange.length)
+            }
             syntaxHighlighting?.prepareForDeletions(in: replacementString.isEmpty ? [affectedCharRange] : [])
         }
         return allowed
@@ -324,6 +335,10 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         }
         let allowed = super.shouldChangeText(inRanges: affectedRanges, replacementStrings: replacementStrings)
         if allowed, let replacementStrings {
+            if !automaticPairs.isEmpty, affectedRanges.count == 1 {
+                let range = affectedRanges[0].rangeValue
+                nativeKeyInput?.edit = EditorTextChange(range: range, delta: replacementStrings[0].utf16.count - range.length)
+            }
             syntaxHighlighting?.prepareForDeletions(in: zip(affectedRanges, replacementStrings).compactMap { range, replacement in
                 replacement.isEmpty ? range.rangeValue : nil
             })
@@ -380,7 +395,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         }
         let selection = selectedRange()
         if selection.length == 0 {
-            replace(selection, with: "    ", coalesce: true)
+            replace(selection, with: LineEditing.spacesToNextTabStop(in: text, at: selection.location), coalesce: true)
         } else {
             apply(LineEditing.indent(text, selection: selection, outdent: false))
         }
@@ -407,16 +422,13 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             super.insertNewline(sender)
             return
         }
-        let selection = selectedRange()
-        let start = LineEditing.line(at: selection.location, in: text).start
-        var end = start
-        while end < selection.location {
-            let character = text.character(at: end)
-            guard character == 32 || character == 9 else { break }
-            end += 1
+        let edit = LineEditing.newline(text, selection: selectedRange(), separator: preferredLineEnding)
+        if edit.selection.location == edit.range.location + edit.replacement.utf16.count {
+            replace(edit.range, with: edit.replacement, coalesce: true)
+        } else {
+            applyMultiEdits([EditorTextEdit(range: edit.range, text: edit.replacement)], selections: [edit.selection],
+                            actionName: "Split Bracket Pair")
         }
-        let indent = text.substring(with: NSRange(location: start, length: end - start))
-        replace(selection, with: preferredLineEnding + indent, coalesce: true)
     }
 
     @objc func indentLines(_ sender: Any?) {
@@ -633,8 +645,12 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             super.insertText(string, replacementRange: replacementRange)
             return
         }
-        if jjInlineDiff?.projectedEditRange != nil {
-            _ = replaceProjectedSelection(with: (string as? String) ?? (string as? NSAttributedString)?.string)
+        let typed = (string as? String) ?? (string as? NSAttributedString)?.string
+        let delimiterKey = nativeKeyInput?.delimiter
+        let delimiter = typed == delimiterKey && !hasMarkedText() ? delimiterKey : nil
+        if let projected = jjInlineDiff?.projectedEditRange {
+            if let delimiter, projected.length > 0, applyTypedDelimiter(delimiter, to: [projected]) { return }
+            _ = replaceProjectedSelection(with: typed)
             return
         }
         if let composition = multiCaretComposition {
@@ -658,19 +674,52 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             }
             return
         }
-        if let plainText = (string as? String) ?? (string as? NSAttributedString)?.string,
-           insertInEmptyConflictSnapshot(plainText, at: replacementRange.location == NSNotFound ? selectedRange() : replacementRange) {
+        if let typed, insertInEmptyConflictSnapshot(typed, at: replacementRange.location == NSNotFound ? selectedRange() : replacementRange) {
             return
         }
-        let typed = (string as? String) ?? (string as? NSAttributedString)?.string
         let character = typed.flatMap { $0.count == 1 && $0 != "\n" && $0 != "\r" && $0 != "\t" ? $0 : nil }
         trackLanguageTyping(character, enabled: character != nil) {
+            if let delimiter, replacementRange.location == NSNotFound || replacementRange == selectedRange(),
+               applyTypedDelimiter(delimiter, to: focusedSelectionGroups?.flatMap { $0 } ?? caretSelections) { return }
             if !insertAtCarets(string, replacementRange: replacementRange) {
                 if focusSession != nil { return }
                 if hasSecondarySelections { keepPrimarySelection(nil) }
                 super.insertText(string, replacementRange: replacementRange)
             }
         }
+    }
+
+    private func applyTypedDelimiter(_ key: String, to ranges: [NSRange]) -> Bool {
+        guard isEditable, let text = textStorage?.mutableString, focusAllowsEdits(ranges) else { return false }
+        automaticPairs = automaticPairs.filter { pair in
+            ranges.contains { pair.opening < $0.location && $0.location <= pair.closing }
+        }
+        let closers = Set(automaticPairs.map(\.closing))
+        let smart = ranges.map { range in
+            let canSkip = closers.contains(range.location) && focusAllowsEdits([NSRange(location: range.location, length: 1)])
+            return TypingDelimiters.edit(for: key, in: text, selection: range, canSkip: canSkip)
+        }
+        guard smart.contains(where: { $0 != nil }) else { return false }
+        let localEdits = zip(ranges, smart).map { range, result in
+            result?.edit ?? LineEditing.Edit(range: range, replacement: key,
+                                             selection: NSRange(location: range.location + 1, length: 0))
+        }
+        let plan = MultiCaretEditing.typingPlan(localEdits)
+        let changes = plan.edits.filter { $0.range.length > 0 || !$0.text.isEmpty }.map {
+            EditorTextChange(range: $0.range, delta: $0.lengthChange)
+        }
+        if changes.isEmpty {
+            breakUndoCoalescing()
+            setCaretSelections(plan.selections, record: false)
+            scrollRangeToVisible(selectedRange())
+        } else {
+            let inserted = zip(smart, plan.selections).compactMap { result, selection in
+                result?.tracksPair == true ? TypingDelimiters.Pair(opening: selection.location - 1, closing: selection.location) : nil
+            }
+            let pairs = automaticPairs.compactMap { $0.remapped(after: changes) } + inserted
+            applyMultiEdits(plan.edits, selections: plan.selections, actionName: "Type Delimiter", automaticPairsAfter: pairs)
+        }
+        return true
     }
 
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
@@ -967,6 +1016,12 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
             deleteToEndOfLine(nil)
             return
         }
+        // Let AppKit dispatch text input, including keyboard layouts and IME, before applying a delimiter edit.
+        var delimiter: String?
+        if !hasMarkedText(), let characters = event.characters, TypingDelimiters.contains(characters) { delimiter = characters }
+        let previous = nativeKeyInput
+        nativeKeyInput = NativeKeyInput(delimiter: delimiter)
+        defer { nativeKeyInput = previous }
         super.keyDown(with: event)
     }
 
@@ -1159,7 +1214,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         paragraph.minimumLineHeight = lineHeight
         paragraph.maximumLineHeight = lineHeight
         paragraph.tabStops = []
-        paragraph.defaultTabInterval = ("    " as NSString).size(withAttributes: [.font: font]).width
+        paragraph.defaultTabInterval = (LineEditing.indentUnit as NSString).size(withAttributes: [.font: font]).width
         defaultParagraphStyle = paragraph
         rebuildDiagnosticMessages()
         let range = NSRange(location: 0, length: textStorage?.length ?? 0)
@@ -1383,6 +1438,12 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         let changes = applyingTextEdits?.map { EditorTextChange(range: $0.range, delta: $0.lengthChange) }
             ?? (edited.location != NSNotFound && edited.length >= delta
                 ? [EditorTextChange(range: NSRange(location: edited.location, length: edited.length - delta), delta: delta)] : [])
+        if !automaticPairs.isEmpty {
+            // The storage notification can also cover adjacent characters whose attributes changed.
+            let keyChanges = nativeKeyInput?.edit.flatMap { applyingTextEdits == nil && $0.delta == delta ? [$0] : nil } ?? changes
+            automaticPairs = keyChanges.isEmpty ? [] : automaticPairs.compactMap { $0.remapped(after: keyChanges) }
+        }
+        nativeKeyInput?.edit = nil
         if SyntaxEngine.supportsIncremental(syntaxLanguage) {
             syntaxAnalysis.recordEdit(edited, delta: delta, length: storage.length)
         }

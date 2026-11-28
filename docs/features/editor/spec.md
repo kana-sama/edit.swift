@@ -11,7 +11,7 @@ Use Menlo Regular at 12 points with an 18-point line height, matching the defaul
 - Consecutive Up and Down commands preserve a single caret’s horizontal position when a short line can only show it at the end. A later vertical move returns to that column when the line is long enough.
 - Escape closes expanded inline changes first. Otherwise it keeps only the primary selection when there are multiple carets, or collapses a single selection to its active end. The text stays intact.
 - Use the Edit menu or Command-X, C, V, A, Z, and Shift-Command-Z for Cut, Copy, Paste, Select All, Undo, and Redo. Copy and Cut with an empty selection act on the current line. Pasting a whole-line copy at a caret inserts it above that line. Selected text uses native clipboard behavior.
-- Return inserts a line break with the leading spaces or tabs before the caret. Tab inserts four spaces at a caret or indents the selected lines. Shift-Tab outdents the affected lines.
+- [Smart Typing](../smart-typing/spec.md) defines delimiter insertion, wrapping a selection, Return indentation, and Tab stops. Shift-Tab outdents the affected lines.
 - Option-Up and Option-Down move the current line or selected block up or down and keep the selection with the moved text. Undo restores the original line order and caret or selection. At the document boundary the block stays in place.
 - Command-Return inserts below and Shift-Command-Return inserts above with matching indentation. Command-] and Command-[ indent or outdent each affected line. Outdent removes one leading tab or up to four leading spaces.
 - Command-Delete deletes the prefix of a line, and Command-Forward Delete deletes the suffix. At the relevant line boundary these commands join adjacent lines.
