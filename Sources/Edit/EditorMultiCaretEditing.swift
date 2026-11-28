@@ -424,7 +424,7 @@ extension EditorTextView {
     func applyMultiEdits(
         _ replacements: [MultiCaretEditing.Replacement], selections: [NSRange], validate: Bool = true,
         restoreFocus: EditorFocusSession.Snapshot? = nil,
-        restoreNavigation: [FocusNavigationSelection]? = nil, actionName: String? = nil,
+        restoreNavigation: [FocusNavigationSelection]? = nil, actionName: String? = nil, revealSelection: Bool = true,
         conflictEditsAfter: [JJConflictEdit]? = nil, automaticPairsAfter: [TypingDelimiters.Pair]? = nil
     ) -> Bool {
         let edits = replacements.filter { $0.range.length > 0 || !$0.text.isEmpty }
@@ -489,7 +489,7 @@ extension EditorTextView {
         didChangeText()
         multiCaret.isApplying = false
         breakUndoCoalescing()
-        if let primary = caretSelections.last { scrollRangeToVisible(primary) }
+        if revealSelection, let primary = caretSelections.last { scrollRangeToVisible(primary) }
 
         let ownsUndoGroup = (previousFocus != nil || manager?.groupsByEvent == false) && manager?.groupingLevel == 0 &&
             manager?.isUndoing == false && manager?.isRedoing == false
@@ -497,7 +497,8 @@ extension EditorTextView {
         manager?.registerUndo(withTarget: self) { editor in
             MainActor.assumeIsolated {
                 editor.applyMultiEdits(inverse, selections: previous, validate: false, restoreFocus: previousFocus,
-                                       restoreNavigation: previousFocusNavigation, conflictEditsAfter: previousConflictEdits,
+                                       restoreNavigation: previousFocusNavigation, revealSelection: revealSelection,
+                                       conflictEditsAfter: previousConflictEdits,
                                        automaticPairsAfter: previousAutomaticPairs)
             }
         }

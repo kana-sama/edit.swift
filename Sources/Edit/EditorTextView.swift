@@ -449,7 +449,7 @@ final class EditorTextView: NSTextView, NSTextViewDelegate {
         let edits = MultiCaretEditing.toggleLineComments(in: text, for: selections, prefix: prefix,
                                                         settings: indentationSettings)
         applyMultiEdits(edits, selections: MultiCaretEditing.mapped(selections, after: edits),
-                        actionName: "Toggle Line Comments")
+                        actionName: "Toggle Line Comments", revealSelection: selections.last?.length == 0)
     }
 
     @objc func outdentLines(_ sender: Any?) {

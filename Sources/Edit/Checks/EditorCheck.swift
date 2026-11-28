@@ -100,6 +100,39 @@ enum EditorCheck {
             try expect(editor.string == commented && editor.selectedRange() == originalSelection,
                        "undo the Zig uncomment in one step and restore the selection")
         }
+        let commentedCode = """
+            const outsideSelection = 0;
+                // const prev_draw_mode = playdate.graphics.setDrawMode(.fill_white);
+                // defer _ = playdate.graphics.setDrawMode(prev_draw_mode);
+            const longLine = "\(String(repeating: "0123456789", count: 16))";
+            """
+        let uncommentedCode = commentedCode.replacingOccurrences(of: "    // ", with: "    ")
+        let commentStart = (commentedCode as NSString).range(of: "playdate.graphics").location
+        let commentEnd = (commentedCode as NSString).range(of: "ics.setDrawMode(prev_draw_mode)").location
+        for horizontalOffset: CGFloat in [0, 40] {
+            setBuffer(commentedCode, at: commentStart, length: commentEnd - commentStart)
+            window.layoutIfNeeded()
+            editor.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            scrollView.scrollToVisibleContentOrigin(NSPoint(x: horizontalOffset, y: 0))
+            func checkHorizontalPosition(_ stage: String) throws {
+                let actual = scrollView.visibleContentOrigin.x
+                try expect(abs(actual - horizontalOffset) < 0.5,
+                           "keep horizontal position \(stage) (\(horizontalOffset) → \(actual))")
+            }
+            try checkHorizontalPosition("before toggling line comments")
+            try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == uncommentedCode,
+                       "uncomment a partial multiline selection")
+            try checkHorizontalPosition("after uncommenting")
+            try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == commentedCode,
+                       "comment a partial multiline selection")
+            try checkHorizontalPosition("after commenting")
+            undo.undo()
+            try expect(editor.string == uncommentedCode, "undo commenting a partial multiline selection")
+            try checkHorizontalPosition("after Undo")
+            undo.redo()
+            try expect(editor.string == commentedCode, "redo commenting a partial multiline selection")
+            try checkHorizontalPosition("after Redo")
+        }
         setBuffer("    ", at: 4)
         try expect(lines.performKeyEquivalent(with: shortcut) && editor.string == "    // " &&
                    editor.selectedRange() == NSRange(location: 7, length: 0),
