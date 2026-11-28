@@ -570,6 +570,11 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         Task { await document.save() }
     }
 
+    @objc func saveDocumentWithoutFormat(_ sender: Any?) {
+        guard let document = activeDocument, !document.isBusy, !isQuitting else { return }
+        Task { await document.save(formatIfEnabled: false) }
+    }
+
     @objc func saveDocumentAs(_ sender: Any?) {
         guard let document = activeDocument, !document.isBusy, !isQuitting else { return }
         Task { await document.save(asNew: true) }
@@ -801,7 +806,8 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         case #selector(openRecentDocument(_:)):
             return activeDocument?.canReplaceBuffer ?? false
         case #selector(reopenClosedFile(_:)): return canReopenClosedFile
-        case #selector(saveDocument(_:)), #selector(saveDocumentAs(_:)), #selector(saveDocumentAsScratch(_:)):
+        case #selector(saveDocument(_:)), #selector(saveDocumentWithoutFormat(_:)),
+             #selector(saveDocumentAs(_:)), #selector(saveDocumentAsScratch(_:)):
             return activeDocument.map { $0.hasEditableTextDocument && !$0.isBusy && $0.window.attachedSheet == nil } ?? false
         case #selector(openFind(_:)): return activeDocument?.canPerformFind(.find) ?? false
         case #selector(openWorkspaceFind(_:)): return activeDocument?.canPerformFind(.findWorkspace) ?? false
@@ -1435,6 +1441,7 @@ final class Edit: NSObject, NSApplicationDelegate, NSUserInterfaceValidations, N
         file.addCommand("Go to File…", #selector(showGoToFile(_:)), "p").target = self
         file.addItem(.separator())
         file.addCommand("Save", #selector(saveDocument(_:)), "s").target = self
+        file.addCommand("Save Without Format", #selector(saveDocumentWithoutFormat(_:))).target = self
         file.addCommand("Save As…", #selector(saveDocumentAs(_:)), "s", [.command, .shift]).target = self
         file.addCommand("Save as Scratch…", #selector(saveDocumentAsScratch(_:))).target = self
         file.addCommand("Close", #selector(closeDocument(_:)), "w").target = self

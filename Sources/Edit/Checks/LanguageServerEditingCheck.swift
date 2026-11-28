@@ -145,9 +145,10 @@ enum LanguageServerEditingCheck {
 
     private static func checkFormatOnSave(in document: DocumentWindow, file: URL, fixture: Fixture) async throws {
         let editor = document.editor
-        guard let menu = NSApp.mainMenu,
-              let toggle = ControlCommand.fromMenu(menu).first(where: { $0.title == "Toggle Format on Save" }) else {
-            throw Failure(detail: "find Format on Save in Command Mode")
+        let commands = NSApp.mainMenu.map(ControlCommand.fromMenu) ?? []
+        guard let toggle = commands.first(where: { $0.title == "Toggle Format on Save" }),
+              let bypass = commands.first(where: { $0.title == "File: Save Without Format" }) else {
+            throw Failure(detail: "find Format on Save and Save Without Format in Command Mode")
         }
         try require(toggle.isAvailable(in: document, focus: editor) && toggle.toggleState(in: document) == false,
                     "offer Format on Save switched off in a new workspace")
@@ -166,6 +167,14 @@ enum LanguageServerEditingCheck {
         editor.insertText("const number=42;\n", replacementRange: start)
         let unformatted = editor.string
         let position = editor.selectedRange()
+        try require(bypass.isAvailable(in: document, focus: editor), "offer Save Without Format for an editable document")
+        bypass.run(in: document)
+        try await wait("save the unformatted text from Command Mode") {
+            !document.window.isDocumentEdited && (try? disk()) == unformatted
+        }
+        try require(editor.string == unformatted && editor.selectedRange() == position && document.isFormatOnSaveEnabled,
+                    "preserve the text, selection, and Format on Save setting after Save Without Format")
+
         editor.breakUndoCoalescing()
         editor.undoManager?.removeAllActions()
         let savedOn = await document.save()
