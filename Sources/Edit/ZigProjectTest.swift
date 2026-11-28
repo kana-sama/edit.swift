@@ -23,17 +23,27 @@ struct ZigProjectTest: Sendable {
         return Self(library: library, configurer: source, relativeFile: relativeFile)
     }
 
-    func arguments(executable: URL, file: URL, runner: URL, staging: URL) throws -> [String] {
-        let files = FileManager.default
-        let overlay = staging.appending(path: "zig-lib", directoryHint: .isDirectory)
-        let compiler = overlay.appending(path: "compiler", directoryHint: .isDirectory)
-        try files.createDirectory(at: compiler, withIntermediateDirectories: true)
-        try linkEntries(in: library, to: overlay, excluding: "compiler")
-        try linkEntries(in: library.appending(path: "compiler", directoryHint: .isDirectory), to: compiler, excluding: "configurer.zig")
-        let step = "edit-selected-test-\(UUID().uuidString.lowercased())"
-        let source = configurer + "\n" + selector(executable: executable, file: file, runner: runner, step: step)
-        try source.write(to: compiler.appending(path: "configurer.zig"), atomically: true, encoding: .utf8)
-        return ["build", "--zig-lib=\(overlay.path)", step]
+    func cacheInputs(executable: URL, file: URL) -> [String] {
+        [library.path, configuration(executable: executable, file: file, runner: URL(filePath: "/runner.zig"), step: "edit-selected-test")]
+    }
+
+    func arguments(executable: URL, file: URL, runner: URL, generated: URL, staging: URL?) throws -> [String] {
+        let overlay = generated.appending(path: "zig-lib", directoryHint: .isDirectory)
+        let step = "edit-selected-test-\(generated.lastPathComponent.prefix(16))"
+        if let staging {
+            let stagedOverlay = staging.appending(path: "zig-lib", directoryHint: .isDirectory)
+            let compiler = stagedOverlay.appending(path: "compiler", directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: compiler, withIntermediateDirectories: true)
+            try linkEntries(in: library, to: stagedOverlay, excluding: "compiler")
+            try linkEntries(in: library.appending(path: "compiler", directoryHint: .isDirectory), to: compiler, excluding: "configurer.zig")
+            try configuration(executable: executable, file: file, runner: runner, step: step)
+                .write(to: compiler.appending(path: "configurer.zig"), atomically: true, encoding: .utf8)
+        }
+        return ["build", "--zig-lib=\(overlay.path)", step, "--summary", "all"]
+    }
+
+    private func configuration(executable: URL, file: URL, runner: URL, step: String) -> String {
+        configurer + "\n" + selector(executable: executable, file: file, runner: runner, step: step)
     }
 
     private static func libraryPath(executable: URL, environment: [String: String], directory: URL) async -> URL? {

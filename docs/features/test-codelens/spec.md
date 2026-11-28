@@ -16,11 +16,15 @@ With Zig 0.17, use the project's `zig build` configuration when its `test` step 
 
 Select the test by its full compiler name in the test runner. Zig's `--test-filter` matches substrings and unnamed blocks are included even when that filter is present. Keep other tests outside the run. [Zig test declarations][zig-tests]
 
+Reuse generated runner and build configuration files at stable paths for the same inputs. Tests in a project share Edit's local and global Zig caches for the selected toolchain. Zig validates the cached binary against the project's current sources. Each click executes the selected test, and the build summary reports whether Zig reused its binary.
+
+Store these files in Edit's own cache. After a run, expire groups unused for 14 days and remove the least recently used groups until the cache fits within 1 GiB and 24 project and toolchain groups. Active runs and groups just released by a terminal are skipped during cleanup.
+
 Print the working directory and the actual Zig executable and arguments before launching. Reveal live output and the exit status in the current window's **Tests** terminal space, while keeping keyboard focus in the editor. Clicking Run test while a test in that window is running reveals the current output. Control-C in the test terminal interrupts the process. Keep the transcript after the run and inherit the [terminal's folder and window lifecycle](../terminal/spec.md).
 
 ## Acceptance
 
-Run `./script/check --only zig-test [screenshot-path]` with Zig on PATH. Verify that the multiline test's button follows its first display row after a UTF-16 edit and with word wrap. Click it with pending changes and check the saved file, precise selection, live output, and editor focus. Run the similarly named neighbor to verify failure output and reuse of the terminal. Verify the printed command for loose-file and project runs. In a project test with an injected module, check that the module resolves and the test's neighbor stays outside the run. Hold a file switch and check the outgoing action until the new text appears. The optional screenshot shows the inline controls on the original fixture.
+Run `./script/check --only zig-test [screenshot-path]` with Zig on PATH. Verify that the multiline test's button follows its first display row after a UTF-16 edit and with word wrap. Click it with pending changes and check the saved file, precise selection, live output, and editor focus. Run the similarly named neighbor to verify failure output and reuse of the terminal. Verify the printed command for loose-file and project runs. In a project test with an injected module, check that two unchanged clicks execute the selected test with the same command and that the second compile step is cached. Change the module and check that Zig rebuilds and runs the updated test. Verify that cleanup skips active groups and trims inactive groups by age, count, and disk usage. Hold a file switch and check the outgoing action until the new text appears. The optional screenshot shows the inline controls on the original fixture.
 
 [vscode-zig-tests]: https://github.com/ziglang/vscode-zig/blob/master/src/zigTestRunnerProvider.ts#L65-L88
 [zig-tests]: https://ziglang.org/documentation/0.17.1/#Zig-Test

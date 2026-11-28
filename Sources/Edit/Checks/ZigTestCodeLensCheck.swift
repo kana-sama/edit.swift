@@ -16,6 +16,7 @@ enum ZigTestCodeLensCheck {
             document.window.close()
             try? files.removeItem(at: root)
         }
+        try checkCachePruning(under: root)
         let zig = root.appending(path: "Selected tests.zig")
         let plain = root.appending(path: "Plain.txt")
         try "Plain text\n".write(to: plain, atomically: true, encoding: .utf8)
@@ -125,6 +126,9 @@ enum ZigTestCodeLensCheck {
     private static func checkProject(in app: Edit, document: DocumentWindow, under root: URL) async throws {
         let project = root.appending(path: "Project with modules", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let projectCache = project.appending(path: ".zig-cache", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: projectCache, withIntermediateDirectories: false)
+        try Data().write(to: projectCache.appending(path: "existing"))
         try """
         const std = @import("std");
         pub fn build(b: *std.Build) void {
@@ -149,6 +153,13 @@ enum ZigTestCodeLensCheck {
         """.write(to: file, atomically: true, encoding: .utf8)
         try await runProjectCase(project: project, file: file, name: "project import", in: app, document: document)
         try expect(!output(in: document.window).contains("WholeSuiteRan"), "leave the project test's neighbor unexecuted")
+        try "pub const answer = 43;\n".write(to: project.appending(path: "value.zig"), atomically: true, encoding: .utf8)
+        let rebuilt = try await runProjectTest(named: "project import", in: document)
+        try expect(rebuilt.contains("expected 42, found 43") && rebuilt.contains("Zig exited with status 1.") &&
+                   compileLine(in: rebuilt)?.contains("cached") == false,
+                   "rebuild after an imported module changes\nTerminal output:\n\(rebuilt)")
+        try expect(try FileManager.default.contentsOfDirectory(atPath: projectCache.path) == ["existing"],
+                   "store the CodeLens build artifacts in Edit's cache")
 
         let environment = ProcessInfo.processInfo.environment
         if let fixture = environment["EDIT_ZIG_TEST_PROJECT_FILE"], let name = environment["EDIT_ZIG_TEST_PROJECT_CASE"] {
@@ -163,14 +174,69 @@ enum ZigTestCodeLensCheck {
         document.setFolder(project)
         try expect(try await app.openFile(file, in: document) === document, "open the module-dependent test file")
         document.languageFeatures.perform(.stop)
+        let first = try await runProjectTest(named: name, in: document)
+        let second = try await runProjectTest(named: name, in: document)
+        for text in [first, second] {
+            try expect(text.contains("zig build ") && text.contains(".test.\(name)") && text.contains("Passed") &&
+                       text.contains("Zig exited with status 0."),
+                       "run the selected test with the Zig build configuration\nTerminal output:\n\(text)")
+        }
+        let commands = { (text: String) in text.split(separator: "\n").filter { $0.hasPrefix("$ ") } }
+        try expect(commands(first) == commands(second), "keep the terminal command and generated paths stable")
+        let initialCompile = try require(compileLine(in: first), "observe the initial compilation in Zig's summary")
+        let cachedCompile = try require(compileLine(in: second), "observe the cached compilation in Zig's summary")
+        try expect(!initialCompile.contains("cached") && cachedCompile.contains("cached"),
+                   "execute the test again using a cached binary\nFirst: \(initialCompile)\nSecond: \(cachedCompile)")
+        print("Zig CodeLens \(file.lastPathComponent), \(name): \(initialCompile.trimmingCharacters(in: .whitespaces)) → \(cachedCompile.trimmingCharacters(in: .whitespaces))")
+    }
+
+    private static func compileLine(in output: String) -> Substring? {
+        output.split(separator: "\n").first { $0.contains("compile test ") }
+    }
+
+    private static func runProjectTest(named name: String, in document: DocumentWindow) async throws -> String {
+        let completion = "Zig exited with status "
+        let previous = output(in: document.window).components(separatedBy: completion).count
         try await wait("discover the project test") { button(name, in: document.editor) != nil }
         try require(button(name, in: document.editor), "find the project test button").performClick(nil)
         try await waitForOutput("finish the project test", in: document.window, seconds: 120) { text in
-            text.contains("Zig exited with status ")
+            let parts = text.components(separatedBy: completion)
+            return parts.count == previous + 1 && parts.last?.contains(".") == true
         }
         let text = output(in: document.window)
-        try expect(text.contains("zig build ") && text.contains(".test.\(name)") && text.contains("Passed") && text.contains("status 0"),
-                   "run the selected test with the Zig build configuration\nTerminal output:\n\(text)")
+        let parts = text.components(separatedBy: completion)
+        return parts[parts.count - 2] + completion + parts[parts.count - 1]
+    }
+
+    private static func checkCachePruning(under root: URL) throws {
+        let files = FileManager.default
+        let cacheRoot = root.appending(path: "Cache cleanup", directoryHint: .isDirectory)
+        let (active, _) = try ZigTestCache.prepare(in: cacheRoot, project: root, executable: URL(filePath: "/usr/bin/true"),
+                                                   inputs: ["test"]) { _, _ in [] }
+        func mark(_ directory: URL, age: TimeInterval) throws {
+            let marker = directory.appending(path: "last-use")
+            if !files.fileExists(atPath: marker.path) { try Data().write(to: marker) }
+            try files.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -age)], ofItemAtPath: marker.path)
+        }
+        func group(named digit: Character, age: TimeInterval) throws -> URL {
+            let group = cacheRoot.appending(path: String(repeating: digit, count: 64))
+            try files.createDirectory(at: group, withIntermediateDirectories: false)
+            try mark(group, age: age)
+            try Data(repeating: 1, count: 4_096).write(to: group.appending(path: "artifact"))
+            return group
+        }
+        let expired = try group(named: "a", age: 30 * 24 * 60 * 60)
+        let older = try group(named: "b", age: 240)
+        let recent = try group(named: "c", age: 60)
+        try mark(active.directory, age: 30 * 24 * 60 * 60)
+        try ZigTestCache.prune(in: cacheRoot, maximumGroups: 2)
+        try expect(!files.fileExists(atPath: expired.path) && !files.fileExists(atPath: older.path),
+                   "expire old groups and remove the least recently used group at the count limit")
+        try expect(files.fileExists(atPath: recent.path), "retain a recently used cache group")
+        try ZigTestCache.prune(in: cacheRoot, maximumBytes: 0)
+        try expect(!files.fileExists(atPath: recent.path), "remove an inactive cache group at the disk budget")
+        try expect(files.fileExists(atPath: active.directory.path), "keep an active cache group through both sweeps")
+        withExtendedLifetime(active) {}
     }
 
     private static func buttons(in editor: EditorTextView) -> [NSButton] {
@@ -194,8 +260,10 @@ enum ZigTestCodeLensCheck {
             (view as? LocalProcessTerminalView) ?? view.subviews.lazy.compactMap(terminal).first
         }
         guard let view = window.contentView, let terminal = terminal(in: view) else { return "" }
-        return terminal.terminalContentSnapshot(region: .history(maximumScrollbackRows: 100))?.rows.map(\.text)
-            .joined(separator: "\n") ?? ""
+        return terminal.terminalContentSnapshot(region: .history(maximumScrollbackRows: 100))?.rows.reduce(into: "") { text, row in
+            if !row.isWrapped { text += "\n" }
+            text += row.text
+        } ?? ""
     }
 
     private static func wait(_ detail: String, seconds: Int = 5, until ready: () -> Bool) async throws {

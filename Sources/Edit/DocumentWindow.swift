@@ -583,7 +583,8 @@ final class DocumentWindow: NSObject, NSWindowDelegate {
             }
             guard await lens.isCurrent(test, file: file), isCurrent(), await save(), isCurrent() else { return }
             do {
-                let invocation = try await ZigTestInvocation.prepare(test: test, file: file, folder: folder)
+                let invocation = try await ZigTestInvocation.prepare(test: test, file: file, folder: folder,
+                                                                      cacheRoot: ZigTestCache.location(isolated: app.isAgentCheck))
                 guard isCurrent() else { return }
                 prepareTerminal().runTest(invocation)
                 attachTerminal(focusing: false)

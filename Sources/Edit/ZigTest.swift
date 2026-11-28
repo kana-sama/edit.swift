@@ -44,9 +44,9 @@ final class ZigTestInvocation: Sendable {
     let arguments: [String]
     let environment: [String: String]
     let directory: URL
-    private let runnerDirectory: URL
+    private let cache: ZigTestCache
 
-    @concurrent static func prepare(test: ZigTestDeclaration, file: URL, folder: URL?) async throws -> ZigTestInvocation {
+    @concurrent static func prepare(test: ZigTestDeclaration, file: URL, folder: URL?, cacheRoot: URL) async throws -> ZigTestInvocation {
         let environment = await launchEnvironment()
         try Task.checkCancellation()
         guard let executable = LanguageServerSession.executable(in: environment["PATH"] ?? "", named: "zig") else {
@@ -59,41 +59,42 @@ final class ZigTestInvocation: Sendable {
         let project = await ZigProjectTest.find(executable: executable, environment: environment, directory: root, file: file)
         try Task.checkCancellation()
         return try ZigTestInvocation(test: test, file: file, directory: root, executable: executable,
-                                     environment: environment, project: project)
+                                     environment: environment, project: project, cacheRoot: cacheRoot)
     }
 
     private init(test: ZigTestDeclaration, file: URL, directory: URL, executable: URL,
-                 environment: [String: String], project: ZigProjectTest?) throws {
+                 environment: [String: String], project: ZigProjectTest?, cacheRoot: URL) throws {
         let prefix = ZigTestDeclaration.quoted(file.deletingPathExtension().lastPathComponent + test.namePrefix)
-        let runnerDirectory = FileManager.default.temporaryDirectory.appending(path: "Edit-Zig-Test-\(UUID())",
-                                                                                  directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: runnerDirectory, withIntermediateDirectories: false,
-                                                attributes: [.posixPermissions: 0o700])
-        let runner = runnerDirectory.appending(path: "runner.zig")
-        let arguments: [String]
-        do {
-            try Self.runner(selected: "\(prefix) ++ \(test.nameLiteral)").write(to: runner, atomically: true, encoding: .utf8)
-            if let project {
-                arguments = try project.arguments(executable: executable, file: file, runner: runner, staging: runnerDirectory)
-            } else {
-                arguments = ["test", file.path, "--test-runner", runner.path]
+        let source = Self.runner(selected: "\(prefix) ++ \(test.nameLiteral)")
+        let inputs = [file.path, source] + (project?.cacheInputs(executable: executable, file: file) ?? [])
+        let (cache, arguments) = try ZigTestCache.prepare(in: cacheRoot, project: directory, executable: executable,
+                                                          inputs: inputs) { generated, staging in
+            let runner = generated.appending(path: "runner.zig")
+            if let staging {
+                try source.write(to: staging.appending(path: "runner.zig"), atomically: true, encoding: .utf8)
             }
-        } catch {
-            try? FileManager.default.removeItem(at: runnerDirectory)
-            throw error
+            if let project {
+                return try project.arguments(executable: executable, file: file, runner: runner, generated: generated, staging: staging)
+            }
+            return ["test", file.path, "--test-runner", runner.path]
         }
-        self.runnerDirectory = runnerDirectory
+        self.cache = cache
         self.executable = executable
         self.arguments = arguments
-        self.environment = environment
+        self.environment = environment.merging(["ZIG_LOCAL_CACHE_DIR": cache.local.path, "ZIG_GLOBAL_CACHE_DIR": cache.global.path]) {
+            _, cachePath in cachePath
+        }
         self.directory = directory
     }
 
-    deinit { try? FileManager.default.removeItem(at: runnerDirectory) }
-
     var displayCommand: String {
         let command = ([executable.path] + arguments).map(Self.shellArgument).joined(separator: " ")
-        return "$ cd \(Self.shellArgument(directory.path))\r\n$ \(command)"
+        return """
+        $ cd \(Self.shellArgument(directory.path))
+        $ export ZIG_LOCAL_CACHE_DIR=\(Self.shellArgument(cache.local.path))
+        $ export ZIG_GLOBAL_CACHE_DIR=\(Self.shellArgument(cache.global.path))
+        $ \(command)
+        """.replacingOccurrences(of: "\n", with: "\r\n")
     }
 
     private static func shellArgument(_ argument: String) -> String {
